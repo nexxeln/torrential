@@ -349,6 +349,96 @@ fn a_files_glob_downloads_only_the_matching_files() {
 }
 
 #[test]
+fn a_removed_torrent_reuses_completed_files_without_a_peer() {
+    let fixture = Fixture::new("set", &[("a.bin", 4 * PIECE as usize), ("b.bin", 4 * PIECE as usize)], 21);
+    let seeder = Seeder::start(&fixture, None);
+    let mut home = Home::new(&seeder);
+    home.get(&fixture.torrent_file(), &["--files", "a.bin"]);
+    assert_eq!(home.run(&["wait", &fixture.short()]).code, 0);
+    home.ok(&["rm", &fixture.short()]);
+    home.ok(&["daemon", "stop"]);
+    let before = snapshot(&home.downloads());
+    drop(seeder);
+    home.peers.clear();
+
+    home.get(&fixture.torrent_file(), &["--files", "a.bin"]);
+    let wait = home.run(&["wait", &fixture.short(), "--timeout", "20s"]);
+    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
+    assert_eq!(verified(&home.job(&fixture.id())), fixture.files["a.bin"].len() as u64);
+    assert_eq!(snapshot(&home.downloads()), before, "hashing reused the files without rewriting them");
+    assert!(!fixture.downloaded(&home, "b.bin").exists());
+
+    home.ok(&["rm", &fixture.short()]);
+    home.ok(&["daemon", "stop"]);
+    let seeder = Seeder::start(&fixture, None);
+    home.peers = seeder.addr.to_string();
+    home.get(&fixture.magnet(), &["--files", "b.bin"]);
+    let wait = home.run(&["wait", &fixture.short()]);
+    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
+    assert!(fixture.intact(&home, "b.bin"));
+    assert_eq!(
+        snapshot(&home.downloads()).get(&fixture.downloaded(&home, "a.bin")),
+        before.get(&fixture.downloaded(&home, "a.bin")),
+        "the previously downloaded file stays untouched when only the remaining file is selected"
+    );
+    assert_eq!(seeder.uploaded(), fixture.files["b.bin"].len() as u64);
+}
+
+#[test]
+fn a_removed_partial_torrent_reuses_pieces_with_a_new_file_selection() {
+    let fixture = Fixture::new("set", &[("a.bin", 1_200_000), ("b.bin", 900_000), ("docs/readme.txt", 70_000)], 22);
+    let seeder = Seeder::start(&fixture, SLOW);
+    let mut home = Home::new(&seeder);
+    home.get(&fixture.magnet(), &["--files", "*.bin"]);
+    home.until(&fixture.id(), "a quarter is verified", |j| verified(j) >= 500_000);
+    home.ok(&["pause", &fixture.short()]);
+    let before = verified(&home.job(&fixture.id()));
+    let selected = (fixture.files["a.bin"].len() + fixture.files["b.bin"].len()) as u64;
+    assert!(before < selected, "paused before completion");
+    home.ok(&["rm", &fixture.short()]);
+    home.ok(&["daemon", "stop"]);
+    drop(seeder);
+    let seeder = Seeder::start(&fixture, None);
+    home.peers = seeder.addr.to_string();
+
+    home.get(&fixture.magnet(), &["--files", "*.bin", "--files", "docs/readme.txt"]);
+    let wait = home.run(&["wait", &fixture.short()]);
+    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
+    // The last selected piece overlaps the previously skipped readme. Re-adding
+    // with that file selected may fetch this shared piece again; its bin bytes
+    // count as verified in `before`, while its readme bytes do not.
+    let shared = selected % u64::from(PIECE);
+    assert!(
+        seeder.uploaded() <= fixture.total() - before + shared,
+        "the new download transferred {} bytes, more than the {} missing plus {shared} in the shared piece",
+        seeder.uploaded(),
+        fixture.total() - before
+    );
+    for file in fixture.files.keys() {
+        assert!(fixture.intact(&home, file), "{file} matches its source");
+    }
+}
+
+#[test]
+fn a_magnet_hashes_existing_files_after_fetching_its_metadata() {
+    let fixture = Fixture::new("set", &[("a.bin", 4 * PIECE as usize), ("b.bin", 4 * PIECE as usize)], 23);
+    let seeder = Seeder::start(&fixture, None);
+    let home = Home::new(&seeder);
+    let path = fixture.downloaded(&home, "a.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = fixture.files["a.bin"].clone();
+    bytes[100] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+
+    home.get(&fixture.magnet(), &["--files", "a.bin"]);
+    let wait = home.run(&["wait", &fixture.short()]);
+    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
+    assert!(fixture.intact(&home, "a.bin"), "the existing bytes were checked and the damaged piece repaired");
+    assert_eq!(seeder.uploaded(), u64::from(PIECE), "only the damaged piece needed downloading");
+    assert!(!fixture.downloaded(&home, "b.bin").exists(), "the unselected file stays unselected");
+}
+
+#[test]
 fn pause_stops_writes_and_resume_finishes() {
     let fixture = Fixture::new("big", &BIG, 4);
     let seeder = Seeder::start(&fixture, SLOW);

@@ -117,7 +117,7 @@ hint: torrential wait d40a19 --until metadata
 === path_conflict, exit 4
 error[path_conflict]: 1 file already exists under /Users/ada/Movies/night
   /Users/ada/Movies/night/Night.mp4
-hint: choose another folder with --dir, or move the existing files; torrential never overwrites
+hint: choose another folder with --dir, or move the conflicting paths; only regular files can be reused
 --- json
 {
   "schema": 1,
@@ -125,7 +125,7 @@ hint: choose another folder with --dir, or move the existing files; torrential n
   "error": {
     "code": "path_conflict",
     "message": "1 file already exists under /Users/ada/Movies/night",
-    "hint": "choose another folder with --dir, or move the existing files; torrential never overwrites",
+    "hint": "choose another folder with --dir, or move the conflicting paths; only regular files can be reused",
     "details": {
       "paths": [
         "/Users/ada/Movies/night/Night.mp4"

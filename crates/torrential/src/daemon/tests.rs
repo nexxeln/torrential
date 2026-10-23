@@ -394,7 +394,7 @@ async fn an_ambiguous_prefix_lists_the_candidates() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn disk_size_and_existing_files_refuse_a_download() {
+async fn disk_size_and_conflicting_directories_refuse_a_download() {
     let h = Harness::new();
     let big = torrent(5, "big", &[("a.bin", 40 * GIB), ("b.bin", 20 * GIB)]);
     let err = h.get(h.torrent_file(&big), &[]).await.unwrap_err();
@@ -408,7 +408,7 @@ async fn disk_size_and_existing_files_refuse_a_download() {
     assert_eq!(err.code, ErrorCode::DiskFull);
     assert_eq!(err.details, Some(torrential_core::error::Details::Space { required: 70 * GIB, available: 69 * GIB }));
     h.disk.set_free(500 * GIB);
-    h.disk.create(h.downloads().join("big/b.bin"));
+    h.disk.directory(h.downloads().join("big/b.bin"));
     let err = h.get_with(raised.clone()).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::PathConflict);
     assert_eq!(
@@ -418,6 +418,30 @@ async fn disk_size_and_existing_files_refuse_a_download() {
     assert!(h.status().await.is_empty());
     let only_a = GetRequest { files: vec!["a.bin".into()], ..raised };
     assert_eq!(h.get_with(only_a).await.unwrap().outcome, GetOutcome::Started);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_files_need_only_unallocated_space_and_are_not_assumed_verified() {
+    let h = Harness::new();
+    h.disk.set_free(12 * GIB);
+    let first = torrent(52, "first", &[("a.bin", 10 * GIB)]);
+    h.disk.file(h.downloads().join("first/a.bin"), 9 * GIB);
+    let reply = h.get(h.torrent_file(&first), &[]).await.unwrap();
+    assert_eq!(reply.outcome, GetOutcome::Started);
+    assert_eq!(reply.job.progress.verified, 0, "only the engine's hash check can verify data");
+
+    // The first download needs 1 GiB, not another 10 GiB. The second learns
+    // its files from a magnet, exercising admission after metadata arrives too.
+    let second = torrent(53, "second", &[("b.bin", 10 * GIB)]);
+    h.disk.file(h.downloads().join("second/b.bin"), 9 * GIB);
+    h.swarm.publish(second.clone());
+    h.get(magnet(&second), &[]).await.unwrap();
+    let jobs = h
+        .until("both downloads are admitted", |jobs| {
+            jobs.iter().all(|j| j.status.name() == "downloading" || j.status.name() == "error")
+        })
+        .await;
+    assert!(jobs.iter().all(|j| j.status.name() == "downloading"), "{jobs:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

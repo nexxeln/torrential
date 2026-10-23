@@ -634,6 +634,7 @@ fn sample(code: ErrorCode) -> Error {
     let plan = |conflicts| Plan {
         wanted: vec![true],
         selected_size: 70 * GIB,
+        allocated_size: 0,
         destination: "/Users/ada/Movies/night".into(),
         links: Vec::new(),
         conflicts,

@@ -25,6 +25,8 @@ pub trait Disk: Send {
     fn space(&self, path: &Path) -> std::io::Result<Space>;
     fn exists(&self, path: &Path) -> bool;
     fn is_link(&self, path: &Path) -> bool;
+    /// Space already allocated to a regular file, without following a symbolic link.
+    fn allocated_file_bytes(&self, path: &Path) -> Option<u64>;
 }
 
 pub fn reserve(total: u64) -> u64 {
@@ -35,6 +37,7 @@ pub fn reserve(total: u64) -> u64 {
 pub struct Plan {
     pub wanted: Vec<bool>,
     pub selected_size: u64,
+    pub allocated_size: u64,
     pub destination: PathBuf,
     pub links: Vec<PathBuf>,
     pub conflicts: Vec<PathBuf>,
@@ -42,6 +45,10 @@ pub struct Plan {
 }
 
 impl Plan {
+    pub fn needed(&self, verified: u64) -> u64 {
+        self.selected_size.saturating_sub(self.allocated_size.max(verified))
+    }
+
     pub fn public(&self) -> DownloadPlan {
         DownloadPlan {
             selected_files: self.wanted.iter().filter(|w| **w).count() as u32,
@@ -54,25 +61,40 @@ impl Plan {
     }
 }
 
-pub fn plan(
-    metainfo: &Metainfo,
-    selection: &Selection,
-    dir: &Path,
-    already_wanted: Option<&[bool]>,
-    disk: &dyn Disk,
-) -> Result<Plan, Error> {
+pub fn plan(metainfo: &Metainfo, selection: &Selection, dir: &Path, disk: &dyn Disk) -> Result<Plan, Error> {
     let wanted = files::wanted(metainfo, selection)?;
     let selected_size = metainfo.files.iter().zip(&wanted).filter(|(_, w)| **w).map(|(f, _)| f.size).sum();
-    let new: Vec<bool> = match already_wanted {
-        Some(already) => wanted.iter().zip(already).map(|(now, was)| *now && !*was).collect(),
-        None => wanted.clone(),
-    };
-    let conflicts = files::targets(metainfo, dir, &new).into_iter().filter(|p| disk.exists(p)).collect();
+    // Existing regular files are checked by libtorrent before any pieces are downloaded.
+    // A directory or another special file at a file's destination still blocks the download.
+    let conflicts = metainfo
+        .files
+        .iter()
+        .zip(&wanted)
+        .filter(|(_, w)| **w)
+        .filter_map(|(file, _)| {
+            let path = dir.join(files::relative(metainfo, file));
+            let untouched_link = file.size == 0 && disk.is_link(&path);
+            (disk.exists(&path) && disk.allocated_file_bytes(&path).is_none() && !untouched_link).then_some(path)
+        })
+        .collect();
+    let allocated_size = allocated_bytes(metainfo, dir, &wanted, disk);
     let space = disk.space(dir).map_err(|e| {
         Error::new(ErrorCode::StorageError, format!("cannot read free space at {}: {e}", dir.display()))
     })?;
     let links = links(metainfo, dir, &wanted, disk);
-    Ok(Plan { wanted, selected_size, destination: dir.join(&metainfo.name), links, conflicts, space })
+    Ok(Plan { wanted, selected_size, allocated_size, destination: dir.join(&metainfo.name), links, conflicts, space })
+}
+
+pub fn allocated_bytes(metainfo: &Metainfo, dir: &Path, wanted: &[bool], disk: &dyn Disk) -> u64 {
+    metainfo
+        .files
+        .iter()
+        .zip(wanted)
+        .filter(|(_, w)| **w)
+        .map(|(file, _)| {
+            disk.allocated_file_bytes(&dir.join(files::relative(metainfo, file))).unwrap_or(0).min(file.size)
+        })
+        .sum()
 }
 
 /// libtorrent never writes a zero-length file that already exists. Torrent
@@ -150,7 +172,7 @@ pub fn check_conflicts(plan: &Plan) -> Result<(), Error> {
         ),
     )
     .with_details(Details::Paths(plan.conflicts.iter().map(|p| p.display().to_string()).collect()))
-    .with_hint("choose another folder with --dir, or move the existing files; torrential never overwrites"))
+    .with_hint("choose another folder with --dir, or move the conflicting paths; only regular files can be reused"))
 }
 
 pub fn check_links(links: &[PathBuf], dir: &Path, retry: Option<&str>) -> Result<(), Error> {
@@ -233,6 +255,12 @@ impl Disk for RealDisk {
     fn is_link(&self, path: &Path) -> bool {
         path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
     }
+
+    fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = path.symlink_metadata().ok()?;
+        meta.is_file().then(|| meta.blocks().saturating_mul(512).min(meta.len()))
+    }
 }
 
 pub struct RoomyDisk;
@@ -249,6 +277,10 @@ impl Disk for RoomyDisk {
     fn is_link(&self, path: &Path) -> bool {
         RealDisk.is_link(path)
     }
+
+    fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
+        RealDisk.allocated_file_bytes(path)
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +292,7 @@ struct FakeFiles {
     space: Space,
     paths: BTreeSet<PathBuf>,
     links: BTreeSet<PathBuf>,
+    allocated: std::collections::BTreeMap<PathBuf, u64>,
 }
 
 #[cfg(test)]
@@ -269,11 +302,22 @@ impl FakeDisk {
             space,
             paths: BTreeSet::new(),
             links: BTreeSet::new(),
+            allocated: std::collections::BTreeMap::new(),
         })))
     }
 
-    pub fn create(&self, path: impl Into<PathBuf>) {
-        self.0.lock().unwrap().paths.insert(path.into());
+    pub fn directory(&self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        let mut files = self.0.lock().unwrap();
+        files.paths.insert(path.clone());
+        files.allocated.remove(&path);
+    }
+
+    pub fn file(&self, path: impl Into<PathBuf>, allocated: u64) {
+        let path = path.into();
+        let mut files = self.0.lock().unwrap();
+        files.paths.insert(path.clone());
+        files.allocated.insert(path, allocated);
     }
 
     pub fn link(&self, path: impl Into<PathBuf>) {
@@ -301,6 +345,10 @@ impl Disk for FakeDisk {
     fn is_link(&self, path: &Path) -> bool {
         self.0.lock().unwrap().links.contains(path)
     }
+
+    fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
+        self.0.lock().unwrap().allocated.get(path).copied()
+    }
 }
 
 #[cfg(test)]
@@ -322,7 +370,7 @@ mod tests {
     }
 
     fn plan_for(size: u64, disk: &FakeDisk) -> Plan {
-        plan(&torrent(size), &Selection::All, Path::new("/dl"), None, disk).unwrap()
+        plan(&torrent(size), &Selection::All, Path::new("/dl"), disk).unwrap()
     }
 
     #[test]
@@ -400,6 +448,8 @@ mod tests {
         assert_eq!(found(&[true, true, true]), Vec::<PathBuf>::new());
         symlink("a.bin", real.join("set/link")).unwrap();
         assert_eq!(found(&[true, true, true]), Vec::<PathBuf>::new(), "a torrent's own link, as libtorrent makes it");
+        let plan = plan(&set, &Selection::Patterns(vec!["link".into()]), &dir, &RealDisk).unwrap();
+        assert_eq!(check_conflicts(&plan), Ok(()), "libtorrent does not rewrite an existing zero-length link");
         std::fs::remove_dir(real.join("set/docs")).unwrap();
         symlink(&outside, real.join("set/docs")).unwrap();
         symlink(outside.join("a.bin"), real.join("set/a.bin")).unwrap();
@@ -424,13 +474,40 @@ mod tests {
     }
 
     #[test]
-    fn existing_files_conflict_unless_the_download_wrote_them() {
+    fn existing_regular_files_are_reused_but_directories_conflict() {
         let disk = FakeDisk::new(DISK);
-        disk.create("/dl/set/b.bin");
+        disk.file("/dl/set/a.bin", GIB / 2);
+        disk.file("/dl/set/b.bin", GIB);
+        let plan = plan_for(GIB, &disk);
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(check_conflicts(&plan), Ok(()));
+        assert_eq!(plan.needed(0), GIB / 2);
+        assert_eq!(plan.needed(GIB), GIB / 2, "verified and allocated bytes are not counted twice");
+        assert_eq!(plan.needed(2 * GIB), 0);
+
+        disk.directory("/dl/set/b.bin");
         let plan = plan_for(GIB, &disk);
         assert_eq!(plan.conflicts, [PathBuf::from("/dl/set/b.bin")]);
         assert_eq!(check_conflicts(&plan).unwrap_err().code, ErrorCode::PathConflict);
-        let update = super::plan(&torrent(GIB), &Selection::All, Path::new("/dl"), Some(&[true, true]), &disk).unwrap();
-        assert!(update.conflicts.is_empty());
+        let only_a =
+            super::plan(&torrent(GIB), &Selection::Patterns(vec!["a.bin".into()]), Path::new("/dl"), &disk).unwrap();
+        assert!(only_a.conflicts.is_empty());
+        assert_eq!(only_a.needed(0), GIB / 2, "unselected files contribute no reusable space");
+    }
+
+    #[test]
+    fn sparse_files_do_not_count_their_unallocated_length_as_reusable_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("set")).unwrap();
+        let path = tmp.path().join("set/a.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(GIB).unwrap();
+        let plan = plan(&torrent(GIB), &Selection::All, tmp.path(), &RealDisk).unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(plan.allocated_size, 0);
+        assert_eq!(plan.needed(0), 2 * GIB);
+        assert_eq!(RealDisk.allocated_file_bytes(&tmp.path().join("set")), None);
+        std::os::unix::fs::symlink(&path, tmp.path().join("link")).unwrap();
+        assert_eq!(RealDisk.allocated_file_bytes(&tmp.path().join("link")), None);
     }
 }

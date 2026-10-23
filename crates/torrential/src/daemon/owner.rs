@@ -367,8 +367,18 @@ impl Owner {
             .values()
             .filter(|j| j.id() != except && j.record.intent == Intent::Running)
             .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
-            .map(JobEntry::remaining)
+            .map(|job| self.space_needed(job))
             .sum()
+    }
+
+    fn space_needed(&self, job: &JobEntry) -> u64 {
+        match (&job.metainfo, job.wanted()) {
+            (Some(metainfo), Some(wanted)) => {
+                let allocated = admission::allocated_bytes(metainfo, &job.record.dir, &wanted, self.disk.as_ref());
+                job.selected_size().unwrap_or(0).saturating_sub(allocated.max(job.verified()))
+            }
+            _ => job.remaining(),
+        }
     }
 
     fn get(&mut self, get: GetCommand) -> Result<GetReply, Error> {
@@ -397,15 +407,14 @@ impl Owner {
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
         let cap = Cap::new(max_size, setup_max_size);
-        let plan =
-            metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, None, self.disk.as_ref())).transpose()?;
+        let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
         if let (Some(plan), Some(metainfo)) = (&plan, metainfo.as_deref()) {
             admission::check_size(plan.selected_size, cap, None)?;
             if !dry_run {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
-            admission::check_disk(plan.space, plan.selected_size, self.others_remaining(&dir, id))?;
+            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
         }
         let record = JobRecord {
             id,
@@ -491,14 +500,13 @@ impl Owner {
             let job = self.jobs[&id].view();
             return Ok(GetReply { outcome: GetOutcome::Updated, job, plan: None, previous_selection: previous });
         };
-        let before = if too_large { None } else { job.wanted() };
-        let plan = admission::plan(&metainfo, &selection, &job.record.dir, before.as_deref(), self.disk.as_ref())?;
+        let plan = admission::plan(&metainfo, &selection, &job.record.dir, self.disk.as_ref())?;
         admission::check_size(plan.selected_size, cap, None)?;
         if !dry_run {
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
-        let needed = plan.selected_size.saturating_sub(job.verified());
+        let needed = plan.needed(job.verified());
         admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
@@ -544,9 +552,7 @@ impl Owner {
 
     fn current_plan(&self, job: &JobEntry) -> Option<torrential_core::protocol::DownloadPlan> {
         let metainfo = job.metainfo.as_deref()?;
-        let wanted = job.wanted()?;
-        let plan = admission::plan(metainfo, &job.record.selection, &job.record.dir, Some(&wanted), self.disk.as_ref())
-            .ok()?;
+        let plan = admission::plan(metainfo, &job.record.selection, &job.record.dir, self.disk.as_ref()).ok()?;
         Some(plan.public())
     }
 
@@ -922,11 +928,11 @@ impl Owner {
         job.record.info_hash = metainfo.info_hash;
         job.metainfo = Some(metainfo.clone());
         let (dir, cap, selection) = (job.record.dir.clone(), job.record.cap, job.record.selection.clone());
-        let admitted = admission::plan(&metainfo, &selection, &dir, None, self.disk.as_ref()).and_then(|plan| {
+        let admitted = admission::plan(&metainfo, &selection, &dir, self.disk.as_ref()).and_then(|plan| {
             admission::check_size(plan.selected_size, cap, Some(id))?;
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
-            admission::check_disk(plan.space, plan.selected_size, self.others_remaining(&dir, id))?;
+            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
             Ok(plan)
         });
         match admitted {
@@ -1217,7 +1223,7 @@ impl Owner {
         if job.metainfo.is_some()
             && let Ok(space) = self.disk.space(&job.record.dir)
             && let Err(error) =
-                admission::check_disk(space, job.remaining(), self.others_remaining(&job.record.dir, id))
+                admission::check_disk(space, self.space_needed(job), self.others_remaining(&job.record.dir, id))
         {
             self.fail(id, error);
             return;

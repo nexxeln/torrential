@@ -52,6 +52,8 @@ torrential rm fd69b2                        # stop tracking it, and keep its fil
 
 An ID is the start of the torrent's infohash, and any unique prefix of 4 or more characters works. `get` also takes a magnet link, a full infohash, or a `.torrent` file or URL.
 
+Removing a torrent keeps its files. Add the same torrent again with the same download folder to continue: torrential checks the existing data and downloads only missing or damaged pieces in the files you select. You can pick a different set of files each time.
+
 On a terminal, `get` shows progress until the download is done. Downloads run in a background engine, so they keep going after you press Ctrl-C or close the terminal.
 
 Every command takes `--json` for scripts, and `torrential schema` describes the commands, their flags, and their errors.
