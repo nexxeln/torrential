@@ -13,7 +13,7 @@ pub fn size(bytes: Option<u64>) -> String {
 
 pub fn percent(progress: &Progress) -> String {
     match progress.size {
-        None => NONE.to_string(),
+        None => UNKNOWN.to_string(),
         Some(size) if progress.verified >= size => "100%".to_string(),
         Some(size) => {
             let tenths = progress.verified as u128 * 1000 / size as u128;
@@ -27,7 +27,7 @@ pub fn rate(bytes_per_sec: u64) -> String {
 }
 
 pub fn eta(seconds: Option<u64>) -> String {
-    seconds.map_or_else(|| NONE.to_string(), |s| format_duration(Duration::from_secs(s)))
+    seconds.map_or_else(|| UNKNOWN.to_string(), |s| format_duration(Duration::from_secs(s)))
 }
 
 pub fn elapsed(d: Duration) -> String {
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(percent(&p(341, Some(1000))), "34.1%");
         assert_eq!(percent(&p(9_999, Some(10_000))), "99.9%");
         assert_eq!(percent(&p(10_000, Some(10_000))), "100%");
-        assert_eq!(percent(&p(0, None)), "-");
+        assert_eq!(percent(&p(0, None)), "?");
     }
 
     #[test]

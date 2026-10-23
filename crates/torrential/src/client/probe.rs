@@ -35,15 +35,20 @@ pub fn checks(paths: &Paths, settings: Result<Config, Error>, network: bool) -> 
         return checks;
     }
     match ask(&search, enabled) {
-        Ok(reports) => checks.extend(reports.into_iter().map(|r| {
-            let status = match r.outcome {
-                ref ok if ok.is_ok() => CheckStatus::Ok,
-                SourceOutcome::Irrelevant => CheckStatus::Warn,
-                _ => CheckStatus::Fail,
-            };
-            let detail = format!("{}, {} ms", source_outcome(&r.outcome), r.elapsed_ms);
-            check(&format!("source {}", r.source), status, detail)
-        })),
+        Ok(reports) => {
+            let answered = reports.iter().filter(|r| r.outcome.is_ok()).count();
+            let status = if answered == reports.len() { CheckStatus::Ok } else { CheckStatus::Fail };
+            checks.push(check("sources", status, format!("{answered} of {} answered", reports.len())));
+            checks.extend(reports.into_iter().map(|r| {
+                let status = match r.outcome {
+                    ref ok if ok.is_ok() => CheckStatus::Ok,
+                    SourceOutcome::Irrelevant => CheckStatus::Warn,
+                    _ => CheckStatus::Fail,
+                };
+                let detail = format!("{}, {} ms", source_outcome(&r.outcome), r.elapsed_ms);
+                check(&format!("source {}", r.source), status, detail)
+            }));
+        }
         Err(error) => checks.push(check("sources", CheckStatus::Fail, error.message)),
     }
     checks

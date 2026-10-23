@@ -41,6 +41,7 @@ Or run the commands yourself:
 
 ```sh
 torrential search big buck bunny            # each result starts with a short ID
+torrential files fd69b2 --files '*.mp4'     # preview which files a glob picks
 torrential get fd69b2 --files '*h264.mp4'   # download only the files you want
 torrential wait fd69b2                      # follow a download until it is done
 torrential status                           # list your downloads

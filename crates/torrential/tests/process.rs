@@ -323,10 +323,11 @@ fn usage_errors_exit_2_with_a_hint() {
         "{}",
         run.stderr
     );
-    assert!(run.stderr.ends_with("hint: torrential wait --help\n"), "{}", run.stderr);
+    assert!(run.stderr.ends_with("hint: torrential wait --help\nnext: torrential wait --help\n"), "{}", run.stderr);
     let json = home.run(&["frobnicate", "--json"]);
     let doc: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
     assert_eq!((json.code, doc["error"]["hint"].as_str()), (2, Some("torrential --help")));
+    assert_eq!(doc["next"], "torrential --help");
     let bare = home.run(&[]);
     assert_eq!(bare.code, 0);
     assert!(bare.stdout.starts_with("torrential searches torrent indexes"));
@@ -506,10 +507,17 @@ fn get_max_size_raises_the_cap_of_a_magnet_that_stopped_over_it() {
     let stopped = status();
     let refusal = "the selection is 2.1 GiB, over the 2 GB cap from torrential setup";
     let hint = "torrential get 2d9b6a --max-size 3GiB allows it, or pick fewer files with --files";
-    assert!(stopped.ends_with(&format!("error:    [too_large] {refusal}\n# hint: {hint}\n")), "{stopped}");
+    let next = "torrential get 2d9b6a --max-size 3GiB";
+    assert!(
+        stopped.ends_with(&format!("error:    [too_large] {refusal}\n# hint: {hint}\nnext:     {next}\n")),
+        "{stopped}"
+    );
 
     let resumed = home.run(&["resume", "2d9b6a"]);
-    assert_eq!((resumed.code, resumed.stderr), (7, format!("error[too_large]: {refusal}\nhint: {hint}\n")));
+    assert_eq!(
+        (resumed.code, resumed.stderr),
+        (7, format!("error[too_large]: {refusal}\nhint: {hint}\nnext: {next}\n"))
+    );
     let raised = home.run(&["get", "2d9b6a", "--max-size", "4GiB"]);
     let again = home.run(&["get", "2d9b6a", "--max-size", "4GiB"]);
     let paused = home.run(&["pause", "2d9b6a"]);
@@ -543,12 +551,13 @@ fn errors_name_a_reference_by_its_hash_or_kind_never_its_url() {
             (
                 3,
                 "error[invalid_ref]: this command takes a download ID, not a .torrent URL\nhint: run torrential \
-                 status to list download IDs\n"
+                 status to list download IDs\nnext: torrential status\n"
             ),
             (
                 3,
                 &*format!(
-                    "error[not_found]: no download matches {hash}\nhint: run torrential status to list downloads\n"
+                    "error[not_found]: no download matches {hash}\nhint: run torrential status to list downloads\nnext: \
+                     torrential status\n"
                 )
             ),
             (

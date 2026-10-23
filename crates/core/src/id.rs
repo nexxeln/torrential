@@ -212,7 +212,11 @@ impl FromStr for HexPrefix {
             None => (false, lower),
         };
         let valid = (Self::MIN_LEN..=40).contains(&hex.len()) && hex.bytes().all(|b| b.is_ascii_hexdigit());
-        if valid { Ok(Self { locator, hex }) } else { Err(invalid_ref(s, "an ID prefix is 4 to 40 hex characters")) }
+        if valid {
+            Ok(Self { locator, hex })
+        } else {
+            Err(invalid_ref(s, "an ID is 4 to 40 hex characters, or u and hex for a result without an infohash"))
+        }
     }
 }
 

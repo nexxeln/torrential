@@ -2,9 +2,9 @@
 source: crates/torrential/src/output/views/tests.rs
 expression: "both(&search(&result, NOW), &Response::Search { result })"
 ---
-ID	SEEDS	SIZE	AGE	SOURCE	FLAGS	NAME
-# 0 of 0 results · 1 of 1 source ok · 1.4s
-next: torrential search <other words>
+ID	SEEDS	SIZE	QUALITY	AGE	SOURCE	FLAGS	NAME
+# no results · 1 of 1 source ok · 1.4s
+next: torrential search arch linux iso
 
 --- json
 {
@@ -65,5 +65,5 @@ next: torrential search <other words>
     ],
     "elapsed_ms": 1432
   },
-  "next": "torrential search <other words>"
+  "next": "torrential search arch linux iso"
 }

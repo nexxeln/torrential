@@ -326,7 +326,8 @@ impl Owner {
                 ErrorCode::InvalidRef,
                 format!("{command} takes a download ID, not a .torrent file or URL"),
             )
-            .with_hint("run torrential status to list download IDs")),
+            .with_hint("run torrential status to list download IDs")
+            .with_next("torrential status")),
         }
     }
 
@@ -426,7 +427,7 @@ impl Owner {
             return Ok(GetReply {
                 outcome: GetOutcome::Planned,
                 job,
-                plan: plan.map(|p| p.public()),
+                plan: plan.map(|p| p.public(cap)),
                 previous_selection: None,
             });
         }
@@ -441,7 +442,7 @@ impl Owner {
         self.publish(id);
         let job = &self.jobs[&id];
         let outcome = if job.observed.in_engine() { GetOutcome::Started } else { GetOutcome::Queued };
-        Ok(GetReply { outcome, job: job.view(), plan: plan.map(|p| p.public()), previous_selection: None })
+        Ok(GetReply { outcome, job: job.view(), plan: plan.map(|p| p.public(cap)), previous_selection: None })
     }
 
     fn get_existing(
@@ -507,7 +508,7 @@ impl Owner {
             return Ok(GetReply {
                 outcome: GetOutcome::Planned,
                 job,
-                plan: Some(plan.public()),
+                plan: Some(plan.public(cap)),
                 previous_selection: previous,
             });
         }
@@ -539,7 +540,7 @@ impl Owner {
             (None, true) => GetOutcome::Queued,
             (None, false) => GetOutcome::Existing,
         };
-        Ok(GetReply { outcome, job: job.view(), plan: Some(plan.public()), previous_selection: previous })
+        Ok(GetReply { outcome, job: job.view(), plan: Some(plan.public(cap)), previous_selection: previous })
     }
 
     fn current_plan(&self, job: &JobEntry) -> Option<torrential_core::protocol::DownloadPlan> {
@@ -547,7 +548,7 @@ impl Owner {
         let wanted = job.wanted()?;
         let plan = admission::plan(metainfo, &job.record.selection, &job.record.dir, Some(&wanted), self.disk.as_ref())
             .ok()?;
-        Some(plan.public())
+        Some(plan.public(job.record.cap))
     }
 
     fn metadata(&mut self, target: MetaTarget, deadline: Instant, reply: Reply<FilesInfo>) {
@@ -790,7 +791,8 @@ impl Owner {
                 ErrorCode::JobConflict,
                 format!("{short} has no file list yet, so there is nothing to verify"),
             )
-            .with_hint(format!("torrential wait {short} --until metadata")));
+            .with_hint(format!("torrential wait {short} --until metadata"))
+            .with_next(format!("torrential wait {short} --until metadata")));
         };
         if repair && let Some(size) = job.selected_size() {
             admission::check_size(size, job.record.cap, Some(id))?;
@@ -1029,7 +1031,8 @@ impl Owner {
             "torrential resume {} looks for them again; the {} verified stays",
             &id.to_hex()[..6],
             size(verified)
-        ));
+        ))
+        .with_next(format!("torrential resume {}", &id.to_hex()[..6]));
         self.fail(id, error);
     }
 
@@ -1069,6 +1072,7 @@ impl Owner {
         let within = crate::output::format::elapsed(self.config.writes_stop_within);
         Error::new(ErrorCode::JobConflict, format!("writes to {} did not stop within {within}", shorts.join(", ")))
             .with_hint(format!("run torrential pause {} again; it returns once writes stop", shorts.join(" ")))
+            .with_next(format!("torrential pause {}", shorts.join(" ")))
     }
 
     fn resume_data(
@@ -1181,7 +1185,8 @@ impl Owner {
                     ErrorCode::VerificationFailed,
                     format!("{} in the selected files", crate::output::format::count(n as usize, "damaged piece")),
                 )
-                .with_hint(format!("torrential verify {short} --repair downloads them again"));
+                .with_hint(format!("torrential verify {short} --repair downloads them again"))
+                .with_next(format!("torrential verify {short} --repair"));
                 let failed = Intent::Failed { error };
                 record(&mut self.store, Some(&failed));
                 job.record.intent = failed;
@@ -1382,4 +1387,5 @@ fn claim_key(path: &Path) -> String {
 fn no_download(reference: &str) -> Error {
     Error::new(ErrorCode::NotFound, format!("no download matches {reference}"))
         .with_hint("run torrential status to list downloads")
+        .with_next("torrential status")
 }

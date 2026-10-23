@@ -6,7 +6,7 @@
 unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CODEX_THREAD_ID CODEX_CI GEMINI_CLI CURSOR_AGENT AI_AGENT \
 	CODEX_SANDBOX CODEX_SANDBOX_NETWORK_DISABLED
 export PATH="$PWD/target/release:$PATH" TORRENTIAL_HOME=/tmp/torrential-demo/home COLORTERM=truecolor
-torrential daemon stop >/dev/null 2>&1
+torrential engine stop >/dev/null 2>&1
 rm -rf /tmp/torrential-demo
 mkdir -p "$TORRENTIAL_HOME/config"
 cat >"$TORRENTIAL_HOME/config/config.yaml" <<'YAML'

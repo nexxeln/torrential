@@ -1,0 +1,55 @@
+---
+source: crates/torrential/src/output/views/tests.rs
+expression: "both(&doc, &Typed\n{ kind: \"files\", body: Files { files: reply, matched: Some(matched) } })"
+---
+SIZE	DONE	PATH
+51.4 KiB	-	Night.asr.srt
+568.8 MiB	-	Night.mp4
+250.5 MiB	-	VTS_01_1.mp4
+# 3 of 4 files in night_of_the_living_dead_dvd match · 819.3 MiB · file list from the .torrent URL in 0.4s
+next: torrential get 6bc1af --files '*.MP4' --files Night.asr.srt
+
+--- json
+{
+  "schema": 1,
+  "type": "files",
+  "files": {
+    "id": "6bc1af0000000000000000000000000000000000",
+    "name": "night_of_the_living_dead_dvd",
+    "total_size": 5046586573,
+    "files": [
+      {
+        "index": 0,
+        "path": "Night.asr.srt",
+        "size": 52633,
+        "selected": false,
+        "verified": 0
+      },
+      {
+        "index": 1,
+        "path": "Night.mp4",
+        "size": 596399542,
+        "selected": false,
+        "verified": 0
+      },
+      {
+        "index": 2,
+        "path": "VTS_01_1.mp4",
+        "size": 262668288,
+        "selected": false,
+        "verified": 0
+      }
+    ],
+    "metadata_source": "torrent_url",
+    "elapsed_ms": 412
+  },
+  "matched": {
+    "patterns": [
+      "*.MP4",
+      "Night.asr.srt"
+    ],
+    "total_files": 4,
+    "size": 859120463
+  },
+  "next": "torrential get 6bc1af --files '*.MP4' --files Night.asr.srt"
+}

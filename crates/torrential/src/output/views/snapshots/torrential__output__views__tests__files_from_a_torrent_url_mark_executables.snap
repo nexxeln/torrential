@@ -9,7 +9,8 @@ SIZE	DONE	PATH	RISK
 1.1 MiB	-	Codec Installer.exe	executable
 # 4 files in night_of_the_living_dead_dvd · 4.7 GiB · file list from the .torrent URL in 0.4s
 # executables inside a media torrent are a common malware sign
-next: torrential get 6bc1af --files <PATTERN>
+# torrential get 6bc1af --files <PATTERN> downloads only the matching files
+next: torrential get 6bc1af
 
 --- json
 {
@@ -53,5 +54,5 @@ next: torrential get 6bc1af --files <PATTERN>
     "metadata_source": "torrent_url",
     "elapsed_ms": 412
   },
-  "next": "torrential get 6bc1af --files <PATTERN>"
+  "next": "torrential get 6bc1af"
 }

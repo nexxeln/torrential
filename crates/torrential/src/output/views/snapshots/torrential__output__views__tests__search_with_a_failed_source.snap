@@ -2,14 +2,14 @@
 source: crates/torrential/src/output/views/tests.rs
 expression: "both(&doc, &Response::Search { result })"
 ---
-ID	SEEDS	SIZE	AGE	SOURCE	FLAGS	NAME
-9b5212	412	1.5 GiB	17d	archlinux+1	official	archlinux-2026.10.01-x86_64.iso
-51e0c7	37	1.4 GiB	47d	knaben	-	archlinux-2026.09.01-x86_64.iso
-ud4d4d4	?	?	?	jackett	-	Arch Linux 2026.10.01 x86_64 ISO + checksums
-9b5213	3	2.0 GiB	3y	knaben	-	arch linux ISOgpj.exe
+ID	SEEDS	SIZE	QUALITY	AGE	SOURCE	FLAGS	NAME
+9b5212	412	1.5 GiB	-	17d	archlinux+1	official	archlinux-2026.10.01-x86_64.iso
+51e0c7	37	1.4 GiB	-	47d	knaben	-	archlinux-2026.09.01-x86_64.iso
+ud4d4d4	?	?	-	?	jackett	-	Arch Linux 2026.10.01 x86_64 ISO + checksums
+9b5213	3	2.0 GiB	-	3y	knaben	-	arch linux ISOgpj.exe
 # 4 of 14 results · 2 of 4 sources ok · apibay: http 503 · nyaa: timeout · 1.4s · 1 adult hidden: --adult · more: --limit 14
 # ranked for this Mac: arm64
-next: torrential files <ID> · torrential get <ID>
+next: torrential files 9b5212
 
 --- json
 {
@@ -175,5 +175,5 @@ next: torrential files <ID> · torrential get <ID>
     ],
     "elapsed_ms": 1432
   },
-  "next": "torrential files <ID> · torrential get <ID>"
+  "next": "torrential files 9b5212"
 }

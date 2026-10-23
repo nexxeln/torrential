@@ -120,6 +120,7 @@ fn network_kind(stat: &libc::statfs) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_cast)]
 fn network_kind(stat: &libc::statfs) -> Option<String> {
     let kind = match stat.f_type as i64 {
         0x6969 => "nfs",

@@ -11,7 +11,8 @@ use torrential_core::{
 
 use super::*;
 use crate::client::wait::Printer;
-use crate::output::{Mode, render};
+use crate::client::{Files, keep_matching};
+use crate::output::{Mode, Typed, render};
 
 const NOW: i64 = 1_792_314_723;
 const DAY: i64 = 86_400;
@@ -161,7 +162,7 @@ fn film_and_software_searches_say_what_they_ranked_for() {
     );
     assert_eq!(
         summary(Vec::new(), Some(Category::Video), &Profile::default()),
-        ["ranked for this machine, not detected yet"]
+        ["filtered by --category video", "ranked for this machine, not detected yet"]
     );
     assert_eq!(summary(vec![iso], None, &detected), ["ranked for this Mac: arm64"]);
     assert_eq!(summary(vec![book], None, &detected), Vec::<String>::new());
@@ -173,15 +174,37 @@ fn search_with_no_results() {
     insta::assert_snapshot!(both(&search(&result, NOW), &Response::Search { result }));
 }
 
+#[test]
+fn search_next_opens_the_top_result() {
+    let top = release(ReleaseId::Torrent(ARCH.parse().unwrap()), "archlinux-2026.10.01-x86_64.iso");
+    let other = release(ReleaseId::Torrent(tid("51e0c7")), "archlinux-2026.09.01-x86_64.iso");
+    let result = search_result(vec![top, other], 2, vec![report("knaben", SourceOutcome::Ok { results: 2 })]);
+    assert_eq!(search(&result, NOW).next.as_deref(), Some("torrential files 9b5212"));
+}
+
+#[test]
+fn a_search_with_no_results_drops_its_filters_or_skips_the_cache() {
+    let cached = vec![report("knaben", SourceOutcome::Cached { results: 0 })];
+    let mut filtered = search_result(Vec::new(), 0, cached.clone());
+    filtered.query.sources = vec!["knaben".into()];
+    filtered.query.min_seeds = Some(50);
+    let doc = search(&filtered, NOW);
+    assert_eq!(doc.summary, ["no results · 1 of 1 source ok · 1.4s", "filtered by --source knaben --min-seeds 50"]);
+    assert_eq!(doc.next.as_deref(), Some("torrential search arch linux iso"));
+
+    let doc = search(&search_result(Vec::new(), 0, cached), NOW);
+    assert_eq!(doc.summary, ["no results · 1 of 1 source ok · 1.4s"]);
+    assert_eq!(doc.next.as_deref(), Some("torrential search arch linux iso --fresh"));
+}
+
 fn file(index: u32, path: &str, size: u64) -> TorrentFile {
     TorrentFile { index, path: path.into(), size, selected: false, verified: 0, risk: None }
 }
 
-#[test]
-fn files_from_a_torrent_url_mark_executables() {
+fn film_files() -> FilesReply {
     let mut installer = file(3, "Codec Installer.exe", 1_200_000);
     installer.risk = Some(FileRisk::Executable);
-    let reply = FilesReply {
+    FilesReply {
         id: "6bc1af".to_string() + &"0".repeat(34),
         name: Some("night_of_the_living_dead_dvd".into()),
         total_size: 5_046_586_573,
@@ -193,8 +216,40 @@ fn files_from_a_torrent_url_mark_executables() {
         ],
         metadata_source: "torrent_url".into(),
         elapsed_ms: 412,
-    };
-    insta::assert_snapshot!(both(&files(&reply), &Response::Files { files: reply }));
+    }
+}
+
+#[test]
+fn files_from_a_torrent_url_mark_executables() {
+    let reply = film_files();
+    insta::assert_snapshot!(both(&files(&reply, None), &Response::Files { files: reply }));
+}
+
+#[test]
+fn files_matching_globs_list_only_those() {
+    let mut reply = film_files();
+    let patterns = vec!["*.MP4".to_string(), "Night.asr.srt".to_string()];
+    let matched = keep_matching(&mut reply, &patterns).unwrap();
+    let doc = files(&reply, Some(&matched));
+    insta::assert_snapshot!(both(&doc, &Typed { kind: "files", body: Files { files: reply, matched: Some(matched) } }));
+}
+
+#[test]
+fn a_match_summary_counts_the_matches_and_their_size() {
+    let mut reply = film_files();
+    let matched = keep_matching(&mut reply, &["night.mp4".to_string()]).unwrap();
+    let doc = files(&reply, Some(&matched));
+    assert_eq!(
+        doc.summary,
+        ["1 of 4 files in night_of_the_living_dead_dvd match · 568.8 MiB · file list from the .torrent URL in 0.4s"]
+    );
+    assert_eq!(doc.next.as_deref(), Some("torrential get 6bc1af --files night.mp4"));
+    let mut reply = film_files();
+    let matched = keep_matching(&mut reply, &["Codec Installer.exe".to_string()]).unwrap();
+    assert_eq!(
+        files(&reply, Some(&matched)).next.as_deref(),
+        Some("torrential get 6bc1af --files 'Codec Installer.exe'")
+    );
 }
 
 #[test]
@@ -212,7 +267,7 @@ fn files_of_a_download_show_progress_per_file() {
         metadata_source: "download".into(),
         elapsed_ms: 3,
     };
-    insta::assert_snapshot!(both(&files(&reply), &Response::Files { files: reply }));
+    insta::assert_snapshot!(both(&files(&reply, None), &Response::Files { files: reply }));
 }
 
 #[test]
@@ -226,7 +281,7 @@ fn a_one_file_torrent_counts_one_file() {
         elapsed_ms: 900,
     };
     assert_eq!(
-        files(&reply).summary,
+        files(&reply, None).summary,
         ["1 file in archlinux-2026.10.01-x86_64.iso · 1.0 GiB · file list from peers in 0.9s"]
     );
 }
@@ -272,7 +327,28 @@ fn plan(conflicts: Vec<PathBuf>) -> DownloadPlan {
         destination: "/Users/ada/Movies/night_of_the_living_dead_dvd".into(),
         free_space: 410 * GIB,
         conflicts,
+        max_size: Some(50 * GIB),
     }
+}
+
+#[test]
+fn a_dry_run_shows_the_size_cap_beside_the_size_and_free_space() {
+    let film = job("6bc1af", Some("night_of_the_living_dead_dvd"), JobStatus::Checking, Progress::default());
+    let reply = get_reply(GetOutcome::Planned, film, Some(DownloadPlan { max_size: Some(8 * GIB), ..plan(vec![]) }));
+    let fields: Vec<String> = match get(&reply, None).body {
+        Body::Fields { fields, .. } => fields.into_iter().map(|(k, v)| format!("{k}: {}", v.text)).collect(),
+        Body::Table { .. } => unreachable!("get shows fields"),
+    };
+    assert_eq!(
+        fields,
+        [
+            "files: all (2 of 255, 568.8 MiB)",
+            "path: /Users/ada/Downloads/torrential/night_of_the_living_dead_dvd",
+            "free: 410.0 GiB",
+            "cap: 8 GiB",
+            "conflicts: none"
+        ]
+    );
 }
 
 #[test]
@@ -363,8 +439,12 @@ fn fleet() -> Vec<Job> {
             "e3a1f0",
             Some("ubuntu-24.04.5-desktop-amd64.iso"),
             JobStatus::Error {
-                error: Error::new(ErrorCode::DiskFull, "needs 5.9 GiB more on this disk")
-                    .with_hint("free some space, or choose another disk with --dir"),
+                error: crate::daemon::admission::check_disk(
+                    crate::daemon::admission::Space { device: 1, total: 250 * GIB, free: 3 * GIB },
+                    6_345_887_744,
+                    0,
+                )
+                .unwrap_err(),
             },
             Progress { size: Some(6_345_887_744), ..Progress::default() },
         ),
@@ -388,6 +468,24 @@ fn fleet() -> Vec<Job> {
 fn status_lists_every_state() {
     let jobs = fleet();
     insta::assert_snapshot!(both(&super::jobs(&jobs), &Response::Jobs { jobs }));
+}
+
+#[test]
+fn status_offers_resume_for_interrupted_and_failed_downloads() {
+    let next = |jobs: &[Job]| {
+        let doc = super::jobs(jobs);
+        (doc.summary[1..].to_vec(), doc.next)
+    };
+    let fleet = fleet();
+    let (summary, wait) = next(&fleet);
+    assert_eq!(wait.as_deref(), Some("torrential wait 9b5212 d40a19 51e0c7"));
+    assert_eq!(summary.last().unwrap(), "torrential resume c32cdd e3a1f0 restarts the interrupted and failed ones");
+
+    let stopped: Vec<Job> = fleet.iter().filter(|j| j.status.is_stopped()).cloned().collect();
+    assert_eq!(next(&stopped).1.as_deref(), Some("torrential resume c32cdd e3a1f0"));
+
+    let paused: Vec<Job> = fleet.iter().filter(|j| j.status == JobStatus::Paused).cloned().collect();
+    assert_eq!(next(&paused), (Vec::new(), Some("torrential resume a282c6".to_string())));
 }
 
 #[test]
@@ -559,7 +657,8 @@ fn doctor_report() {
             status: CheckStatus::Ok,
             detail: "not running; the next command starts it".into(),
         },
-        Check { check: "sources".into(), status: CheckStatus::Skipped, detail: "8 enabled".into() },
+        Check { check: "sources".into(), status: CheckStatus::Fail, detail: "1 of 2 answered".into() },
+        Check { check: "source archive.org".into(), status: CheckStatus::Ok, detail: "12 results, 380 ms".into() },
         Check { check: "source knaben".into(), status: CheckStatus::Fail, detail: "http 503, 211 ms".into() },
     ];
     let fix = Some(
@@ -570,6 +669,21 @@ fn doctor_report() {
         &doctor(&checks, fix),
         &crate::output::Typed { kind: "doctor", body: serde_json::json!({"checks": checks}) }
     ));
+}
+
+#[test]
+fn one_failed_source_is_one_problem() {
+    let check = |check: &str, status| Check { check: check.into(), status, detail: String::new() };
+    let probed = [
+        check("sources", CheckStatus::Fail),
+        check("source archive.org", CheckStatus::Ok),
+        check("source knaben", CheckStatus::Fail),
+    ];
+    assert_eq!(doctor(&probed, None).summary, ["1 problem"]);
+    let unprobed = [check("config", CheckStatus::Fail), check("sources", CheckStatus::Skipped)];
+    assert_eq!(doctor(&unprobed, None).summary, ["1 problem"]);
+    let failed = [check("sources", CheckStatus::Fail)];
+    assert_eq!(doctor(&failed, None).summary, ["1 problem"]);
 }
 
 #[test]
@@ -643,7 +757,8 @@ fn sample(code: ErrorCode) -> Error {
             code,
             "d40a19 has no file list yet, so there is nothing to verify",
             "torrential wait d40a19 --until metadata",
-        ),
+        )
+        .with_next("torrential wait d40a19 --until metadata"),
         ErrorCode::PathConflict => {
             admission::check_conflicts(&plan(vec!["/Users/ada/Movies/night/Night.mp4".into()])).unwrap_err()
         }
@@ -674,7 +789,7 @@ fn sample(code: ErrorCode) -> Error {
         ErrorCode::SandboxWriteBlocked => given(
             code,
             "cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted",
-            "run torrential daemon install from a terminal outside any sandbox",
+            "run torrential engine install from a terminal outside any sandbox",
         ),
         ErrorCode::DaemonUnavailable => {
             let deep = format!("/tmp/{}", "d".repeat(120));
@@ -686,8 +801,9 @@ fn sample(code: ErrorCode) -> Error {
             .unwrap_err()
         }
         ErrorCode::DaemonVersion => {
-            given(code, "the engine speaks wire 2, the client 1", "torrential daemon stop, then run the command again")
+            given(code, "the engine speaks wire 2, the client 1", "torrential engine stop, then run the command again")
                 .with_details(Details::Versions { client: "0.1.0".into(), daemon: "0.2.0".into() })
+                .with_next("torrential engine stop")
         }
         ErrorCode::StateCorrupt => given(
             code,
@@ -710,12 +826,14 @@ fn sample(code: ErrorCode) -> Error {
             code,
             "3 damaged pieces in the selected files",
             "torrential verify 6bc1af --repair downloads them again",
-        ),
+        )
+        .with_next("torrential verify 6bc1af --repair"),
         ErrorCode::NoSource => given(
             code,
             "no peer or web seed has had the 2 pieces still missing (488.8 KiB) for 20m",
             "torrential resume 770e77 looks for them again; the 33.0 MiB verified stays",
-        ),
+        )
+        .with_next("torrential resume 770e77"),
         ErrorCode::Interrupted => given(code, "interrupted", "run the command again"),
         ErrorCode::Internal => Error::internal("the engine thread stopped"),
     }
@@ -812,8 +930,9 @@ fn a_tab_in_a_path_stays_inside_its_column() {
     );
     assert_eq!(
         daemon_status(&report).plain(),
-        "engine: stopped\nsocket: /run/my torrential/engine.sock\nlog:    /state/my torrential/engine.log\n"
+        "engine: stopped\nsocket: /run/my torrential/engine.sock\nlog:    /state/my torrential/engine.log\nnext:   \
+         torrential status\n"
     );
     let row: Vec<String> = wait_row(Duration::from_secs(3), "9b5212", &named).into_iter().map(|c| c.text).collect();
-    assert_eq!(row.join("\t"), "3s\t9b5212\tpaused\t-\t-\t-\t-\t-\tarch linux.iso");
+    assert_eq!(row.join("\t"), "3s\t9b5212\tpaused\t?\t?\t-\t-\t-\tarch linux.iso");
 }

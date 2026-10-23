@@ -127,7 +127,7 @@ pub fn install(env: &Env, log: &Path) -> Result<Report, Error> {
     }
     let write_failed = |e: std::io::Error| {
         Error::new(ErrorCode::SandboxWriteBlocked, format!("cannot write {}: {e}", path.display()))
-            .with_hint("run torrential daemon install from a terminal outside any sandbox")
+            .with_hint("run torrential engine install from a terminal outside any sandbox")
     };
     std::fs::create_dir_all(path.parent().expect("unit paths have a parent")).map_err(write_failed)?;
     std::fs::write(&path, &text).map_err(write_failed)?;

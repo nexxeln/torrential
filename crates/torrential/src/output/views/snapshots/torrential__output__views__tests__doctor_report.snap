@@ -7,7 +7,8 @@ sandbox	fail	CODEX_SANDBOX_NETWORK_DISABLED=1
 disk	ok	410.2 GiB free in /Users/ada/Downloads/torrential
 state	ok	/Users/ada/.local/state/torrential
 engine	ok	not running; the next command starts it
-sources	skipped	8 enabled
+sources	fail	1 of 2 answered
+source archive.org	ok	12 results, 380 ms
 source knaben	fail	http 503, 211 ms
 # 2 problems
 next: in interactive Codex, rerun with sandbox_permissions "require_escalated" and prefix_rule ["torrential"]
@@ -39,8 +40,13 @@ next: in interactive Codex, rerun with sandbox_permissions "require_escalated" a
     },
     {
       "check": "sources",
-      "status": "skipped",
-      "detail": "8 enabled"
+      "status": "fail",
+      "detail": "1 of 2 answered"
+    },
+    {
+      "check": "source archive.org",
+      "status": "ok",
+      "detail": "12 results, 380 ms"
     },
     {
       "check": "source knaben",

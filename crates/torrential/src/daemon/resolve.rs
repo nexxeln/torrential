@@ -38,14 +38,16 @@ pub fn prefix<'a>(
     let typed = if prefix.is_locator() { format!("u{}", prefix.as_str()) } else { prefix.as_str().to_string() };
     match found.len() {
         0 => {
-            let (what, hint) = match scope {
-                Scope::Downloads => ("download", "run torrential status to list downloads".to_string()),
-                Scope::DownloadsAndResults => (
-                    "download or recent search result",
-                    "run torrential search <words> to find it, or pass a magnet link".to_string(),
-                ),
+            let error = match scope {
+                Scope::Downloads => Error::new(ErrorCode::NotFound, format!("no download matches {typed}"))
+                    .with_hint("run torrential status to list downloads")
+                    .with_next("torrential status"),
+                Scope::DownloadsAndResults => {
+                    Error::new(ErrorCode::NotFound, format!("no download or recent search result matches {typed}"))
+                        .with_hint("run torrential search <words> to find it, or pass a magnet link")
+                }
             };
-            Err(Error::new(ErrorCode::NotFound, format!("no {what} matches {typed}")).with_hint(hint))
+            Err(error)
         }
         1 => Ok(found.remove(0).1),
         n => {

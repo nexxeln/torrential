@@ -49,6 +49,6 @@ Hide
 Escape
 Type "q"
 Sleep 500ms
-Type "torrential daemon stop; rm -rf /tmp/torrential-demo"
+Type "torrential engine stop; rm -rf /tmp/torrential-demo"
 Enter
 Sleep 2s

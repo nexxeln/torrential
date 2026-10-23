@@ -145,6 +145,29 @@ fn a_download_says_stalled_only_after_a_quiet_spell() {
     assert_eq!(state.next_stall(), None);
 }
 
+#[test]
+fn a_failed_download_says_why_in_a_few_words_at_every_width() {
+    let failed = |code: ErrorCode, size: (u16, u16)| {
+        let mut state = with_downloads(size);
+        let mut job = jobs()[1].clone();
+        job.status = JobStatus::Error { error: Error::new(code, "the engine stopped it") };
+        state.update(Msg::Watch(Event::Job { job: Box::new(job) }));
+        let buf = render(&state);
+        let (x, y) = find(&buf, "openwebtext-2019");
+        let why = (x..size.0).find(|&x| buf[(x, y)].fg == theme::ERROR).map(|x| buf[(x, y)].symbol().to_string());
+        (line(&buf, y), why)
+    };
+    let (row, ink) = failed(ErrorCode::DiskFull, (80, 24));
+    assert!(row.ends_with("━━╸─────   36%     disk full"), "{row}");
+    assert_eq!(ink.as_deref(), Some("d"), "the reason takes the error ink");
+    let (row, _) = failed(ErrorCode::NoSource, (100, 30));
+    assert!(row.ends_with("36%     no source"), "{row}");
+    let (row, _) = failed(ErrorCode::NoSource, (47, 19));
+    assert_eq!(row, "│ openwebtext-2019              no source  36%", "the reason stands in for the bar");
+    let (row, _) = failed(ErrorCode::MetadataTimeout, (40, 19));
+    assert_eq!(row, "│ openwebtext-2019     no metadata  36%", "wider than the bar it stands in for");
+}
+
 fn wikipedia_with(status: JobStatus, map: Option<&str>) -> (State, Buffer, u16) {
     let mut state = with_downloads((100, 30));
     let mut job = jobs()[0].clone();
@@ -300,6 +323,38 @@ fn one_source_reads_as_one_source() {
 }
 
 #[test]
+fn every_footer_keeps_its_way_out_and_its_keys_hint_at_every_width() {
+    fn newer(size: (u16, u16)) -> State {
+        let mut state = idle(size);
+        state.update(Msg::NewerVersion("0.1.1".into()));
+        state
+    }
+    let typing = |size| {
+        let mut state = newer(size);
+        press(&mut state, "/");
+        state
+    };
+    type Footer = (fn((u16, u16)) -> State, &'static [&'static str], &'static str);
+    let footers: [Footer; 3] = [
+        (newer, &["U update"], "? keys"),
+        (typing, &["0.1.1 is out"], "f1 keys"),
+        (file_tree, &["esc back"], "? keys"),
+    ];
+    for w in 40..=160 {
+        for (scenario, kept, last) in footers {
+            let footer = line(&render(&scenario((w, 24))), 23);
+            assert!(footer.ends_with(last), "{w} columns: {footer}");
+            for word in kept {
+                assert!(footer.contains(word), "{w} columns: {footer}");
+            }
+        }
+    }
+    assert!(line(&render(&newer((47, 19))), 18).ends_with("U update to 0.1.1       space pause   ? keys"));
+    let footer = line(&render(&file_tree((47, 19))), 18);
+    assert!(footer.ends_with("space pick   esc back   ? keys"), "the lower pairs go first: {footer}");
+}
+
+#[test]
 fn a_typing_user_sees_that_f1_opens_the_keys() {
     let mut state = with_downloads((100, 30));
     press(&mut state, "/");
@@ -326,11 +381,11 @@ fn a_row_shows_the_resolution_and_its_details_spell_out_the_quality() {
     assert_eq!(line(&buf, y + 1), "            │   knaben · trusted uploader · 1080p h264");
     let (_, y) = find(&buf, "CAM.x264");
     assert!(
-        line(&buf, y).ends_with("CAM.x264        cam       h264    1.4 GiB     41   2mo"),
-        "the codec when no resolution"
+        line(&buf, y).ends_with("CAM.x264        cam               1.4 GiB     41   2mo"),
+        "a blank, never the codec, when no resolution"
     );
     let (_, y) = find(&buf, "(1968) colorized");
-    assert!(line(&buf, y).ends_with("colorized     pd                734 MiB      –    6y"), "{}", line(&buf, y));
+    assert!(line(&buf, y).ends_with("colorized     pd                734 MiB    web    6y"), "{}", line(&buf, y));
 }
 
 fn heads_row(state: &State) -> String {
@@ -445,7 +500,7 @@ fn the_ranking_panel_shows_what_was_detected_and_takes_the_one_mark() {
         [
             "    ranking │ for this Mac: 1080p screen, shows HDR, plays HEVC, arm64",
             "            ● screen    [auto] phone  laptop  tv  tv-4k         detected 1080p",
-            "            │ max size  [none] 2 GB  8 GB  20 GB",
+            "            │ max size  [none] 2 GiB  8 GiB  20 GiB",
             "            │ playback  [auto] hevc-hdr  hevc  h264          detected hevc-hdr",
         ]
     );
@@ -471,16 +526,17 @@ fn the_panel_previews_what_search_would_rank_for() {
         [
             "    ranking │ for this Mac: 2160p screen, arm64, English",
             "            ● screen     auto  phone  laptop  tv [tv-4k]                            detected 1080p",
-            "            │ max size  [none] 2 GB  8 GB  20 GB",
+            "            │ max size  [none] 2 GiB  8 GiB  20 GiB",
             "            │ playback  [auto] hevc-hdr  hevc  h264                                 plays anything",
         ],
         "a TV's player is not this Mac's, so nothing limits playback"
     );
     assert!(heads_row(&state).contains("ranked for this Mac: 1080p screen"), "the list keeps its order until a save");
+    assert!(heads_row(&state).contains(", plays HEVC (saved)"), "and says it ranks for the saved picks");
     press(&mut state, "jl");
     assert_eq!(
         panel_rows(&state)[2],
-        "            ● max size   none [2 GB] 8 GB  20 GB                          refuses larger downloads"
+        "            ● max size   none [2 GiB] 8 GiB  20 GiB                       refuses larger downloads"
     );
 }
 
@@ -512,7 +568,7 @@ fn the_panel_opens_on_the_saved_overrides_and_fits_60_columns() {
         [
             "    ranking │ for this Mac: 1080p screen, no HDR",
             "            ● screen     auto  phone [laptop] tv  tv-4k",
-            "            │ max size   none  2 GB [5 GB] 8 GB  20 GB",
+            "            │ max size   none  2 GiB [5 GB] 8 GiB  20 GiB",
             "            │ playback   auto  hevc-hdr  hevc [h264]",
         ],
         "the notes at the ends drop where they do not fit"
@@ -542,7 +598,7 @@ fn a_file_list_error_sits_three_cells_after_the_facts() {
 fn a_narrow_window_keeps_the_room_for_names() {
     let buf = render(&searched((60, 16)));
     let (_, y) = find(&buf, "3.4 GiB");
-    assert_eq!(line(&buf, y), "            │ Night…[DVD]  pd         3.4 GiB      –   12y");
+    assert_eq!(line(&buf, y), "            │ Night…[DVD]  pd         3.4 GiB    web   12y");
 }
 
 #[test]
@@ -656,9 +712,9 @@ fn the_margin_labels_each_group_once() {
     let margins: Vec<String> =
         (0..30).map(|y| line(&buf, y).chars().take(11).collect::<String>().trim().to_string()).collect();
     let labels: Vec<&str> = margins.iter().map(String::as_str).filter(|m| !m.is_empty()).collect();
-    assert_eq!(labels, ["torrential", "search", "getting", "failed", "paused", "done", "found"]);
-    let (x, y) = find(&buf, "failed │");
-    assert_eq!((x, buf[(x, y)].fg), (5, theme::ERROR));
+    assert_eq!(labels, ["torrential", "search", "getting", "error", "paused", "done", "found"]);
+    let (x, y) = find(&buf, "error │");
+    assert_eq!((x, buf[(x, y)].fg), (6, theme::ERROR));
 }
 
 #[test]
