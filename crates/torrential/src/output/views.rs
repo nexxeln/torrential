@@ -152,7 +152,7 @@ pub fn search(result: &SearchResult, now: i64) -> Doc {
     };
     let header = vec!["ID", "SEEDS", "SIZE", "QUALITY", "AGE", "SOURCE", "FLAGS", "NAME"];
     let profile = &result.query.profile;
-    if result.is_video() {
+    if video {
         summary.push(format!("ranked for {}", ranked_for(profile)));
     } else if result.releases.iter().any(|r| !Arch::named_in(&r.name).is_empty()) {
         summary.push(format!("ranked for {}", profile.describe_arch()));
