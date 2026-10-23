@@ -5,7 +5,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use torrential_core::units::{count, format_duration};
 use torrential_core::{
-    Codec, Eighths, Flag, Job, JobStatus, Machine, Preferences, Profile, Quality, Release, ReleaseId, Resolution,
+    Eighths, ErrorCode, Flag, Job, JobStatus, Machine, Preferences, Profile, Quality, Release, ReleaseId, Resolution,
     Slice, SourceOutcome, TorrentFile,
 };
 
@@ -162,10 +162,12 @@ fn hints_width(pairs: &[(&str, &str)]) -> u16 {
     cells as u16
 }
 
-fn hints(buf: &mut Buffer, right: u16, y: u16, room: u16, pairs: &[(&str, &str)]) {
+fn hints(buf: &mut Buffer, right: u16, y: u16, room: u16, pairs: &[(&str, &str)], kept: &[(&str, &str)]) {
     let mut pairs = pairs.to_vec();
-    while pairs.len() > 1 && hints_width(&pairs) > room {
-        pairs.pop();
+    while hints_width(&pairs) > room
+        && let Some(last) = pairs.iter().rposition(|pair| !kept.contains(pair))
+    {
+        pairs.remove(last);
     }
     let mut x = right.saturating_sub(hints_width(&pairs));
     for (i, (key, verb)) in pairs.iter().enumerate() {
@@ -426,7 +428,7 @@ fn list(buf: &mut Buffer, state: &State, screen: &Screen) {
         let y = p.top;
         match p.block {
             Block::Label(word) => {
-                let style = if word == "failed" { fg(ERROR) } else { fg(PENCIL) };
+                let style = if word == "error" { fg(ERROR) } else { fg(PENCIL) };
                 put(&mut sheet, at.content, y, right - at.content, word, style);
                 last = Some(word);
             }
@@ -434,7 +436,7 @@ fn list(buf: &mut Buffer, state: &State, screen: &Screen) {
                 let Some(job) = state.job(id) else { continue };
                 let word = if state.confirm == Some(id) { "remove?" } else { label(&job.status) };
                 if last != Some(word) {
-                    let style = if matches!(word, "remove?" | "failed") { fg(ERROR) } else { fg(PENCIL) };
+                    let style = if matches!(word, "remove?" | "error") { fg(ERROR) } else { fg(PENCIL) };
                     margin(&mut sheet, at, y, word, style);
                 }
                 last = Some(word);
@@ -581,7 +583,12 @@ fn download_row(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, y: u16) {
         put_right(buf, g.right, y, &total, ink);
         return;
     }
-    let room = g.rule - 2 - content;
+    let why = match (&job.status, g.tail) {
+        (JobStatus::Error { error }, None) => Some(failure(error.code)),
+        _ => None,
+    };
+    let bar_end = g.rule + g.rule_cells;
+    let room = why.as_ref().map_or(g.rule, |why| g.rule.min(bar_end.saturating_sub(width(why) as u16))) - 2 - content;
     put(buf, content, y, room, &format::name(&name, room.into()), ink);
     let pending =
         state.pending.get(&job.id).map(|action| [(action.progressive(), fg(PENCIL)), (state.spinner(), fg(PENCIL))]);
@@ -589,7 +596,10 @@ fn download_row(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, y: u16) {
         spans(buf, g.rule, y, g.right - g.rule, pending);
         return;
     }
-    progress_mark(buf, g.rule, y, g.rule_cells, Meter::job(state, job));
+    match &why {
+        Some(why) => _ = put_right(buf, bar_end, y, why, fg(ERROR)),
+        None => progress_mark(buf, g.rule, y, g.rule_cells, Meter::job(state, job)),
+    }
     let pct = p.size.map_or("–".to_string(), |size| percent(p.verified, size));
     put_right(buf, g.percent, y, &pct, ink);
     let Some(tail) = g.tail else { return };
@@ -597,7 +607,27 @@ fn download_row(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, y: u16) {
         spans(buf, tail, y, g.right - tail, pending);
         return;
     }
-    put_right(buf, g.right, y, &tail_text(state, job), if is_selected { ink } else { fg(PENCIL) });
+    let style = match (&job.status, is_selected) {
+        (JobStatus::Error { .. }, _) => fg(ERROR),
+        (_, true) => ink,
+        (_, false) => fg(PENCIL),
+    };
+    put_right(buf, g.right, y, &tail_text(state, job), style);
+}
+
+fn failure(code: ErrorCode) -> String {
+    match code {
+        ErrorCode::StorageError => "disk error",
+        ErrorCode::VerificationFailed => "bad data",
+        ErrorCode::MetadataTimeout => "no metadata",
+        ErrorCode::NetworkUnavailable => "offline",
+        ErrorCode::NoSelection => "no files",
+        ErrorCode::InvalidTorrent => "bad torrent",
+        ErrorCode::PathConflict => "path taken",
+        ErrorCode::SandboxNetworkBlocked | ErrorCode::SandboxWriteBlocked => "sandboxed",
+        code => code.as_str(),
+    }
+    .replace('_', " ")
 }
 
 fn tail_text(state: &State, job: &Job) -> String {
@@ -609,6 +639,7 @@ fn tail_text(state: &State, job: &Job) -> String {
             _ => String::new(),
         },
         JobStatus::Metadata => count(p.peers as usize, "peer"),
+        JobStatus::Error { error } => failure(error.code),
         _ => String::new(),
     }
 }
@@ -643,17 +674,20 @@ fn download_detail(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, (y, vie
         }
         (_, Some(total)) => facts.push(format!("{} of {}", size(p.verified), size(total))),
     }
+    if job.status == JobStatus::Downloading {
+        facts.push(rate(p.down_rate));
+    }
     if at.narrow() && job.status == JobStatus::Downloading {
         let left = tail_text(state, job);
         if !left.is_empty() {
             facts.push(left);
         }
     }
-    if job.status == JobStatus::Downloading {
-        facts.push(rate(p.down_rate));
-    }
     if matches!(job.status, JobStatus::Downloading | JobStatus::Metadata) {
         facts.push(count(p.peers as usize, "peer"));
+    }
+    while facts.len() > 1 && width(&facts.join(" · ")) > usize::from(room) {
+        facts.pop();
     }
     put(buf, detail, row + 1, room, &facts.join(" · "), fg(PENCIL));
     row += 2;
@@ -705,9 +739,11 @@ fn heads(buf: &mut Buffer, state: &State, c: &Columns, y: u16) {
     margin(buf, c.at, y, "found", fg(PENCIL));
     let room = c.size - "size".len() as u16 - 2 - c.at.content;
     let ranked_for = state.search.as_ref().and_then(|s| s.ranked_for.as_ref());
-    let ranked = ranked_for.and_then(|r| first_fit(ranked_lines(r), usize::from(room) - "ranked for ".len()));
+    let saved = if state.ranking.is_some_and(|r| r.picks != r.saved) { " (saved)" } else { "" };
+    let fit = usize::from(room).saturating_sub("ranked for ".len() + saved.len());
+    let ranked = ranked_for.and_then(|r| first_fit(ranked_lines(r), fit));
     let order = match (state.sort, ranked) {
-        (Sort::BestMatch, Some(ranked)) => format!("ranked for {ranked}"),
+        (Sort::BestMatch, Some(ranked)) => format!("ranked for {ranked}{saved}"),
         (Sort::BestMatch, None) => "best match first".into(),
         (Sort::Seeds, _) => "most seeds first".into(),
         (Sort::Size, _) => "largest first".into(),
@@ -751,8 +787,7 @@ fn flag_words(flag: Flag) -> &'static str {
 }
 
 fn quality_word(quality: Quality) -> Option<&'static str> {
-    let codec = quality.codec.map(Codec::as_str);
-    quality.resolution.map(Resolution::as_str).or(codec).or(quality.hdr.then_some("hdr"))
+    quality.resolution.map(Resolution::as_str)
 }
 
 fn result_row(buf: &mut Buffer, state: &State, release: &Release, c: &Columns, y: u16) {
@@ -781,7 +816,8 @@ fn result_row(buf: &mut Buffer, state: &State, release: &Release, c: &Columns, y
             None | Some(1..=9) => pick(PENCIL),
             Some(_) => pick(TEXT),
         };
-        put_right(buf, x, y, &seeds(release.seeders), seeds_style);
+        let web = release.seeders.is_none() && release.sources.iter().any(|s| s == "archive.org");
+        put_right(buf, x, y, &if web { "web".into() } else { seeds(release.seeders) }, seeds_style);
     }
     if let Some(x) = c.age {
         let published = release.published.map_or("–".into(), |p| age(p, state.clock));
@@ -1045,7 +1081,9 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
         (Focus::Files, Some(Item::Download(_))) => {
             vec![("space", pause), ("esc", "back"), ("o", "open"), ("?", "keys")]
         }
-        (Focus::Files, _) => vec![("space", "pick"), ("a", "all"), ("enter", "download"), ("esc", "back")],
+        (Focus::Files, _) => {
+            vec![("space", "pick"), ("enter", "download"), ("a", "all"), ("esc", "back"), ("?", "keys")]
+        }
         (Focus::List, Some(Item::Download(_))) => vec![("space", pause), ("x", "remove"), ("o", "open"), ("?", "keys")],
         (Focus::List, Some(Item::Result(_))) if downloaded => vec![("d", "downloads"), ("s", "sort"), ("?", "keys")],
         (Focus::List, Some(Item::Result(_))) => {
@@ -1054,7 +1092,12 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
         (Focus::List, None) => vec![("/", "search"), ("?", "keys")],
     };
     let mut room = screen.right - screen.at.content;
-    let first = pairs.first().map_or(0, |pair| hints_width(&[*pair]) + 4);
+    let essential = |(key, _): &(&str, &str)| state.toast.is_none() && matches!(*key, "esc" | "?" | "f1");
+    let kept: Vec<(&str, &str)> =
+        pairs.iter().enumerate().filter(|(i, pair)| *i == 0 || essential(pair)).map(|(_, pair)| *pair).collect();
+    let reserve = |pairs: &[(&str, &str)]| if pairs.is_empty() { 0 } else { hints_width(pairs) + 4 };
+    let first = reserve(&kept);
+    let must = reserve(&pairs.iter().copied().filter(essential).collect::<Vec<_>>());
     let note = match (&state.toast, &state.upgrade) {
         (Some(toast), _) => {
             let color = match toast.tone {
@@ -1062,27 +1105,30 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
                 Tone::Success => ACTION,
                 Tone::Warning | Tone::Error => ERROR,
             };
-            Some((toast.text.clone(), color))
+            Some((toast.text.clone(), color, first))
         }
         (None, Some(Upgrade::Available(latest))) => {
             let texts = match state.focus {
                 Focus::Query => vec![format!("torrential {latest} is out"), format!("{latest} is out")],
                 _ => vec![
-                    format!("torrential {latest} is out · U updates"),
-                    format!("{latest} is out · U updates"),
-                    format!("U updates to {latest}"),
+                    format!("torrential {latest} is out · U update"),
+                    format!("{latest} is out · U update"),
+                    format!("U update to {latest}"),
                 ],
             };
-            first_fit(texts, room.saturating_sub(first).into()).map(|text| (text, PENCIL))
+            let shortest = texts.last().filter(|text| width(text) as u16 + must <= room).cloned();
+            first_fit(texts, room.saturating_sub(first).into()).or(shortest).map(|text| (text, PENCIL, must))
         }
-        (None, Some(Upgrade::Installing(latest))) => Some((format!("Updating to {latest}{}", state.spinner()), PENCIL)),
+        (None, Some(Upgrade::Installing(latest))) => {
+            Some((format!("Updating to {latest}{}", state.spinner()), PENCIL, first))
+        }
         (None, Some(Upgrade::Installed) | None) => None,
     };
-    if let Some((text, color)) = note {
-        let used = put(buf, screen.at.content, y, room.saturating_sub(first), &text, fg(color));
+    if let Some((text, color, reserved)) = note {
+        let used = put(buf, screen.at.content, y, room.saturating_sub(reserved), &text, fg(color));
         room = room.saturating_sub(used + 4);
     }
     if !pairs.is_empty() {
-        hints(buf, screen.right, y, room, &pairs);
+        hints(buf, screen.right, y, room, &pairs, &kept);
     }
 }

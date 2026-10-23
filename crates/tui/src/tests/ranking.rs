@@ -132,10 +132,10 @@ fn a_saved_cap_the_panel_does_not_offer_is_still_a_choice() {
     press(&mut state, "Sj");
     let ranking = state.ranking.unwrap();
     let labels: Vec<String> = ranking.choices(ranking.row).into_iter().map(|c| ranking.row.value(c)).collect();
-    assert_eq!(labels, ["none", "2 GB", "5 GB", "8 GB", "20 GB"]);
+    assert_eq!(labels, ["none", "2 GiB", "5 GB", "8 GiB", "20 GiB"]);
     assert_eq!(ranking.picked(ranking.row), 2);
     press(&mut state, "l");
-    let eight = Preferences { max_size: Some(8_000_000_000), ..Preferences::default() };
+    let eight = Preferences { max_size: Some(8 << 30), ..Preferences::default() };
     assert_eq!(state.update(key(KeyCode::Enter)), [edit(five, eight)]);
 }
 

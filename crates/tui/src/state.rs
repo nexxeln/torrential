@@ -64,7 +64,7 @@ pub enum Row {
 
 pub const ROWS: [Row; 3] = [Row::Screen, Row::MaxSize, Row::Playback];
 
-const CAPS: [u64; 3] = [2_000_000_000, 8_000_000_000, 20_000_000_000];
+const CAPS: [u64; 3] = [2 << 30, 8 << 30, 20 << 30];
 
 impl Row {
     pub const fn name(self) -> &'static str {
@@ -292,7 +292,7 @@ pub fn label(status: &JobStatus) -> &'static str {
         JobStatus::Downloading | JobStatus::Metadata => "getting",
         JobStatus::Checking => "checking",
         JobStatus::Queued => "waiting",
-        JobStatus::Error { .. } => "failed",
+        JobStatus::Error { .. } => "error",
         JobStatus::Interrupted => "stopped",
         JobStatus::Paused => "paused",
         JobStatus::Done { .. } => "done",
