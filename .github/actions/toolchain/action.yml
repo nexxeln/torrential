@@ -1,0 +1,34 @@
+name: toolchain
+description: Install and cache what scripts/release.sh needs on this runner.
+
+inputs:
+  target:
+    required: true
+  kind:
+    description: test or build, so test and release builds keep separate caches
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'macOS'
+      uses: cachix/install-nix-action@v31
+    - if: runner.os == 'macOS'
+      uses: nix-community/cache-nix-action@v6
+      with:
+        primary-key: nix-${{ inputs.target }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+        restore-prefixes-first-match: nix-${{ inputs.target }}-
+        gc-max-store-size: 8G
+    - if: runner.os == 'macOS'
+      shell: bash
+      run: nix --extra-experimental-features 'nix-command flakes' develop -c true
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: cargo-${{ inputs.kind }}-${{ inputs.target }}-${{ hashFiles('Cargo.lock', 'vendor/libtorrent/CMakeLists.txt', 'crates/engine/build.rs') }}-${{ github.sha }}
+        restore-keys: |
+          cargo-${{ inputs.kind }}-${{ inputs.target }}-${{ hashFiles('Cargo.lock', 'vendor/libtorrent/CMakeLists.txt', 'crates/engine/build.rs') }}-
+          cargo-${{ inputs.kind }}-${{ inputs.target }}-

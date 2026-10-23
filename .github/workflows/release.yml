@@ -1,0 +1,88 @@
+# Releases
+#   1. Bump version in Cargo.toml, run cargo update -p torrential --offline, and commit "Release X.Y.Z" on main.
+#   2. git tag vX.Y.Z && git push origin main vX.Y.Z. This workflow tests, builds every target, and opens a draft release.
+#   3. Check the draft's assets, write the notes, and publish it with --latest. install.yml then installs it on every platform.
+# workflow_dispatch builds the same assets as artifacts without a tag or a release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+  test:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          kind: build
+      - run: scripts/release.sh
+      - name: Check the binary runs
+        run: |
+          mkdir -p check && tar -xzf dist/torrential-${{ matrix.target }}.tar.gz -C check
+          ls check
+          check/torrential --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: torrential-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft:
+    if: github.ref_type == 'tag'
+    needs: [test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check every checksum
+        working-directory: dist
+        run: ls -l && sha256sum -c *.sha256
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "torrential ${GITHUB_REF_NAME#v}" --notes ""
