@@ -7,7 +7,9 @@ version=${TORRENTIAL_VERSION:-latest}
 
 case "$(uname -s) $(uname -m)" in
   "Darwin arm64") target=aarch64-apple-darwin ;;
+  "Darwin x86_64") target=x86_64-apple-darwin ;;
   "Linux x86_64") target=x86_64-unknown-linux-musl ;;
+  "Linux aarch64" | "Linux arm64") target=aarch64-unknown-linux-musl ;;
   *)
     echo "torrential has no prebuilt binary for $(uname -s) $(uname -m)." >&2
     echo "Build it from source: https://github.com/$repo#build-from-source" >&2
