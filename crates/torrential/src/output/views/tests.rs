@@ -11,7 +11,8 @@ use torrential_core::{
 
 use super::*;
 use crate::client::wait::Printer;
-use crate::output::{Mode, render};
+use crate::client::{Files, keep_matching};
+use crate::output::{Mode, Typed, render};
 
 const NOW: i64 = 1_792_314_723;
 const DAY: i64 = 86_400;
@@ -177,11 +178,10 @@ fn file(index: u32, path: &str, size: u64) -> TorrentFile {
     TorrentFile { index, path: path.into(), size, selected: false, verified: 0, risk: None }
 }
 
-#[test]
-fn files_from_a_torrent_url_mark_executables() {
+fn film_files() -> FilesReply {
     let mut installer = file(3, "Codec Installer.exe", 1_200_000);
     installer.risk = Some(FileRisk::Executable);
-    let reply = FilesReply {
+    FilesReply {
         id: "6bc1af".to_string() + &"0".repeat(34),
         name: Some("night_of_the_living_dead_dvd".into()),
         total_size: 5_046_586_573,
@@ -193,8 +193,40 @@ fn files_from_a_torrent_url_mark_executables() {
         ],
         metadata_source: "torrent_url".into(),
         elapsed_ms: 412,
-    };
-    insta::assert_snapshot!(both(&files(&reply), &Response::Files { files: reply }));
+    }
+}
+
+#[test]
+fn files_from_a_torrent_url_mark_executables() {
+    let reply = film_files();
+    insta::assert_snapshot!(both(&files(&reply, None), &Response::Files { files: reply }));
+}
+
+#[test]
+fn files_matching_globs_list_only_those() {
+    let mut reply = film_files();
+    let patterns = vec!["*.MP4".to_string(), "Night.asr.srt".to_string()];
+    let matched = keep_matching(&mut reply, &patterns).unwrap();
+    let doc = files(&reply, Some(&matched));
+    insta::assert_snapshot!(both(&doc, &Typed { kind: "files", body: Files { files: reply, matched: Some(matched) } }));
+}
+
+#[test]
+fn a_match_summary_counts_the_matches_and_their_size() {
+    let mut reply = film_files();
+    let matched = keep_matching(&mut reply, &["night.mp4".to_string()]).unwrap();
+    let doc = files(&reply, Some(&matched));
+    assert_eq!(
+        doc.summary,
+        ["1 of 4 files in night_of_the_living_dead_dvd match · 568.8 MiB · file list from the .torrent URL in 0.4s"]
+    );
+    assert_eq!(doc.next.as_deref(), Some("torrential get 6bc1af --files night.mp4"));
+    let mut reply = film_files();
+    let matched = keep_matching(&mut reply, &["Codec Installer.exe".to_string()]).unwrap();
+    assert_eq!(
+        files(&reply, Some(&matched)).next.as_deref(),
+        Some("torrential get 6bc1af --files 'Codec Installer.exe'")
+    );
 }
 
 #[test]
@@ -212,7 +244,7 @@ fn files_of_a_download_show_progress_per_file() {
         metadata_source: "download".into(),
         elapsed_ms: 3,
     };
-    insta::assert_snapshot!(both(&files(&reply), &Response::Files { files: reply }));
+    insta::assert_snapshot!(both(&files(&reply, None), &Response::Files { files: reply }));
 }
 
 #[test]
@@ -226,7 +258,7 @@ fn a_one_file_torrent_counts_one_file() {
         elapsed_ms: 900,
     };
     assert_eq!(
-        files(&reply).summary,
+        files(&reply, None).summary,
         ["1 file in archlinux-2026.10.01-x86_64.iso · 1.0 GiB · file list from peers in 0.9s"]
     );
 }

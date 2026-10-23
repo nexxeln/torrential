@@ -26,13 +26,16 @@ pub fn wanted(metainfo: &Metainfo, selection: &Selection) -> Result<Vec<bool>, E
     let set = compile(patterns)?;
     let wanted: Vec<bool> =
         metainfo.files.iter().map(|f| set.is_match(&f.path) || set.is_match(sanitize(&f.path))).collect();
+    some_match(wanted, patterns, &metainfo.name, &metainfo.info_hash.id().to_hex())
+}
+
+pub fn some_match(wanted: Vec<bool>, patterns: &[String], name: &str, id: &str) -> Result<Vec<bool>, Error> {
     if wanted.contains(&true) {
-        Ok(wanted)
-    } else {
-        let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
-        Err(Error::new(ErrorCode::NoSelection, format!("no file in {} matches {}", metainfo.name, quoted.join(", ")))
-            .with_hint(format!("run torrential files {} to see the paths", &metainfo.info_hash.id().to_hex()[..6])))
+        return Ok(wanted);
     }
+    let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
+    Err(Error::new(ErrorCode::NoSelection, format!("no file in {name} matches {}", quoted.join(", ")))
+        .with_hint(format!("run torrential files {} to see the paths", &id[..6])))
 }
 
 pub fn targets(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {

@@ -111,7 +111,15 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "repeatable": false
         }
       ],
-      "flags": []
+      "flags": [
+        {
+          "name": "--files",
+          "help": "List only files matching this glob or exact path, as get --files would pick them. `*` crosses folders and case is ignored. Repeat to add more",
+          "takes_value": true,
+          "repeatable": true,
+          "value_name": "GLOB"
+        }
+      ]
     },
     {
       "name": "get",

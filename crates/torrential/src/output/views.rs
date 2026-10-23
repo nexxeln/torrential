@@ -154,7 +154,14 @@ pub fn profile_check(profile: &Profile) -> Check {
     Check { check: "profile".into(), status: CheckStatus::Ok, detail: ranked_for(profile) }
 }
 
-pub fn files(reply: &FilesReply) -> Doc {
+#[derive(Debug, serde::Serialize)]
+pub struct FileMatch {
+    pub patterns: Vec<String>,
+    pub total_files: usize,
+    pub size: u64,
+}
+
+pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
     let from_download = reply.metadata_source == "download";
     let risky = reply.files.iter().any(|f| f.risk.is_some());
     let rows = reply
@@ -195,15 +202,22 @@ pub fn files(reply: &FilesReply) -> Doc {
         _ => "",
     };
     let count = reply.files.len();
-    let mut summary = vec![format!(
-        "{} in {name} · {} · file list {source} in {}",
-        format::count(count, "file"),
-        format_size(reply.total_size),
-        format::seconds_tenths(reply.elapsed_ms)
-    )];
+    let elapsed = format::seconds_tenths(reply.elapsed_ms);
+    let mut summary = vec![match matched {
+        Some(m) => format!(
+            "{count} of {} in {name} match · {} · file list {source} in {elapsed}",
+            format::count(m.total_files, "file"),
+            format_size(m.size)
+        ),
+        None => format!(
+            "{} in {name} · {} · file list {source} in {elapsed}",
+            format::count(count, "file"),
+            format_size(reply.total_size)
+        ),
+    }];
     if count > MAX_FILE_ROWS {
         summary.push(format!(
-            "showing {MAX_FILE_ROWS} of {}; get --files <GLOB> --dry-run checks a pattern",
+            "showing {MAX_FILE_ROWS} of {}; torrential files --files <GLOB> narrows the list",
             format::count(count, "file")
         ));
     }
@@ -213,7 +227,10 @@ pub fn files(reply: &FilesReply) -> Doc {
     Doc {
         body: Body::Table { header, rows },
         summary,
-        next: Some(format!("torrential get {} --files <PATTERN>", short_ref(&reply.id))),
+        next: Some(match matched {
+            Some(m) => rerun_get(&short_ref(&reply.id), &Selection::Patterns(m.patterns.clone()), None),
+            None => format!("torrential get {} --files <PATTERN>", short_ref(&reply.id)),
+        }),
     }
 }
 

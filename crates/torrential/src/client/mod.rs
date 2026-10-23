@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
-use torrential_core::protocol::{GetRequest, Request, Response};
+use torrential_core::protocol::{FilesReply, GetRequest, Request, Response};
 use torrential_core::{Error, ErrorCode, Preferences, Profile, SearchQuery, Target};
 
 use crate::cli::{Command, DaemonCommand, GetArgs, SearchArgs, Until};
+use crate::daemon::files;
 use crate::daemon::server::METADATA_WAIT;
 use crate::env::Env;
-use crate::output::views::{self, ChangeCommand, Check, CheckStatus, DaemonReport};
+use crate::output::views::{self, ChangeCommand, Check, CheckStatus, DaemonReport, FileMatch};
 use crate::output::{self, Mode, Typed, render};
 use crate::paths::Paths;
 use crate::skill::{self, SkillCommand, Writes};
@@ -67,9 +68,11 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             let target = Target::parse(&args.reference, &cwd)?;
             let request = Request::Files { target, timeout_ms: METADATA_WAIT.as_millis() as u32 };
             match answer(engine()?.call_within(&request, METADATA_WAIT + Duration::from_secs(15))?)? {
-                Response::Files { files } => {
-                    let doc = views::files(&files);
-                    Ok(emit(mode, &doc, &Response::Files { files }))
+                Response::Files { mut files } => {
+                    let matched =
+                        if args.files.is_empty() { None } else { Some(keep_matching(&mut files, &args.files)?) };
+                    let doc = views::files(&files, matched.as_ref());
+                    Ok(emit(mode, &doc, &Typed { kind: "files", body: Files { files, matched } }))
                 }
                 other => Err(connect::unexpected(&other)),
             }
@@ -464,4 +467,71 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
 #[derive(Serialize)]
 struct Checks<'a> {
     checks: &'a [Check],
+}
+
+#[derive(Serialize)]
+pub struct Files {
+    pub files: FilesReply,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched: Option<FileMatch>,
+}
+
+pub fn keep_matching(reply: &mut FilesReply, patterns: &[String]) -> Result<FileMatch, Error> {
+    let set = files::compile(patterns)?;
+    let wanted = reply.files.iter().map(|f| set.is_match(&f.path)).collect();
+    let wanted = files::some_match(wanted, patterns, reply.name.as_deref().unwrap_or(&reply.id), &reply.id)?;
+    let total_files = reply.files.len();
+    let mut wanted = wanted.into_iter();
+    reply.files.retain(|_| wanted.next().unwrap_or(false));
+    Ok(FileMatch { patterns: patterns.to_vec(), total_files, size: reply.files.iter().map(|f| f.size).sum() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use torrential_core::TorrentFile;
+
+    fn reply() -> FilesReply {
+        let file = |index, path: &str, size| TorrentFile {
+            index,
+            path: path.into(),
+            size,
+            selected: false,
+            verified: 0,
+            risk: None,
+        };
+        FilesReply {
+            id: "6bc1af".to_string() + &"0".repeat(34),
+            name: Some("film".into()),
+            total_size: 600,
+            files: vec![file(0, "Film.mp4", 400), file(1, "extras/Trailer.MP4", 150), file(2, "notes.txt", 50)],
+            metadata_source: "torrent_file".into(),
+            elapsed_ms: 1,
+        }
+    }
+
+    fn keep(patterns: &[&str]) -> Result<(Vec<u32>, FileMatch), Error> {
+        let mut reply = reply();
+        let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+        let matched = keep_matching(&mut reply, &patterns)?;
+        Ok((reply.files.iter().map(|f| f.index).collect(), matched))
+    }
+
+    #[test]
+    fn globs_keep_the_files_get_would_pick() {
+        let (kept, matched) = keep(&["*.mp4"]).unwrap();
+        assert_eq!(kept, [0, 1]);
+        assert_eq!((matched.total_files, matched.size), (3, 550));
+        assert_eq!(keep(&["NOTES.TXT", "film.mp4"]).unwrap().0, [0, 2]);
+        assert_eq!(keep(&["extras/Trailer.MP4"]).unwrap().0, [1]);
+    }
+
+    #[test]
+    fn globs_that_match_nothing_fail_like_get() {
+        let err = keep(&["*.mkv"]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoSelection);
+        assert_eq!(err.message, "no file in film matches \"*.mkv\"");
+        assert_eq!(err.hint.as_deref(), Some("run torrential files 6bc1af to see the paths"));
+        assert_eq!(keep(&["["]).unwrap_err().code, ErrorCode::Usage);
+    }
 }

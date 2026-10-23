@@ -32,6 +32,9 @@ pub enum Command {
     )]
     Search(SearchArgs),
     /// List the files in a torrent, fetching its metadata if needed
+    #[command(
+        after_help = "Examples:\n  torrential files 6bc1af\n  torrential files 6bc1af --files '*.mp4' --files '*.srt'"
+    )]
     Files(FilesArgs),
     /// Start a download, or change its file selection
     #[command(
@@ -159,6 +162,9 @@ pub struct FilesArgs {
     /// An ID prefix, infohash, magnet link, .torrent file, or .torrent URL
     #[arg(value_name = "REF", add = ArgValueCandidates::new(complete_download_ids))]
     pub reference: String,
+    /// List only files matching this glob or exact path, as get --files would pick them. `*` crosses folders and case is ignored. Repeat to add more
+    #[arg(long, value_name = "GLOB")]
+    pub files: Vec<String>,
 }
 
 #[derive(Args, Debug)]
