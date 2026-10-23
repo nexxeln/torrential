@@ -233,6 +233,7 @@ fn job_refs(references: &[String], cwd: &Path) -> Result<Vec<String>, Error> {
 fn not_a_download(kind: &str) -> Error {
     Error::new(ErrorCode::InvalidRef, format!("this command takes a download ID, not {kind}"))
         .with_hint("run torrential status to list download IDs")
+        .with_next("torrential status")
 }
 
 fn changes(mut conn: Conn, request: Request, command: ChangeCommand, mode: Mode) -> Result<u8, Error> {

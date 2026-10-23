@@ -50,7 +50,7 @@ torrential resume fd69b2                    # continue it, or retry a failed one
 torrential rm fd69b2                        # stop tracking it, and keep its files
 ```
 
-An ID is the start of the torrent's infohash, and any unique prefix of 4 or more characters works. `get` also takes a magnet link, a full infohash, or a `.torrent` file or URL.
+An ID is the start of the torrent's infohash, or `u` and a digest for a result that only links a `.torrent` file. Any unique prefix of 4 or more characters works. `get` also takes a magnet link, a full infohash, or a `.torrent` file or URL.
 
 Removing a torrent keeps its files. Add the same torrent again with the same download folder to continue: torrential checks the existing data and downloads only missing or damaged pieces in the files you select. You can pick a different set of files each time.
 
@@ -98,7 +98,7 @@ $ torrential wait c85f98
 
 It chose the public-domain original over the 55 GiB remux, picked one 1.8 GiB MP4 out of five files, and checked back with `wait` instead of `sleep`. The download does not depend on the agent, so a later session can check on it with `torrential status`.
 
-Agent sandboxes block the connections BitTorrent needs. torrential checks for a sandbox before it starts, and the skill tells the agent what to do about it.
+Agent sandboxes block the connections BitTorrent needs. torrential checks for a sandbox before it starts, and its error tells the agent what to do about it.
 
 ## Settings
 

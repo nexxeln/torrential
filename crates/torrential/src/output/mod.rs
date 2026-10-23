@@ -218,7 +218,10 @@ pub struct ErrorOutput {
 pub fn error(mode: Mode, error: &Error) -> ErrorOutput {
     match mode {
         Mode::Json => {
-            ErrorOutput { stdout: json_document(&ErrorDocument { kind: "error", error }, None), stderr: String::new() }
+            let mut error = error.clone();
+            let next = error.next.take();
+            let document = ErrorDocument { kind: "error", error: &error };
+            ErrorOutput { stdout: json_document(&document, next.as_deref().map(String::as_str)), stderr: String::new() }
         }
         Mode::Plain => ErrorOutput { stdout: String::new(), stderr: error_text(error, false) },
         Mode::Human => ErrorOutput { stdout: String::new(), stderr: error_text(error, true) },
@@ -235,6 +238,9 @@ fn error_text(error: &Error, color: bool) -> String {
     }
     if let Some(hint) = &error.hint {
         push_line(&mut out, &paint(Token::Muted, &format!("hint: {}", sanitize(hint))));
+    }
+    if let Some(next) = &error.next {
+        push_line(&mut out, &paint(Token::Muted, &format!("next: {}", sanitize(next))));
     }
     out
 }
@@ -296,6 +302,22 @@ mod tests {
         let out = error(Mode::Plain, &e);
         assert_eq!(out.stdout, "");
         assert_eq!(out.stderr, "error[not_found]: no download matches 9b52\nhint: torrential status\n");
+    }
+
+    #[test]
+    fn an_error_whose_hint_leads_with_a_command_names_it_as_next() {
+        let e = Error::new(ErrorCode::VerificationFailed, "3 damaged pieces in the selected files")
+            .with_hint("torrential verify 6bc1af --repair downloads them again")
+            .with_next("torrential verify 6bc1af --repair");
+        assert_eq!(
+            error(Mode::Plain, &e).stderr,
+            "error[verification_failed]: 3 damaged pieces in the selected files\nhint: torrential verify 6bc1af --repair \
+             downloads them again\nnext: torrential verify 6bc1af --repair\n"
+        );
+        let json: serde_json::Value = serde_json::from_str(&error(Mode::Json, &e).stdout).unwrap();
+        assert_eq!(json["next"], "torrential verify 6bc1af --repair");
+        let keys: Vec<&String> = json["error"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["code", "message", "hint"]);
     }
 
     #[test]

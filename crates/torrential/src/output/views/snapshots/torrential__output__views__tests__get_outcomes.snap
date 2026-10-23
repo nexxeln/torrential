@@ -88,7 +88,8 @@ next:  torrential wait 6bc1af
       "selected_size": 596452175,
       "destination": "/Users/ada/Movies/night_of_the_living_dead_dvd",
       "free_space": 440234147840,
-      "conflicts": []
+      "conflicts": [],
+      "max_size": 53687091200
     }
   },
   "next": "torrential wait 6bc1af"
@@ -220,7 +221,8 @@ next:  torrential wait 6bc1af
       "selected_size": 596452175,
       "destination": "/Users/ada/Movies/night_of_the_living_dead_dvd",
       "free_space": 440234147840,
-      "conflicts": []
+      "conflicts": [],
+      "max_size": 53687091200
     },
     "previous_selection": {
       "kind": "all"
@@ -233,6 +235,7 @@ planned 6bc1af night_of_the_living_dead_dvd
 files:     Night.mp4 *.srt (2 of 255, 568.8 MiB)
 path:      /Users/ada/Movies/night_of_the_living_dead_dvd
 free:      410.0 GiB
+cap:       50 GiB
 conflicts: none
 next:      torrential get 6bc1af --files Night.mp4 --files '*.srt'
 
@@ -275,7 +278,8 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt'
       "selected_size": 596452175,
       "destination": "/Users/ada/Movies/night_of_the_living_dead_dvd",
       "free_space": 440234147840,
-      "conflicts": []
+      "conflicts": [],
+      "max_size": 53687091200
     }
   },
   "next": "torrential get 6bc1af --files Night.mp4 --files '*.srt'"
@@ -285,6 +289,7 @@ planned 6bc1af night_of_the_living_dead_dvd
 files:     Night.mp4 *.srt (2 of 255, 568.8 MiB)
 path:      /Users/ada/Movies/night_of_the_living_dead_dvd
 free:      410.0 GiB
+cap:       50 GiB
 conflicts: 1
 # exists: /Users/ada/Movies/night_of_the_living_dead_dvd/Night.mp4
 next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir <EMPTY DIR>
@@ -330,7 +335,8 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir <EMPTY 
       "free_space": 440234147840,
       "conflicts": [
         "/Users/ada/Movies/night_of_the_living_dead_dvd/Night.mp4"
-      ]
+      ],
+      "max_size": 53687091200
     }
   },
   "next": "torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir <EMPTY DIR>"
@@ -340,6 +346,7 @@ planned 6bc1af night_of_the_living_dead_dvd
 files:     Night.mp4 *.srt (2 of 255, 568.8 MiB)
 path:      /Users/ada/Movies/night_of_the_living_dead_dvd
 free:      410.0 GiB
+cap:       50 GiB
 conflicts: none
 next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir /Users/ada/Movies
 
@@ -382,7 +389,8 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir /Users/
       "selected_size": 596452175,
       "destination": "/Users/ada/Movies/night_of_the_living_dead_dvd",
       "free_space": 440234147840,
-      "conflicts": []
+      "conflicts": [],
+      "max_size": 53687091200
     }
   },
   "next": "torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir /Users/ada/Movies"

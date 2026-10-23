@@ -3,9 +3,9 @@ source: crates/torrential/src/output/views/tests.rs
 expression: "render(Mode::Plain, &doc, &Response::Search { result })"
 ---
 ID	SEEDS	SIZE	QUALITY	AGE	SOURCE	FLAGS	NAME
-b42ef9	40	1.1 GiB	-	30d	knaben	-	Night of the Living Dead (1968)
+b42ef9	40	1.1 GiB	?	30d	knaben	-	Night of the Living Dead (1968)
 5c7c3c	40	59.0 GiB	2160p hevc hdr	30d	knaben	-	Night of the Living Dead (1968) 2160p UHD BluRay HDR10 x265
 082e09	40	1.0 GiB	720p h264	30d	knaben	-	Night Of The Living Dead 720p 1968 x264
 # 3 of 3 results · 1 of 1 source ok · 1.4s
 # ranked for this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English
-next: torrential files <ID> · torrential get <ID>
+next: torrential files b42ef9

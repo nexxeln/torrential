@@ -5,9 +5,9 @@ expression: "both(&files(&reply), &Response::Files { files: reply })"
 SIZE	DONE	PATH
 4.0 GiB	100%	debian-13.1.0-amd64-DVD-1.iso
 4.0 GiB	25.0%	debian-13.1.0-amd64-DVD-2.iso
-4.0 GiB	skip	debian-13.1.0-amd64-DVD-3.iso
+4.0 GiB	-	debian-13.1.0-amd64-DVD-3.iso
 # 3 files in debian-13.1.0-amd64-DVD · 12.0 GiB · file list from the download in 0.0s
-next: torrential get 9b5212 --files <PATTERN>
+next: torrential wait 9b5212
 
 --- json
 {
@@ -43,5 +43,5 @@ next: torrential get 9b5212 --files <PATTERN>
     "metadata_source": "download",
     "elapsed_ms": 3
   },
-  "next": "torrential get 9b5212 --files <PATTERN>"
+  "next": "torrential wait 9b5212"
 }

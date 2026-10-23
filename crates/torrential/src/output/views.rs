@@ -4,10 +4,10 @@ use std::time::Duration;
 use torrential_core::id::shortest_unique_prefix;
 use torrential_core::protocol::{Change, FilesReply, GetOutcome, GetReply};
 use torrential_core::text::sanitize;
-use torrential_core::units::{format_limit, format_size};
+use torrential_core::units::{format_limit, format_size, size_text};
 use torrential_core::{
-    Arch, ErrorCode, Job, JobStatus, Machine, Profile, Release, ReleaseId, SearchResult, Selection, SourceOutcome,
-    TorrentId,
+    Arch, Category, ErrorCode, Job, JobStatus, Machine, Profile, Release, ReleaseId, SearchResult, Selection,
+    SourceOutcome, TorrentId,
 };
 
 use super::format::{self, NONE};
@@ -69,29 +69,25 @@ pub fn source_outcome(outcome: &SourceOutcome) -> String {
 
 pub fn search(result: &SearchResult, now: i64) -> Doc {
     let ids = release_ids(&result.releases);
-    let qualities: Vec<String> = result.releases.iter().map(|r| r.quality().to_string()).collect();
-    let tagged = qualities.iter().any(|q| !q.is_empty());
+    let video = result.is_video();
     let rows = result
         .releases
         .iter()
-        .zip(ids)
-        .zip(qualities)
-        .map(|((r, id), quality)| {
+        .zip(&ids)
+        .map(|(r, id)| {
             let source = match r.sources.as_slice() {
                 [] => NONE.to_string(),
                 [one] => one.clone(),
                 [first, rest @ ..] => format!("{first}+{}", rest.len()),
             };
             let flags: Vec<&str> = r.flags.iter().map(|f| f.as_str()).collect();
-            let mut row = vec![
+            let quality = r.quality().to_string();
+            let unknown = if video || r.category == Some(Category::Video) { format::UNKNOWN } else { NONE };
+            vec![
                 Cell::styled(id, Token::Accent),
                 Cell::new(r.seeders.map_or_else(|| format::UNKNOWN.to_string(), |s| s.to_string())),
                 Cell::new(format::size(r.size)),
-            ];
-            if tagged {
-                row.push(if quality.is_empty() { Cell::styled(NONE, Token::Muted) } else { Cell::new(quality) });
-            }
-            row.extend([
+                if quality.is_empty() { Cell::styled(unknown, Token::Muted) } else { Cell::new(quality) },
                 Cell::new(format::age(r.published, now)),
                 Cell::styled(source, Token::Muted),
                 if flags.is_empty() {
@@ -100,15 +96,16 @@ pub fn search(result: &SearchResult, now: i64) -> Doc {
                     Cell::styled(flags.join(","), Token::Mint)
                 },
                 Cell::new(&r.name),
-            ]);
-            row
+            ]
         })
         .collect();
     let ok = result.sources.iter().filter(|s| s.outcome.is_ok()).count();
-    let mut line = vec![
-        format!("{} of {}", result.releases.len(), format::count(result.total as usize, "result")),
-        format!("{ok} of {} ok", format::count(result.sources.len(), "source")),
-    ];
+    let found = if result.releases.is_empty() {
+        "no results".to_string()
+    } else {
+        format!("{} of {}", result.releases.len(), format::count(result.total as usize, "result"))
+    };
+    let mut line = vec![found, format!("{ok} of {} ok", format::count(result.sources.len(), "source"))];
     line.extend(
         result
             .sources
@@ -124,23 +121,43 @@ pub fn search(result: &SearchResult, now: i64) -> Doc {
     if result.total > shown {
         line.push(format!("more: --limit {}", result.total.min(shown + 10)));
     }
-    let next = if result.releases.is_empty() {
-        "torrential search <other words>"
-    } else {
-        "torrential files <ID> · torrential get <ID>"
-    };
-    let mut header = vec!["ID", "SEEDS", "SIZE", "AGE", "SOURCE", "FLAGS", "NAME"];
-    if tagged {
-        header.insert(3, "QUALITY");
-    }
     let mut summary = vec![line.join(" · ")];
+    let query = &result.query;
+    let mut filters = Vec::new();
+    for source in &query.sources {
+        filters.push(format!("--source {}", format::shell_word(&sanitize(source))));
+    }
+    if let Some(category) = query.category {
+        filters.push(format!("--category {}", category.as_str()));
+    }
+    if let Some(min) = query.min_seeds {
+        filters.push(format!("--min-seeds {min}"));
+    }
+    if let Some(max) = query.max_size {
+        filters.push(format!("--max-size {}", size_text(max)));
+    }
+    let next = match ids.first() {
+        Some(id) => format!("torrential files {id}"),
+        None => {
+            let words: Vec<String> = query.text.split_whitespace().map(|w| format::shell_word(&sanitize(w))).collect();
+            let mut next = format!("torrential search {}", words.join(" "));
+            let cached = result.sources.iter().any(|s| matches!(s.outcome, SourceOutcome::Cached { .. }));
+            if !filters.is_empty() {
+                summary.push(format!("filtered by {}", filters.join(" ")));
+            } else if cached {
+                next.push_str(" --fresh");
+            }
+            next
+        }
+    };
+    let header = vec!["ID", "SEEDS", "SIZE", "QUALITY", "AGE", "SOURCE", "FLAGS", "NAME"];
     let profile = &result.query.profile;
-    if result.is_video() {
+    if video {
         summary.push(format!("ranked for {}", ranked_for(profile)));
     } else if result.releases.iter().any(|r| !Arch::named_in(&r.name).is_empty()) {
         summary.push(format!("ranked for {}", profile.describe_arch()));
     }
-    Doc { body: Body::Table { header, rows }, summary, next: Some(next.to_string()) }
+    Doc { body: Body::Table { header, rows }, summary, next: Some(next) }
 }
 
 pub fn ranked_for(profile: &Profile) -> String {
@@ -170,8 +187,7 @@ pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
         .take(MAX_FILE_ROWS)
         .map(|f| {
             let done = match (from_download, f.selected) {
-                (false, _) => NONE.to_string(),
-                (true, false) => "skip".to_string(),
+                (false, _) | (true, false) => NONE.to_string(),
                 (true, true) => format::percent(&torrential_core::Progress {
                     size: Some(f.size),
                     verified: f.verified,
@@ -224,14 +240,21 @@ pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
     if risky {
         summary.push("executables inside a media torrent are a common malware sign".to_string());
     }
-    Doc {
-        body: Body::Table { header, rows },
-        summary,
-        next: Some(match matched {
-            Some(m) => rerun_get(&short_ref(&reply.id), &Selection::Patterns(m.patterns.clone()), None),
-            None => format!("torrential get {} --files <PATTERN>", short_ref(&reply.id)),
-        }),
-    }
+    let id = short_ref(&reply.id);
+    let next = match matched {
+        Some(m) => Some(rerun_get(&id, &Selection::Patterns(m.patterns.clone()), None)),
+        None if from_download => {
+            let pending = reply.files.iter().any(|f| f.selected && f.verified < f.size);
+            pending.then(|| format!("torrential wait {id}"))
+        }
+        None => {
+            if count > 1 {
+                summary.push(format!("torrential get {id} --files <PATTERN> downloads only the matching files"));
+            }
+            Some(format!("torrential get {id}"))
+        }
+    };
+    Doc { body: Body::Table { header, rows }, summary, next }
 }
 
 pub fn selection(selection: &Selection) -> String {
@@ -281,6 +304,9 @@ pub fn get(reply: &GetReply, dir: Option<&Path>) -> Doc {
         && let Some(plan) = &reply.plan
     {
         fields.push(("free", Cell::new(format_size(plan.free_space))));
+        if let Some(cap) = plan.max_size {
+            fields.push(("cap", Cell::new(format_limit(cap))));
+        }
         let conflicts = if plan.conflicts.is_empty() { "none".to_string() } else { plan.conflicts.len().to_string() };
         fields.push(("conflicts", Cell::new(conflicts)));
         summary
@@ -326,9 +352,18 @@ pub fn state_cell(status: &JobStatus) -> Cell {
 
 fn next_for_stopped(status: &JobStatus, id: &str) -> Option<String> {
     match status {
+        JobStatus::Error { error } if error.next.is_some() => error.next.as_deref().cloned(),
         JobStatus::Error { error } if error.code == ErrorCode::TooLarge => None,
         JobStatus::Paused | JobStatus::Interrupted | JobStatus::Error { .. } => Some(format!("torrential resume {id}")),
         _ => None,
+    }
+}
+
+fn restartable(status: &JobStatus) -> bool {
+    match status {
+        JobStatus::Interrupted => true,
+        JobStatus::Error { error } => error.code != ErrorCode::TooLarge,
+        _ => false,
     }
 }
 
@@ -338,14 +373,15 @@ fn is_active(status: &JobStatus) -> bool {
 
 pub fn job_row(id: &str, job: &Job) -> Vec<Cell> {
     let active = matches!(job.status, JobStatus::Metadata | JobStatus::Checking | JobStatus::Downloading);
+    let downloading = job.status == JobStatus::Downloading;
     vec![
         Cell::styled(id, Token::Accent),
         state_cell(&job.status),
         Cell::new(format::percent(&job.progress)),
-        Cell::new(job.progress.size.map_or_else(|| NONE.to_string(), format_size)),
-        Cell::new(if active { format::rate(job.progress.down_rate) } else { NONE.to_string() }),
+        Cell::new(format::size(job.progress.size)),
+        Cell::new(if downloading { format::rate(job.progress.down_rate) } else { NONE.to_string() }),
         Cell::new(if active { job.progress.peers.to_string() } else { NONE.to_string() }),
-        Cell::new(if active { format::eta(job.progress.eta) } else { NONE.to_string() }),
+        Cell::new(if downloading { format::eta(job.progress.eta) } else { NONE.to_string() }),
         job.name.as_deref().map_or_else(|| Cell::styled(format::UNKNOWN, Token::Muted), Cell::new),
     ]
 }
@@ -373,18 +409,22 @@ pub fn jobs(jobs: &[Job]) -> Doc {
     }
     let active: Vec<&str> =
         jobs.iter().zip(&ids).filter(|(j, _)| is_active(&j.status)).map(|(_, id)| id.as_str()).collect();
-    let stopped: Vec<&str> = jobs
-        .iter()
-        .zip(&ids)
-        .filter(|(j, _)| next_for_stopped(&j.status, "").is_some())
-        .map(|(_, id)| id.as_str())
-        .collect();
+    let ids_where = |keep: fn(&JobStatus) -> bool| -> Vec<&str> {
+        jobs.iter().zip(&ids).filter(|(j, _)| keep(&j.status)).map(|(_, id)| id.as_str()).collect()
+    };
+    let restart = ids_where(restartable);
+    let paused = ids_where(|s| *s == JobStatus::Paused);
     let next = if jobs.is_empty() {
         Some("torrential search <words>".to_string())
     } else if !active.is_empty() {
+        if !restart.is_empty() {
+            summary.push(format!("torrential resume {} restarts the interrupted and failed ones", restart.join(" ")));
+        }
         Some(format!("torrential wait {}", active.join(" ")))
-    } else if !stopped.is_empty() {
-        Some(format!("torrential resume {}", stopped.join(" ")))
+    } else if !restart.is_empty() {
+        Some(format!("torrential resume {}", restart.join(" ")))
+    } else if !paused.is_empty() {
+        Some(format!("torrential resume {}", paused.join(" ")))
     } else {
         None
     };
@@ -403,12 +443,17 @@ pub fn job(job: &Job) -> Doc {
         Some(size) => {
             format!("{} ({} of {})", format::percent(p), format_size(p.verified.min(size)), format_size(size))
         }
-        None => NONE.to_string(),
+        None => format::UNKNOWN.to_string(),
     };
     fields.push(("progress", Cell::new(progress)));
-    if matches!(job.status, JobStatus::Metadata | JobStatus::Checking | JobStatus::Downloading) {
+    let downloading = job.status == JobStatus::Downloading;
+    if downloading {
         fields.push(("down", Cell::new(format::rate(p.down_rate))));
+    }
+    if matches!(job.status, JobStatus::Metadata | JobStatus::Checking | JobStatus::Downloading) {
         fields.push(("peers", Cell::new(format!("{} ({})", p.peers, format::count(p.seeds as usize, "seed")))));
+    }
+    if downloading {
         fields.push(("eta", Cell::new(format::eta(p.eta))));
     }
     fields.push(("files", Cell::new(selection(&job.selection))));
@@ -603,11 +648,11 @@ pub fn daemon_status(report: &DaemonReport) -> Doc {
     }
     fields.push(("socket", Cell::new(report.socket.clone())));
     fields.push(("log", Cell::new(report.log.clone())));
-    let next = match report.engine {
-        "stopped" => None,
-        _ => Some("torrential status".to_string()),
-    };
-    Doc { body: Body::Fields { title: Vec::new(), fields }, summary: Vec::new(), next }
+    Doc {
+        body: Body::Fields { title: Vec::new(), fields },
+        summary: Vec::new(),
+        next: Some("torrential status".to_string()),
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, serde::Serialize)]
@@ -639,7 +684,12 @@ impl CheckStatus {
 
 pub fn doctor(checks: &[Check], fix: Option<String>) -> Doc {
     let rows = checks.iter().map(|c| vec![Cell::new(&c.check), c.status.cell(), Cell::new(c.detail.clone())]).collect();
-    let problems = checks.iter().filter(|c| matches!(c.status, CheckStatus::Warn | CheckStatus::Fail)).count();
+    let probed = checks.iter().any(|c| c.check.starts_with("source "));
+    let problems = checks
+        .iter()
+        .filter(|c| matches!(c.status, CheckStatus::Warn | CheckStatus::Fail))
+        .filter(|c| !(probed && c.check == "sources"))
+        .count();
     Doc {
         body: Body::Table { header: vec!["CHECK", "STATUS", "DETAIL"], rows },
         summary: vec![format::count(problems, "problem")],

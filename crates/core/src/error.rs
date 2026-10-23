@@ -170,15 +170,22 @@ pub struct Error {
     pub hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Details>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Box<String>>,
 }
 
 impl Error {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), hint: None, details: None }
+        Self { code, message: message.into(), hint: None, details: None, next: None }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    pub fn with_next(mut self, next: impl Into<String>) -> Self {
+        self.next = Some(Box::new(next.into()));
         self
     }
 

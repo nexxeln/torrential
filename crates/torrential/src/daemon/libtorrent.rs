@@ -216,7 +216,8 @@ impl Libtorrent {
             }
             (A::ResumeDataFailed { error, .. }, Some(id)) => {
                 let error = Error::new(ErrorCode::StorageError, format!("libtorrent did not save its state: {error}"))
-                    .with_hint(format!("torrential resume {}", short(id)));
+                    .with_hint(format!("torrential resume {}", short(id)))
+                    .with_next(format!("torrential resume {}", short(id)));
                 self.events.push(EngineEvent::Failed { id, error });
             }
             (A::TorrentError { file, error, .. }, Some(id)) => {

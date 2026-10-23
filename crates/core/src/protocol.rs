@@ -135,6 +135,9 @@ pub struct DownloadPlan {
     pub free_space: u64,
     /// Paths that already exist and would block the download.
     pub conflicts: Vec<PathBuf>,
+    /// The size cap that applies, which for an existing download is its own.
+    #[serde(default)]
+    pub max_size: Option<u64>,
 }
 
 /// The result of a pause, resume, remove, or verify for one download.

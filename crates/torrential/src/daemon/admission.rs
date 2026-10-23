@@ -49,7 +49,7 @@ impl Plan {
         self.selected_size.saturating_sub(self.allocated_size.max(verified))
     }
 
-    pub fn public(&self) -> DownloadPlan {
+    pub fn public(&self, cap: Cap) -> DownloadPlan {
         DownloadPlan {
             selected_files: self.wanted.iter().filter(|w| **w).count() as u32,
             total_files: self.wanted.len() as u32,
@@ -57,6 +57,7 @@ impl Plan {
             destination: self.destination.clone(),
             free_space: self.space.free,
             conflicts: self.links.iter().chain(&self.conflicts).cloned().collect(),
+            max_size: Some(cap.bytes),
         }
     }
 }
@@ -64,8 +65,6 @@ impl Plan {
 pub fn plan(metainfo: &Metainfo, selection: &Selection, dir: &Path, disk: &dyn Disk) -> Result<Plan, Error> {
     let wanted = files::wanted(metainfo, selection)?;
     let selected_size = metainfo.files.iter().zip(&wanted).filter(|(_, w)| **w).map(|(f, _)| f.size).sum();
-    // Existing regular files are checked by libtorrent before any pieces are downloaded.
-    // A directory or another special file at a file's destination still blocks the download.
     let conflicts = metainfo
         .files
         .iter()
@@ -141,18 +140,17 @@ pub fn check_size(selected: u64, cap: Cap, job: Option<TorrentId>) -> Result<(),
     }
     let from = if cap.from_setup { " from torrential setup" } else { "" };
     let allow = selected.div_ceil(GIB);
-    let hint = match job {
-        None => format!("add --max-size {allow}GiB to allow it, or pick fewer files with --files"),
-        Some(id) => format!(
-            "torrential get {} --max-size {allow}GiB allows it, or pick fewer files with --files",
-            &id.to_hex()[..6]
-        ),
-    };
-    Err(Error::new(
+    let error = Error::new(
         ErrorCode::TooLarge,
         format!("the selection is {}, over the {} cap{from}", format_size(selected), format_limit(cap.bytes)),
-    )
-    .with_hint(hint))
+    );
+    Err(match job {
+        None => error.with_hint(format!("add --max-size {allow}GiB to allow it, or pick fewer files with --files")),
+        Some(id) => {
+            let get = format!("torrential get {} --max-size {allow}GiB", &id.to_hex()[..6]);
+            error.with_hint(format!("{get} allows it, or pick fewer files with --files")).with_next(get)
+        }
+    })
 }
 
 pub fn check_conflicts(plan: &Plan) -> Result<(), Error> {

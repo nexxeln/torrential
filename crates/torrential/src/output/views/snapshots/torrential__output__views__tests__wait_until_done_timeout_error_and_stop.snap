@@ -23,8 +23,8 @@ next: torrential wait 9b5212
 {"schema":1,"type":"result","outcome":"timeout","elapsed":100,"jobs":[{"id":"9b521219bc48550140a666f74a29048ed78e933b","info_hash":{"v1":"9b521219bc48550140a666f74a29048ed78e933b"},"name":"archlinux-2026.10.01-x86_64.iso","dir":"/Users/ada/Downloads/torrential","path":"/Users/ada/Downloads/torrential/archlinux-2026.10.01-x86_64.iso","state":"downloading","progress":{"size":1640497152,"verified":1240000000,"down_rate":32715571,"up_rate":120000,"peers":48,"seeds":31,"eta":12},"selection":{"kind":"all"},"added_at":1792311123}],"next":"torrential wait 9b5212"}
 === error, exit 7
 ELAPSED	ID	STATE	PROGRESS	SIZE	DOWN	PEERS	ETA	NAME
-0s	9b5212	metadata	-	-	0 B/s	0	-	archlinux-2026.10.01-x86_64.iso
-3s	9b5212	error	-	-	-	-	-	archlinux-2026.10.01-x86_64.iso
+0s	9b5212	metadata	?	?	-	0	-	archlinux-2026.10.01-x86_64.iso
+3s	9b5212	error	?	?	-	-	-	archlinux-2026.10.01-x86_64.iso
 # 9b5212 stopped after 3s with error[disk_full]: needs 1.5 GiB more on this disk, but only 900.0 MiB is free and 2.0 GiB stays in reserve
 # hint: free some space, or choose another disk with --dir
 next: torrential resume 9b5212
@@ -42,7 +42,7 @@ next: torrential resume 9b5212
 {"schema":1,"type":"result","outcome":"stopped","elapsed":0,"jobs":[{"id":"9b521219bc48550140a666f74a29048ed78e933b","info_hash":{"v1":"9b521219bc48550140a666f74a29048ed78e933b"},"name":"archlinux-2026.10.01-x86_64.iso","dir":"/Users/ada/Downloads/torrential","path":"/Users/ada/Downloads/torrential/archlinux-2026.10.01-x86_64.iso","state":"interrupted","progress":{"size":1640497152,"verified":1240000000,"down_rate":32715571,"up_rate":120000,"peers":48,"seeds":31,"eta":12},"selection":{"kind":"all"},"added_at":1792311123}],"next":"torrential resume 9b5212"}
 === metadata, exit 0
 ELAPSED	ID	STATE	PROGRESS	SIZE	DOWN	PEERS	ETA	NAME
-0s	9b5212	metadata	-	-	0 B/s	0	-	archlinux-2026.10.01-x86_64.iso
+0s	9b5212	metadata	?	?	-	0	-	archlinux-2026.10.01-x86_64.iso
 2s	9b5212	downloading	3.0%	1.5 GiB	31.2 MiB/s	48	49s	archlinux-2026.10.01-x86_64.iso
 # file list known after 2s
 next: torrential files 9b5212
