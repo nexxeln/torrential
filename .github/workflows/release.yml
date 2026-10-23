@@ -2,13 +2,20 @@
 #   1. Bump version in Cargo.toml, run cargo update -p torrential --offline, and commit "Release X.Y.Z" on main.
 #   2. git tag vX.Y.Z && git push origin main vX.Y.Z. This workflow tests, builds every target, and opens a draft release.
 #   3. Check the draft's assets, write the notes, and publish it with --latest. install.yml then installs it on every platform.
-# workflow_dispatch builds the same assets as artifacts without a tag or a release.
+# workflow_dispatch, and pull requests that touch the release pipeline, build the same assets as artifacts only.
 name: release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/**
+      - scripts/release.sh
+      - install.sh
+      - flake.nix
+      - flake.lock
 
 permissions:
   contents: read
@@ -28,6 +35,7 @@ jobs:
           fi
 
   test:
+    if: github.event_name != 'pull_request'
     needs: version
     uses: ./.github/workflows/ci.yml
 
