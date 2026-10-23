@@ -5,6 +5,7 @@ expression: out
 === usage, exit 2
 error[usage]: invalid value 'soon' for '--timeout <DURATION>': "soon" is not a duration; use a form like 100s, 5m, or 1h30m
 hint: torrential wait --help
+next: torrential wait --help
 --- json
 {
   "schema": 1,
@@ -14,7 +15,7 @@ hint: torrential wait --help
     "message": "invalid value 'soon' for '--timeout <DURATION>': \"soon\" is not a duration; use a form like 100s, 5m, or 1h30m",
     "hint": "torrential wait --help"
   },
-  "next": null
+  "next": "torrential wait --help"
 }
 === confirmation_required, exit 2
 error[confirmation_required]: deleting files needs confirmation
@@ -59,6 +60,7 @@ error[invalid_torrent]: not a torrent file: expected value at line 1 column 1
 === not_found, exit 3
 error[not_found]: no download matches 9b52
 hint: run torrential status to list downloads
+next: torrential status
 --- json
 {
   "schema": 1,
@@ -68,7 +70,7 @@ hint: run torrential status to list downloads
     "message": "no download matches 9b52",
     "hint": "run torrential status to list downloads"
   },
-  "next": null
+  "next": "torrential status"
 }
 === ambiguous_ref, exit 3
 error[ambiguous_ref]: e3a1 matches 2 torrents
@@ -103,6 +105,7 @@ hint: use a longer prefix, such as: torrential get e3a1f0
 === job_conflict, exit 4
 error[job_conflict]: d40a19 has no file list yet, so there is nothing to verify
 hint: torrential wait d40a19 --until metadata
+next: torrential wait d40a19 --until metadata
 --- json
 {
   "schema": 1,
@@ -112,7 +115,7 @@ hint: torrential wait d40a19 --until metadata
     "message": "d40a19 has no file list yet, so there is nothing to verify",
     "hint": "torrential wait d40a19 --until metadata"
   },
-  "next": null
+  "next": "torrential wait d40a19 --until metadata"
 }
 === path_conflict, exit 4
 error[path_conflict]: 1 file already exists under /Users/ada/Movies/night
@@ -260,6 +263,7 @@ hint: set TORRENTIAL_HOME to a shorter directory
 error[daemon_version]: the engine speaks wire 2, the client 1
   client 0.1.0, engine 0.2.0
 hint: torrential engine stop, then run the command again
+next: torrential engine stop
 --- json
 {
   "schema": 1,
@@ -275,7 +279,7 @@ hint: torrential engine stop, then run the command again
       }
     }
   },
-  "next": null
+  "next": "torrential engine stop"
 }
 === state_corrupt, exit 6
 error[state_corrupt]: the state database /Users/ada/.local/state/torrential/state.db is damaged: file is not a database
@@ -328,6 +332,7 @@ hint: add --max-size 70GiB to allow it, or pick fewer files with --files
 === no_selection, exit 7
 error[no_selection]: no file in night matches "*.mkv"
 hint: run torrential files 6b6b6b to see the paths
+next: torrential files 6b6b6b
 --- json
 {
   "schema": 1,
@@ -337,7 +342,7 @@ hint: run torrential files 6b6b6b to see the paths
     "message": "no file in night matches \"*.mkv\"",
     "hint": "run torrential files 6b6b6b to see the paths"
   },
-  "next": null
+  "next": "torrential files 6b6b6b"
 }
 === storage_error, exit 7
 error[storage_error]: the disk holding /Users/ada/.local/state/torrential/state.db is full
@@ -356,6 +361,7 @@ hint: free some space on that disk
 === verification_failed, exit 7
 error[verification_failed]: 3 damaged pieces in the selected files
 hint: torrential verify 6bc1af --repair downloads them again
+next: torrential verify 6bc1af --repair
 --- json
 {
   "schema": 1,
@@ -365,11 +371,12 @@ hint: torrential verify 6bc1af --repair downloads them again
     "message": "3 damaged pieces in the selected files",
     "hint": "torrential verify 6bc1af --repair downloads them again"
   },
-  "next": null
+  "next": "torrential verify 6bc1af --repair"
 }
 === no_source, exit 7
 error[no_source]: no peer or web seed has had the 2 pieces still missing (488.8 KiB) for 20m
 hint: torrential resume 770e77 looks for them again; the 33.0 MiB verified stays
+next: torrential resume 770e77
 --- json
 {
   "schema": 1,
@@ -379,7 +386,7 @@ hint: torrential resume 770e77 looks for them again; the 33.0 MiB verified stays
     "message": "no peer or web seed has had the 2 pieces still missing (488.8 KiB) for 20m",
     "hint": "torrential resume 770e77 looks for them again; the 33.0 MiB verified stays"
   },
-  "next": null
+  "next": "torrential resume 770e77"
 }
 === interrupted, exit 130
 error[interrupted]: interrupted

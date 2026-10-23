@@ -5,7 +5,7 @@ description: Search, download, and manage torrents with the torrential CLI. Use 
 
 # torrential
 
-Output is plain text: tab-separated lists, `#` summary lines, and a final `next:` line with the command to run next. Errors print `error[code]` and a `hint:` to follow. `--json` gives exact values. `torrential schema` and `torrential <command> --help` cover the rest.
+Output is plain text: tab-separated lists, `#` summary lines, and a final `next:` line with the command to run next. Errors print `error[code]` and a `hint:` to follow, plus a `next:` line when the hint leads with a command. `--json` gives exact values. `torrential schema` and `torrential <command> --help` cover the rest.
 
 ## Rules
 

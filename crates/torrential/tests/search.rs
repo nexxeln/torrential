@@ -204,15 +204,15 @@ fn search_ranks_what_the_sources_answered() {
         .stdout
         .lines()
         .take_while(|l| !l.starts_with('#'))
-        .map(|l| l.split('\t').enumerate().filter(|(i, _)| *i != 3).map(|(_, c)| c).collect::<Vec<_>>().join(" | "))
+        .map(|l| l.split('\t').enumerate().filter(|(i, _)| *i != 4).map(|(_, c)| c).collect::<Vec<_>>().join(" | "))
         .collect();
     assert_eq!(
         table,
         [
-            "ID | SEEDS | SIZE | SOURCE | FLAGS | NAME",
-            "dafc8c | 143 | 6.1 GiB | knaben | - | ubuntu-26.04-desktop-amd64.iso",
-            "4a3f5e | 52 | 5.8 GiB | knaben+1 | trusted | ubuntu-24.04.1-desktop-amd64.iso",
-            "2c6b68 | 37 | 3.4 GiB | knaben+1 | trusted | Ubuntu 22.04 LTS",
+            "ID | SEEDS | SIZE | QUALITY | SOURCE | FLAGS | NAME",
+            "dafc8c | 143 | 6.1 GiB | - | knaben | - | ubuntu-26.04-desktop-amd64.iso",
+            "4a3f5e | 52 | 5.8 GiB | - | knaben+1 | trusted | ubuntu-24.04.1-desktop-amd64.iso",
+            "2c6b68 | 37 | 3.4 GiB | - | knaben+1 | trusted | Ubuntu 22.04 LTS",
         ]
     );
     let result = &json["result"];
@@ -581,7 +581,7 @@ fn doctor_network_asks_each_enabled_source() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|c| c["check"].as_str().unwrap().starts_with("source"))
+        .filter(|c| c["check"].as_str().unwrap().starts_with("source "))
         .map(|c| {
             let detail = c["detail"].as_str().unwrap();
             let (outcome, took) = detail.rsplit_once(", ").unwrap();
@@ -595,6 +595,8 @@ fn doctor_network_asks_each_enabled_source() {
         ("source nyaa", "ok", "30 results"),
     ];
     assert_eq!(sources, expected.map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string())));
+    let summary = doctor["checks"].as_array().unwrap().iter().find(|c| c["check"] == "sources").unwrap();
+    assert_eq!((&summary["status"], &summary["detail"]), (&"fail".into(), &"2 of 3 answered".into()));
     assert_eq!(server.asked("/nyaa/"), ["/nyaa/?page=rss&q=linux&c=0_0&f=0"]);
 }
 
@@ -689,11 +691,11 @@ fn the_machine_and_preferences_rank_a_film_search_and_say_so() {
         [
             "SIZE | QUALITY | NAME",
             "1.0 GiB | 720p | Night Of The Living Dead 720p 1968",
-            "1.1 GiB | - | Night of the Living Dead (1968)",
-            "1.1 GiB | - | Night of the Living Dead (1968)",
-            "528.0 MiB | - | Night of the Living Dead (1968)",
-            "1.8 GiB | - | Night of the Living Dead (1968)",
-            "742.1 MiB | - | Night Of The Living Dead ( 1968)",
+            "1.1 GiB | ? | Night of the Living Dead (1968)",
+            "1.1 GiB | ? | Night of the Living Dead (1968)",
+            "528.0 MiB | ? | Night of the Living Dead (1968)",
+            "1.8 GiB | ? | Night of the Living Dead (1968)",
+            "742.1 MiB | ? | Night Of The Living Dead ( 1968)",
             "# ranked for this Mac: 1080p screen, no HDR, H.264 only, up to 2 GB, arm64, English · overrides: screen \
              laptop, max_size 2GB, playback h264",
         ]

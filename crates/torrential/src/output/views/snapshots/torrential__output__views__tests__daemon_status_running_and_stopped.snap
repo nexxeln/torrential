@@ -25,6 +25,7 @@ next:      torrential status
 engine: stopped
 socket: /tmp/torrential-501/engine.sock
 log:    /Users/ada/.local/state/torrential/engine.log
+next:   torrential status
 
 --- json
 {
@@ -36,5 +37,5 @@ log:    /Users/ada/.local/state/torrential/engine.log
   "socket": "/tmp/torrential-501/engine.sock",
   "log": "/Users/ada/.local/state/torrential/engine.log",
   "downloads": null,
-  "next": null
+  "next": "torrential status"
 }

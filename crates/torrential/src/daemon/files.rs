@@ -35,7 +35,8 @@ pub fn some_match(wanted: Vec<bool>, patterns: &[String], name: &str, id: &str) 
     }
     let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
     Err(Error::new(ErrorCode::NoSelection, format!("no file in {name} matches {}", quoted.join(", ")))
-        .with_hint(format!("run torrential files {} to see the paths", &id[..6])))
+        .with_hint(format!("run torrential files {} to see the paths", &id[..6]))
+        .with_next(format!("torrential files {}", &id[..6])))
 }
 
 pub fn targets(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {

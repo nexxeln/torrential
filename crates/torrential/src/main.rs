@@ -87,5 +87,5 @@ fn usage_error(e: &clap::Error, args: &[String]) -> Error {
         Some(s) if known => format!("torrential {s} --help"),
         _ => "torrential --help".to_string(),
     };
-    Error::new(ErrorCode::Usage, message).with_hint(hint)
+    Error::new(ErrorCode::Usage, message).with_hint(hint.clone()).with_next(hint)
 }
