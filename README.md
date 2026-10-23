@@ -12,7 +12,7 @@
 curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh | sh
 ```
 
-This puts one file at `~/.local/bin/torrential`. It runs on macOS 14 or later and on 64-bit Linux, on Apple silicon, Intel, AMD, or ARM.
+This puts one file at `~/.local/bin/torrential`. It runs on macOS 14 or later on Apple silicon, and on 64-bit Linux on Intel, AMD, or ARM.
 
 ### Build from source
 

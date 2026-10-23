@@ -90,7 +90,6 @@ pub fn tag_version(location: &str) -> Option<Version> {
 pub fn target(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
-        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
         ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-musl"),
         _ => None,
@@ -505,11 +504,11 @@ mod tests {
     }
 
     #[test]
-    fn macos_and_linux_on_arm64_and_x86_64_have_a_prebuilt_binary() {
+    fn apple_silicon_and_linux_on_arm64_and_x86_64_have_a_prebuilt_binary() {
         assert_eq!(target("macos", "aarch64"), Some("aarch64-apple-darwin"));
-        assert_eq!(target("macos", "x86_64"), Some("x86_64-apple-darwin"));
         assert_eq!(target("linux", "x86_64"), Some("x86_64-unknown-linux-musl"));
         assert_eq!(target("linux", "aarch64"), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(target("macos", "x86_64"), None);
         assert_eq!(target("windows", "x86_64"), None);
         assert_eq!(target("freebsd", "x86_64"), None);
     }

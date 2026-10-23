@@ -15,11 +15,10 @@ esac
 
 case "$(uname -s) $(uname -m)" in
   "Darwin arm64") target=aarch64-apple-darwin ;;
-  "Darwin x86_64") target=x86_64-apple-darwin ;;
   "Linux x86_64") target=x86_64-unknown-linux-musl ;;
   "Linux aarch64") target=aarch64-unknown-linux-musl ;;
   *)
-    echo "release.sh builds on macOS or Linux, on arm64 or x86_64, not $(uname -s) $(uname -m)" >&2
+    echo "release.sh builds on macOS arm64 or Linux arm64 or x86_64, not $(uname -s) $(uname -m)" >&2
     exit 1
     ;;
 esac
