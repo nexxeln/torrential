@@ -297,7 +297,7 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
                 ErrorCode::DaemonVersion,
                 format!("the engine speaks wire {WIRE_VERSION}, the client {client_wire}"),
             )
-            .with_hint("torrential daemon stop, then run the command again");
+            .with_hint("torrential engine stop, then run the command again");
             wire::write_async(&mut wr, &Response::Error { error }).await?;
             continue;
         }

@@ -41,6 +41,6 @@ Wait
 Sleep 3.5s
 
 Hide
-Type "torrential daemon stop; rm -rf /tmp/torrential-demo"
+Type "torrential engine stop; rm -rf /tmp/torrential-demo"
 Enter
 Sleep 2s

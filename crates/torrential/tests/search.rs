@@ -428,7 +428,7 @@ fn a_private_locator_resolves_after_a_restart_with_the_key_from_the_environment(
         (
             2,
             "error[usage]: this result's .torrent link needs an API key for the jackett indexer, which has none\n\
-             hint: set api_key_env for jackett in the torrential config and run torrential daemon stop, or search \
+             hint: set api_key_env for jackett in the torrential config and run torrential engine stop, or search \
              again\n"
         )
     );
@@ -438,7 +438,7 @@ fn a_private_locator_resolves_after_a_restart_with_the_key_from_the_environment(
             2,
             "error[usage]: this result's .torrent link needs an API key for the jackett indexer, which is not \
              configured\nhint: add jackett back to sources.torznab in the torrential config and run torrential \
-             daemon stop, or search again\n"
+             engine stop, or search again\n"
         )
     );
     let config_file = home.path("th/config/config.yaml").display().to_string();

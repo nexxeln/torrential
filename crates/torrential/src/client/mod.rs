@@ -386,7 +386,7 @@ fn service_report(report: service::Report, mode: Mode) -> Result<u8, Error> {
         ("unit", output::Cell::new(unit.clone())),
     ];
     let next =
-        matches!(report.result, "installed" | "already_installed").then(|| "torrential daemon status".to_string());
+        matches!(report.result, "installed" | "already_installed").then(|| "torrential engine status".to_string());
     let doc = output::Doc { body: output::Body::Fields { title: Vec::new(), fields }, summary: Vec::new(), next };
     let payload = Payload { result: report.result, manager: report.manager.name(), unit };
     Ok(emit(mode, &doc, &Typed { kind: "daemon_service", body: payload }))

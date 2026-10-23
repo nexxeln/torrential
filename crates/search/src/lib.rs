@@ -214,7 +214,7 @@ impl Search {
                 ErrorCode::Usage,
                 format!("this result's .torrent link needs an API key for the {name} indexer, which {why}"),
             )
-            .with_hint(format!("{hint} and run torrential daemon stop, or search again"))
+            .with_hint(format!("{hint} and run torrential engine stop, or search again"))
         };
         let Some(source) = self.inner.sources.iter().find(|s| s.meta.name == *name) else {
             return Err(if self.inner.disabled.contains(name) {

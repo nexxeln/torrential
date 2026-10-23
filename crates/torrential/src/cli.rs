@@ -63,6 +63,7 @@ pub enum Command {
     /// Open the terminal UI, which `torrential` alone also opens on a terminal
     Tui,
     /// Inspect or manage the engine process
+    #[command(name = "engine", visible_alias = "daemon")]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,

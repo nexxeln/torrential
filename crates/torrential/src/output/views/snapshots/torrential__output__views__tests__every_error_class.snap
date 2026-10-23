@@ -31,7 +31,7 @@ hint: add --yes to confirm
   "next": null
 }
 === invalid_ref, exit 3
-error[invalid_ref]: "9b5" is not a torrent reference: an ID prefix is 4 to 40 hex characters
+error[invalid_ref]: "9b5" is not a torrent reference: an ID is 4 to 40 hex characters, or u and hex for a result without an infohash
 hint: pass an ID from `torrential search`, a magnet link, a .torrent file, or a .torrent URL
 --- json
 {
@@ -39,7 +39,7 @@ hint: pass an ID from `torrential search`, a magnet link, a .torrent file, or a 
   "type": "error",
   "error": {
     "code": "invalid_ref",
-    "message": "\"9b5\" is not a torrent reference: an ID prefix is 4 to 40 hex characters",
+    "message": "\"9b5\" is not a torrent reference: an ID is 4 to 40 hex characters, or u and hex for a result without an infohash",
     "hint": "pass an ID from `torrential search`, a magnet link, a .torrent file, or a .torrent URL"
   },
   "next": null
@@ -230,7 +230,7 @@ hint: in interactive Codex, rerun with sandbox_permissions "require_escalated" a
 }
 === sandbox_write_blocked, exit 6
 error[sandbox_write_blocked]: cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted
-hint: run torrential daemon install from a terminal outside any sandbox
+hint: run torrential engine install from a terminal outside any sandbox
 --- json
 {
   "schema": 1,
@@ -238,7 +238,7 @@ hint: run torrential daemon install from a terminal outside any sandbox
   "error": {
     "code": "sandbox_write_blocked",
     "message": "cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted",
-    "hint": "run torrential daemon install from a terminal outside any sandbox"
+    "hint": "run torrential engine install from a terminal outside any sandbox"
   },
   "next": null
 }
@@ -259,7 +259,7 @@ hint: set TORRENTIAL_HOME to a shorter directory
 === daemon_version, exit 6
 error[daemon_version]: the engine speaks wire 2, the client 1
   client 0.1.0, engine 0.2.0
-hint: torrential daemon stop, then run the command again
+hint: torrential engine stop, then run the command again
 --- json
 {
   "schema": 1,
@@ -267,7 +267,7 @@ hint: torrential daemon stop, then run the command again
   "error": {
     "code": "daemon_version",
     "message": "the engine speaks wire 2, the client 1",
-    "hint": "torrential daemon stop, then run the command again",
+    "hint": "torrential engine stop, then run the command again",
     "details": {
       "versions": {
         "client": "0.1.0",

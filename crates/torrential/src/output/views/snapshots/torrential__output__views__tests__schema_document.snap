@@ -339,7 +339,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": []
     },
     {
-      "name": "daemon",
+      "name": "engine",
       "about": "Inspect or manage the engine process",
       "arguments": [],
       "flags": [],

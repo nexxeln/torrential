@@ -674,7 +674,7 @@ fn sample(code: ErrorCode) -> Error {
         ErrorCode::SandboxWriteBlocked => given(
             code,
             "cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted",
-            "run torrential daemon install from a terminal outside any sandbox",
+            "run torrential engine install from a terminal outside any sandbox",
         ),
         ErrorCode::DaemonUnavailable => {
             let deep = format!("/tmp/{}", "d".repeat(120));
@@ -686,7 +686,7 @@ fn sample(code: ErrorCode) -> Error {
             .unwrap_err()
         }
         ErrorCode::DaemonVersion => {
-            given(code, "the engine speaks wire 2, the client 1", "torrential daemon stop, then run the command again")
+            given(code, "the engine speaks wire 2, the client 1", "torrential engine stop, then run the command again")
                 .with_details(Details::Versions { client: "0.1.0".into(), daemon: "0.2.0".into() })
         }
         ErrorCode::StateCorrupt => given(

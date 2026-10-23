@@ -213,7 +213,7 @@ mod tests {
                 "setup",
                 "doctor",
                 "tui",
-                "daemon",
+                "engine",
                 "schema",
                 "completions",
                 "skill",
