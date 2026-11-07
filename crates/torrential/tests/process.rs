@@ -243,7 +243,7 @@ fn wait_times_out_with_exit_8_while_the_download_runs() {
 }
 
 #[test]
-fn search_get_and_wait_to_done_in_four_calls() {
+fn search_get_and_wait_rechecks_a_completed_download() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "100GiB")]);
     let search = home.run(&["search", "arch", "linux"]);
     assert_eq!(search.code, 0, "{}", search.stderr);
@@ -255,8 +255,16 @@ fn search_get_and_wait_to_done_in_four_calls() {
     let path = Path::new(&home.downloads()).join("archlinux-2026.10.01-x86_64.iso");
     let last = wait.stdout.lines().last().unwrap();
     assert!(last.starts_with("# done after ") && last.ends_with(&format!(" · path {}", path.display())), "{last}");
-    let again = home.run(&["get", "9b5212", "--dir", &home.downloads()]);
-    assert!(again.stdout.starts_with("existing 9b5212"), "{}", again.stdout);
+    let again = home.run(&["get", "9b5212", "--dir", &home.downloads(), "--json"]);
+    assert_eq!(again.code, 0, "{}{}", again.stdout, again.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&again.stdout).unwrap();
+    assert_eq!(doc["reply"]["job"]["id"], ARCH);
+    // Rechecking can start immediately or queue until the old engine handle is removed.
+    assert!(matches!(doc["reply"]["outcome"].as_str(), Some("started" | "queued")), "{doc:#}");
+    let checked = home.run(&["wait", "9b5212", "--json"]);
+    assert_eq!(checked.code, 0, "{}{}", checked.stdout, checked.stderr);
+    let last: serde_json::Value = serde_json::from_str(checked.stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(last["outcome"], "done");
 }
 
 #[test]
