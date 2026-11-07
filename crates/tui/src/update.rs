@@ -654,21 +654,14 @@ impl State {
         }
     }
 
-    fn downloaded(&self, id: ReleaseId) -> bool {
-        matches!(id, ReleaseId::Torrent(t) if self.job(t).is_some())
-    }
-
     fn download(&mut self, id: ReleaseId) -> Vec<Effect> {
-        if self.downloaded(id) {
-            self.say(Tone::Info, "Already in downloads. Press d to view it.");
-            return Vec::new();
-        }
         let Some(Files::Ready(tree)) = self.files.get(&id) else { return self.open_files(id, true) };
         if tree.picked_count() == 0 {
             self.say(Tone::Warning, "Nothing picked. Press space to pick a file.");
             return Vec::new();
         }
-        let files = tree.selection();
+        // Explicit paths also let an existing download expand to every file.
+        let files = Some(tree.selection());
         self.focus = Focus::List;
         vec![Effect::Get { release: id, files }]
     }

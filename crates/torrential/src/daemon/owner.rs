@@ -479,8 +479,9 @@ impl Owner {
         }
         let job = &self.jobs[&id];
         let too_large = matches!(&job.record.intent, Intent::Failed { error } if error.code == ErrorCode::TooLarge);
+        let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none();
         let unchanged = selection == Selection::All || selection == job.record.selection;
-        if unchanged && cap == job.record.cap && !too_large {
+        if unchanged && cap == job.record.cap && !too_large && !recheck {
             let plan = self.current_plan(job);
             return Ok(GetReply { outcome: GetOutcome::Existing, job: job.view(), plan, previous_selection: None });
         }
@@ -507,7 +508,8 @@ impl Owner {
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
-        let needed = plan.needed(job.verified());
+        let reset_progress = recheck || previous.is_some();
+        let needed = plan.needed(if reset_progress { 0 } else { job.verified() });
         admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
@@ -526,13 +528,25 @@ impl Owner {
         if cap != job.record.cap {
             self.store.set_cap(id, cap)?;
         }
-        let reopen = too_large || (previous.is_some() && matches!(job.record.intent, Intent::Done { .. }));
+        if reset_progress {
+            // The old selection's counters and resume data cannot verify the new
+            // selection, or files that may have been deleted since completion.
+            self.store.record_check(id, None, 0, None, &vec![0; metainfo.files.len()])?;
+        }
+        let reopen = too_large || recheck || (previous.is_some() && matches!(job.record.intent, Intent::Done { .. }));
         if reopen {
             self.store.set_intent(id, &Intent::Running)?;
         }
         let job = self.jobs.get_mut(&id).expect("found above");
         job.record.selection = selection;
         job.record.cap = cap;
+        if reset_progress {
+            job.record.verified = 0;
+            job.record.piece_map = None;
+            job.record.files_verified = Some(vec![0; metainfo.files.len()]);
+            job.stats.verified = 0;
+            job.stats.piece_map = None;
+        }
         if reopen {
             job.record.intent = Intent::Running;
         }
@@ -542,7 +556,7 @@ impl Owner {
         self.schedule();
         self.publish(id);
         let job = &self.jobs[&id];
-        let outcome = match (&previous, too_large) {
+        let outcome = match (&previous, too_large || recheck) {
             (Some(_), _) => GetOutcome::Updated,
             (None, true) if job.observed.in_engine() => GetOutcome::Started,
             (None, true) => GetOutcome::Queued,

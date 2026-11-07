@@ -204,11 +204,8 @@ impl Tree {
         (0..self.files.len()).filter(|&i| self.is_risky(i) && !self.picked[i]).count()
     }
 
-    pub fn selection(&self) -> Option<Vec<String>> {
-        if self.picked.iter().all(|p| *p) {
-            return None;
-        }
-        Some(self.files.iter().zip(&self.picked).filter(|(_, p)| **p).map(|(f, _)| f.path.clone()).collect())
+    pub fn selection(&self) -> Vec<String> {
+        self.files.iter().zip(&self.picked).filter(|(_, p)| **p).map(|(f, _)| f.path.clone()).collect()
     }
 
     pub fn settle(&mut self, rows: usize) {
@@ -281,7 +278,7 @@ mod tests {
         tree.cursor = 4;
         tree.toggle();
         assert_eq!(tree.check(0), Check::All);
-        assert_eq!(tree.selection(), None);
+        assert_eq!(tree.selection(), ["Night.mp4", "extras/meta.xml", "Night.srt", "extras/setup.exe"]);
     }
 
     #[test]
@@ -290,7 +287,7 @@ mod tests {
         tree.toggle_all();
         assert_eq!(tree.picked_count(), 0);
         tree.toggle_all();
-        assert_eq!(tree.selection(), Some(vec!["Night.mp4".into(), "extras/meta.xml".into(), "Night.srt".into()]));
+        assert_eq!(tree.selection(), ["Night.mp4", "extras/meta.xml", "Night.srt"]);
     }
 
     #[test]
