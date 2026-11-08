@@ -11,7 +11,6 @@ use torrential_tui::{Edit, Exit};
 use super::connect::{self, Conn, DEFAULT_REPLY_WITHIN};
 use crate::config::{self, Config};
 use crate::daemon::admission::{Disk, RealDisk};
-use crate::daemon::server::METADATA_WAIT;
 use crate::env::Env;
 use crate::paths::Paths;
 use crate::skill::Writes;
@@ -83,15 +82,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn files(&self, reference: &str) -> Result<FilesReply, Error> {
-        let request = Request::Files {
-            target: Target::Prefix(reference.to_string()),
-            timeout_ms: METADATA_WAIT.as_millis() as u32,
-        };
-        match self.conn()?.call_within(&request, METADATA_WAIT + Duration::from_secs(15))? {
-            Response::Files { files } => Ok(files),
-            Response::Error { error } => Err(error),
-            other => Err(connect::unexpected(&other)),
-        }
+        super::file_list(&mut self.conn()?, Target::Prefix(reference.to_string()))
     }
 
     fn get(&self, reference: &str, files: Option<Vec<String>>) -> Result<GetReply, Error> {

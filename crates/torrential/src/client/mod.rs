@@ -1,5 +1,7 @@
 pub mod connect;
 pub mod launch;
+pub mod play;
+pub mod player;
 mod probe;
 pub mod service;
 mod setup;
@@ -65,19 +67,13 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             search(engine()?, args, preferences, mode)
         }
         Command::Files(args) => {
-            let target = Target::parse(&args.reference, &cwd)?;
-            let request = Request::Files { target, timeout_ms: METADATA_WAIT.as_millis() as u32 };
-            match answer(engine()?.call_within(&request, METADATA_WAIT + Duration::from_secs(15))?)? {
-                Response::Files { mut files } => {
-                    let matched =
-                        if args.files.is_empty() { None } else { Some(keep_matching(&mut files, &args.files)?) };
-                    let doc = views::files(&files, matched.as_ref());
-                    Ok(emit(mode, &doc, &Typed { kind: "files", body: Files { files, matched } }))
-                }
-                other => Err(connect::unexpected(&other)),
-            }
+            let mut files = file_list(&mut engine()?, Target::parse(&args.reference, &cwd)?)?;
+            let matched = if args.files.is_empty() { None } else { Some(keep_matching(&mut files, &args.files)?) };
+            let doc = views::files(&files, matched.as_ref());
+            Ok(emit(mode, &doc, &Typed { kind: "files", body: Files { files, matched } }))
         }
         Command::Get(args) => get(engine()?, args, mode, &cwd, env),
+        Command::Play(args) => play::run(args, mode, env, &cwd),
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;
@@ -207,6 +203,15 @@ fn get(mut conn: Conn, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Resu
         );
     }
     Ok(exit)
+}
+
+/// A torrent's files, fetching its metadata if needed, as `torrential files` lists them.
+pub fn file_list(conn: &mut Conn, target: Target) -> Result<FilesReply, Error> {
+    let request = Request::Files { target, timeout_ms: METADATA_WAIT.as_millis() as u32 };
+    match answer(conn.call_within(&request, METADATA_WAIT + Duration::from_secs(15))?)? {
+        Response::Files { files } => Ok(files),
+        other => Err(connect::unexpected(&other)),
+    }
 }
 
 fn absolute(path: &Path, cwd: &Path, env: &Env) -> PathBuf {

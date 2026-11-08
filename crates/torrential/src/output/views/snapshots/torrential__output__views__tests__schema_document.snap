@@ -163,6 +163,27 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "play",
+      "about": "Play a video in your player while it downloads, starting when it will not pause",
+      "arguments": [
+        {
+          "name": "WORDS",
+          "help": "A download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for",
+          "required": true,
+          "repeatable": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--dir",
+          "help": "The folder a new download goes into",
+          "takes_value": true,
+          "repeatable": false,
+          "value_name": "DIR"
+        }
+      ]
+    },
+    {
       "name": "status",
       "about": "List downloads, or show one in detail",
       "arguments": [

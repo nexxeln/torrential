@@ -34,6 +34,12 @@ pub fn elapsed(d: Duration) -> String {
     if d.as_secs() < 600 { format!("{}s", d.as_secs()) } else { format_duration(d) }
 }
 
+/// `4:05` or `1:36:12`, as a player shows a time.
+pub fn clock(d: Duration) -> String {
+    let (h, m, s) = (d.as_secs() / 3600, d.as_secs() % 3600 / 60, d.as_secs() % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
 pub fn seconds_tenths(ms: u32) -> String {
     format!("{}.{}s", ms / 1000, ms % 1000 / 100)
 }
@@ -85,6 +91,12 @@ mod tests {
         assert_eq!(percent(&p(9_999, Some(10_000))), "99.9%");
         assert_eq!(percent(&p(10_000, Some(10_000))), "100%");
         assert_eq!(percent(&p(0, None)), "?");
+    }
+
+    #[test]
+    fn clocks_show_hours_only_when_there_are_some() {
+        let clock = |secs| clock(Duration::from_secs(secs));
+        assert_eq!([clock(4), clock(29 * 60 + 40), clock(5772)], ["0:04", "29:40", "1:36:12"]);
     }
 
     #[test]
