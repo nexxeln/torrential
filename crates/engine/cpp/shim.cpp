@@ -516,6 +516,50 @@ MissingCounts Session::missing_pieces(rust::Slice<const std::uint8_t> id) const 
   return r;
 }
 
+bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
+                         std::uint64_t length) {
+  lt::torrent_handle const h = find_with_metadata(id);
+  auto const ti = h.torrent_file();
+  lt::file_storage const& fs = ti->layout();
+  lt::file_index_t const f(static_cast<int>(file));
+  if (file >= static_cast<std::uint32_t>(fs.num_files()) || fs.pad_file_at(f)) {
+    fail(FailureKind::InvalidInput, "file index " + std::to_string(file) + " is out of range for " +
+                                        std::to_string(fs.num_files()) + " files");
+  }
+  auto const size = static_cast<std::uint64_t>(fs.file_size(f));
+  if (length == 0 || offset >= size) {
+    fail(FailureKind::InvalidInput, "byte range " + std::to_string(offset) + "+" + std::to_string(length) +
+                                        " is outside the " + std::to_string(size) + "-byte file");
+  }
+  std::uint64_t const end = length > size - offset ? size : offset + length;
+  lt::piece_index_t const first = fs.map_file(f, static_cast<std::int64_t>(offset), 0).piece;
+  lt::piece_index_t const last = fs.map_file(f, static_cast<std::int64_t>(end - 1), 0).piece;
+  lt::piece_index_t const file_last = fs.map_file(f, static_cast<std::int64_t>(size - 1), 0).piece;
+  lt::torrent_status const st = h.status(lt::torrent_handle::query_pieces);
+  // A piece passes its hash check while its blocks can still wait in the
+  // write cache, and leaves the download queue once they are all written.
+  // Only then does reading the file return its bytes.
+  std::vector<lt::partial_piece_info> const writing = h.get_download_queue();
+  bool written = true;
+  int deadline_ms = 0;
+  for (lt::piece_index_t p = first; p <= last; ++p) {
+    bool const queued = std::any_of(writing.begin(), writing.end(),
+                                    [p](lt::partial_piece_info const& q) { return q.piece_index == p; });
+    if (st.pieces.get_bit(p) && !queued) continue;
+    written = false;
+    h.set_piece_deadline(p, deadline_ms);
+    deadline_ms += 100;
+  }
+  // A reader goes on to the bytes after the range. Sequential picking skips
+  // the pieces with deadlines, so they still come first.
+  h.set_sequential_range(first, file_last);
+  return written;
+}
+
+void Session::download_in_order(rust::Slice<const std::uint8_t> id) {
+  find(id).set_flags(lt::torrent_flags::sequential_download);
+}
+
 void Session::post_session_stats() { session_.post_session_stats(); }
 
 rust::Vec<std::uint8_t> Session::save_state() const {

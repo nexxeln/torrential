@@ -176,6 +176,27 @@ impl Session {
         Ok(MissingPieces { missing: counts.missing, unavailable: counts.unavailable })
     }
 
+    /// Needs metadata. Asks peers for the pieces under `length` bytes of `file` from `offset` before
+    /// any other piece, the earliest first, then for the rest of the file in order. True once every
+    /// one of them is verified and written, so reading that range of the file returns the torrent's
+    /// bytes. Ask again until then: each call renews the request.
+    pub fn want_range(
+        &mut self,
+        id: TorrentId,
+        file: FileIndex,
+        offset: u64,
+        length: u64,
+    ) -> Result<bool, EngineError> {
+        let r = self.native.pin_mut().want_range(id.as_bytes(), file.get(), offset, length);
+        r.map_err(|e| with_id(e, id))
+    }
+
+    /// Picks pieces in file order instead of rarest first, for a torrent read while it downloads.
+    pub fn download_in_order(&mut self, id: TorrentId) -> Result<(), EngineError> {
+        let r = self.native.pin_mut().download_in_order(id.as_bytes());
+        r.map_err(|e| with_id(e, id))
+    }
+
     /// Asks for session counters. `Alert::SessionStats` delivers them.
     pub fn post_session_stats(&mut self) -> Result<(), EngineError> {
         self.native.pin_mut().post_session_stats().map_err(bridge::error)
