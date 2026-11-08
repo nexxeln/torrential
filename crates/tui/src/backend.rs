@@ -17,6 +17,9 @@ pub trait Backend: Send + Sync + 'static {
     fn files(&self, reference: &str) -> Result<FilesReply, Error>;
     /// Starts downloading a search result. `files` holds exact paths; `None` means every file.
     fn get(&self, reference: &str, files: Option<Vec<String>>) -> Result<GetReply, Error>;
+    /// Streams the video of a search result or a download, with its subtitles, and opens it in a
+    /// player at once. Returns the player's name.
+    fn play(&self, reference: &str) -> Result<String, Error>;
     fn pause(&self, id: &str) -> Result<Vec<Change>, Error>;
     fn resume(&self, id: &str) -> Result<Vec<Change>, Error>;
     /// Stops tracking a download. Its files stay on disk.

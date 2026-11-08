@@ -20,4 +20,4 @@ expression: shot(&scenario(size))
 "│ done                                         "
 "↓ big_buck_bunny_1080p_h264.mov        691 MiB "
 "                                               "
-"      space pause   x remove   o open   ? keys "
+"      space pause   P play   x remove   ? keys "

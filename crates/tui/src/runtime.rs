@@ -11,7 +11,7 @@ use torrential_core::protocol::Event;
 use torrential_core::{Error, ErrorCode};
 
 use crate::backend::Backend;
-use crate::state::{Item, JobAction, State, Tone, Upgrade};
+use crate::state::{JobAction, State, Tone, Upgrade};
 use crate::theme::ColorMode;
 use crate::update::{Effect, Msg};
 use crate::view;
@@ -191,17 +191,18 @@ fn perform<B: Backend>(effect: Effect, backend: &Arc<B>, tx: &Sender<Msg>) {
         }
         Effect::Files(item) => {
             thread::spawn(move || {
-                let reference = match item {
-                    Item::Download(id) => id.to_hex(),
-                    Item::Result(id) => id.to_ref(),
-                };
-                let _ = tx.send(Msg::Files { item, result: backend.files(&reference) });
+                let _ = tx.send(Msg::Files { item, result: backend.files(&item.reference()) });
             });
         }
         Effect::Get { release, files } => {
             thread::spawn(move || {
                 let result = backend.get(&release.to_ref(), files).map(Box::new);
                 let _ = tx.send(Msg::Started { release, result });
+            });
+        }
+        Effect::Play(item) => {
+            thread::spawn(move || {
+                let _ = tx.send(Msg::Played(backend.play(&item.reference())));
             });
         }
         Effect::Job { id, action } => {

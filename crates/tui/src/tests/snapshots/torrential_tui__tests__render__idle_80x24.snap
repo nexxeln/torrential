@@ -25,4 +25,4 @@ expression: shot(&scenario(size))
 "            │                                                                   "
 "            │                                                                   "
 "                                                                                "
-"                                      space pause   x remove   o open   ? keys  "
+"                             space pause   P play   x remove   o open   ? keys  "

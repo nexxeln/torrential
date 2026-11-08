@@ -13,7 +13,7 @@ expression: shot(&scenario(size))
 "│   / search   enter search again              "
 "│   ctrl+u clear   tab into the list           "
 "│ results                                      "
-"│   enter files   D download   s sort          "
+"│   enter files   D download   P play   s sort "
 "│   h l close, open                            "
 "│ files                                        "
 "│   space pick   a all or none                 "
