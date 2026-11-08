@@ -1,6 +1,7 @@
 pub mod error;
 pub mod id;
 pub mod job;
+pub mod media;
 pub mod preferences;
 pub mod profile;
 pub mod protocol;
