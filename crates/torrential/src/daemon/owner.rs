@@ -520,7 +520,7 @@ impl Owner {
         }
         let job = &self.jobs[&id];
         let too_large = matches!(&job.record.intent, Intent::Failed { error } if error.code == ErrorCode::TooLarge);
-        let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none();
+        let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none() && self.lost_files(job);
         let unchanged = selection == Selection::All || selection == job.record.selection;
         if unchanged && cap == job.record.cap && !too_large && !recheck {
             let plan = self.current_plan(job);
@@ -549,8 +549,7 @@ impl Owner {
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
-        let reset_progress = recheck || previous.is_some();
-        let needed = plan.needed(if reset_progress { 0 } else { job.verified() });
+        let needed = plan.needed(if recheck { 0 } else { job.verified() });
         admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
@@ -569,9 +568,9 @@ impl Owner {
         if cap != job.record.cap {
             self.store.set_cap(id, cap)?;
         }
-        if reset_progress {
-            // The old selection's counters and resume data cannot verify the new
-            // selection, or files that may have been deleted since completion.
+        if recheck {
+            // The resume data still claims the lost files' pieces, so without dropping it the
+            // engine would skip them.
             self.store.record_check(id, None, 0, None, &vec![0; metainfo.files.len()])?;
         }
         let reopen = too_large || recheck || (previous.is_some() && matches!(job.record.intent, Intent::Done { .. }));
@@ -581,7 +580,7 @@ impl Owner {
         let job = self.jobs.get_mut(&id).expect("found above");
         job.record.selection = selection;
         job.record.cap = cap;
-        if reset_progress {
+        if recheck {
             job.record.verified = 0;
             job.record.piece_map = None;
             job.record.files_verified = Some(vec![0; metainfo.files.len()]);
@@ -604,6 +603,16 @@ impl Owner {
             (None, false) => GetOutcome::Existing,
         };
         Ok(GetReply { outcome, job: job.view(), plan: Some(plan.public(cap)), previous_selection: previous })
+    }
+
+    /// Whether a selected file of the download is gone from disk or shorter than the torrent says.
+    fn lost_files(&self, job: &JobEntry) -> bool {
+        let Some(metainfo) = job.metainfo.as_deref() else { return false };
+        let Ok(wanted) = super::files::wanted(metainfo, &job.record.selection) else { return false };
+        metainfo.files.iter().zip(wanted).filter(|(_, wanted)| *wanted).any(|(file, _)| {
+            let path = job.record.dir.join(super::files::relative(metainfo, file));
+            self.disk.allocated_file_bytes(&path) != Some(file.size)
+        })
     }
 
     fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>), Error> {

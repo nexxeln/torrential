@@ -352,6 +352,34 @@ async fn a_finished_download_is_done_and_stays_done_after_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn get_rechecks_a_finished_download_only_when_a_file_is_gone() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let iso = torrent(2, "arch.iso", &[("arch.iso", GIB)]);
+    h.get(h.torrent_file(&iso), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    h.disk.file(h.downloads().join("arch.iso"), GIB);
+    let intact = h.get(Target::Prefix(prefix(&iso)), &[]).await.unwrap();
+    h.disk.file(h.downloads().join("arch.iso"), GIB / 2);
+    let cut = h.get(Target::Prefix(prefix(&iso)), &[]).await.unwrap();
+    assert_eq!((intact.outcome, intact.job.progress.verified), (GetOutcome::Existing, GIB));
+    assert!(matches!(cut.outcome, GetOutcome::Started | GetOutcome::Queued), "{:?}", cut.outcome);
+    assert_eq!(cut.job.progress.verified, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_a_file_to_a_finished_download_keeps_its_progress() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let film = torrent(5, "film", &[("film.mkv", GIB), ("film.srt", 50_000)]);
+    h.get(h.torrent_file(&film), &["film.mkv"]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    h.disk.file(h.downloads().join("film/film.mkv"), GIB);
+    let both = h.get(Target::Prefix(prefix(&film)), &["film.mkv", "film.srt"]).await.unwrap();
+    assert_eq!((both.outcome, both.job.progress.verified), (GetOutcome::Updated, GIB));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn get_is_idempotent_and_reports_a_changed_selection() {
     let h = Harness::new();
     let film = torrent(3, "film", &[("film.mkv", GIB), ("film.srt", 50_000), ("extras.mkv", GIB)]);
