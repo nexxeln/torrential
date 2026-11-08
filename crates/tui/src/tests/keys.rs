@@ -154,8 +154,31 @@ fn a_started_download_shows_at_once_and_keeps_the_cursor_on_the_result() {
     assert_eq!(state.downloads.len(), 6);
     assert_eq!(cursor_name(&state), "Night of the Living Dead (1968)");
     assert_eq!(state.toast.as_ref().unwrap().text, "Started Night of the Living Dead (1968)");
-    assert_eq!(press(&mut state, "D"), []);
-    assert_eq!(state.toast.as_ref().unwrap().text, "Already in downloads. Press d to view it.");
+    assert_eq!(press(&mut state, "D"), [Effect::Files(Item::Result(result_id("4c1e9a")))]);
+}
+
+#[test]
+fn an_existing_download_accepts_another_file_selection_including_every_file() {
+    let mut state = searched((100, 30));
+    let release = result_id("b7f20d");
+    state.downloads.push(Job { id: id("b7f20d"), ..jobs()[3].clone() });
+    press(&mut state, "j");
+    state.update(key(KeyCode::Enter));
+    let mut reply = dvd_files();
+    reply.files.truncate(2);
+    let paths: Vec<String> = reply.files.iter().map(|f| f.path.clone()).collect();
+    state.update(Msg::Files { item: Item::Result(release), result: Ok(reply) });
+
+    press(&mut state, "j ");
+    assert_eq!(state.update(key(KeyCode::Enter)), [Effect::Get { release, files: Some(vec![paths[1].clone()]) }]);
+
+    state.update(key(KeyCode::Enter));
+    press(&mut state, " ");
+    assert_eq!(
+        state.update(key(KeyCode::Enter)),
+        [Effect::Get { release, files: Some(paths) }],
+        "picking every file must expand the existing download's selection"
+    );
 }
 
 #[test]
