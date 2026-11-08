@@ -141,6 +141,8 @@ pub trait EnginePort: Send {
     fn file_progress(&mut self, id: TorrentId) -> Result<Vec<u64>, Error>;
     /// Fetches the pieces under this byte range of a file first. True when all of them are verified and on disk.
     fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error>;
+    /// Downloads pieces in file order, for a download someone watches as it arrives.
+    fn stream(&mut self, id: TorrentId) -> Result<(), Error>;
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent>;
 }
 
@@ -155,6 +157,7 @@ pub enum EngineCommand {
     Remove(TorrentId),
     FileProgress(TorrentId, oneshot::Sender<Result<Vec<u64>, Error>>),
     WantRange(TorrentId, u32, u64, u64, oneshot::Sender<Result<bool, Error>>),
+    Stream(TorrentId),
 }
 
 #[derive(Clone)]
@@ -225,6 +228,7 @@ fn apply(port: &mut dyn EnginePort, command: EngineCommand) -> Option<EngineEven
         EngineCommand::SaveResume(id) => (id, port.save_resume_data(id)),
         EngineCommand::SaveResumeIfProgressed(id) => (id, port.save_resume_data_if_progressed(id)),
         EngineCommand::Remove(id) => (id, port.remove(id)),
+        EngineCommand::Stream(id) => (id, port.stream(id)),
         EngineCommand::FileProgress(id, reply) => {
             let _ = reply.send(port.file_progress(id));
             return None;
@@ -513,6 +517,10 @@ impl EnginePort for Fake {
 
     fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
         self.torrent(id)?.written(file, offset, length)
+    }
+
+    fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.torrent(id).map(|_| ())
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {

@@ -37,6 +37,23 @@ pub fn bind(port: u16) -> io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, port)).or_else(|_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
 }
 
+/// `http://127.0.0.1:{port}/{torrent ID}/{file index}/{file name}`. The server routes on the ID
+/// and index; the name gives the player a title and an extension.
+pub fn url(port: u16, id: TorrentId, index: u32, path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let name: String = name
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    format!("http://127.0.0.1:{port}/{}/{index}/{name}", id.to_hex())
+}
+
 pub async fn accept(ctx: Arc<Ctx>, listener: tokio::net::TcpListener) {
     while let Ok((stream, _)) = listener.accept().await {
         let ctx = ctx.clone();
@@ -222,7 +239,7 @@ fn head(parsed: &httparse::Request) -> Head {
     Head::Request(Request { head_only, path, range: header("range"), keep_alive })
 }
 
-/// `/{torrent ID}/{file index}/{file name}`, where the name is only for the player.
+/// The torrent ID and file index of a path `url` built.
 fn route(path: &str) -> Option<(TorrentId, u32)> {
     let mut parts = path.strip_prefix('/')?.split('/');
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))

@@ -522,6 +522,10 @@ impl EnginePort for Libtorrent {
         self.session.want_range(engine_id(id), index, offset, length).map_err(engine_error)
     }
 
+    fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.session.download_in_order(engine_id(id)).map_err(engine_error)
+    }
+
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         let wait = if self.events.is_empty() { max_wait } else { Duration::ZERO };
         match self.session.wait_alerts(wait) {
