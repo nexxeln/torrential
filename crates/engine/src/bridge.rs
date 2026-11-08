@@ -226,6 +226,8 @@ pub(crate) mod ffi {
         fn status(self: &Session, id: &[u8]) -> Result<StatusRecord>;
         fn piece_slices(self: &Session, id: &[u8], slices: u32) -> Result<Vec<PieceCounts>>;
         fn missing_pieces(self: &Session, id: &[u8]) -> Result<MissingCounts>;
+        fn want_range(self: Pin<&mut Session>, id: &[u8], file: u32, offset: u64, length: u64) -> Result<bool>;
+        fn download_in_order(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn post_session_stats(self: Pin<&mut Session>) -> Result<()>;
         fn save_state(self: &Session) -> Result<Vec<u8>>;
         fn listen_port(self: &Session) -> Result<u16>;
