@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use torrential_core::error::{Details, EXIT_PENDING};
-use torrential_core::protocol::{Change, DownloadPlan, FilesReply, GetOutcome, GetReply, Response};
+use torrential_core::protocol::{Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream};
 use torrential_core::{
     Error, ErrorCode, FileRisk, Flag, InfoHash, Job, JobStatus, LocatorId, Progress, Release, ReleaseId, SearchQuery,
     SearchResult, Selection, SourceOutcome, SourceReport, TorrentFile, TorrentId,
 };
 
 use super::*;
+use crate::client::play::Hold;
 use crate::client::wait::Printer;
 use crate::client::{Files, keep_matching};
 use crate::output::{Mode, Typed, render};
@@ -936,4 +937,55 @@ fn a_tab_in_a_path_stays_inside_its_column() {
     );
     let row: Vec<String> = wait_row(Duration::from_secs(3), "9b5212", &named).into_iter().map(|c| c.text).collect();
     assert_eq!(row.join("\t"), "3s\t9b5212\tpaused\t?\t?\t-\t-\t-\tarch linux.iso");
+}
+
+#[test]
+fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
+    let stream = |index, path: &str, size| Stream {
+        index,
+        path: path.into(),
+        size,
+        url: format!("http://127.0.0.1:47919/6bc1af{}/{index}/{path}", "0".repeat(34)),
+    };
+    let film = job("6bc1af", Some("night_of_the_living_dead_dvd"), JobStatus::Downloading, downloading());
+    let reply = PlayReply {
+        job: film.clone(),
+        streams: vec![stream(1, "Night.mp4", 596_399_542), stream(0, "Night.asr.srt", 52_633)],
+    };
+    let bare = PlayReply { job: film.clone(), streams: vec![stream(2, "VTS_01_1.mp4", 262_668_288)] };
+    let out = [
+        play("Night of the Living Dead (1968)", &reply, Some(Duration::from_secs(5772))).plain(),
+        play("night_of_the_living_dead_dvd", &bare, None).plain(),
+    ];
+    assert_eq!(
+        out,
+        [
+            "6bc1af Night of the Living Dead (1968)\nvideo:     Night.mp4 (568.8 MiB)\nsubtitles: Night.asr.srt\n\
+             runtime:   1:36:12\nnext:      torrential status 6bc1af\n",
+            "6bc1af night_of_the_living_dead_dvd\nvideo: VTS_01_1.mp4 (250.5 MiB)\nnext:  torrential status 6bc1af\n",
+        ]
+    );
+    assert_eq!(
+        playing("IINA", &film),
+        "\u{1b}[38;2;153;255;228m▶\u{1b}[0m Playing in IINA. The rest keeps downloading: torrential status 6bc1af\n"
+    );
+}
+
+#[test]
+fn a_held_start_says_why_and_for_how_long() {
+    let lines = [
+        hold(Hold::Reading),
+        hold(Hold::Buffering(Duration::from_secs(4))),
+        hold(Hold::Countdown(Duration::from_secs(29 * 60 + 40))),
+        hold(Hold::Stalled),
+    ];
+    assert_eq!(
+        lines,
+        [
+            "Buffering…",
+            "Buffering… ready in 0:04",
+            "Starts in 29:40 so it never pauses. Enter starts now",
+            "Waiting for peers",
+        ]
+    );
 }

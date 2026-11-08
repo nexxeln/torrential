@@ -59,6 +59,14 @@ pub fn detect(env: &Env) -> Result<Machine, Error> {
     Ok(Machine { os, display, arch: Arch::of_host(), language: language(os, env) })
 }
 
+/// The language `detect` reads, without waiting for its display probe.
+pub fn system_language(env: &Env) -> Option<Language> {
+    match env.var("TORRENTIAL_TEST_MACHINE") {
+        Some(_) => detect(env).ok()?.language,
+        None => language(Os::of_host(), env),
+    }
+}
+
 /// macOS keeps the language the user picked in `AppleLanguages`, and a shell often has no
 /// `LANG` at all. Elsewhere the locale variables decide, in the order POSIX reads them.
 fn language(os: Os, env: &Env) -> Option<Language> {

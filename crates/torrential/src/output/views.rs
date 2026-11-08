@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use torrential_core::id::shortest_unique_prefix;
-use torrential_core::protocol::{Change, FilesReply, GetOutcome, GetReply};
+use torrential_core::protocol::{Change, FilesReply, GetOutcome, GetReply, PlayReply};
 use torrential_core::text::sanitize;
 use torrential_core::units::{format_limit, format_size, size_text};
 use torrential_core::{
@@ -11,8 +11,9 @@ use torrential_core::{
 };
 
 use super::format::{self, NONE};
-use super::theme::Token;
+use super::theme::{Token, paint};
 use super::{Body, Cell, Doc};
+use crate::client::play::Hold;
 use crate::skill::{Change as SkillChange, Installed, State};
 use crate::update::Policy;
 
@@ -323,6 +324,44 @@ pub fn get(reply: &GetReply, dir: Option<&Path>) -> Doc {
         _ => Some(format!("torrential wait {id}")),
     };
     Doc { body: Body::Fields { title, fields }, summary, next }
+}
+
+pub const UNKNOWN_RUNTIME: &str = "torrential cannot read how long this video runs, so it may pause while it downloads";
+
+/// The release, the files it plays, and how long the video runs once that is known.
+pub fn play(name: &str, reply: &PlayReply, runtime: Option<Duration>) -> Doc {
+    let id = short_ids(&[reply.job.id]).remove(0);
+    let title = vec![Cell::styled(id.clone(), Token::Accent), Cell::new(name)];
+    let mut fields = Vec::new();
+    if let [video, subtitles @ ..] = reply.streams.as_slice() {
+        fields.push(("video", Cell::new(format!("{} ({})", video.path, format_size(video.size)))));
+        if !subtitles.is_empty() {
+            let paths: Vec<&str> = subtitles.iter().map(|s| s.path.as_str()).collect();
+            fields.push(("subtitles", Cell::new(paths.join(", "))));
+        }
+    }
+    if let Some(runtime) = runtime {
+        fields.push(("runtime", Cell::new(format::clock(runtime))));
+    }
+    Doc { body: Body::Fields { title, fields }, summary: Vec::new(), next: Some(format!("torrential status {id}")) }
+}
+
+pub fn hold(hold: Hold) -> String {
+    match hold {
+        Hold::Reading => "Buffering…".to_string(),
+        Hold::Buffering(wait) => format!("Buffering… ready in {}", format::clock(wait)),
+        Hold::Countdown(wait) => format!("Starts in {} so it never pauses. Enter starts now", format::clock(wait)),
+        Hold::Stalled => "Waiting for peers".to_string(),
+    }
+}
+
+pub fn playing(player: &str, job: &Job) -> String {
+    let id = short_ids(&[job.id]).remove(0);
+    format!(
+        "{} Playing in {}. The rest keeps downloading: torrential status {id}\n",
+        paint(Token::Mint, "▶"),
+        sanitize(player)
+    )
 }
 
 fn rerun_get(id: &str, selection: &Selection, dir: Option<String>) -> String {

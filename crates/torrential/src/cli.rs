@@ -41,6 +41,11 @@ pub enum Command {
         after_help = "Examples:\n  torrential get 9b5212\n  torrential get 'magnet:?xt=urn:btih:…' --dir ~/isos\n  torrential get 6bc1af --files '*.mp4' --dry-run"
     )]
     Get(GetArgs),
+    /// Play a video in your player while it downloads, starting when it will not pause
+    #[command(
+        after_help = "Examples:\n  torrential play night of the living dead\n  torrential play 6bc1af\n  torrential play 6bc1af --json"
+    )]
+    Play(PlayArgs),
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout passes
@@ -185,6 +190,16 @@ pub struct GetArgs {
     /// Print the selected size, destination, free space, and conflicts without downloading
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PlayArgs {
+    /// A download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for
+    #[arg(value_name = "WORDS", required = true, num_args = 1.., add = ArgValueCandidates::new(complete_download_ids))]
+    pub words: Vec<String>,
+    /// The folder a new download goes into
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
