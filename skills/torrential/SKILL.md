@@ -29,3 +29,7 @@ Downloads run in a background engine and keep going after your turn. `wait` retu
 Manage downloads with `status`, `pause`, `resume` (`--all` after a reboot), `verify` (then `wait`), and `rm`, which keeps the files.
 
 A `# update:` line means a newer torrential is out. Tell the user once and offer `torrential update`, or `torrential setup --updates auto` to always update.
+
+## Watch
+
+`torrential play <id or search words>` opens the user's player on the video while it downloads. Run it only when the user asks to watch something. With `--json` it opens nothing and returns `streams[0].url`, a local URL any player can open while the download continues.
