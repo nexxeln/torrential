@@ -3,6 +3,7 @@ pub mod book;
 pub mod engine_port;
 pub mod files;
 mod fixture;
+pub mod http;
 pub mod libtorrent;
 pub mod magnet;
 pub mod owner;
@@ -105,6 +106,7 @@ pub struct Running {
     pub ctx: Arc<Ctx>,
     pub owner: tokio::task::JoinHandle<()>,
     pub engine: std::thread::JoinHandle<()>,
+    pub http: tokio::task::JoinHandle<()>,
 }
 
 pub fn start(
@@ -113,8 +115,18 @@ pub fn start(
     ports: Ports,
     config: OwnerConfig,
     version: String,
+    http_port: u16,
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
+    let players = http::bind(http_port)
+        .and_then(|listener| {
+            listener.set_nonblocking(true)?;
+            let _entered = runtime.enter();
+            tokio::net::TcpListener::from_std(listener)
+        })
+        .map_err(|e| Error::internal(format!("cannot listen for players on 127.0.0.1: {e}")))?;
+    let http_port =
+        players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
     let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, config)?;
@@ -127,8 +139,10 @@ pub fn start(
         engine,
         parse: ports.parse,
         version,
+        http_port,
     });
-    Ok(Running { ctx, owner: task, engine: thread })
+    let http = runtime.spawn(http::accept(ctx.clone(), players));
+    Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
 pub fn log(message: &str) {
@@ -220,8 +234,12 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         })?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
-        let running = start(&tokio::runtime::Handle::current(), store, ports, config, version.clone())?;
-        log(&format!("engine {version} started, pid {}, socket {}", std::process::id(), socket.display()));
+        let running = start(&tokio::runtime::Handle::current(), store, ports, config, version.clone(), http::PORT)?;
+        let (pid, players) = (std::process::id(), running.ctx.http_port);
+        log(&format!(
+            "engine {version} started, pid {pid}, socket {}, players http://127.0.0.1:{players}",
+            socket.display()
+        ));
         let ctx = running.ctx.clone();
         let accept = tokio::spawn(async move {
             let uid = paths::uid();
@@ -235,6 +253,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         let updates = tokio::spawn(crate::update::watch(env.clone(), paths.clone()));
         let _ = running.owner.await;
         accept.abort();
+        running.http.abort();
         signals.abort();
         updates.abort();
         let _ = std::fs::remove_file(&socket);

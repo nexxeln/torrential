@@ -99,6 +99,15 @@ pub struct GetCommand {
     pub dry_run: bool,
 }
 
+/// A selected file of a download, for the HTTP server.
+#[derive(Clone, Debug)]
+pub struct StreamFile {
+    pub path: PathBuf,
+    pub size: u64,
+    /// The download is done, so every byte is on disk.
+    pub complete: bool,
+}
+
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
@@ -110,6 +119,7 @@ pub enum Command {
     Remove { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
+    StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
     Disconnected { keep_until: Option<Instant> },
@@ -270,6 +280,9 @@ impl Owner {
                 let watch = self.resolve_jobs(&refs, "wait").map(|ids| (self.views(&ids), self.updates.subscribe()));
                 let _ = reply.send(watch);
             }
+            Command::StreamFile { id, index, reply } => {
+                let _ = reply.send(self.stream_file(id, index));
+            }
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Connected => self.connections += 1,
             Command::Disconnected { keep_until } => {
@@ -282,6 +295,19 @@ impl Owner {
 
     fn views(&self, ids: &[TorrentId]) -> Vec<Job> {
         ids.iter().filter_map(|id| self.jobs.get(id)).map(JobEntry::view).collect()
+    }
+
+    fn stream_file(&self, id: TorrentId, index: u32) -> Result<StreamFile, Error> {
+        let found = self.jobs.get(&id).and_then(|job| {
+            let metainfo = job.metainfo.as_deref()?;
+            let file = metainfo.files.get(index as usize)?;
+            job.wanted()?[index as usize].then(|| StreamFile {
+                path: job.record.dir.join(files::relative(metainfo, file)),
+                size: file.size,
+                complete: matches!(job.record.intent, Intent::Done { .. }),
+            })
+        });
+        found.ok_or_else(|| Error::new(ErrorCode::NotFound, format!("no download has file {index} of {} selected", id)))
     }
 
     fn publish(&self, id: TorrentId) {

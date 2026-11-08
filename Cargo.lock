@@ -3222,6 +3222,7 @@ dependencies = [
  "dirs",
  "flate2",
  "globset",
+ "httparse",
  "indicatif",
  "insta",
  "libc",

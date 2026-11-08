@@ -49,6 +49,8 @@ pub struct Ctx {
     pub engine: EngineHandle,
     pub parse: ParseTorrent,
     pub version: String,
+    /// Where `http` serves downloads to players.
+    pub http_port: u16,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {

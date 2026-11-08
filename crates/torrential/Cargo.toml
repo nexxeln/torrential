@@ -22,6 +22,7 @@ ctrlc = "3.5"
 dirs = "7"
 flate2 = "1"
 globset = "0.4"
+httparse = "1.10"
 indicatif = "0.18"
 libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
