@@ -7,6 +7,7 @@ pub mod profile;
 pub mod protocol;
 pub mod quality;
 pub mod release;
+pub mod stream;
 pub mod text;
 pub mod units;
 
