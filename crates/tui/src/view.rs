@@ -1000,13 +1000,14 @@ fn empty(buf: &mut Buffer, state: &State, screen: &Screen, y: u16) {
 const HELP: [(&str, &[(&str, &str)]); 6] = [
     ("move", &[("j k", "up, down"), ("g G", "first, last"), ("pgup pgdn", "a page"), ("d r", "downloads, results")]),
     ("typing", &[("/", "search"), ("enter", "search again"), ("ctrl+u", "clear"), ("tab", "into the list")]),
-    ("results", &[("enter", "files"), ("D", "download"), ("s", "sort"), ("h l", "close, open")]),
+    ("results", &[("enter", "files"), ("D", "download"), ("P", "play"), ("s", "sort"), ("h l", "close, open")]),
     ("files", &[("space", "pick"), ("a", "all or none"), ("h l", "fold folders"), ("enter", "download")]),
     (
         "download",
         &[
             ("enter", "files"),
             ("space", "pause, resume"),
+            ("P", "play"),
             ("v", "verify"),
             ("x", "remove"),
             ("o", "open"),
@@ -1084,10 +1085,12 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
         (Focus::Files, _) => {
             vec![("space", "pick"), ("enter", "download"), ("a", "all"), ("esc", "back"), ("?", "keys")]
         }
-        (Focus::List, Some(Item::Download(_))) => vec![("space", pause), ("x", "remove"), ("o", "open"), ("?", "keys")],
+        (Focus::List, Some(Item::Download(_))) => {
+            vec![("space", pause), ("P", "play"), ("x", "remove"), ("o", "open"), ("?", "keys")]
+        }
         (Focus::List, Some(Item::Result(_))) if downloaded => vec![("d", "downloads"), ("s", "sort"), ("?", "keys")],
         (Focus::List, Some(Item::Result(_))) => {
-            vec![("enter", "files"), ("D", "download"), ("s", "sort"), ("?", "keys")]
+            vec![("enter", "files"), ("D", "download"), ("P", "play"), ("s", "sort"), ("?", "keys")]
         }
         (Focus::List, None) => vec![("/", "search"), ("?", "keys")],
     };

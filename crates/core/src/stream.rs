@@ -1,0 +1,187 @@
+use std::path::Path;
+use std::time::Duration;
+
+use crate::job::TorrentFile;
+
+/// Folders that hold the subtitles for every video in the torrent.
+const SUBTITLE_FOLDERS: [&str; 4] = ["sub", "subs", "subtitle", "subtitles"];
+
+/// Plan for this share of the current rate, since a rate measured over a few seconds swings as peers come and go.
+const MARGIN: f64 = 0.9;
+
+/// Video on disk before playback starts.
+const HEAD_BUFFER: Duration = Duration::from_secs(10);
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Playable {
+    pub video: u32,
+    /// Ordered by path.
+    pub subtitles: Vec<u32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Start {
+    Now,
+    /// Whole seconds, rounded up.
+    Wait(Duration),
+    /// Bytes are missing and no peer is sending any.
+    Stalled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Video,
+    Subtitle,
+}
+
+/// The largest video file, plus the subtitle files that belong with it.
+pub fn pick(files: &[TorrentFile]) -> Option<Playable> {
+    let videos: Vec<&TorrentFile> = files.iter().filter(|f| kind(&f.path) == Some(Kind::Video)).collect();
+    let features: Vec<&TorrentFile> = videos.iter().copied().filter(|f| !is_sample(&f.path)).collect();
+    let video = if features.is_empty() { &videos } else { &features }.iter().max_by_key(|f| f.size)?;
+    let home = folder(&video.path);
+    let mut subtitles: Vec<&TorrentFile> = files
+        .iter()
+        .filter(|f| kind(&f.path) == Some(Kind::Subtitle))
+        .filter(|f| features.len() <= 1 || folder(&f.path) == home || in_subtitle_folder(&f.path))
+        .collect();
+    subtitles.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
+}
+
+/// When playback can start so it never catches up with the download.
+pub fn start(size: u64, runtime: Duration, have: u64, rate: u64) -> Start {
+    match (size.saturating_sub(have), rate) {
+        (0, _) => Start::Now,
+        (_, 0) => Start::Stalled,
+        (missing, rate) => {
+            let rate = rate as f64 * MARGIN;
+            let head = (size as f64 * HEAD_BUFFER.as_secs_f64() / runtime.as_secs_f64()).min(size as f64);
+            let wait = (missing as f64 / rate - runtime.as_secs_f64()).max((head - have as f64) / rate);
+            if wait > 0.0 { Start::Wait(Duration::from_secs(wait.ceil() as u64)) } else { Start::Now }
+        }
+    }
+}
+
+fn kind(path: &str) -> Option<Kind> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mkv" | "mp4" | "m4v" | "mov" | "webm" | "avi" | "ts" | "m2ts" | "wmv" | "mpg" | "mpeg" | "ogv" => {
+            Some(Kind::Video)
+        }
+        "srt" | "ass" | "ssa" | "vtt" | "sub" => Some(Kind::Subtitle),
+        _ => None,
+    }
+}
+
+fn is_sample(path: &str) -> bool {
+    path.split('/').any(|part| part.to_ascii_lowercase().starts_with("sample"))
+}
+
+fn folder(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(folder, _)| folder)
+}
+
+fn in_subtitle_folder(path: &str) -> bool {
+    folder(path).split('/').any(|part| SUBTITLE_FOLDERS.contains(&part.to_ascii_lowercase().as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picked<'a>(listing: &[(&'a str, u64)]) -> Option<(&'a str, Vec<&'a str>)> {
+        let files: Vec<TorrentFile> = (0..)
+            .zip(listing)
+            .map(|(index, &(path, size))| TorrentFile {
+                index,
+                path: path.into(),
+                size,
+                selected: true,
+                verified: 0,
+                risk: None,
+            })
+            .collect();
+        let playable = pick(&files)?;
+        let path = |index: u32| listing[index as usize].0;
+        Some((path(playable.video), playable.subtitles.into_iter().map(path).collect()))
+    }
+
+    #[test]
+    fn picks_the_feature_and_its_subtitles() {
+        let movie = [
+            ("Movie.2024.1080p.mkv", 4_000_000_000),
+            ("Sample/movie.2024.sample.mkv", 30_000_000),
+            ("Subs/3_French.srt", 82_000),
+            ("Subs/2_English.srt", 80_000),
+            ("Forced/English.srt", 2_000),
+            ("Movie.2024.1080p.nfo", 4_000),
+        ];
+        let season = [
+            ("Show.S01E01.mkv", 1_000_000_000),
+            ("Show.S01E02.mkv", 2_000_000_000),
+            ("Show.S01E01.en.srt", 40_000),
+            ("Show.S01E02.en.srt", 40_000),
+            ("Show.S01E02.de.VTT", 40_000),
+            ("Extras/Making Of.mkv", 500_000_000),
+            ("Extras/Making Of.srt", 10_000),
+            ("SUBTITLES/Show.S01E02.fr.ass", 50_000),
+        ];
+        let read = [
+            picked(&movie),
+            picked(&season),
+            picked(&[("Sample.mkv", 900_000_000), ("Feature.MP4", 700_000_000)]),
+            picked(&[("sample-clip.mkv", 19_000_000), ("notes.txt", 1_000)]),
+            picked(&[("Film/Film.mp4", 700_000_000), ("Extras/Commentary.srt", 60_000), ("Film/Film.idx", 9_000)]),
+            picked(&[("ubuntu-24.04.iso", 6_000_000_000), ("readme.srt", 1_000)]),
+            picked(&[]),
+        ];
+        assert_eq!(
+            read,
+            [
+                Some(("Movie.2024.1080p.mkv", vec!["Forced/English.srt", "Subs/2_English.srt", "Subs/3_French.srt"])),
+                Some((
+                    "Show.S01E02.mkv",
+                    vec![
+                        "SUBTITLES/Show.S01E02.fr.ass",
+                        "Show.S01E01.en.srt",
+                        "Show.S01E02.de.VTT",
+                        "Show.S01E02.en.srt",
+                    ]
+                )),
+                Some(("Feature.MP4", vec![])),
+                Some(("sample-clip.mkv", vec![])),
+                Some(("Film/Film.mp4", vec!["Extras/Commentary.srt"])),
+                None,
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn waits_until_playback_cannot_catch_the_download() {
+        let (size, runtime) = (5_000_000_000, Duration::from_secs(90 * 60));
+        let read = [
+            start(size, runtime, 0, 695_000),
+            start(size, runtime, 0, 1_200_000),
+            start(size, runtime, 0, 50_000_000),
+            start(size, runtime, 10_000_000, 50_000_000),
+            start(size, runtime, size, 0),
+            start(size, runtime, 4_000_000_000, 0),
+            start(3_107, Duration::from_secs(7), 0, 1_000),
+        ];
+        // The first is about 30 minutes at the full 5.56 Mbit/s, and 43 minutes when planning for 90% of it.
+        assert_eq!(
+            read,
+            [
+                Start::Wait(Duration::from_secs(2594)),
+                Start::Wait(Duration::from_secs(9)),
+                Start::Wait(Duration::from_secs(1)),
+                Start::Now,
+                Start::Now,
+                Start::Stalled,
+                Start::Wait(Duration::from_secs(4)),
+            ]
+        );
+    }
+}

@@ -28,6 +28,7 @@ pub enum Msg {
     SearchDone { search: u64, result: Result<SearchResult, Error> },
     Files { item: Item, result: Result<FilesReply, Error> },
     Started { release: ReleaseId, result: Result<Box<GetReply>, Error> },
+    Played(Result<String, Error>),
     Changed { id: TorrentId, action: JobAction, result: Result<Vec<Change>, Error> },
     Preferences(Preferences),
     Machine(Machine),
@@ -41,6 +42,7 @@ pub enum Effect {
     Search { search: u64, query: SearchQuery },
     Files(Item),
     Get { release: ReleaseId, files: Option<Vec<String>> },
+    Play(Item),
     Job { id: TorrentId, action: JobAction },
     FreeSpace,
     Open(PathBuf),
@@ -63,6 +65,7 @@ pub enum Action {
     Open,
     Collapse,
     Download,
+    Play,
     Sort,
     TogglePause,
     Verify,
@@ -137,6 +140,13 @@ impl State {
             }
             Msg::Files { item, result } => self.files_arrived(item, result),
             Msg::Started { release, result } => self.started(release, result),
+            Msg::Played(result) => {
+                match result {
+                    Ok(player) => self.say(Tone::Success, format!("Playing in {player}")),
+                    Err(error) => self.say(Tone::Error, format!("Playing failed: {}", error.message)),
+                }
+                Vec::new()
+            }
             Msg::Changed { id, action, result } => self.changed(id, action, result),
             Msg::Preferences(preferences) => {
                 self.preferences.get_or_insert(preferences);
@@ -286,6 +296,7 @@ impl State {
             Char(' ') if picking => Action::Pick,
             Char('a') if picking => Action::PickAll,
             Char('D') => Action::Download,
+            Char('P') => Action::Play,
             Char('s') => Action::Sort,
             Char('S') => Action::Ranking,
             Char('U') => Action::Upgrade,
@@ -324,6 +335,12 @@ impl State {
             Action::Download => {
                 if let Some(Item::Result(id)) = self.cursor {
                     return self.download(id);
+                }
+            }
+            Action::Play => {
+                if let Some(item) = self.cursor {
+                    self.say(Tone::Info, "Starting the player…");
+                    return vec![Effect::Play(item)];
                 }
             }
             Action::Sort => {

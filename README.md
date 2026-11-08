@@ -44,6 +44,7 @@ torrential search big buck bunny            # each result starts with a short ID
 torrential files fd69b2 --files '*.mp4'     # preview which files a glob picks
 torrential get fd69b2 --files '*h264.mp4'   # download only the files you want
 torrential wait fd69b2                      # follow a download until it is done
+torrential play fd69b2                      # watch it while it downloads
 torrential status                           # list your downloads
 torrential pause fd69b2                     # pause a download
 torrential resume fd69b2                    # continue it, or retry a failed one
@@ -57,6 +58,14 @@ Removing a torrent keeps its files. Add the same torrent again with the same dow
 On a terminal, `get` shows progress until the download is done. Downloads run in a background engine, so they keep going after you press Ctrl-C or close the terminal.
 
 Every command takes `--json` for scripts, and `torrential schema` describes the commands, their flags, and their errors.
+
+## Watch while it downloads
+
+```sh
+torrential play night of the living dead
+```
+
+`play` picks the release, its video, and its subtitles, then opens IINA, mpv, or VLC. Pieces download in the order you watch, and seeking fetches the part you jump to. If your connection is slower than the video, torrential counts down to the moment playback can start without pausing, and Enter starts it at once. Set `player:` in `config.yaml` to choose a player. In the terminal UI, press `P` on a result or a download.
 
 ## Ranked for your machine
 

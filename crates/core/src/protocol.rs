@@ -13,7 +13,7 @@ use crate::id::Target;
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{SearchQuery, SearchResult};
 
-pub const WIRE_VERSION: u32 = 2;
+pub const WIRE_VERSION: u32 = 3;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -38,6 +38,8 @@ pub enum Request {
         timeout_ms: u32,
     },
     Get(GetRequest),
+    /// Downloads these files first and in order, and serves them over local HTTP as they arrive.
+    Play(PlayRequest),
     /// No refs means every download.
     Status {
         refs: Vec<String>,
@@ -79,12 +81,25 @@ pub struct GetRequest {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlayRequest {
+    pub target: Target,
+    /// `None` means the configured download folder. An existing download keeps its own.
+    pub dir: Option<PathBuf>,
+    /// `TorrentFile::index` of each file to play: the video first, then its subtitles. They join any
+    /// files the download already has selected.
+    pub files: Vec<u32>,
+    /// The max size from `torrential setup`, the cap of a new download.
+    pub setup_max_size: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Response {
     Hello { engine_version: String, wire: u32, pid: u32 },
     Search { result: SearchResult },
     Files { files: FilesReply },
     Get { reply: Box<GetReply> },
+    Play { reply: Box<PlayReply> },
     Jobs { jobs: Vec<Job> },
     Changed { changes: Vec<Change> },
     Ok,
@@ -111,6 +126,23 @@ pub struct GetReply {
     /// For `updated`, and for a `--dry-run` that would change the selection: the selection before this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_selection: Option<Selection>,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlayReply {
+    pub job: Job,
+    /// One per requested file, in the request's order.
+    pub streams: Vec<Stream>,
+}
+
+/// A file served over local HTTP while it downloads. Range requests fetch the bytes they ask for first.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Stream {
+    pub index: u32,
+    /// Relative to the torrent's folder, sanitized, as in `TorrentFile`.
+    pub path: String,
+    pub size: u64,
+    pub url: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

@@ -275,6 +275,23 @@ fn space_pauses_and_the_row_waits_for_the_engine() {
 }
 
 #[test]
+fn shift_p_plays_a_result_or_a_download_and_says_in_what() {
+    let mut state = searched((100, 30));
+    press(&mut state, "j");
+    assert_eq!(press(&mut state, "P"), [Effect::Play(Item::Result(result_id("b7f20d")))]);
+    assert_eq!(state.toast.as_ref().unwrap().text, "Starting the player…");
+    state.update(Msg::Played(Ok("IINA".into())));
+    assert_eq!(state.toast.as_ref().unwrap().text, "Playing in IINA");
+
+    let mut state = with_downloads((100, 30));
+    assert_eq!(press(&mut state, "P"), [Effect::Play(Item::Download(id("6f2c81")))]);
+    let none = Error::new(ErrorCode::NoSelection, "wikipedia-en-2026-09-text has no video file");
+    state.update(Msg::Played(Err(none)));
+    assert_eq!(state.toast.as_ref().unwrap().text, "Playing failed: wikipedia-en-2026-09-text has no video file");
+    assert_eq!(press(&mut state, "p"), [Effect::Job { id: id("6f2c81"), action: JobAction::Pause }]);
+}
+
+#[test]
 fn remove_asks_first_and_keeps_files() {
     let mut state = with_downloads((100, 30));
     press(&mut state, "jj");

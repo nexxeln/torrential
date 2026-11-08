@@ -267,6 +267,135 @@ fn search_get_and_wait_rechecks_a_completed_download() {
     assert_eq!(last["outcome"], "done");
 }
 
+const NIGHT: &str = "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c";
+
+/// Puts `PORT` in place of the player port, which is another one when a second engine holds it.
+fn portless(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("127.0.0.1:") {
+        let (before, after) = rest.split_at(at + "127.0.0.1:".len());
+        out.push_str(before);
+        out.push_str("PORT");
+        rest = after.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    out + rest
+}
+
+#[test]
+fn play_json_names_the_video_and_its_subtitles_and_opens_nothing() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    assert_eq!(home.run(&["search", "night", "of", "the", "living", "dead"]).code, 0);
+    let doc = home.json(&["play", "4c1e9a", "--json"]);
+    let streams: Vec<(u64, String, u64, String)> = doc["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            let url = portless(s["url"].as_str().unwrap());
+            (s["index"].as_u64().unwrap(), s["path"].as_str().unwrap().into(), s["size"].as_u64().unwrap(), url)
+        })
+        .collect();
+    assert_eq!(
+        streams,
+        [
+            (
+                0,
+                "night_of_the_living_dead.mp4".into(),
+                747 << 20,
+                format!("http://127.0.0.1:PORT/{NIGHT}/0/night_of_the_living_dead.mp4")
+            ),
+            (
+                3,
+                "night_of_the_living_dead.srt".into(),
+                49 << 10,
+                format!("http://127.0.0.1:PORT/{NIGHT}/3/night_of_the_living_dead.srt")
+            ),
+        ]
+    );
+    assert_eq!(
+        (doc["type"].as_str(), doc["name"].as_str(), doc["job"]["id"].as_str(), doc["next"].as_str()),
+        (Some("play"), Some("night_of_the_living_dead"), Some(NIGHT), Some("torrential status 4c1e9a"))
+    );
+    assert_eq!(
+        doc["job"]["selection"],
+        serde_json::json!({"kind": "patterns", "value": ["night_of_the_living_dead.mp4", "night_of_the_living_dead.srt"]})
+    );
+}
+
+#[test]
+fn play_searches_for_words_and_for_an_id_that_names_nothing() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    for words in [&["night", "of", "the", "living", "dead"][..], &["dead"]] {
+        let doc = home.json(&[&["play"], words, &["--json"]].concat());
+        assert_eq!(
+            (doc["name"].as_str(), doc["job"]["id"].as_str()),
+            (Some("Night of the Living Dead (1968)"), Some(NIGHT)),
+            "{words:?}"
+        );
+    }
+    let nothing = home.run(&["play", "zzzz", "nothing"]);
+    assert_eq!(
+        (nothing.code, nothing.stderr.as_str()),
+        (
+            3,
+            "error[not_found]: no video result matches \"zzzz nothing\"\nhint: run torrential search zzzz nothing to \
+             see what each source found\nnext: torrential search zzzz nothing\n"
+        )
+    );
+}
+
+#[test]
+fn play_refuses_a_torrent_without_a_video() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    assert_eq!(home.run(&["search", "night", "of", "the", "living", "dead"]).code, 0);
+    let run = home.run(&["play", "c48e01"]);
+    assert_eq!(
+        (run.code, run.stderr.as_str()),
+        (
+            7,
+            "error[no_selection]: Night of the Living Dead score has no video file\nhint: run torrential files c48e01 \
+             to see what it holds\nnext: torrential files c48e01\n"
+        )
+    );
+}
+
+#[test]
+fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language() {
+    let mut home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let bin = home.dir.path().join("bin");
+    let argv = home.dir.path().join("argv");
+    std::fs::create_dir_all(&bin).unwrap();
+    let mpv = bin.join("mpv");
+    std::fs::write(&mpv, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}.part\nmv {0}.part {0}\n", argv.display()))
+        .unwrap();
+    std::fs::set_permissions(&mpv, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(home.dir.path().join("th/config")).unwrap();
+    std::fs::write(home.dir.path().join("th/config/config.yaml"), "player: mpv\n").unwrap();
+    home.set("PATH", &format!("{}:/usr/bin:/bin", bin.display()));
+    assert_eq!(home.run(&["search", "night", "of", "the", "living", "dead"]).code, 0);
+    let run = home.run(&["play", "4c1e9a"]);
+    assert_eq!(
+        (run.code, run.stdout.as_str()),
+        (
+            0,
+            "4c1e9a night_of_the_living_dead\nvideo:     night_of_the_living_dead.mp4 (747.0 MiB)\nsubtitles: \
+             night_of_the_living_dead.srt\n# playing in mpv · the rest keeps downloading\nnext:      torrential \
+             status 4c1e9a\n"
+        ),
+        "{}",
+        run.stderr
+    );
+    eventually("the player starts", Duration::from_secs(10), || argv.exists());
+    assert_eq!(
+        portless(&std::fs::read_to_string(&argv).unwrap()),
+        format!(
+            "--sub-file=http://127.0.0.1:PORT/{NIGHT}/3/night_of_the_living_dead.srt\n--slang=en\n\
+             --force-media-title=night_of_the_living_dead\nhttp://127.0.0.1:PORT/{NIGHT}/0/night_of_the_living_dead.mp4\n"
+        )
+    );
+}
+
 #[test]
 fn a_killed_engine_comes_back_with_the_download_interrupted() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);

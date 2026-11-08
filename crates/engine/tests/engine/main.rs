@@ -10,3 +10,4 @@ mod support;
 mod swarm;
 mod symlinks;
 mod upload;
+mod want_range;

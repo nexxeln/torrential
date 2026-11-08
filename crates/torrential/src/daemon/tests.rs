@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use torrential_core::protocol::{Change, FilesReply, GetOutcome, GetReply, GetRequest, Request, Response};
+use torrential_core::protocol::{
+    Change, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream,
+};
 use torrential_core::{Error, ErrorCode, InfoHash, Job, JobStatus, Selection, Target};
 
 use super::admission::{FakeDisk, GIB, Space};
@@ -98,7 +100,7 @@ impl Harness {
             ),
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
-        start(&tokio::runtime::Handle::current(), store, ports, config(dir.path()), "0.1.0".into()).unwrap()
+        start(&tokio::runtime::Handle::current(), store, ports, config(dir.path()), "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -129,6 +131,15 @@ impl Harness {
     async fn get_with(&self, request: GetRequest) -> Result<GetReply, Error> {
         match self.ask(Request::Get(request)).await {
             Response::Get { reply } => Ok(*reply),
+            Response::Error { error } => Err(error),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    async fn play(&self, target: Target, files: &[u32]) -> Result<PlayReply, Error> {
+        let request = PlayRequest { target, dir: Some(self.downloads()), files: files.to_vec(), setup_max_size: None };
+        match self.ask(Request::Play(request)).await {
+            Response::Play { reply } => Ok(*reply),
             Response::Error { error } => Err(error),
             other => panic!("unexpected {other:?}"),
         }
@@ -254,6 +265,20 @@ impl<P: EnginePort> EnginePort for Gated<P> {
 
     fn file_progress(&mut self, id: torrential_core::TorrentId) -> Result<Vec<u64>, Error> {
         self.port.file_progress(id)
+    }
+
+    fn want_range(
+        &mut self,
+        id: torrential_core::TorrentId,
+        file: u32,
+        offset: u64,
+        length: u64,
+    ) -> Result<bool, Error> {
+        self.port.want_range(id, file, offset, length)
+    }
+
+    fn stream(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
+        self.port.stream(id)
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
@@ -1276,4 +1301,178 @@ async fn a_selection_widened_while_the_engine_finishes_is_done_only_once_the_new
         ("done", 32 * 1024, true),
         "done means every selected file arrived"
     );
+}
+
+const MIB: u64 = 1 << 20;
+
+fn written(path: &std::path::Path, size: u64) -> Vec<u8> {
+    let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+/// One HTTP/1.1 connection to the engine's player server.
+struct Player(tokio::io::BufReader<tokio::net::TcpStream>);
+
+impl Player {
+    async fn connect(h: &Harness) -> Self {
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", h.running.ctx.http_port)).await.unwrap();
+        Self(tokio::io::BufReader::new(stream))
+    }
+
+    async fn send(&mut self, method: &str, path: &str, headers: &[&str]) {
+        use tokio::io::AsyncWriteExt;
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\n{}\r\n",
+            headers.iter().map(|h| format!("{h}\r\n")).collect::<String>()
+        );
+        self.0.get_mut().write_all(request.as_bytes()).await.unwrap();
+    }
+
+    /// The status, the headers sorted and lowercased one per line, and the body.
+    async fn answer(&mut self, head_only: bool) -> (u16, String, Vec<u8>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        let mut line = String::new();
+        self.0.read_line(&mut line).await.unwrap();
+        let status = line.split(' ').nth(1).unwrap().parse().unwrap();
+        let mut headers = Vec::new();
+        loop {
+            line.clear();
+            self.0.read_line(&mut line).await.unwrap();
+            let Some((name, value)) = line.trim_end().split_once(": ") else { break };
+            headers.push(format!("{}: {value}\n", name.to_ascii_lowercase()));
+        }
+        headers.sort();
+        let length =
+            headers.iter().find_map(|h| h.strip_prefix("content-length: ")).map_or(0, |n| n.trim().parse().unwrap());
+        let mut body = vec![0; if head_only { 0 } else { length }];
+        self.0.read_exact(&mut body).await.unwrap();
+        (status, headers.concat(), body)
+    }
+
+    async fn get(&mut self, path: &str, range: &str) -> (u16, String, Vec<u8>) {
+        self.send("GET", path, &["Host: 127.0.0.1", &format!("Range: {range}")]).await;
+        self.answer(false).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_player_gets_a_range_once_the_engine_has_its_pieces() {
+    let h = Harness::new();
+    let film = torrent(80, "film", &[("film.mkv", 4 * MIB), ("film.srt", 2_000)]);
+    let bytes = written(&h.downloads().join("film/film.mkv"), 4 * MIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("downloading", |jobs| jobs[0].status.name() == "downloading").await;
+    let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
+    let mut player = Player::connect(&h).await;
+    let fetch = tokio::spawn(async move { player.get(&path, "bytes=1000000-1000099").await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!fetch.is_finished(), "no piece has arrived, so the player waits");
+    h.swarm.set_rate(100 * GIB);
+    let (status, headers, body) = fetch.await.unwrap();
+    assert_eq!(status, 206);
+    assert_eq!(
+        headers,
+        "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 1000000-1000099/4194304\ncontent-type: video/x-matroska\n"
+    );
+    assert_eq!(body, bytes[1_000_000..1_000_100]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_player_connection_gets_whole_files_ranges_and_refusals() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let notes = torrent(81, "notes", &[("notes.srt", 10_000), ("notes.txt", 10)]);
+    let bytes = written(&h.downloads().join("notes/notes.srt"), 10_000);
+    h.get(h.torrent_file(&notes), &["*.srt"]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let srt = format!("/{}/0/notes.srt", notes.info_hash.id().to_hex());
+
+    let mut player = Player::connect(&h).await;
+    player.send("HEAD", &srt, &["Host: 127.0.0.1:47919"]).await;
+    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\n";
+    assert_eq!(player.answer(true).await, (200, whole.to_string(), Vec::new()));
+    let last = "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 9900-9999/10000\ncontent-type: application/x-subrip\n";
+    assert_eq!(player.get(&srt, "bytes=-100").await, (206, last.to_string(), bytes[9_900..].to_vec()));
+    let past = "accept-ranges: bytes\ncontent-length: 0\ncontent-range: bytes */10000\n";
+    assert_eq!(player.get(&srt, "bytes=10000-").await, (416, past.to_string(), Vec::new()));
+    let unselected = format!("/{}/1/notes.txt", notes.info_hash.id().to_hex());
+    assert_eq!(player.get(&unselected, "bytes=0-").await.0, 404, "notes.txt is not selected");
+    assert_eq!(player.get(&format!("/{}/0/a.mkv", "ab".repeat(20)), "bytes=0-").await.0, 404);
+
+    let mut page = Player::connect(&h).await;
+    page.send("GET", &srt, &["Host: rebound.example:47919"]).await;
+    assert_eq!(page.answer(false).await.0, 403, "a web page that rebinds its hostname to 127.0.0.1");
+}
+
+fn patterns(paths: &[&str]) -> Selection {
+    Selection::Patterns(paths.iter().map(|p| p.to_string()).collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn play_downloads_exactly_the_files_it_names_and_returns_their_urls() {
+    let h = Harness::new();
+    let film = torrent(90, "film", &[("Film [2024].mkv", 3 * GIB), ("Film.en.srt", 40_000), ("extras.mkv", GIB)]);
+    let reply = h.play(h.torrent_file(&film), &[0, 1]).await.unwrap();
+    assert_eq!(reply.job.selection, patterns(&["Film [[]2024[]].mkv", "Film.en.srt"]));
+    assert_eq!(reply.job.progress.size, Some(3 * GIB + 40_000));
+    let (port, id) = (h.running.ctx.http_port, film.info_hash.id().to_hex());
+    let stream = |index, path: &str, size, name| Stream {
+        index,
+        path: path.into(),
+        size,
+        url: format!("http://127.0.0.1:{port}/{id}/{index}/{name}"),
+    };
+    assert_eq!(
+        reply.streams,
+        [
+            stream(0, "Film [2024].mkv", 3 * GIB, "Film%20%5B2024%5D.mkv"),
+            stream(1, "Film.en.srt", 40_000, "Film.en.srt")
+        ]
+    );
+    let selected: Vec<bool> = h.files(&prefix(&film)).await.files.iter().map(|f| f.selected).collect();
+    assert_eq!(selected, [true, true, false]);
+
+    let unknown = torrent(91, "unknown", &[("a.mkv", GIB)]);
+    let error = h.play(magnet(&unknown), &[0]).await.unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::Usage, "5b5b5b has no file list yet, so nothing can play")
+    );
+    assert_eq!(
+        h.play(h.torrent_file(&film), &[3]).await.unwrap_err().message,
+        "5a5a5a has 3 files, so it has no file 3"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn play_adds_its_files_to_a_paused_download_and_resumes_it() {
+    let h = Harness::new();
+    let film = torrent(92, "film", &[("film.mkv", GIB), ("film.srt", 40_000), ("extras.mkv", GIB)]);
+    h.get(h.torrent_file(&film), &["extras.mkv"]).await.unwrap();
+    h.changes(Request::Pause { refs: vec![prefix(&film)] }).await.unwrap();
+    assert_eq!(h.states().await, ["paused"]);
+    let reply = h.play(Target::Prefix(prefix(&film)), &[0, 2]).await.unwrap();
+    assert_eq!(reply.job.selection, patterns(&["extras.mkv", "film.mkv"]));
+    h.until("running again", |jobs| jobs[0].status.name() == "downloading").await;
+
+    let every = torrent(93, "every", &[("a.mkv", GIB), ("b.mkv", GIB)]);
+    h.get(h.torrent_file(&every), &[]).await.unwrap();
+    assert_eq!(h.play(Target::Prefix(prefix(&every)), &[1]).await.unwrap().job.selection, Selection::All);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_played_download_runs_while_every_slot_is_taken() {
+    let h = Harness::new();
+    let torrents: Vec<FakeTorrentFile> = (94..98).map(|n| torrent(n, &format!("t{n}"), &[("f.mkv", GIB)])).collect();
+    for t in &torrents {
+        h.get(h.torrent_file(t), &[]).await.unwrap();
+    }
+    h.until("three downloading", |jobs| jobs.iter().filter(|j| j.status.name() == "downloading").count() == 3).await;
+    assert_eq!(h.states().await[3], "queued");
+    h.play(Target::Prefix(prefix(&torrents[3])), &[0]).await.unwrap();
+    let film = torrent(98, "film", &[("film.mkv", GIB)]);
+    h.play(h.torrent_file(&film), &[0]).await.unwrap();
+    h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
 }

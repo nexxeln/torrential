@@ -8,6 +8,7 @@ use torrential_core::units::{parse_size, size_text};
 use torrential_core::{Error, ErrorCode, Playback, Preferences, Screen};
 use torrential_search::{SearchConfig, TorznabConfig};
 
+use crate::client::player::Choice;
 use crate::env::Env;
 use crate::paths::Paths;
 use crate::skill::{Writes, write_atomic};
@@ -20,6 +21,7 @@ pub struct Config {
     pub file: Option<PathBuf>,
     pub preferences: Preferences,
     pub updates: Policy,
+    pub player: Option<Choice>,
 }
 
 #[derive(Deserialize, Default)]
@@ -29,6 +31,7 @@ struct File {
     sources: Sources,
     preferences: Option<Overrides>,
     updates: Option<Policy>,
+    player: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -303,7 +306,16 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         .collect::<Result<_, _>>()?;
     let search = SearchConfig { torznab, disabled: file.sources.disabled, ..SearchConfig::default() };
     let preferences = file.preferences.unwrap_or_default().read()?;
-    Ok(Config { downloads, search, file: None, preferences, updates: file.updates.unwrap_or_default() })
+    let player = file
+        .player
+        .map(|Spanned { value, referenced, .. }| {
+            Choice::parse(&value).ok_or_else(|| {
+                let message = format!("player {value:?} is not iina, mpv, vlc, or an absolute path");
+                (Some(referenced.line()), message)
+            })
+        })
+        .transpose()?;
+    Ok(Config { downloads, search, file: None, preferences, updates: file.updates.unwrap_or_default(), player })
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -471,6 +483,18 @@ sources:
             let error = load(text).unwrap_err();
             assert_eq!(error.message, format!("$TORRENTIAL_HOME/config/config.yaml {expected}"), "{text}");
         }
+    }
+
+    #[test]
+    fn reads_the_player_and_names_the_line_of_a_bad_one() {
+        let player = |text: &str| parse(text, &env()).map(|c| c.player);
+        assert_eq!(player("player: mpv\n"), Ok(Some(Choice::Mpv)));
+        assert_eq!(player("player: /usr/local/bin/play\n"), Ok(Some(Choice::Program("/usr/local/bin/play".into()))));
+        assert_eq!(player("updates: auto\n"), Ok(None));
+        assert_eq!(
+            player("updates: auto\nplayer: celluloid\n"),
+            Err((Some(2), "player \"celluloid\" is not iina, mpv, vlc, or an absolute path".to_string()))
+        );
     }
 
     struct Folder {

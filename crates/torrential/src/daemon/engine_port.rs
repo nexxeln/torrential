@@ -139,6 +139,10 @@ pub trait EnginePort: Send {
     fn save_resume_data_if_progressed(&mut self, id: TorrentId) -> Result<(), Error>;
     fn remove(&mut self, id: TorrentId) -> Result<(), Error>;
     fn file_progress(&mut self, id: TorrentId) -> Result<Vec<u64>, Error>;
+    /// Fetches the pieces under this byte range of a file first. True when all of them are verified and on disk.
+    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error>;
+    /// Downloads pieces in file order, for a download someone watches as it arrives.
+    fn stream(&mut self, id: TorrentId) -> Result<(), Error>;
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent>;
 }
 
@@ -152,6 +156,8 @@ pub enum EngineCommand {
     SaveResumeIfProgressed(TorrentId),
     Remove(TorrentId),
     FileProgress(TorrentId, oneshot::Sender<Result<Vec<u64>, Error>>),
+    WantRange(TorrentId, u32, u64, u64, oneshot::Sender<Result<bool, Error>>),
+    Stream(TorrentId),
 }
 
 #[derive(Clone)]
@@ -165,8 +171,16 @@ impl EngineHandle {
     }
 
     pub async fn file_progress(&self, id: TorrentId) -> Result<Vec<u64>, Error> {
+        self.ask(|reply| EngineCommand::FileProgress(id, reply)).await
+    }
+
+    pub async fn want_range(&self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+        self.ask(|reply| EngineCommand::WantRange(id, file, offset, length, reply)).await
+    }
+
+    async fn ask<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> EngineCommand) -> Result<T, Error> {
         let (reply, answer) = oneshot::channel();
-        self.send(EngineCommand::FileProgress(id, reply));
+        self.send(make(reply));
         answer.await.map_err(|_| Error::internal("the engine thread stopped"))?
     }
 }
@@ -214,8 +228,13 @@ fn apply(port: &mut dyn EnginePort, command: EngineCommand) -> Option<EngineEven
         EngineCommand::SaveResume(id) => (id, port.save_resume_data(id)),
         EngineCommand::SaveResumeIfProgressed(id) => (id, port.save_resume_data_if_progressed(id)),
         EngineCommand::Remove(id) => (id, port.remove(id)),
+        EngineCommand::Stream(id) => (id, port.stream(id)),
         EngineCommand::FileProgress(id, reply) => {
             let _ = reply.send(port.file_progress(id));
+            return None;
+        }
+        EngineCommand::WantRange(id, file, offset, length, reply) => {
+            let _ = reply.send(port.want_range(id, file, offset, length));
             return None;
         }
     };
@@ -342,6 +361,21 @@ impl FakeTorrent {
 
     fn files(&self) -> Vec<u64> {
         self.landing().map(|l| l.files).unwrap_or_default()
+    }
+
+    fn written(&self, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+        let Some(metainfo) = &self.metainfo else {
+            return Err(Error::internal(format!("{} has no file list", self.id)));
+        };
+        let size = metainfo.files.get(file as usize).map(|f| f.size).unwrap_or(0);
+        if length == 0 || offset >= size {
+            return Err(Error::internal(format!("byte range {offset}+{length} is outside file {file} of {}", self.id)));
+        }
+        let start = metainfo.files[..file as usize].iter().map(|f| f.size).sum::<u64>() + offset;
+        let end = start + length.min(size - offset);
+        let piece = fake_piece_size(metainfo.total());
+        let have = self.landing().map(|l| l.have).unwrap_or_default();
+        Ok((start / piece..end.div_ceil(piece)).all(|p| have.get(p as usize) == Some(&true)))
     }
 
     fn wanted_size(&self) -> Option<u64> {
@@ -481,6 +515,14 @@ impl EnginePort for Fake {
         Ok(self.torrent(id)?.files())
     }
 
+    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+        self.torrent(id)?.written(file, offset, length)
+    }
+
+    fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.torrent(id).map(|_| ())
+    }
+
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         if self.events.is_empty() {
             std::thread::sleep(max_wait.min(Duration::from_millis(20)));
@@ -533,6 +575,7 @@ const FAKE_RUN: usize = 4;
 #[derive(Clone, PartialEq, Debug)]
 pub struct Landing {
     pub verified: u64,
+    pub have: Vec<bool>,
     pub files: Vec<u64>,
     pub piece_map: Option<PieceMap>,
     pub missing: Missing,
@@ -546,7 +589,8 @@ pub fn fake_landing(metainfo: &Metainfo, wanted: &[bool], arrived: u64, unavaila
     let total = metainfo.total();
     let mut files = vec![0; metainfo.files.len()];
     if total == 0 {
-        return Landing { verified: 0, files, piece_map: None, missing: Missing { pieces: 0, unavailable: 0 } };
+        let missing = Missing { pieces: 0, unavailable: 0 };
+        return Landing { verified: 0, have: Vec::new(), files, piece_map: None, missing };
     }
     let piece = fake_piece_size(total);
     let pieces = total.div_ceil(piece) as usize;
@@ -585,7 +629,7 @@ pub fn fake_landing(metainfo: &Metainfo, wanted: &[bool], arrived: u64, unavaila
         Slice::of(run.clone().filter(|&p| have[p]).count() as u32, run.filter(|&p| want[p] > 0).count() as u32)
     }));
     let missing = Missing { pieces: wanted_pieces - landed, unavailable };
-    Landing { verified: arrived - left, files, piece_map: Some(piece_map), missing }
+    Landing { verified: arrived - left, have, files, piece_map: Some(piece_map), missing }
 }
 
 fn overlaps(metainfo: &Metainfo, piece: u64) -> impl Iterator<Item = (usize, usize, u64)> + '_ {
