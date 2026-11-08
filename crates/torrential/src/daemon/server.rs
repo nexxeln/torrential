@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use torrential_core::protocol::{Event, FilesReply, GetRequest, Request, Response, WIRE_VERSION};
+use torrential_core::protocol::{
+    Event, FilesReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream, WIRE_VERSION,
+};
 use torrential_core::text::sanitize;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile,
@@ -12,8 +14,11 @@ use torrential_core::{
 
 use super::engine_port::{EngineHandle, Metainfo, ParseTorrent};
 use super::files;
+use super::http;
 use super::magnet::{self, Magnet};
-use super::owner::{Command, FileBytes, FilesInfo, GetCommand, MetaTarget, Origin, Reply, Resolved, Source, Update};
+use super::owner::{
+    Command, FileBytes, FilesInfo, GetCommand, MetaTarget, Origin, PlayCommand, Reply, Resolved, Source, Update,
+};
 use super::search_port::{Progress, SearchPort};
 use crate::machine::Detector;
 use crate::wire;
@@ -64,6 +69,7 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             files(ctx, target, Duration::from_millis(timeout_ms.into())).await.map(|files| Response::Files { files })
         }
         Request::Get(request) => get(ctx, request).await.map(|reply| Response::Get { reply: Box::new(reply) }),
+        Request::Play(request) => play(ctx, request).await.map(|reply| Response::Play { reply: Box::new(reply) }),
         Request::Status { refs } => {
             owner.ask(|reply| Command::Status { refs, reply }).await.map(|jobs| Response::Jobs { jobs })
         }
@@ -235,6 +241,23 @@ async fn get(ctx: &Ctx, request: GetRequest) -> Result<torrential_core::protocol
     }
     let get = GetCommand { source, dir, files, max_size, setup_max_size, dry_run };
     ctx.owner.ask(|reply| Command::Get { get: Box::new(get), reply }).await
+}
+
+async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
+    let PlayRequest { target, dir, files, setup_max_size } = request;
+    let source = resolve(ctx, target, "play").await?;
+    let play = PlayCommand { source, dir, files: files.clone(), setup_max_size };
+    let (job, metainfo) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+    let streams = files
+        .into_iter()
+        .map(|index| {
+            let file = &metainfo.files[index as usize];
+            let path = sanitize(&file.path);
+            let url = http::url(ctx.http_port, job.id, index, &path);
+            Stream { index, path, size: file.size, url }
+        })
+        .collect();
+    Ok(PlayReply { job, streams })
 }
 
 async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesReply, Error> {

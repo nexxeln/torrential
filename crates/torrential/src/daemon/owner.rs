@@ -99,6 +99,14 @@ pub struct GetCommand {
     pub dry_run: bool,
 }
 
+pub struct PlayCommand {
+    pub source: Source,
+    pub dir: Option<PathBuf>,
+    /// Indexes into the torrent's file list.
+    pub files: Vec<u32>,
+    pub setup_max_size: Option<u64>,
+}
+
 /// A selected file of a download, for the HTTP server.
 #[derive(Clone, Debug)]
 pub struct StreamFile {
@@ -111,6 +119,7 @@ pub struct StreamFile {
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
+    Play { play: Box<PlayCommand>, reply: Reply<(Job, Arc<Metainfo>)> },
     Metadata { target: MetaTarget, deadline: Instant, reply: Reply<FilesInfo> },
     Cache { metainfo: Metainfo },
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
@@ -157,6 +166,8 @@ pub struct Owner {
     tombstones: Vec<Tombstone>,
     probes: BTreeSet<TorrentId>,
     draining: BTreeSet<TorrentId>,
+    /// Played downloads, which run in order and take no download slot until the engine exits.
+    streamed: BTreeSet<TorrentId>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
     stopping: Option<Stopping>,
@@ -209,6 +220,7 @@ impl Owner {
             jobs,
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
+            streamed: BTreeSet::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
@@ -258,6 +270,9 @@ impl Owner {
             }
             Command::Get { get, reply } => {
                 let _ = reply.send(self.get(*get));
+            }
+            Command::Play { play, reply } => {
+                let _ = reply.send(self.play(*play));
             }
             Command::Metadata { target, deadline, reply } => self.metadata(target, deadline, reply),
             Command::Cache { metainfo } => {
@@ -577,6 +592,64 @@ impl Owner {
         Ok(GetReply { outcome, job: job.view(), plan: Some(plan.public(cap)), previous_selection: previous })
     }
 
+    fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>), Error> {
+        let PlayCommand { source, dir, files, setup_max_size } = play;
+        let id = match &source {
+            Source::Download(id) if self.jobs.contains_key(id) => *id,
+            Source::Download(id) => return Err(no_download(&id.to_hex())),
+            Source::Magnet(m) => self.find_job(&m.info_hash).unwrap_or(m.info_hash.id()),
+            Source::Torrent { metainfo, .. } => self.find_job(&metainfo.info_hash).unwrap_or(metainfo.info_hash.id()),
+        };
+        let job = self.jobs.get(&id);
+        let metainfo = job.and_then(|j| j.metainfo.clone()).or_else(|| match &source {
+            Source::Torrent { metainfo, .. } => Some(Arc::new(metainfo.clone())),
+            _ => self.cached(id),
+        });
+        let short = id.to_hex()[..6].to_string();
+        let see_files = |e: Error| {
+            e.with_hint(format!("run torrential files {short} first")).with_next(format!("torrential files {short}"))
+        };
+        let Some(metainfo) = metainfo else {
+            return Err(see_files(Error::new(
+                ErrorCode::Usage,
+                format!("{short} has no file list yet, so nothing can play"),
+            )));
+        };
+        let count = metainfo.files.len();
+        if let Some(missing) = files.iter().find(|&&i| i as usize >= count) {
+            let message = format!("{short} has {count} files, so it has no file {missing}");
+            return Err(see_files(Error::new(ErrorCode::Usage, message)));
+        }
+        if files.is_empty() {
+            return Err(see_files(Error::new(ErrorCode::Usage, "play needs at least one file")));
+        }
+        let (mut patterns, wanted) = match job {
+            None => (Vec::new(), vec![false; count]),
+            Some(job) => match &job.record.selection {
+                Selection::All => (Vec::new(), vec![true; count]),
+                Selection::Patterns(chosen) => (chosen.clone(), job.wanted().unwrap_or_else(|| vec![false; count])),
+            },
+        };
+        for &i in &files {
+            let pattern = globset::escape(&torrential_core::text::sanitize(&metainfo.files[i as usize].path));
+            if !wanted[i as usize] && !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
+        let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
+        let id = self.get(get)?.job.id;
+        let job = &self.jobs[&id];
+        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
+            self.resume(&[id.to_hex()], false)?;
+        }
+        self.streamed.insert(id);
+        if self.jobs[&id].observed.in_engine() {
+            self.engine.send(EngineCommand::Stream(id));
+        }
+        self.schedule();
+        Ok((self.jobs[&id].view(), metainfo))
+    }
+
     fn current_plan(&self, job: &JobEntry) -> Option<torrential_core::protocol::DownloadPlan> {
         let metainfo = job.metainfo.as_deref()?;
         let plan = admission::plan(metainfo, &job.record.selection, &job.record.dir, self.disk.as_ref()).ok()?;
@@ -777,6 +850,7 @@ impl Owner {
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
                     self.store.remove(&tomb)?;
                     let job = self.jobs.remove(&id).expect("resolved above");
+                    self.streamed.remove(&id);
                     if job.observed.in_engine() {
                         self.engine.send(EngineCommand::Remove(id));
                         self.draining.insert(id);
@@ -1233,7 +1307,7 @@ impl Owner {
             return;
         }
         let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()));
-        for id in book::to_start(ready, self.config.max_active) {
+        for id in book::to_start(ready, self.config.max_active, &self.streamed) {
             self.start(id);
         }
     }
@@ -1275,6 +1349,9 @@ impl Owner {
             resume_data,
             paused: false,
         }));
+        if self.streamed.contains(&id) {
+            self.engine.send(EngineCommand::Stream(id));
+        }
         self.jobs.get_mut(&id).expect("scheduled").observed = Observed::InEngine(phase);
         self.publish(id);
     }

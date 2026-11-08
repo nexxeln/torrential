@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::os::unix::fs::PermissionsExt;
@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use serde_json::Value;
 use sha2::Digest;
+use torrential_core::Target;
+use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame};
 use torrential_engine as lt;
 
 const PIECE: u32 = 16 * 1024;
@@ -781,4 +783,51 @@ fn a_download_to_files_a_queued_download_will_write_is_refused() {
         error["hint"],
         format!("choose another folder with --dir, or remove {0} with torrential rm {0}", first.short())
     );
+}
+
+fn ask(socket: &mut std::os::unix::net::UnixStream, request: &Request) -> Value {
+    socket.write_all(&encode_frame(request).unwrap()).unwrap();
+    let mut len = [0u8; 4];
+    socket.read_exact(&mut len).unwrap();
+    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+    socket.read_exact(&mut body).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// The status line and headers, and the body, of one GET with a `Range` header.
+fn get_range(url: &str, range: &str) -> (String, Vec<u8>) {
+    let (host, path) = url.strip_prefix("http://").unwrap().split_once('/').unwrap();
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    write!(stream, "GET /{path} HTTP/1.1\r\nHost: {host}\r\nRange: {range}\r\nConnection: close\r\n\r\n").unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    (String::from_utf8(response[..end].to_vec()).unwrap(), response[end + 4..].to_vec())
+}
+
+#[test]
+fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
+    let fixture = Fixture::new("film", &[("film.mkv", 20 << 20), ("film.srt", 3_000)], 23);
+    let seeder = Seeder::start(&fixture, SLOW);
+    let home = Home::new(&seeder);
+    home.ok(&["status"]);
+    let mut socket = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
+    let play = PlayRequest {
+        target: Target::TorrentFile(fixture.torrent_file().into()),
+        dir: Some(home.downloads()),
+        files: vec![0],
+        setup_max_size: None,
+    };
+    let reply = ask(&mut socket, &Request::Play(play));
+    let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
+    assert!(url.ends_with(&format!("/{}/0/film.mkv", fixture.id())), "{url}");
+
+    let (head, body) = get_range(&url, "bytes=10000000-10099999");
+    assert!(head.starts_with("HTTP/1.1 206 Partial Content\r\n"), "{head}");
+    assert!(head.contains("\r\nContent-Range: bytes 10000000-10099999/20971520\r\n"), "{head}");
+    assert!(body == fixture.files["film.mkv"][10_000_000..10_100_000], "the 100 KB from the middle match the source");
+    let job = home.job(&fixture.id());
+    assert!(verified(&job) < fixture.total() / 2, "{} of {} bytes verified", verified(&job), fixture.total());
 }

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -223,20 +224,31 @@ impl JobEntry {
     }
 }
 
-pub fn to_start<'a>(jobs: impl Iterator<Item = &'a JobEntry>, max_active: usize) -> Vec<TorrentId> {
-    let mut waiting = Vec::new();
+/// Streamed jobs start at once and take no slot.
+pub fn to_start<'a>(
+    jobs: impl Iterator<Item = &'a JobEntry>,
+    max_active: usize,
+    streamed: &BTreeSet<TorrentId>,
+) -> Vec<TorrentId> {
+    let (mut now, mut waiting) = (Vec::new(), Vec::new());
     let mut active = 0;
     for job in jobs {
+        let streamed = streamed.contains(&job.id());
         if job.observed.occupies_slot() {
-            active += 1;
+            active += usize::from(!streamed);
         } else if job.record.intent == Intent::Running
             && matches!(job.observed, Observed::Absent | Observed::InEngine(Phase::Paused))
         {
-            waiting.push((job.record.added_at, job.id()));
+            if streamed {
+                now.push(job.id());
+            } else {
+                waiting.push((job.record.added_at, job.id()));
+            }
         }
     }
     waiting.sort();
-    waiting.into_iter().take(max_active.saturating_sub(active)).map(|(_, id)| id).collect()
+    now.extend(waiting.into_iter().take(max_active.saturating_sub(active)).map(|(_, id)| id));
+    now
 }
 
 #[cfg(test)]
@@ -361,9 +373,10 @@ mod tests {
             entry(5, 1, Intent::Running, Observed::Parked),
             entry(6, 40, Intent::Running, Observed::InEngine(Phase::Paused)),
         ];
-        let ids: Vec<u8> = to_start(jobs.iter(), 3).iter().map(|id| id.as_bytes()[0]).collect();
+        let none = BTreeSet::new();
+        let ids: Vec<u8> = to_start(jobs.iter(), 3, &none).iter().map(|id| id.as_bytes()[0]).collect();
         assert_eq!(ids, [3, 2]);
-        let ids: Vec<u8> = to_start(jobs.iter(), 4).iter().map(|id| id.as_bytes()[0]).collect();
+        let ids: Vec<u8> = to_start(jobs.iter(), 4, &none).iter().map(|id| id.as_bytes()[0]).collect();
         assert_eq!(ids, [3, 2, 6]);
     }
 
