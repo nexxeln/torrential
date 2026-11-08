@@ -271,7 +271,7 @@ fn a_toast_never_pushes_out_the_first_hint() {
     press(&mut state, "d");
     state.say(crate::state::Tone::Success, started);
     let footer = line(&render(&state), 29);
-    assert_eq!(footer, format!("{:14}{started}{:8}space pause   x remove   o open", "", ""));
+    assert_eq!(footer, format!("{:14}{started}{:8}space pause   P play   x remove", "", ""));
     state.update(Msg::Resize(60, 16));
     let footer = line(&render(&state), 15);
     assert_eq!(footer, format!("{:14}Started Night of the Living…     space pause", ""));

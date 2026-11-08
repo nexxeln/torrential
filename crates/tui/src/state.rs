@@ -16,6 +16,16 @@ pub enum Item {
     Result(ReleaseId),
 }
 
+impl Item {
+    /// The reference the engine resolves to this item.
+    pub fn reference(self) -> String {
+        match self {
+            Item::Download(id) => id.to_hex(),
+            Item::Result(id) => id.to_ref(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Query,

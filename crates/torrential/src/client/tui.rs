@@ -9,6 +9,7 @@ use torrential_core::{Error, ErrorCode, Machine, Preferences, Profile, SearchQue
 use torrential_tui::{Edit, Exit};
 
 use super::connect::{self, Conn, DEFAULT_REPLY_WITHIN};
+use super::play::{self, Playing};
 use crate::config::{self, Config};
 use crate::daemon::admission::{Disk, RealDisk};
 use crate::env::Env;
@@ -99,6 +100,18 @@ impl torrential_tui::Backend for EngineBackend {
             Response::Error { error } => Err(error),
             other => Err(connect::unexpected(&other)),
         }
+    }
+
+    fn play(&self, reference: &str) -> Result<String, Error> {
+        let config = Config::load(&self.paths, &self.env)?;
+        let mut conn = self.conn()?;
+        let target = Target::Prefix(reference.to_string());
+        let listing = super::file_list(&mut conn, target.clone())?;
+        let reply = play::start(&mut conn, target, &listing, None, config.preferences.max_size)?;
+        let player = play::player(&config, &self.paths, &self.env, &reply.streams[0].url)?;
+        let name = listing.name.unwrap_or_else(|| crate::output::views::short_ref(&listing.id));
+        play::open(&player, &Playing { name, reply }, &self.env)?;
+        Ok(player.name())
     }
 
     fn pause(&self, id: &str) -> Result<Vec<Change>, Error> {
