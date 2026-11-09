@@ -215,7 +215,7 @@ impl Libtorrent {
                 self.events.push(EngineEvent::ResumeData { id, data: data.into_bytes(), verified, piece_map, files });
             }
             (A::ResumeDataFailed { error, .. }, Some(id)) => {
-                let error = Error::new(ErrorCode::StorageError, format!("libtorrent did not save its state: {error}"))
+                let error = Error::new(ErrorCode::StorageError, format!("could not save the resume data: {error}"))
                     .with_hint(format!("torrential resume {}", short(id)))
                     .with_next(format!("torrential resume {}", short(id)));
                 self.events.push(EngineEvent::Failed { id, error });
@@ -670,7 +670,7 @@ fn storage_error(id: TorrentId, file: Option<&Path>, error: &lt::NativeError) ->
             .with_hint(format!("free some space, then run torrential resume {}", short(id)))
     } else {
         Error::new(ErrorCode::StorageError, format!("{}{place}", error.message))
-            .with_hint(format!("fix the download folder, then run torrential resume {}", short(id)))
+            .with_hint(format!("check the download folder, then run torrential resume {}", short(id)))
     }
 }
 

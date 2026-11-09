@@ -191,7 +191,7 @@ fn a_download_getting_bytes_shows_where_its_pieces_sit() {
     let (state, buf, y) = wikipedia_with(JobStatus::Downloading, Some(SCATTERED));
     assert_eq!(
         line(&buf, y),
-        "    getting ● wikipedia-en-2026-09-text                       █▄▁▁▇▂▆▆▂▄██▁▁▄▄   22%      30m left"
+        "downloading ● wikipedia-en-2026-09-text                       █▄▁▁▇▂▆▆▂▄██▁▁▄▄   22%      30m left"
     );
     let (x, _) = find(&buf, "█▄▁▁▇");
     let plain = render_in(&state, ColorMode::NoColor);
@@ -204,7 +204,7 @@ fn a_gauge_spreads_a_few_wanted_slices_across_every_cell() {
     let (_, buf, y) = wikipedia_with(JobStatus::Downloading, Some(ONE_FILE));
     assert_eq!(
         line(&buf, y),
-        "    getting ● wikipedia-en-2026-09-text                       ████▄▄▄▁▁▁▂▂▂▆▆▆   22%      30m left"
+        "downloading ● wikipedia-en-2026-09-text                       ████▄▄▄▁▁▁▂▂▂▆▆▆   22%      30m left"
     );
     let (_, buf, y) = wikipedia_with(JobStatus::Downloading, Some(&"-".repeat(64)));
     assert!(line(&buf, y).contains(" ━━━╸──────────── "), "nothing wanted: {}", line(&buf, y));
@@ -220,7 +220,7 @@ fn a_stalled_download_draws_the_rule_until_bytes_arrive_again() {
         job.progress.eta = None;
         Msg::Watch(Event::Job { job: Box::new(job) })
     };
-    let gauge = "    getting ● wikipedia-en-2026-09-text                       ▃▂▁▄▂▂▁▃▂▁▃▂▂▂▁▁   22%";
+    let gauge = "downloading ● wikipedia-en-2026-09-text                       ▃▂▁▄▂▂▁▃▂▁▃▂▂▂▁▁   22%";
     let file_ink = |buf: &Buffer, x: u16| buf[(x, find(buf, "s-multistream.xml.bz2").1)].fg;
     state.update(wikipedia(600));
     let buf = render(&state);
@@ -232,7 +232,7 @@ fn a_stalled_download_draws_the_rule_until_bytes_arrive_again() {
     later(&mut state, 10_000);
     state.update(Msg::Tick);
     let buf = render(&state);
-    let stalled = "    getting ● wikipedia-en-2026-09-text                       ━━━╸────────────   22%       stalled";
+    let stalled = "downloading ● wikipedia-en-2026-09-text                       ━━━╸────────────   22%       stalled";
     assert_eq!(line(&buf, 4), stalled);
     assert_eq!((buf[(x, 4)].fg, file_ink(&buf, x)), (theme::PENCIL, theme::PENCIL), "no bytes: pencil, not sage");
     state.update(wikipedia(600));
@@ -254,14 +254,14 @@ fn a_long_query_is_cut_so_failed_sources_stay_in_view() {
     state.update(key(KeyCode::Enter));
     state.update(Msg::SearchDone { search: 1, result: Ok(result(night()[2..3].to_vec(), final_sources())) });
     let buf = render(&state);
-    assert_eq!(line(&buf, 2), "     search │ night of the living dead 1968 1080p bluray…   1 found · 2 failed");
+    assert_eq!(line(&buf, 2), "     search │ night of the living dead 1968 1080p blura…   1 result · 2 failed");
     let (x, y) = find(&buf, "2 failed");
     assert_eq!(buf[(x, y)].fg, theme::ERROR);
     press(&mut state, "/");
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
     let caret = view::render(&mut buf, &state, ColorMode::TrueColor);
-    assert_eq!(line(&buf, 2), "     search ●  of the living dead 1968 1080p bluray x264    1 found · 2 failed");
-    assert_eq!(caret, Some(ratatui::layout::Position::new(56, 2)));
+    assert_eq!(line(&buf, 2), "     search ● of the living dead 1968 1080p bluray x264    1 result · 2 failed");
+    assert_eq!(caret, Some(ratatui::layout::Position::new(55, 2)));
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn every_footer_keeps_its_way_out_and_its_keys_hint_at_every_width() {
     type Footer = (fn((u16, u16)) -> State, &'static [&'static str], &'static str);
     let footers: [Footer; 3] = [
         (newer, &["U update"], "? keys"),
-        (typing, &["0.1.1 is out"], "f1 keys"),
+        (typing, &["0.1.1 available"], "f1 keys"),
         (file_tree, &["esc back"], "? keys"),
     ];
     for w in 40..=160 {
@@ -390,27 +390,24 @@ fn a_row_shows_the_resolution_and_its_details_spell_out_the_quality() {
 
 fn heads_row(state: &State) -> String {
     let buf = render(state);
-    line(&buf, find(&buf, "found │").1)
+    line(&buf, find(&buf, "results │").1)
 }
 
 #[test]
 fn a_film_search_says_what_it_ranked_for_in_as_many_parts_as_fit() {
     assert_eq!(
         heads_row(&searched((160, 45))),
-        "      found │ ranked for this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English           size  seeds   age"
-    );
-    assert_eq!(
-        heads_row(&searched((100, 30))),
-        "      found │ ranked for this Mac: 1080p screen, shows HDR, plays HEVC, arm64    size  seeds   age"
+        "    results │ ranked for this Mac: 1080p screen, HDR, HEVC, arm64, English                       size  seeds   age"
     );
     assert_eq!(
         heads_row(&searched((80, 24))),
-        "      found │ ranked for this Mac: 1080p screen, shows HDR   size  seeds   age"
+        "    results │ ranked for this Mac: 1080p screen, HDR, HEVC   size  seeds   age"
     );
-    assert_eq!(heads_row(&searched((60, 16))), "      found │ ranked for this Mac        size  seeds   age");
+    assert_eq!(heads_row(&searched((70, 20))), "    results │ ranked for this Mac: 1080p screen    size  seeds   age");
+    assert_eq!(heads_row(&searched((60, 16))), "    results │ ranked for this Mac        size  seeds   age");
     let mut state = searched((100, 30));
     press(&mut state, "s");
-    assert!(heads_row(&state).contains("found │ most seeds first"), "another order ranks for nothing");
+    assert!(heads_row(&state).contains("results │ most seeds first"), "another order ranks for nothing");
 }
 
 #[test]
@@ -428,12 +425,12 @@ fn a_search_ranks_for_what_its_results_depend_on() {
     };
     assert_eq!(
         found(vec![iso("ubuntu-24.04.1-desktop-amd64.iso")]),
-        "      found │ ranked for this Mac: arm64                                         size  seeds   age",
+        "    results │ ranked for this Mac: arm64                                         size  seeds   age",
         "software that names an architecture"
     );
     assert_eq!(
         found(vec![iso("Ubuntu Linux Bible, 10th Edition")]),
-        "      found │ best match first                                                   size  seeds   age"
+        "    results │ best match first                                                   size  seeds   age"
     );
 }
 
@@ -452,11 +449,11 @@ fn a_search_before_detection_says_so_without_cutting_the_words() {
     let pending = || Profile { detected: None, ..Profile::default() };
     assert_eq!(
         heads_row(&searched_for((80, 24), pending())),
-        "      found │ ranked for this machine, not detected yet      size  seeds   age"
+        "    results │ ranked for this machine, not detected yet      size  seeds   age"
     );
     assert_eq!(
         heads_row(&searched_for((60, 16), pending())),
-        "      found │ best match first           size  seeds   age",
+        "    results │ best match first           size  seeds   age",
         "never \"ranked for this machine\""
     );
 }
@@ -467,20 +464,20 @@ fn a_search_with_overrides_names_them_or_only_the_machine() {
     let tv = || with(Preferences { screen: Some(torrential_core::Screen::Tv4k), ..Preferences::default() });
     assert_eq!(
         heads_row(&searched_for((160, 45), tv())),
-        "      found │ ranked for this Mac: 2160p screen, arm64, English · overrides: screen tv-4k        size  seeds   age"
+        "    results │ ranked for this Mac: 2160p screen, arm64, English · overrides: screen tv-4k        size  seeds   age"
     );
     assert_eq!(
         heads_row(&searched_for((100, 30), tv())),
-        "      found │ ranked for this Mac: 2160p screen · overrides: screen tv-4k        size  seeds   age"
+        "    results │ ranked for this Mac: 2160p screen · overrides: screen tv-4k        size  seeds   age"
     );
     assert_eq!(
         heads_row(&searched_for((80, 24), tv())),
-        "      found │ ranked for this Mac · overrides: screen tv-4k  size  seeds   age"
+        "    results │ ranked for this Mac · overrides: screen tv-4k  size  seeds   age"
     );
     let h264 = with(Preferences { playback: Some(torrential_core::Playback::H264), ..Preferences::default() });
     assert_eq!(
         heads_row(&searched_for((80, 24), h264)),
-        "      found │ ranked for this Mac                            size  seeds   age",
+        "    results │ ranked for this Mac                            size  seeds   age",
         "not \"1080p screen, no HDR\" without the H.264 that the override set"
     );
 }
@@ -498,7 +495,7 @@ fn the_ranking_panel_shows_what_was_detected_and_takes_the_one_mark() {
     assert_eq!(
         panel_rows(&state),
         [
-            "    ranking │ for this Mac: 1080p screen, shows HDR, plays HEVC, arm64",
+            "    ranking │ for this Mac: 1080p screen, HDR, HEVC, arm64, English",
             "            ● screen    [auto] phone  laptop  tv  tv-4k         detected 1080p",
             "            │ max size  [none] 2 GiB  8 GiB  20 GiB",
             "            │ playback  [auto] hevc-hdr  hevc  h264          detected hevc-hdr",
@@ -527,16 +524,16 @@ fn the_panel_previews_what_search_would_rank_for() {
             "    ranking │ for this Mac: 2160p screen, arm64, English",
             "            ● screen     auto  phone  laptop  tv [tv-4k]                            detected 1080p",
             "            │ max size  [none] 2 GiB  8 GiB  20 GiB",
-            "            │ playback  [auto] hevc-hdr  hevc  h264                                 plays anything",
+            "            │ playback  [auto] hevc-hdr  hevc  h264                                      any codec",
         ],
         "a TV's player is not this Mac's, so nothing limits playback"
     );
     assert!(heads_row(&state).contains("ranked for this Mac: 1080p screen"), "the list keeps its order until a save");
-    assert!(heads_row(&state).contains(", plays HEVC (saved)"), "and says it ranks for the saved picks");
+    assert!(heads_row(&state).contains(", arm64 (saved)"), "and says it ranks for the saved picks");
     press(&mut state, "jl");
     assert_eq!(
         panel_rows(&state)[2],
-        "            ● max size   none [2 GiB] 8 GiB  20 GiB                       refuses larger downloads"
+        "            ● max size   none [2 GiB] 8 GiB  20 GiB                        blocks larger downloads"
     );
 }
 
@@ -547,10 +544,7 @@ fn before_any_search_the_panel_shows_the_machine_detected_at_start() {
     assert_eq!(panel_rows(&state)[0], "    ranking │ for this machine, not detected yet");
     assert!(panel_rows(&state)[1].ends_with("not detected yet"), "{}", panel_rows(&state)[1]);
     state.update(Msg::Machine(mac()));
-    assert_eq!(
-        panel_rows(&state)[0],
-        "    ranking │ for this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English"
-    );
+    assert_eq!(panel_rows(&state)[0], "    ranking │ for this Mac: 1080p screen, HDR, HEVC, arm64, English");
     assert!(panel_rows(&state)[1].ends_with("detected 1080p"));
 }
 
@@ -712,7 +706,7 @@ fn the_margin_labels_each_group_once() {
     let margins: Vec<String> =
         (0..30).map(|y| line(&buf, y).chars().take(11).collect::<String>().trim().to_string()).collect();
     let labels: Vec<&str> = margins.iter().map(String::as_str).filter(|m| !m.is_empty()).collect();
-    assert_eq!(labels, ["torrential", "search", "getting", "error", "paused", "done", "found"]);
+    assert_eq!(labels, ["torrential", "search", "downloading", "error", "paused", "done", "results"]);
     let (x, y) = find(&buf, "error │");
     assert_eq!((x, buf[(x, y)].fg), (6, theme::ERROR));
 }
@@ -738,8 +732,8 @@ fn remove_asks_in_the_margin_and_says_the_files_stay() {
     let (x, y) = find(&buf, "remove?");
     assert_eq!((x, buf[(x, y)].fg), (4, theme::ERROR));
     assert!(line(&buf, y).contains("● stackexchange"), "{}", line(&buf, y));
-    assert!(line(&buf, y + 1).contains("Its files stay in ~/Downloads/torrential."), "{}", line(&buf, y + 1));
-    assert!(line(&buf, y + 1).ends_with("enter removes it   esc keeps it"));
+    assert!(line(&buf, y + 1).contains("Files are kept in ~/Downloads/torrential."), "{}", line(&buf, y + 1));
+    assert!(line(&buf, y + 1).ends_with("enter remove   esc cancel"));
     assert_eq!(line(&buf, 29), "", "the footer does not repeat the keys");
 }
 
@@ -752,7 +746,7 @@ fn a_result_in_downloads_offers_the_way_there() {
     state.toast = None;
     let buf = render(&state);
     assert!(line(&buf, 29).ends_with("d downloads   s sort   ? keys"), "{}", line(&buf, 29));
-    assert!(shot(&state).contains("in downloads · press d to see it"));
+    assert!(shot(&state).contains("in downloads · press d to view it"));
 }
 
 #[test]
@@ -772,7 +766,7 @@ fn without_color_the_mark_the_ticks_and_the_words_still_carry_meaning() {
     let (x, y) = find(&buf, "ranked for this Mac");
     assert!(buf[(x, y)].modifier.contains(Modifier::DIM), "pencil turns faint");
     let screen = shot(&state);
-    assert!(screen.contains("1 executable left out"), "{screen}");
+    assert!(screen.contains("1 executable excluded"), "{screen}");
 }
 
 #[test]

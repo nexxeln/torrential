@@ -29,12 +29,12 @@ const UPDATED: &str = "updated.json";
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
-    /// Say when a newer version is out
+    /// Show a notice when a newer version is available
     #[default]
     Notify,
     /// Install newer versions in the background
     Auto,
-    /// Never look for newer versions
+    /// Never check for newer versions
     Off,
 }
 
@@ -175,7 +175,7 @@ impl Releases {
             Some(latest) if response.status().is_redirection() => Ok(latest),
             _ => Err(Error::new(
                 ErrorCode::FetchFailed,
-                format!("{url} answered {} without naming a release", response.status()),
+                format!("{url} returned {} without a release version", response.status()),
             )
             .with_hint("run torrential update again later")),
         }
@@ -188,7 +188,7 @@ impl Releases {
         )?;
         let mut response = client.get(&url).send().await.map_err(|e| unreachable(&url, &e))?;
         if !response.status().is_success() {
-            return Err(Error::new(ErrorCode::FetchFailed, format!("{url} answered {}", response.status()))
+            return Err(Error::new(ErrorCode::FetchFailed, format!("{url} returned {}", response.status()))
                 .with_hint("run torrential update again later"));
         }
         let mut body = Vec::new();
@@ -254,13 +254,13 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
             ErrorCode::NotFound,
             format!("there is no prebuilt torrential for {} {}", std::env::consts::OS, std::env::consts::ARCH),
         )
-        .with_hint("build it from source as https://github.com/nexxeln/torrential#install shows"));
+        .with_hint("build it from source: https://github.com/nexxeln/torrential#install"));
     };
     let exe = executable()?;
     if exe.starts_with("/nix/store") {
         return Err(Error::new(
             ErrorCode::StorageError,
-            format!("torrential runs from {}, which Nix manages", exe.display()),
+            format!("torrential is installed at {}, which is managed by Nix", exe.display()),
         )
         .with_hint("update it with Nix, for example nix profile upgrade torrential"));
     }
@@ -310,7 +310,7 @@ fn unpack(asset: &str, tarball: &[u8]) -> Result<Vec<u8>, Error> {
             return Ok(binary);
         }
     }
-    Err(Error::new(ErrorCode::FetchFailed, format!("{asset} holds no torrential binary")))
+    Err(Error::new(ErrorCode::FetchFailed, format!("{asset} contains no torrential binary")))
 }
 
 struct Partial {
@@ -413,7 +413,8 @@ impl Audience {
     }
 
     fn out(self, current: &str, latest: Version) -> String {
-        let news = format!("torrential {latest} is out (you have {current}). Run torrential update to install it.");
+        let news =
+            format!("torrential {latest} is available (you have {current}). Run torrential update to install it.");
         match self {
             Self::Person => news,
             Self::Agent => format!("# update: {news}"),
@@ -568,11 +569,11 @@ mod tests {
         assert_eq!(Audience::of(Mode::Plain, &env(&[]), false), None);
         assert_eq!(
             Audience::Person.out("0.1.0", latest),
-            "torrential 0.1.1 is out (you have 0.1.0). Run torrential update to install it."
+            "torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it."
         );
         assert_eq!(
             Audience::Agent.out("0.1.0", latest),
-            "# update: torrential 0.1.1 is out (you have 0.1.0). Run torrential update to install it."
+            "# update: torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it."
         );
         assert_eq!(Audience::Person.updated("0.1.0", "0.1.1"), "Updated torrential to 0.1.1.");
         assert_eq!(Audience::Agent.updated("0.1.0", "0.1.1"), "# updated torrential from 0.1.0 to 0.1.1");

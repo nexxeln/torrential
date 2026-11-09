@@ -307,12 +307,12 @@ mod tests {
     #[test]
     fn an_error_whose_hint_leads_with_a_command_names_it_as_next() {
         let e = Error::new(ErrorCode::VerificationFailed, "3 damaged pieces in the selected files")
-            .with_hint("torrential verify 6bc1af --repair downloads them again")
+            .with_hint("run torrential verify 6bc1af --repair to download them again")
             .with_next("torrential verify 6bc1af --repair");
         assert_eq!(
             error(Mode::Plain, &e).stderr,
-            "error[verification_failed]: 3 damaged pieces in the selected files\nhint: torrential verify 6bc1af --repair \
-             downloads them again\nnext: torrential verify 6bc1af --repair\n"
+            "error[verification_failed]: 3 damaged pieces in the selected files\nhint: run torrential verify 6bc1af \
+             --repair to download them again\nnext: torrential verify 6bc1af --repair\n"
         );
         let json: serde_json::Value = serde_json::from_str(&error(Mode::Json, &e).stdout).unwrap();
         assert_eq!(json["next"], "torrential verify 6bc1af --repair");

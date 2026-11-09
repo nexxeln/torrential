@@ -635,7 +635,7 @@ impl Owner {
         let Some(metainfo) = metainfo else {
             return Err(see_files(Error::new(
                 ErrorCode::Usage,
-                format!("{short} has no file list yet, so nothing can play"),
+                format!("{short} has no file list yet, so it cannot be played"),
             )));
         };
         let count = metainfo.files.len();
@@ -1150,14 +1150,14 @@ impl Owner {
         let error = Error::new(
             ErrorCode::NoSource,
             format!(
-                "no peer or web seed has had the {} still missing ({}) for {}",
+                "no peer or web seed has had the remaining {} ({}) for {}",
                 crate::output::format::count(pieces, "piece"),
                 size(missing),
                 crate::output::format::elapsed(self.config.stall_after),
             ),
         )
         .with_hint(format!(
-            "torrential resume {} looks for them again; the {} verified stays",
+            "run torrential resume {} to try again; the {} already verified is kept",
             &id.to_hex()[..6],
             size(verified)
         ))
@@ -1314,7 +1314,7 @@ impl Owner {
                     ErrorCode::VerificationFailed,
                     format!("{} in the selected files", crate::output::format::count(n as usize, "damaged piece")),
                 )
-                .with_hint(format!("torrential verify {short} --repair downloads them again"))
+                .with_hint(format!("run torrential verify {short} --repair to download them again"))
                 .with_next(format!("torrential verify {short} --repair"));
                 let failed = Intent::Failed { error };
                 record(&mut self.store, Some(&failed));
@@ -1422,7 +1422,7 @@ impl Owner {
                 ErrorCode::MetadataTimeout,
                 format!("no peer sent the file list for {short} in time"),
             )
-            .with_hint(format!("try again later, or run torrential get {short} to keep looking in the background"))));
+            .with_hint(format!("try again later, or run torrential get {short} to keep trying in the background"))));
         }
         let abandoned: Vec<TorrentId> =
             self.probes.iter().copied().filter(|id| !self.metadata_waiters.iter().any(|w| w.id == *id)).collect();

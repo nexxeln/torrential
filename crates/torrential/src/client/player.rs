@@ -115,9 +115,9 @@ pub fn find(choice: Option<&Choice>, env: &Env) -> Option<Player> {
 pub fn missing(choice: Option<&Choice>, url: &str, config: &Path) -> Error {
     let message = match choice {
         Some(Choice::Iina) => "config.yaml sets player: iina, but IINA is not installed".to_string(),
-        Some(Choice::Mpv) => "config.yaml sets player: mpv, but no mpv is on PATH".to_string(),
+        Some(Choice::Mpv) => "config.yaml sets player: mpv, but mpv is not on PATH".to_string(),
         Some(Choice::Vlc) => "config.yaml sets player: vlc, but VLC is not installed".to_string(),
-        Some(Choice::Program(_)) | None => "found no IINA, mpv, or VLC to play it in".to_string(),
+        Some(Choice::Program(_)) | None => "no media player found (looked for IINA, mpv, and VLC)".to_string(),
     };
     Error::new(ErrorCode::NotFound, message).with_hint(format!(
         "open {url} in any player, or set player: in {} to the player's absolute path",

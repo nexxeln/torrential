@@ -100,12 +100,12 @@ pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Erro
     let player = player(&config, &paths, env, &playing.reply.streams[0].url)?;
     if mode == Mode::Plain {
         open(&player, &playing, env)?;
-        let summary = vec![format!("playing in {} · the rest keeps downloading", player.name())];
+        let summary = vec![format!("playing in {} · the download continues", player.name())];
         return Ok(emit(mode, &Doc { summary, ..doc }, &Typed { kind: "play", body: &playing }));
     }
     let id = views::short_ids(&[playing.reply.job.id]).remove(0);
     let _ = ctrlc::set_handler(move || {
-        eprintln!("\nThe download keeps going: torrential status {id}");
+        eprintln!("\nThe download continues in the background: torrential status {id}");
         std::process::exit(130);
     });
     let runtime = countdown(conn, &playing)?;
@@ -157,7 +157,7 @@ pub fn start(
         let id = views::short_ref(&listing.id);
         let name = listing.name.clone().unwrap_or_else(|| id.clone());
         return Err(Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
-            .with_hint(format!("run torrential files {id} to see what it holds"))
+            .with_hint(format!("run torrential files {id} to list its files"))
             .with_next(format!("torrential files {id}")));
     };
     let files = [playable.video].into_iter().chain(playable.subtitles).collect();
@@ -199,7 +199,7 @@ fn resolve(
     let Some(release) = releases.into_iter().next() else {
         let search = format!("torrential search {}", words.iter().map(|w| shell_word(w)).collect::<Vec<_>>().join(" "));
         return Err(Error::new(ErrorCode::NotFound, format!("no video result matches {text:?}"))
-            .with_hint(format!("run {search} to see what each source found"))
+            .with_hint(format!("run {search} to see all results"))
             .with_next(search));
     };
     let target = Target::Prefix(release.id.to_ref());

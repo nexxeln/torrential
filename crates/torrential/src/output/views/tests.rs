@@ -155,7 +155,7 @@ fn film_and_software_searches_say_what_they_ranked_for() {
 
     assert_eq!(
         summary(vec![film.clone()], None, &detected),
-        ["ranked for this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English"]
+        ["ranked for this Mac: 1080p screen, HDR, HEVC, arm64, English"]
     );
     assert_eq!(
         summary(vec![film], None, &Profile { preferences: tv, ..detected.clone() }),
@@ -480,7 +480,7 @@ fn status_offers_resume_for_interrupted_and_failed_downloads() {
     let fleet = fleet();
     let (summary, wait) = next(&fleet);
     assert_eq!(wait.as_deref(), Some("torrential wait 9b5212 d40a19 51e0c7"));
-    assert_eq!(summary.last().unwrap(), "torrential resume c32cdd e3a1f0 restarts the interrupted and failed ones");
+    assert_eq!(summary.last().unwrap(), "to retry interrupted and failed downloads: torrential resume c32cdd e3a1f0");
 
     let stopped: Vec<Job> = fleet.iter().filter(|j| j.status.is_stopped()).cloned().collect();
     assert_eq!(next(&stopped).1.as_deref(), Some("torrential resume c32cdd e3a1f0"));
@@ -579,7 +579,7 @@ fn wait_until_done_timeout_error_and_stop() {
     let failed = JobStatus::Error {
         error: Error::new(
             ErrorCode::DiskFull,
-            "needs 1.5 GiB more on this disk, but only 900.0 MiB is free and 2.0 GiB stays in reserve",
+            "needs 1.5 GiB more on this disk, but only 900.0 MiB is free and 2.0 GiB is kept in reserve",
         )
         .with_hint("free some space, or choose another disk with --dir"),
     };
@@ -658,9 +658,9 @@ fn doctor_report() {
             status: CheckStatus::Ok,
             detail: "not running; the next command starts it".into(),
         },
-        Check { check: "sources".into(), status: CheckStatus::Fail, detail: "1 of 2 answered".into() },
+        Check { check: "sources".into(), status: CheckStatus::Fail, detail: "1 of 2 responded".into() },
         Check { check: "source archive.org".into(), status: CheckStatus::Ok, detail: "12 results, 380 ms".into() },
-        Check { check: "source knaben".into(), status: CheckStatus::Fail, detail: "http 503, 211 ms".into() },
+        Check { check: "source knaben".into(), status: CheckStatus::Fail, detail: "HTTP 503, 211 ms".into() },
     ];
     let fix = Some(
         "in interactive Codex, rerun with sandbox_permissions \"require_escalated\" and prefix_rule [\"torrential\"]"
@@ -764,24 +764,26 @@ fn sample(code: ErrorCode) -> Error {
         ErrorCode::PathConflict => {
             admission::check_conflicts(&plan(vec!["/Users/ada/Movies/night/Night.mp4".into()])).unwrap_err()
         }
-        ErrorCode::ProvidersUnavailable => {
-            given(code, "every search source failed", "try again in a minute, or pick a source with --source")
-                .with_details(Details::Sources(vec![
-                    report("knaben", SourceOutcome::Http { status: 502 }),
-                    report("apibay", SourceOutcome::Timeout),
-                ]))
-        }
+        ErrorCode::ProvidersUnavailable => given(
+            code,
+            "all sources failed (knaben, apibay)",
+            "check the network connection, or retry with a longer --timeout",
+        )
+        .with_details(Details::Sources(vec![
+            report("knaben", SourceOutcome::Http { status: 502 }),
+            report("apibay", SourceOutcome::Timeout),
+        ])),
         ErrorCode::MetadataTimeout => given(
             code,
             "no peer sent the file list for 9b5212 in time",
-            "try again later, or run torrential get 9b5212 to keep looking in the background",
+            "try again later, or run torrential get 9b5212 to keep trying in the background",
         ),
         ErrorCode::NetworkUnavailable => {
             given(code, "no network route to any DHT node", "check the network connection, then run the command again")
         }
         ErrorCode::FetchFailed => given(
             code,
-            "could not fetch https://archive.org/download/x/x_archive.torrent: http 404",
+            "could not fetch https://archive.org/download/x/x_archive.torrent: HTTP 404",
             "try the magnet link instead",
         ),
         ErrorCode::SandboxNetworkBlocked => crate::client::launch::sandbox_error(
@@ -802,15 +804,17 @@ fn sample(code: ErrorCode) -> Error {
             )
             .unwrap_err()
         }
-        ErrorCode::DaemonVersion => {
-            given(code, "the engine speaks wire 2, the client 1", "torrential engine stop, then run the command again")
-                .with_details(Details::Versions { client: "0.1.0".into(), daemon: "0.2.0".into() })
-                .with_next("torrential engine stop")
-        }
+        ErrorCode::DaemonVersion => given(
+            code,
+            "the engine uses protocol version 2, but this client uses 1",
+            "run torrential engine stop, then run the command again",
+        )
+        .with_details(Details::Versions { client: "0.1.0".into(), daemon: "0.2.0".into() })
+        .with_next("torrential engine stop"),
         ErrorCode::StateCorrupt => given(
             code,
             "the state database /Users/ada/.local/state/torrential/state.db is damaged: file is not a database",
-            "torrential never resets state on its own; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup",
+            "the state is never reset automatically; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup",
         ),
         ErrorCode::DiskFull => admission::check_disk(disk, 70 * GIB, 0).unwrap_err(),
         ErrorCode::TooLarge => {
@@ -821,19 +825,19 @@ fn sample(code: ErrorCode) -> Error {
         }
         ErrorCode::StorageError => given(
             code,
-            "the disk holding /Users/ada/.local/state/torrential/state.db is full",
+            "the disk containing /Users/ada/.local/state/torrential/state.db is full",
             "free some space on that disk",
         ),
         ErrorCode::VerificationFailed => given(
             code,
             "3 damaged pieces in the selected files",
-            "torrential verify 6bc1af --repair downloads them again",
+            "run torrential verify 6bc1af --repair to download them again",
         )
         .with_next("torrential verify 6bc1af --repair"),
         ErrorCode::NoSource => given(
             code,
-            "no peer or web seed has had the 2 pieces still missing (488.8 KiB) for 20m",
-            "torrential resume 770e77 looks for them again; the 33.0 MiB verified stays",
+            "no peer or web seed has had the remaining 2 pieces (488.8 KiB) for 20m",
+            "run torrential resume 770e77 to try again; the 33.0 MiB already verified is kept",
         )
         .with_next("torrential resume 770e77"),
         ErrorCode::Interrupted => given(code, "interrupted", "run the command again"),
@@ -878,7 +882,7 @@ fn skill_status_suggests_install_only_when_it_loses_no_edits() {
         "TARGET\tSTATE\tVERSION\tPATH\n\
          agents\toutdated\t0.0.9\t/Users/ada/.agents/skills/torrential\n\
          claude\tmissing\t-\t/Users/ada/.claude/skills/torrential\n\
-         # this binary carries the skill from torrential 0.1.0\n\
+         # this binary includes the skill from torrential 0.1.0\n\
          next: torrential skill install\n"
     );
     let edited = [row(Target::Agents, State::Modified, Some("0.1.0")), row(Target::Claude, State::Foreign, None)];
@@ -887,10 +891,10 @@ fn skill_status_suggests_install_only_when_it_loses_no_edits() {
         "TARGET\tSTATE\tVERSION\tPATH\n\
          agents\tmodified\t0.1.0\t/Users/ada/.agents/skills/torrential\n\
          claude\tforeign\t-\t/Users/ada/.claude/skills/torrential\n\
-         # this binary carries the skill from torrential 0.1.0\n\
+         # this binary includes the skill from torrential 0.1.0\n\
          # agents was edited after torrential wrote it\n\
          # claude was not written by torrential\n\
-         # torrential skill install --force replaces them\n"
+         # to replace them: torrential skill install --force\n"
     );
     let check = |status, detail: &str| Check { check: "skill".into(), status, detail: detail.into() };
     assert_eq!(
@@ -923,7 +927,7 @@ fn a_tab_in_a_path_stays_inside_its_column() {
         skill_status(&installed, "0.1.0", &install).plain(),
         "TARGET\tSTATE\tVERSION\tPATH\n\
          agents\tmissing\t-\t/src/my repo/.agents/skills/torrential\n\
-         # this binary carries the skill from torrential 0.1.0\n\
+         # this binary includes the skill from torrential 0.1.0\n\
          next: cd '/src/my repo' && torrential skill install --scope project\n"
     );
     assert_eq!(
@@ -967,7 +971,7 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
     );
     assert_eq!(
         playing("IINA", &film),
-        "\u{1b}[38;2;153;255;228m▶\u{1b}[0m Playing in IINA. The rest keeps downloading: torrential status 6bc1af\n"
+        "\u{1b}[38;2;153;255;228m▶\u{1b}[0m Playing in IINA. The download continues: torrential status 6bc1af\n"
     );
 }
 
@@ -984,7 +988,7 @@ fn a_held_start_says_why_and_for_how_long() {
         [
             "Buffering…",
             "Buffering… ready in 0:04",
-            "Starts in 29:40 so it never pauses. Enter starts now",
+            "Starts in 29:40 so playback does not pause. Press Enter to start now",
             "Waiting for peers",
         ]
     );

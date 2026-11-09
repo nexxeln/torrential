@@ -244,16 +244,14 @@ fn read(paths: &Paths) -> Result<Option<(PathBuf, String)>, Error> {
     match (try_read(path(paths))?, try_read(paths.config.join("config.yml"))?) {
         (Some((yaml, _)), Some((yml, _))) => Err(Error::new(
             ErrorCode::Usage,
-            format!("{} and {} both exist, so torrential cannot tell which to read", yaml.display(), yml.display()),
+            format!("{} and {} both exist, and only one can be used", yaml.display(), yml.display()),
         )
         .with_hint("move what you want to keep into one file and delete the other")),
-        (None, None) if toml.exists() => {
-            Err(Error::new(ErrorCode::Usage, format!("{} is not read; torrential reads config.yaml", toml.display()))
-                .with_hint(format!(
-                    "write your settings as YAML in {}, then delete config.toml",
-                    path(paths).display()
-                )))
-        }
+        (None, None) if toml.exists() => Err(Error::new(
+            ErrorCode::Usage,
+            format!("{} is not supported; the config file is config.yaml", toml.display()),
+        )
+        .with_hint(format!("write your settings as YAML in {}, then delete config.toml", path(paths).display()))),
         (found, None) | (None, found) => Ok(found),
     }
 }
@@ -422,8 +420,8 @@ sources:
             (both.code, both.message.as_str(), both.hint.as_deref()),
             (
                 ErrorCode::Usage,
-                "$TORRENTIAL_HOME/config/config.yaml and $TORRENTIAL_HOME/config/config.yml both exist, so torrential \
-                 cannot tell which to read",
+                "$TORRENTIAL_HOME/config/config.yaml and $TORRENTIAL_HOME/config/config.yml both exist, and only one can be \
+                 used",
                 Some("move what you want to keep into one file and delete the other")
             )
         );
@@ -439,7 +437,7 @@ sources:
             (alone.code, alone.message.as_str(), alone.hint.as_deref()),
             (
                 ErrorCode::Usage,
-                "$TORRENTIAL_HOME/config/config.toml is not read; torrential reads config.yaml",
+                "$TORRENTIAL_HOME/config/config.toml is not supported; the config file is config.yaml",
                 Some("write your settings as YAML in $TORRENTIAL_HOME/config/config.yaml, then delete config.toml")
             )
         );

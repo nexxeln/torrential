@@ -320,9 +320,9 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         if client_wire != WIRE_VERSION && request != Request::Shutdown {
             let error = Error::new(
                 ErrorCode::DaemonVersion,
-                format!("the engine speaks wire {WIRE_VERSION}, the client {client_wire}"),
+                format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {client_wire}"),
             )
-            .with_hint("torrential engine stop, then run the command again")
+            .with_hint("run torrential engine stop, then run the command again")
             .with_next("torrential engine stop");
             wire::write_async(&mut wr, &Response::Error { error }).await?;
             continue;

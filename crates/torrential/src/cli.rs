@@ -13,7 +13,7 @@ use crate::completions::complete_download_ids;
     version,
     about = "Search torrent indexes and download torrents",
     disable_help_subcommand = true,
-    after_help = "Examples:\n  torrential search arch linux iso\n  torrential get 9b5212 --dir ~/isos\n  torrential wait 9b5212\n\nAgents: run torrential skill install to add the skill that explains torrential."
+    after_help = "Examples:\n  torrential search arch linux iso\n  torrential get 9b5212 --dir ~/isos\n  torrential wait 9b5212\n\nAgents: run torrential skill install to add the torrential skill."
 )]
 pub struct Cli {
     /// Print JSON on stdout instead of text
@@ -41,34 +41,34 @@ pub enum Command {
         after_help = "Examples:\n  torrential get 9b5212\n  torrential get 'magnet:?xt=urn:btih:…' --dir ~/isos\n  torrential get 6bc1af --files '*.mp4' --dry-run"
     )]
     Get(GetArgs),
-    /// Play a video in your player while it downloads, starting when it will not pause
+    /// Play a video in your media player while it downloads
     #[command(
         after_help = "Examples:\n  torrential play night of the living dead\n  torrential play 6bc1af\n  torrential play 6bc1af --json"
     )]
     Play(PlayArgs),
     /// List downloads, or show one in detail
     Status(StatusArgs),
-    /// Follow downloads until they finish or the timeout passes
+    /// Follow downloads until they finish or the timeout is reached
     #[command(
         after_help = "Examples:\n  torrential wait 9b5212\n  torrential wait 9b5212 --timeout 110m\n  torrential wait 9b5212 --until metadata"
     )]
     Wait(WaitArgs),
-    /// Pause downloads, returning once writes stop
+    /// Pause downloads and return once disk writes stop
     Pause(RefsArgs),
     /// Resume downloads, or retry failed ones
     Resume(ResumeArgs),
-    /// Stop tracking downloads and keep their files
+    /// Remove downloads from the list without deleting their files
     Rm(RefsArgs),
     /// Re-hash the data on disk and report damaged pieces
     Verify(VerifyArgs),
-    /// Show what search ranks for on this machine, or set where you watch instead
+    /// Show or change ranking and update settings
     #[command(
         after_help = "Examples:\n  torrential setup\n  torrential setup --screen tv-4k\n  torrential setup --screen auto --max-size none\n  torrential setup --updates auto"
     )]
     Setup(SetupArgs),
     /// Diagnose sandbox, disk, state, engine, config, and sources
     Doctor(DoctorArgs),
-    /// Open the terminal UI, which `torrential` alone also opens on a terminal
+    /// Open the terminal UI, the default when no command is given in a terminal
     Tui,
     /// Inspect or manage the engine process
     #[command(name = "engine", visible_alias = "daemon")]
@@ -83,12 +83,12 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Install, check, or print the skill that teaches coding agents to use torrential
+    /// Install, check, or print the torrential skill for coding agents
     Skill {
         #[command(subcommand)]
         command: crate::skill::SkillCommand,
     },
-    /// Install the latest torrential, or check whether a newer one is out
+    /// Install the latest version, or check whether a newer one is available
     #[command(after_help = "Examples:\n  torrential update\n  torrential update --check")]
     Update(UpdateArgs),
 }
@@ -117,7 +117,7 @@ pub struct SearchArgs {
     /// Hide results larger than this, for example 8GiB, and results with unknown size
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub max_size: Option<u64>,
-    /// Order of the results. Relevance comes before popularity
+    /// Sort order. The default, relevance, ranks match quality above seed count
     #[arg(long, value_enum, default_value_t = SortArg::Relevance)]
     pub sort: SortArg,
     /// Number of results to show
@@ -136,16 +136,16 @@ pub struct SearchArgs {
 
 #[derive(Args, Debug)]
 pub struct SetupArgs {
-    /// Where you watch, when it is not this machine's display. auto goes back to the display
+    /// The screen you watch on, if it is not this machine's display. auto uses the detected display
     #[arg(long, value_enum)]
     pub screen: Option<ScreenArg>,
-    /// The largest download get starts without its own --max-size, for example 8GB, or none
+    /// Default size limit for get when --max-size is not passed, for example 8GB, or none
     #[arg(long, value_name = "SIZE", value_parser = parse_limit)]
     pub max_size: Option<Limit>,
-    /// What your player handles, when it is not this machine's. auto goes back to the display
+    /// The formats your player supports, if they differ from this machine's. auto uses the detected formats
     #[arg(long, value_enum)]
     pub playback: Option<PlaybackArg>,
-    /// Whether torrential says when a newer version is out, installs it in the background, or never looks
+    /// How to handle new versions: show a notice, install in the background, or never check
     #[arg(long, value_enum)]
     pub updates: Option<crate::update::Policy>,
 }
@@ -158,7 +158,7 @@ pub struct Limit(pub Option<u64>);
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
-    /// Also search each enabled source once, and report how it answered and how long it took
+    /// Also query each enabled source once and report its result and response time
     #[arg(long)]
     pub network: bool,
 }
@@ -168,7 +168,7 @@ pub struct FilesArgs {
     /// An ID prefix, infohash, magnet link, .torrent file, or .torrent URL
     #[arg(value_name = "REF", add = ArgValueCandidates::new(complete_download_ids))]
     pub reference: String,
-    /// List only files matching this glob or exact path, as get --files would pick them. `*` crosses folders and case is ignored. Repeat to add more
+    /// List only files matching this glob or exact path, the same way get --files selects them. `*` matches across folders and case is ignored. Repeat to add more
     #[arg(long, value_name = "GLOB")]
     pub files: Vec<String>,
 }
@@ -178,13 +178,13 @@ pub struct GetArgs {
     /// An ID prefix, infohash, magnet link, .torrent file, or .torrent URL
     #[arg(value_name = "REF", add = ArgValueCandidates::new(complete_download_ids))]
     pub reference: String,
-    /// Download only files matching this glob or exact path. `*` crosses folders and case is ignored. Repeat to add more
+    /// Download only files matching this glob or exact path. `*` matches across folders and case is ignored. Repeat to add more
     #[arg(long, value_name = "GLOB")]
     pub files: Vec<String>,
-    /// The folder the download goes into
+    /// The folder to download into
     #[arg(long, value_name = "DIR")]
     pub dir: Option<PathBuf>,
-    /// The largest download allowed, for example 120GiB. Without it the cap is the max size from torrential setup, or 50 GiB
+    /// The largest download allowed, for example 120GiB. Defaults to the max size from torrential setup, or 50 GiB
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub max_size: Option<u64>,
     /// Print the selected size, destination, free space, and conflicts without downloading
@@ -197,14 +197,14 @@ pub struct PlayArgs {
     /// A download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for
     #[arg(value_name = "WORDS", required = true, num_args = 1.., add = ArgValueCandidates::new(complete_download_ids))]
     pub words: Vec<String>,
-    /// The folder a new download goes into
+    /// The folder to download into, if this starts a new download
     #[arg(long, value_name = "DIR")]
     pub dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
-    /// Download IDs from torrential status. None lists every download
+    /// Download IDs from torrential status. Omit to list every download
     #[arg(value_name = "ID", add = ArgValueCandidates::new(complete_download_ids))]
     pub references: Vec<String>,
 }
@@ -214,10 +214,10 @@ pub struct WaitArgs {
     /// Download IDs from torrential status
     #[arg(value_name = "ID", required = true, num_args = 1.., add = ArgValueCandidates::new(complete_download_ids))]
     pub references: Vec<String>,
-    /// Stop when the download is done, or as soon as its file list is known
+    /// Stop when the download is done, or as soon as its file list is available
     #[arg(long, value_enum, default_value_t = Until::Done)]
     pub until: Until,
-    /// Give up after this long. Defaults to 100s, or no limit when a person watches in a terminal
+    /// Stop waiting after this long. Defaults to 100s, or no limit in an interactive terminal
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub timeout: Option<Duration>,
 }
@@ -253,7 +253,7 @@ pub struct VerifyArgs {
 pub enum DaemonCommand {
     /// Show whether the engine is running
     Status,
-    /// Ask the engine to save its state and exit
+    /// Stop the engine after it saves its state
     Stop,
     /// Start the engine at login with launchd or systemd
     Install,
@@ -345,9 +345,9 @@ pub enum PlaybackArg {
     HevcHdr,
     /// HEVC but not HDR
     Hevc,
-    /// H.264 (x264) only, which every player handles
+    /// H.264 (x264) only, which every player supports
     H264,
-    /// HEVC, and HDR when this machine's display shows it
+    /// HEVC, and HDR when this machine's display supports it
     Auto,
 }
 

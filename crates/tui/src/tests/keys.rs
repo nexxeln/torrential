@@ -287,7 +287,7 @@ fn shift_p_plays_a_result_or_a_download_and_says_in_what() {
     assert_eq!(press(&mut state, "P"), [Effect::Play(Item::Download(id("6f2c81")))]);
     let none = Error::new(ErrorCode::NoSelection, "wikipedia-en-2026-09-text has no video file");
     state.update(Msg::Played(Err(none)));
-    assert_eq!(state.toast.as_ref().unwrap().text, "Playing failed: wikipedia-en-2026-09-text has no video file");
+    assert_eq!(state.toast.as_ref().unwrap().text, "Playback failed: wikipedia-en-2026-09-text has no video file");
     assert_eq!(press(&mut state, "p"), [Effect::Job { id: id("6f2c81"), action: JobAction::Pause }]);
 }
 
@@ -304,7 +304,7 @@ fn remove_asks_first_and_keeps_files() {
     let effects = state.update(key(KeyCode::Enter));
     assert_eq!(effects, [Effect::Job { id: stackexchange, action: JobAction::Remove }]);
     state.update(Msg::Changed { id: stackexchange, action: JobAction::Remove, result: Ok(Vec::new()) });
-    assert_eq!(state.toast.as_ref().unwrap().text, "Removed from the list. Files stay in ~/Downloads/torrential.");
+    assert_eq!(state.toast.as_ref().unwrap().text, "Removed from the list. Files are kept in ~/Downloads/torrential.");
     assert_eq!((state.downloads.len(), cursor_name(&state)), (4, "big_buck_bunny_1080p_h264.mov".into()));
 }
 
@@ -500,7 +500,7 @@ fn a_failed_update_says_why_and_u_can_try_again() {
     state.update(Msg::Upgraded(Err(failed)));
 
     assert_eq!(state.upgrade, Some(Upgrade::Available("0.1.1".into())));
-    assert_eq!(state.toast.as_ref().map(|t| t.text.as_str()), Some("Updating failed: cannot reach github.com"));
+    assert_eq!(state.toast.as_ref().map(|t| t.text.as_str()), Some("Update failed: cannot reach github.com"));
     assert!(!state.quit);
     assert_eq!(press(&mut state, "U"), [Effect::Upgrade]);
 }

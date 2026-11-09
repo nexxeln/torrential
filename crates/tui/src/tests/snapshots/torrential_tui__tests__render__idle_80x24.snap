@@ -6,7 +6,7 @@ expression: shot(&scenario(size))
 "                                                                                "
 "     search │ press / to search                                                 "
 "            │                                                                   "
-"    getting ● wikipedia-en-2026-09-text           ▃▂▂▂▂▃▂▁   22%      30m left  "
+"downloading ● wikipedia-en-2026-09-text           ▃▂▂▂▂▃▂▁   22%      30m left  "
 "            │   ~/Downloads/torrential/wikipedia-en-2026-09-text                "
 "            │   5.3 GiB of 23.0 GiB · 10.0 MiB/s · 27 peers                     "
 "            │   enwiki-20260901-…istream.xml.bz2  ━╸──────   24%      21.4 GiB  "

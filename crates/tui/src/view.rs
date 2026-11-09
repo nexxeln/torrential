@@ -303,10 +303,10 @@ fn reason(outcome: &SourceOutcome) -> String {
     match outcome {
         SourceOutcome::Ok { .. } | SourceOutcome::Cached { .. } => "ok".into(),
         SourceOutcome::Timeout => "timed out".into(),
-        SourceOutcome::Http { status } => format!("answered {status}"),
-        SourceOutcome::Connect { .. } => "did not connect".into(),
-        SourceOutcome::BadResponse { .. } => "sent a bad answer".into(),
-        SourceOutcome::Irrelevant => "had nothing relevant".into(),
+        SourceOutcome::Http { status } => format!("HTTP {status}"),
+        SourceOutcome::Connect { .. } => "connection failed".into(),
+        SourceOutcome::BadResponse { .. } => "bad response".into(),
+        SourceOutcome::Irrelevant => "no relevant results".into(),
     }
 }
 
@@ -323,7 +323,7 @@ fn search_status(state: &State, short: bool) -> Vec<(String, Style)> {
     if state.filtering() {
         let (shown, all) = (state.results().len(), search.releases.len());
         let text =
-            if short { format!("{shown} of {all}") } else { format!("{shown} of {all} match · enter searches") };
+            if short { format!("{shown} of {all}") } else { format!("{shown} of {all} match · enter to search") };
         return vec![(text, fg(PENCIL))];
     }
     match &search.phase {
@@ -339,8 +339,9 @@ fn search_status(state: &State, short: bool) -> Vec<(String, Style)> {
         SearchPhase::Done => {
             let found = search.releases.len();
             let secs = f64::from(search.elapsed_ms) / 1000.0;
-            let count = if short { format!("{found} found") } else { format!("{found} found in {secs:.1}s") };
-            let mut out = vec![(count, fg(PENCIL))];
+            let results = count(found, "result");
+            let summary = if short { results } else { format!("{results} in {secs:.1}s") };
+            let mut out = vec![(summary, fg(PENCIL))];
             let failed: Vec<&str> =
                 search.sources.iter().filter(|s| !s.outcome.is_ok()).map(|s| s.source.as_str()).collect();
             if !failed.is_empty() {
@@ -470,7 +471,7 @@ fn list(buf: &mut Buffer, state: &State, screen: &Screen) {
                 }
             }
             Block::Heads => {
-                last = Some("found");
+                last = Some("results");
                 heads(&mut sheet, state, &columns, y);
             }
             Block::Result(id) => {
@@ -548,7 +549,7 @@ fn ranking_rows(buf: &mut Buffer, state: &State, ranking: &Ranking, screen: &Scr
 
 fn auto_note(row: Row, ranking: &Ranking, machine: Option<&Machine>) -> Option<String> {
     match (row, machine) {
-        (Row::MaxSize, _) => ranking.picks.max_size.map(|_| "refuses larger downloads".into()),
+        (Row::MaxSize, _) => ranking.picks.max_size.map(|_| "blocks larger downloads".into()),
         (_, None) => Some("not detected yet".into()),
         (Row::Screen, Some(machine)) => Some(match machine.display {
             Some(display) => format!("detected {}", display.target().as_str()),
@@ -557,7 +558,7 @@ fn auto_note(row: Row, ranking: &Ranking, machine: Option<&Machine>) -> Option<S
         (Row::Playback, Some(machine)) => {
             let preferences = Preferences { playback: None, ..ranking.picks };
             let auto = Profile { detected: Some(machine.clone()), preferences, room: None };
-            Some(auto.playback().map_or_else(|| "plays anything".into(), |p| format!("detected {}", p.value.as_str())))
+            Some(auto.playback().map_or_else(|| "any codec".into(), |p| format!("detected {}", p.value.as_str())))
         }
     }
 }
@@ -623,7 +624,7 @@ fn failure(code: ErrorCode) -> String {
         ErrorCode::NetworkUnavailable => "offline",
         ErrorCode::NoSelection => "no files",
         ErrorCode::InvalidTorrent => "bad torrent",
-        ErrorCode::PathConflict => "path taken",
+        ErrorCode::PathConflict => "path conflict",
         ErrorCode::SandboxNetworkBlocked | ErrorCode::SandboxWriteBlocked => "sandboxed",
         code => code.as_str(),
     }
@@ -650,8 +651,8 @@ fn download_detail(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, (y, vie
     let home = state.home.as_deref();
     let mut row = y;
     if state.confirm == Some(job.id) {
-        let text = format!("Its files stay in {}.", home_path(&job.dir, home));
-        let keys = [("enter", fg(INK)), (" removes it   ", fg(PENCIL)), ("esc", fg(INK)), (" keeps it", fg(PENCIL))];
+        let text = format!("Files are kept in {}.", home_path(&job.dir, home));
+        let keys = [("enter", fg(INK)), (" remove   ", fg(PENCIL)), ("esc", fg(INK)), (" cancel", fg(PENCIL))];
         if at.narrow() {
             put(buf, detail, row, room, &text, fg(TEXT));
             row += 1;
@@ -736,7 +737,7 @@ fn download_detail(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, (y, vie
 }
 
 fn heads(buf: &mut Buffer, state: &State, c: &Columns, y: u16) {
-    margin(buf, c.at, y, "found", fg(PENCIL));
+    margin(buf, c.at, y, "results", fg(PENCIL));
     let room = c.size - "size".len() as u16 - 2 - c.at.content;
     let ranked_for = state.search.as_ref().and_then(|s| s.ranked_for.as_ref());
     let saved = if state.ranking.is_some_and(|r| r.picks != r.saved) { " (saved)" } else { "" };
@@ -781,7 +782,7 @@ fn flag_words(flag: Flag) -> &'static str {
         Flag::Trusted => "trusted uploader",
         Flag::PublicDomain => "public domain",
         Flag::CreativeCommons => "creative commons",
-        Flag::Cam => "recorded in a cinema",
+        Flag::Cam => "camera recording",
         Flag::Adult => "adult",
     }
 }
@@ -851,7 +852,7 @@ fn result_detail(buf: &mut Buffer, state: &State, id: ReleaseId, c: &Columns, y:
         return;
     }
     if matches!(id, ReleaseId::Torrent(t) if state.job(t).is_some()) {
-        put(buf, detail, y, room, "in downloads · press d to see it", fg(PENCIL));
+        put(buf, detail, y, room, "in downloads · press d to view it", fg(PENCIL));
         return;
     }
     let Some(release) = state.release(id) else { return };
@@ -935,7 +936,7 @@ fn file_tree(buf: &mut Buffer, state: &State, tree: &Tree, c: &Columns, y: u16, 
     let ruled = y + rows as u16;
     let left_out = tree.risky_left_out();
     if left_out > 0 {
-        let text = format!("{} left out", count(left_out, "executable"));
+        let text = format!("{} excluded", count(left_out, "executable"));
         put(buf, c.at.detail, ruled, before_size(c) - c.at.detail, &text, fg(ERROR));
     }
     put_right(buf, c.size, ruled, "────────", fg(PENCIL));
@@ -967,38 +968,38 @@ fn empty(buf: &mut Buffer, state: &State, screen: &Screen, y: u16) {
         put(buf, at.content, y + 1, room, second, fg(second_color));
     };
     if let (Engine::Unreachable(error), None) = (&state.engine, &state.search) {
-        let why = error.hint.as_deref().unwrap_or("Downloads run in the engine, so this screen needs it.");
+        let why = error.hint.as_deref().unwrap_or("Search and downloads are unavailable until the engine is running.");
         lines("engine", "Cannot reach the engine.", true, why, PENCIL);
         return;
     }
     let Some(search) = &state.search else { return };
     if state.filtering() {
-        let first = format!("Nothing loaded matches \"{}\".", state.query.text.trim());
-        lines("found", &first, false, "Press enter to search for it.", PENCIL);
+        let first = format!("No loaded results match \"{}\".", state.query.text.trim());
+        lines("results", &first, false, "Press enter to search for it.", PENCIL);
         return;
     }
     let failures: Vec<String> = search
         .sources
         .iter()
         .filter(|s| !s.outcome.is_ok())
-        .map(|s| format!("{} {}", s.source, reason(&s.outcome)))
+        .map(|s| format!("{}: {}", s.source, reason(&s.outcome)))
         .collect();
-    let nothing = format!("Nothing found for \"{}\".", search.text);
+    let nothing = format!("No results for \"{}\".", search.text);
     match &search.phase {
         SearchPhase::Running { .. } => {}
         SearchPhase::Done if failures.is_empty() => {
-            lines("found", &nothing, false, "Try fewer or different words.", PENCIL)
+            lines("results", &nothing, false, "Try fewer or different words.", PENCIL)
         }
-        SearchPhase::Done => lines("found", &nothing, false, &failures.join(" · "), ERROR),
+        SearchPhase::Done => lines("results", &nothing, false, &failures.join(" · "), ERROR),
         SearchPhase::Failed(error) => {
             let hint = error.hint.as_deref().unwrap_or("Check the connection, then press enter to search again.");
-            lines("found", "No source answered.", true, hint, PENCIL);
+            lines("results", "All sources failed.", true, hint, PENCIL);
         }
     }
 }
 
 const HELP: [(&str, &[(&str, &str)]); 6] = [
-    ("move", &[("j k", "up, down"), ("g G", "first, last"), ("pgup pgdn", "a page"), ("d r", "downloads, results")]),
+    ("move", &[("j k", "up, down"), ("g G", "first, last"), ("pgup pgdn", "page"), ("d r", "downloads, results")]),
     ("typing", &[("/", "search"), ("enter", "search again"), ("ctrl+u", "clear"), ("tab", "into the list")]),
     ("results", &[("enter", "files"), ("D", "download"), ("P", "play"), ("s", "sort"), ("h l", "close, open")]),
     ("files", &[("space", "pick"), ("a", "all or none"), ("h l", "fold folders"), ("enter", "download")]),
@@ -1019,7 +1020,7 @@ const HELP: [(&str, &[(&str, &str)]); 6] = [
 
 const NOTES: [&str; 4] = [
     "Typing filters the results already loaded.",
-    "Quitting leaves downloads running.",
+    "Downloads keep running after you quit.",
     "Downloads stop at 100% and never seed.",
     "Removing a download keeps its files.",
 ];
@@ -1112,10 +1113,10 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
         }
         (None, Some(Upgrade::Available(latest))) => {
             let texts = match state.focus {
-                Focus::Query => vec![format!("torrential {latest} is out"), format!("{latest} is out")],
+                Focus::Query => vec![format!("torrential {latest} available"), format!("{latest} available")],
                 _ => vec![
-                    format!("torrential {latest} is out · U update"),
-                    format!("{latest} is out · U update"),
+                    format!("torrential {latest} available · U update"),
+                    format!("{latest} available · U update"),
                     format!("U update to {latest}"),
                 ],
             };

@@ -299,7 +299,7 @@ pub fn group(status: &JobStatus) -> u8 {
 
 pub fn label(status: &JobStatus) -> &'static str {
     match status {
-        JobStatus::Downloading | JobStatus::Metadata => "getting",
+        JobStatus::Downloading | JobStatus::Metadata => "downloading",
         JobStatus::Checking => "checking",
         JobStatus::Queued => "waiting",
         JobStatus::Error { .. } => "error",

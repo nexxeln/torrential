@@ -144,7 +144,7 @@ async fn every_source_failing_is_providers_unavailable() {
     let err = search.search(&query("ubuntu", &["knaben", "apibay", "archive.org"])).await.unwrap_err();
 
     assert_eq!(err.code, ErrorCode::ProvidersUnavailable);
-    assert_eq!(err.message, "no source answered (archive.org, knaben, apibay)");
+    assert_eq!(err.message, "all sources failed (archive.org, knaben, apibay)");
     let Some(Details::Sources(reports)) = err.details else { panic!("no source reports") };
     let kinds: Vec<(&str, &str)> = reports
         .iter()
@@ -819,7 +819,7 @@ async fn a_disabled_source_is_neither_searched_nor_nameable() {
     assert_eq!(names, ["archlinux", "ubuntu", "debian", "archive.org", "academictorrents", "apibay"]);
     assert_eq!((named.code, named.message.as_str()), (ErrorCode::Usage, "source \"knaben\" is disabled"));
     assert_eq!(server.hits("/apibay/"), 0);
-    assert_eq!(unknown.message, "sources.disabled names an unknown source \"1337x\"");
+    assert_eq!(unknown.message, "sources.disabled lists an unknown source \"1337x\"");
 }
 
 #[tokio::test]
@@ -841,7 +841,7 @@ async fn a_torrent_fetch_failure_never_quotes_the_link() {
     assert_eq!(fetched, torrent);
     assert_eq!(
         (missing.code, missing.message.as_str()),
-        (ErrorCode::FetchFailed, "could not fetch the .torrent file: http 404")
+        (ErrorCode::FetchFailed, "could not fetch the .torrent file: HTTP 404")
     );
     assert_eq!(huge.message, "could not fetch the .torrent file: larger than 16 MiB");
     assert!(refused.message.starts_with("could not fetch the .torrent file: "), "{}", refused.message);
@@ -940,7 +940,7 @@ async fn rejects_unknown_sources_and_queries_without_words() {
     assert_eq!((unknown.code, unknown.message.as_str()), (ErrorCode::Usage, "unknown source \"1337x\""));
     assert_eq!(
         unknown.hint.as_deref(),
-        Some("sources are archlinux, ubuntu, debian, archive.org, academictorrents, knaben, apibay, nyaa")
+        Some("available sources: archlinux, ubuntu, debian, archive.org, academictorrents, knaben, apibay, nyaa")
     );
     assert_eq!((empty.code, empty.message.as_str()), (ErrorCode::Usage, "a search needs at least one word"));
 }

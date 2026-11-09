@@ -44,7 +44,7 @@ pub fn sandbox_error(blocked: Blocked, env: &Env) -> Error {
     let agent = env.sandbox_harness();
     let (message, signal) = match blocked {
         Blocked::Network { signal } => {
-            ("this sandbox blocks network access, so the engine could not reach any peer".to_string(), signal)
+            ("this sandbox blocks network access, so torrential cannot reach peers".to_string(), signal)
         }
         Blocked::Ipc { socket } => (
             format!("this sandbox blocks the engine socket at {}", socket.display()),

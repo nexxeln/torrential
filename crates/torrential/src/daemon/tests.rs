@@ -608,7 +608,7 @@ async fn a_cap_from_setup_is_named_when_the_file_list_arrives_over_it() {
         (
             ErrorCode::TooLarge,
             "the selection is 3.0 GiB, over the 2 GiB cap from torrential setup",
-            Some("torrential get 292929 --max-size 3GiB allows it, or pick fewer files with --files")
+            Some("run torrential get 292929 --max-size 3GiB to allow it, or pick fewer files with --files")
         )
     );
 }
@@ -651,7 +651,7 @@ async fn resume_leaves_a_download_over_its_cap_stopped() {
         (one.code, one.hint.as_deref()),
         (
             ErrorCode::TooLarge,
-            Some("torrential get 292929 --max-size 3GiB allows it, or pick fewer files with --files")
+            Some("run torrential get 292929 --max-size 3GiB to allow it, or pick fewer files with --files")
         )
     );
     assert_eq!(all, [("2a2a2a".to_string(), "resumed".to_string())]);
@@ -669,7 +669,7 @@ async fn repair_leaves_a_download_over_its_cap_stopped() {
         (err.code, err.hint.as_deref()),
         (
             ErrorCode::TooLarge,
-            Some("torrential get 292929 --max-size 3GiB allows it, or pick fewer files with --files")
+            Some("run torrential get 292929 --max-size 3GiB to allow it, or pick fewer files with --files")
         )
     );
     assert_eq!(h.status().await[0].status.name(), "error");
@@ -955,8 +955,8 @@ async fn a_download_whose_missing_pieces_have_no_source_stops_and_resume_looks_a
         (error.code, error.message.as_str(), error.hint.as_deref()),
         (
             ErrorCode::NoSource,
-            "no peer or web seed has had the 2 pieces still missing (4.0 MiB) for 1s",
-            Some("torrential resume 222222 looks for them again; the 1020.0 MiB verified stays")
+            "no peer or web seed has had the remaining 2 pieces (4.0 MiB) for 1s",
+            Some("run torrential resume 222222 to try again; the 1020.0 MiB already verified is kept")
         )
     );
     let verify = || h.changes(Request::Verify { reference: prefix(&film), repair: false });
@@ -1003,7 +1003,7 @@ async fn a_stop_whose_save_fails_leaves_the_engine_with_the_error_that_stopped_i
     h.get(h.torrent_file(&film), &[]).await.unwrap();
     h.until("all but the withheld pieces", |jobs| jobs[0].progress.verified == GIB - 2 * GIB_PIECE).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    h.swarm.refuse_saves(id, Error::new(ErrorCode::StorageError, "libtorrent did not save its state: disk full"));
+    h.swarm.refuse_saves(id, Error::new(ErrorCode::StorageError, "could not save the resume data: disk full"));
     let deadline = Instant::now() + Duration::from_secs(5);
     while h.swarm.refused_saves(id) == 0 {
         assert!(Instant::now() < deadline, "the stop never tried to save");
@@ -1466,7 +1466,7 @@ async fn play_downloads_exactly_the_files_it_names_and_returns_their_urls() {
     let error = h.play(magnet(&unknown), &[0]).await.unwrap_err();
     assert_eq!(
         (error.code, error.message.as_str()),
-        (ErrorCode::Usage, "5b5b5b has no file list yet, so nothing can play")
+        (ErrorCode::Usage, "5b5b5b has no file list yet, so it cannot be played")
     );
     assert_eq!(
         h.play(h.torrent_file(&film), &[3]).await.unwrap_err().message,

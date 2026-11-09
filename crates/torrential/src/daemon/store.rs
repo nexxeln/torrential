@@ -103,7 +103,7 @@ impl Store {
         let mode: String =
             self.conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0)).map_err(|e| self.fail(e))?;
         if !mode.eq_ignore_ascii_case("wal") {
-            return Err(corrupt(&self.path, &format!("SQLite refused WAL mode and stayed in {mode}")));
+            return Err(corrupt(&self.path, &format!("SQLite could not switch to WAL mode and is in {mode} mode")));
         }
         self.conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;").map_err(|e| self.fail(e))?;
         self.conn.busy_timeout(std::time::Duration::from_secs(1)).map_err(|e| self.fail(e))
@@ -111,13 +111,10 @@ impl Store {
 
     fn migrate(&self, migrations: &[&str]) -> Result<(), Error> {
         let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| self.fail(e))?;
-        let version =
-            usize::try_from(version).map_err(|_| corrupt(&self.path, &format!("it has schema version {version}")))?;
+        let version = usize::try_from(version)
+            .map_err(|_| corrupt(&self.path, &format!("schema version {version} is not valid")))?;
         if version > migrations.len() {
-            return Err(corrupt(
-                &self.path,
-                &format!("it has schema version {version}, written by a newer torrential"),
-            ));
+            return Err(corrupt(&self.path, &format!("schema version {version} is from a newer torrential")));
         }
         if version == migrations.len() {
             return Ok(());
@@ -477,7 +474,7 @@ fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
     match e.sqlite_error_code() {
         Some(Sql::DatabaseCorrupt | Sql::NotADatabase) => corrupt(path, &e.to_string()),
         Some(Sql::DiskFull) => {
-            Error::new(ErrorCode::StorageError, format!("the disk holding {} is full", path.display()))
+            Error::new(ErrorCode::StorageError, format!("the disk containing {} is full", path.display()))
                 .with_hint("free some space on that disk")
         }
         _ => Error::new(ErrorCode::StateCorrupt, format!("{}: {e}", path.display()))
@@ -488,7 +485,7 @@ fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
 fn corrupt(path: &Path, reason: &str) -> Error {
     Error::new(ErrorCode::StateCorrupt, format!("the state database {} is damaged: {reason}", path.display()))
         .with_hint(format!(
-            "torrential never resets state on its own; move {} aside to start fresh, or restore a backup",
+            "the state is never reset automatically; move {} aside to start fresh, or restore a backup",
             path.display()
         ))
 }
@@ -711,6 +708,6 @@ mod tests {
         conn.pragma_update(None, "user_version", 99).unwrap();
         drop(conn);
         let err = Store::open(&path).err().unwrap();
-        assert!(err.message.ends_with("it has schema version 99, written by a newer torrential"), "{}", err.message);
+        assert!(err.message.ends_with("schema version 99 is from a newer torrential"), "{}", err.message);
     }
 }

@@ -354,7 +354,7 @@ fn private_indexer_links_never_reach_the_output() {
 
     assert_eq!(plain.code, 0, "{}", plain.stderr);
     assert_eq!(refused.code, 5);
-    assert!(refused.stderr.contains("could not fetch the .torrent file: http 404"), "{}", refused.stderr);
+    assert!(refused.stderr.contains("could not fetch the .torrent file: HTTP 404"), "{}", refused.stderr);
     assert_eq!(refused_json.json()["error"]["code"], "fetch_failed");
     assert_eq!(started.code, 0, "{}{}", started.stdout, started.stderr);
     assert_eq!(files_json.json()["files"]["name"], "ubuntu-private.iso");
@@ -552,7 +552,7 @@ fn a_config_toml_is_named_rather_than_ignored() {
     let doctor = home.run(&["doctor"]);
 
     let (toml, yaml) = (home.path("th/config/config.toml"), home.path("th/config/config.yaml"));
-    let message = format!("{} is not read; torrential reads config.yaml", toml.display());
+    let message = format!("{} is not supported; the config file is config.yaml", toml.display());
     assert_eq!(refused.code, 2, "{}{}", refused.stdout, refused.stderr);
     assert_eq!(
         refused.stderr,
@@ -590,13 +590,13 @@ fn doctor_network_asks_each_enabled_source() {
         })
         .collect();
     let expected = [
-        ("source knaben", "fail", "http 503"),
+        ("source knaben", "fail", "HTTP 503"),
         ("source apibay", "ok", "0 results"),
         ("source nyaa", "ok", "30 results"),
     ];
     assert_eq!(sources, expected.map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string())));
     let summary = doctor["checks"].as_array().unwrap().iter().find(|c| c["check"] == "sources").unwrap();
-    assert_eq!((&summary["status"], &summary["detail"]), (&"fail".into(), &"2 of 3 answered".into()));
+    assert_eq!((&summary["status"], &summary["detail"]), (&"fail".into(), &"2 of 3 responded".into()));
     assert_eq!(server.asked("/nyaa/"), ["/nyaa/?page=rss&q=linux&c=0_0&f=0"]);
 }
 
@@ -638,7 +638,7 @@ fn files_on_an_archive_org_result_reads_its_torrent_url_not_the_bare_magnet() {
     assert_eq!(server.asked(item).len(), 1);
     assert_eq!(unreachable.code, 5, "{}", unreachable.stderr);
     assert!(
-        unreachable.stderr.starts_with("error[fetch_failed]: could not fetch the .torrent file: http 503\n"),
+        unreachable.stderr.starts_with("error[fetch_failed]: could not fetch the .torrent file: HTTP 503\n"),
         "{}",
         unreachable.stderr
     );
@@ -683,7 +683,7 @@ fn the_machine_and_preferences_rank_a_film_search_and_say_so() {
             "1.0 GiB | 720p | Night Of The Living Dead 720p 1968",
             "54.7 GiB | 2160p | Night of the Living Dead (1968) (4k Remaster)",
             "6.4 GiB | 2160p | Night of the Living Dead (1968) [colorised, 4k, 60FPS]",
-            "# ranked for this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English",
+            "# ranked for this Mac: 1080p screen, HDR, HEVC, arm64, English",
         ]
     );
     assert_eq!(

@@ -137,7 +137,7 @@ progress: 0.0% (0 B of 5.9 GiB)
 files:    all
 path:     /Users/ada/Downloads/torrential/ubuntu-24.04.5-desktop-amd64.iso
 added:    2026-10-18T08:12:03Z
-error:    [disk_full] needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB stays in reserve
+error:    [disk_full] needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB is kept in reserve
 # hint: free some space, or choose another disk with --dir
 next:     torrential resume e3a1f0
 
@@ -157,7 +157,7 @@ next:     torrential resume e3a1f0
       "state": "error",
       "error": {
         "code": "disk_full",
-        "message": "needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB stays in reserve",
+        "message": "needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB is kept in reserve",
         "hint": "free some space, or choose another disk with --dir",
         "details": {
           "space": {

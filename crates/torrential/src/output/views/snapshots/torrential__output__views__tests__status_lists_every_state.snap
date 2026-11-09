@@ -11,8 +11,8 @@ d40a19	metadata	?	?	-	4	-	?
 51e0c7	queued	0.0%	1.4 GiB	-	-	-	archlinux-2026.09.01-x86_64.iso
 a282c6	paused	34.4%	2.7 GiB	-	-	-	Night Of The Living Dead
 # 7 downloads · 1 downloading · 1 interrupted · 1 done · 1 error · 1 metadata · 1 queued · 1 paused
-# e3a1f0 error[disk_full]: needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB stays in reserve
-# torrential resume c32cdd e3a1f0 restarts the interrupted and failed ones
+# e3a1f0 error[disk_full]: needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB is kept in reserve
+# to retry interrupted and failed downloads: torrential resume c32cdd e3a1f0
 next: torrential wait 9b5212 d40a19 51e0c7
 
 --- json
@@ -101,7 +101,7 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "state": "error",
       "error": {
         "code": "disk_full",
-        "message": "needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB stays in reserve",
+        "message": "needs 5.9 GiB more on this disk, but only 3.0 GiB is free and 5.0 GiB is kept in reserve",
         "hint": "free some space, or choose another disk with --dir",
         "details": {
           "space": {

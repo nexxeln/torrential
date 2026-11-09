@@ -89,7 +89,7 @@ fn report(run: &Run) -> SourceReport {
 
 fn all_failed(sources: Vec<SourceReport>) -> Error {
     let names: Vec<&str> = sources.iter().map(|r| r.source.as_str()).collect();
-    Error::new(ErrorCode::ProvidersUnavailable, format!("no source answered ({})", names.join(", ")))
+    Error::new(ErrorCode::ProvidersUnavailable, format!("all sources failed ({})", names.join(", ")))
         .with_hint("check the network connection, or retry with a longer --timeout")
         .with_details(Details::Sources(sources))
 }
