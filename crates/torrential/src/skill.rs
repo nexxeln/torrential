@@ -25,7 +25,7 @@ pub enum SkillCommand {
     Install(InstallArgs),
     /// Show whether each installed copy matches this binary
     Status(TargetArgs),
-    /// Print the skill this binary carries
+    /// Print the skill bundled with this binary
     Show,
     /// Remove the copies torrential wrote, and keep any that were edited
     Uninstall(TargetArgs),
@@ -48,7 +48,7 @@ pub struct TargetArgs {
 pub struct InstallArgs {
     #[command(flatten)]
     pub target: TargetArgs,
-    /// Replace a copy that someone edited or that torrential did not write
+    /// Replace a copy that was edited or that torrential did not write
     #[arg(long)]
     pub force: bool,
 }
@@ -232,7 +232,8 @@ impl Writes {
                 self.rerun
             ))
         } else {
-            Error::new(ErrorCode::StorageError, message).with_hint(format!("fix that folder, then run {}", self.rerun))
+            Error::new(ErrorCode::StorageError, message)
+                .with_hint(format!("make sure that folder is writable, then run {}", self.rerun))
         }
     }
 }
@@ -412,7 +413,7 @@ fn replace_with_link(link: &Path, writes: &Writes) -> Result<(), Error> {
         if !only_skill {
             return Err(Error::new(
                 ErrorCode::PathConflict,
-                format!("{} holds files torrential did not write, so it is not replaced", link.display()),
+                format!("{} contains files torrential did not write, so it was not replaced", link.display()),
             )
             .with_hint(format!("move it aside, then run {}", writes.rerun)));
         }

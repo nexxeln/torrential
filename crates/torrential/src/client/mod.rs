@@ -194,7 +194,7 @@ fn get(mut conn: Conn, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Resu
     let exit = emit(mode, &views::get(&reply, dir.as_deref()), &Response::Get { reply: reply.clone() });
     let attachable = mode == Mode::Human && !dry_run && !reply.job.status.is_stopped();
     if attachable {
-        eprintln!("Ctrl-C stops watching. The download keeps going.");
+        eprintln!("Press Ctrl-C to stop watching. The download continues in the background.");
         return wait::attach(
             connect::ensure(&Paths::from_process(env)?, env)?,
             vec![reply.job.id.to_hex()],
@@ -413,7 +413,7 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
             fix = error.hint.clone();
             checks.push(check("sandbox", CheckStatus::Fail, signal));
         }
-        None => checks.push(check("sandbox", CheckStatus::Ok, "no sandbox signal".into())),
+        None => checks.push(check("sandbox", CheckStatus::Ok, "no sandbox detected".into())),
     }
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,

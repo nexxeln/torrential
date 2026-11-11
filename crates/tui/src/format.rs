@@ -236,10 +236,10 @@ mod tests {
     #[test]
     fn a_profile_line_shortens_by_whole_items_and_keeps_its_label() {
         let fit = |text: &str, room| first_fit(shortenings(text), room);
-        let text = "this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English";
-        assert_eq!(fit(text, 61).as_deref(), Some(text));
-        assert_eq!(fit(text, 60).as_deref(), Some("this Mac: 1080p screen, shows HDR, plays HEVC, arm64"));
-        assert_eq!(fit(text, 30).as_deref(), Some("this Mac: 1080p screen"));
+        let text = "this Mac: 1080p screen, HDR, HEVC, arm64, English";
+        assert_eq!(fit(text, 49).as_deref(), Some(text));
+        assert_eq!(fit(text, 48).as_deref(), Some("this Mac: 1080p screen, HDR, HEVC, arm64"));
+        assert_eq!(fit(text, 26).as_deref(), Some("this Mac: 1080p screen"));
         assert_eq!(fit(text, 21).as_deref(), Some("this Mac"));
         assert_eq!(fit(text, 7), None);
         let pending = "this machine, not detected yet: 2160p screen";

@@ -228,7 +228,7 @@ fn update_refreshes_the_installed_skill_and_then_reports_the_latest() {
         "{\"schema\":1,\"type\":\"update\",\"current\":\"0.1.0\",\"latest\":\"0.1.1\",\"result\":\"updated\",\"next\":null}\n"
     );
     assert_eq!(std::fs::read_to_string(copy.join("SKILL.md")).unwrap(), SKILL);
-    assert_eq!((again.code, again.stdout.as_str()), (0, "torrential 0.1.1 is the latest.\n"));
+    assert_eq!((again.code, again.stdout.as_str()), (0, "torrential 0.1.1 is up to date.\n"));
     assert_eq!(
         again_json.stdout,
         "{\"schema\":1,\"type\":\"update\",\"current\":\"0.1.1\",\"latest\":\"0.1.1\",\"result\":\"up_to_date\",\"next\":\
@@ -361,7 +361,7 @@ fn an_agent_hears_of_a_newer_version_once_a_day_and_json_output_never_changes() 
     assert!(json.stdout.starts_with("{\"schema\":1,\"type\":\"jobs\""), "{}", json.stdout);
     assert_eq!(
         first.stderr,
-        "# update: torrential 0.1.1 is out (you have 0.1.0). Run torrential update to install it.\n"
+        "# update: torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it.\n"
     );
     assert_eq!(second.stderr, "");
     assert_eq!(server.asked(), Vec::<String>::new(), "a check from the last day needs no new one");

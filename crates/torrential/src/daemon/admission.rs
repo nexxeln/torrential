@@ -148,7 +148,7 @@ pub fn check_size(selected: u64, cap: Cap, job: Option<TorrentId>) -> Result<(),
         None => error.with_hint(format!("add --max-size {allow}GiB to allow it, or pick fewer files with --files")),
         Some(id) => {
             let get = format!("torrential get {} --max-size {allow}GiB", &id.to_hex()[..6]);
-            error.with_hint(format!("{get} allows it, or pick fewer files with --files")).with_next(get)
+            error.with_hint(format!("run {get} to allow it, or pick fewer files with --files")).with_next(get)
         }
     })
 }
@@ -220,7 +220,7 @@ pub fn check_disk(space: Space, needed: u64, others_remaining: u64) -> Result<()
         message.push_str(&format!(" plus {} for other downloads", format_size(others_remaining)));
     }
     message.push_str(&format!(
-        ", but only {} is free and {} stays in reserve",
+        ", but only {} is free and {} is kept in reserve",
         format_size(space.free),
         format_size(keep)
     ));
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::DiskFull);
         assert_eq!(
             err.message,
-            "needs 14.0 GiB more on this disk plus 5.0 GiB for other downloads, but only 20.0 GiB is free and 2.0 GiB stays in reserve"
+            "needs 14.0 GiB more on this disk plus 5.0 GiB for other downloads, but only 20.0 GiB is free and 2.0 GiB is kept in reserve"
         );
         assert_eq!(err.details, Some(Details::Space { required: 21 * GIB, available: 20 * GIB }));
     }
@@ -419,7 +419,7 @@ mod tests {
             (err.message.as_str(), err.hint.as_deref()),
             (
                 "the selection is 2.1 GiB, over the 2 GB cap from torrential setup",
-                Some("torrential get 2d9b6a --max-size 3GiB allows it, or pick fewer files with --files")
+                Some("run torrential get 2d9b6a --max-size 3GiB to allow it, or pick fewer files with --files")
             )
         );
         let flagged = check_size(2_254_911_385, Cap::new(Some(GIB), Some(2_000_000_000)), None).unwrap_err();

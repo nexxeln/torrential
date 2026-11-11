@@ -226,7 +226,7 @@ pub fn attach(conn: Conn, refs: Vec<String>, until: Until, timeout: Option<Durat
     let mut state = State::new(jobs);
     let bars = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
     let _ = ctrlc::set_handler(|| {
-        eprintln!("\nThe download keeps going.");
+        eprintln!("\nThe download continues in the background.");
         std::process::exit(130);
     });
     let style = ProgressStyle::with_template(&format!(

@@ -134,7 +134,7 @@ impl torrential_tui::Backend for EngineBackend {
         let mut conn = self.conn()?;
         conn.send(&Request::Watch { refs: Vec::new() })?;
         let mut stream = conn.into_stream();
-        let lost = |e: std::io::Error| Error::new(ErrorCode::DaemonUnavailable, format!("lost the engine: {e}"));
+        let lost = |e: std::io::Error| Error::new(ErrorCode::DaemonUnavailable, format!("connection lost: {e}"));
         stream.set_read_timeout(None).map_err(lost)?;
         loop {
             match wire::read::<Event>(&mut stream).map_err(lost)? {

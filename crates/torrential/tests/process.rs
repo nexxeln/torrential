@@ -163,7 +163,7 @@ fn a_sandboxed_client_refuses_to_start_an_engine() {
     assert_eq!(run.stdout, "");
     assert_eq!(
         run.stderr,
-        "error[sandbox_network_blocked]: this sandbox blocks network access, so the engine could not reach any peer\n  \
+        "error[sandbox_network_blocked]: this sandbox blocks network access, so torrential cannot reach peers\n  \
          signal: CODEX_SANDBOX_NETWORK_DISABLED=1 (codex)\n\
          hint: in interactive Codex, rerun with sandbox_permissions \"require_escalated\" and prefix_rule [\"torrential\"]; \
          unattended Codex (codex exec) has approvals off, so torrential cannot work there\n"
@@ -340,7 +340,7 @@ fn play_searches_for_words_and_for_an_id_that_names_nothing() {
         (
             3,
             "error[not_found]: no video result matches \"zzzz nothing\"\nhint: run torrential search zzzz nothing to \
-             see what each source found\nnext: torrential search zzzz nothing\n"
+             see all results\nnext: torrential search zzzz nothing\n"
         )
     );
 }
@@ -355,7 +355,7 @@ fn play_refuses_a_torrent_without_a_video() {
         (
             7,
             "error[no_selection]: Night of the Living Dead score has no video file\nhint: run torrential files c48e01 \
-             to see what it holds\nnext: torrential files c48e01\n"
+             to list its files\nnext: torrential files c48e01\n"
         )
     );
 }
@@ -380,7 +380,7 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
         (
             0,
             "4c1e9a night_of_the_living_dead\nvideo:     night_of_the_living_dead.mp4 (747.0 MiB)\nsubtitles: \
-             night_of_the_living_dead.srt\n# playing in mpv · the rest keeps downloading\nnext:      torrential \
+             night_of_the_living_dead.srt\n# playing in mpv · the download continues\nnext:      torrential \
              status 4c1e9a\n"
         ),
         "{}",
@@ -445,7 +445,7 @@ fn damaged_state_stops_the_engine_and_reaches_the_client_untouched() {
         "{}",
         run.stderr
     );
-    assert!(run.stderr.contains("torrential never resets state on its own"), "{}", run.stderr);
+    assert!(run.stderr.contains("the state is never reset automatically"), "{}", run.stderr);
     assert_eq!(std::fs::read(&db).unwrap(), junk);
     assert_eq!(home.engine(), None);
 }
@@ -514,7 +514,7 @@ fn skill_install_links_claude_to_the_shared_copy_and_twice_changes_nothing() {
             "TARGET\tSTATE\tVERSION\tPATH\n\
              agents\tup_to_date\t{version}\t{root}/.agents/skills/torrential\n\
              claude\tup_to_date\t{version}\t{root}/.claude/skills/torrential\n\
-             # this binary carries the skill from torrential {version}\n"
+             # this binary includes the skill from torrential {version}\n"
         )
     );
     let copy = home.dir.path().join(".agents/skills/torrential");
@@ -533,10 +533,7 @@ fn skill_show_prints_the_embedded_skill_and_help_points_agents_at_it() {
     let home = Home::new();
     assert_eq!(home.run(&["skill", "show"]).stdout, SKILL);
     let help = home.run(&["--help"]);
-    assert_eq!(
-        help.stdout.lines().last(),
-        Some("Agents: run torrential skill install to add the skill that explains torrential.")
-    );
+    assert_eq!(help.stdout.lines().last(), Some("Agents: run torrential skill install to add the torrential skill."));
 }
 
 #[test]
@@ -574,7 +571,7 @@ fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
         shown.stdout,
         format!(
             "{mac}\nupdates:  notify\nfile:     {file}\n\
-             # ranking for this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English · overrides: none\n\
+             # ranking for this Mac: 1080p screen, HDR, HEVC, arm64, English · overrides: none\n\
              next:     {flags}\n"
         )
     );
@@ -583,7 +580,7 @@ fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
         format!(
             "saved\n{mac}\nupdates:  notify\nfile:     {file}\n\
              # ranking for this Mac: 2160p screen, up to 8 GB, arm64, English · overrides: screen tv-4k, max_size \
-             8GB\n# get refuses a download over 8 GB unless --max-size allows it\nnext:     torrential search <words>\n"
+             8GB\n# get rejects downloads over 8 GB unless --max-size is higher\nnext:     torrential search <words>\n"
         )
     );
     assert_eq!(saved_file, "preferences:\n  screen: tv-4k\n  max_size: 8GB\n");

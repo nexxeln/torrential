@@ -33,8 +33,8 @@ impl Metainfo {
     ) -> Result<Self, Error> {
         let escapes = |p: &str| p.is_empty() || p.starts_with('/') || p.split('/').any(|c| c == ".." || c.is_empty());
         if escapes(&name) || name.contains('/') || files.iter().any(|f| escapes(&f.path)) {
-            return Err(Error::new(ErrorCode::InvalidTorrent, "the torrent has a file path that leaves its folder")
-                .with_hint("this torrent is malformed or hostile; do not download it"));
+            return Err(Error::new(ErrorCode::InvalidTorrent, "the torrent has a file path outside its own folder")
+                .with_hint("this torrent is malformed or malicious; do not download it"));
         }
         Ok(Self { info_hash, name, files, single_file, bytes, checked: () })
     }

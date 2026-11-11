@@ -47,7 +47,7 @@ impl Conn {
 
     fn lost(&self, e: std::io::Error) -> Error {
         let message = match e.kind() {
-            ErrorKind::WouldBlock | ErrorKind::TimedOut => "the engine did not answer in time".to_string(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => "the engine did not respond in time".to_string(),
             _ => format!("lost the connection to the engine: {e}"),
         };
         Error::new(ErrorCode::DaemonUnavailable, message).with_hint(format!("see {}", self.log))

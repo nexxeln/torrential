@@ -55,7 +55,7 @@ pub fn run(args: UpdateArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
             print!("{}", output::json_document(&Typed { kind: "update", body }, None));
         }
         _ if result == "updated" => println!("Updated torrential {current} → {latest}."),
-        _ => println!("torrential {current} is the latest."),
+        _ => println!("torrential {current} is up to date."),
     }
     Ok(0)
 }

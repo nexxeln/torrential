@@ -32,7 +32,7 @@ hint: add --yes to confirm
   "next": null
 }
 === invalid_ref, exit 3
-error[invalid_ref]: "9b5" is not a torrent reference: an ID is 4 to 40 hex characters, or u and hex for a result without an infohash
+error[invalid_ref]: "9b5" is not a torrent reference: an ID is 4 to 40 hex characters, with a leading u for a result that has no infohash
 hint: pass an ID from `torrential search`, a magnet link, a .torrent file, or a .torrent URL
 --- json
 {
@@ -40,7 +40,7 @@ hint: pass an ID from `torrential search`, a magnet link, a .torrent file, or a 
   "type": "error",
   "error": {
     "code": "invalid_ref",
-    "message": "\"9b5\" is not a torrent reference: an ID is 4 to 40 hex characters, or u and hex for a result without an infohash",
+    "message": "\"9b5\" is not a torrent reference: an ID is 4 to 40 hex characters, with a leading u for a result that has no infohash",
     "hint": "pass an ID from `torrential search`, a magnet link, a .torrent file, or a .torrent URL"
   },
   "next": null
@@ -138,18 +138,18 @@ hint: choose another folder with --dir, or move the conflicting paths; only regu
   "next": null
 }
 === providers_unavailable, exit 5
-error[providers_unavailable]: every search source failed
-  knaben: http 502
-  apibay: timeout
-hint: try again in a minute, or pick a source with --source
+error[providers_unavailable]: all sources failed (knaben, apibay)
+  knaben: HTTP 502
+  apibay: timed out
+hint: check the network connection, or retry with a longer --timeout
 --- json
 {
   "schema": 1,
   "type": "error",
   "error": {
     "code": "providers_unavailable",
-    "message": "every search source failed",
-    "hint": "try again in a minute, or pick a source with --source",
+    "message": "all sources failed (knaben, apibay)",
+    "hint": "check the network connection, or retry with a longer --timeout",
     "details": {
       "sources": [
         {
@@ -170,7 +170,7 @@ hint: try again in a minute, or pick a source with --source
 }
 === metadata_timeout, exit 5
 error[metadata_timeout]: no peer sent the file list for 9b5212 in time
-hint: try again later, or run torrential get 9b5212 to keep looking in the background
+hint: try again later, or run torrential get 9b5212 to keep trying in the background
 --- json
 {
   "schema": 1,
@@ -178,7 +178,7 @@ hint: try again later, or run torrential get 9b5212 to keep looking in the backg
   "error": {
     "code": "metadata_timeout",
     "message": "no peer sent the file list for 9b5212 in time",
-    "hint": "try again later, or run torrential get 9b5212 to keep looking in the background"
+    "hint": "try again later, or run torrential get 9b5212 to keep trying in the background"
   },
   "next": null
 }
@@ -197,7 +197,7 @@ hint: check the network connection, then run the command again
   "next": null
 }
 === fetch_failed, exit 5
-error[fetch_failed]: could not fetch https://archive.org/download/x/x_archive.torrent: http 404
+error[fetch_failed]: could not fetch https://archive.org/download/x/x_archive.torrent: HTTP 404
 hint: try the magnet link instead
 --- json
 {
@@ -205,13 +205,13 @@ hint: try the magnet link instead
   "type": "error",
   "error": {
     "code": "fetch_failed",
-    "message": "could not fetch https://archive.org/download/x/x_archive.torrent: http 404",
+    "message": "could not fetch https://archive.org/download/x/x_archive.torrent: HTTP 404",
     "hint": "try the magnet link instead"
   },
   "next": null
 }
 === sandbox_network_blocked, exit 6
-error[sandbox_network_blocked]: this sandbox blocks network access, so the engine could not reach any peer
+error[sandbox_network_blocked]: this sandbox blocks network access, so torrential cannot reach peers
   signal: CODEX_SANDBOX_NETWORK_DISABLED=1 (codex)
 hint: in interactive Codex, rerun with sandbox_permissions "require_escalated" and prefix_rule ["torrential"]; unattended Codex (codex exec) has approvals off, so torrential cannot work there
 --- json
@@ -220,7 +220,7 @@ hint: in interactive Codex, rerun with sandbox_permissions "require_escalated" a
   "type": "error",
   "error": {
     "code": "sandbox_network_blocked",
-    "message": "this sandbox blocks network access, so the engine could not reach any peer",
+    "message": "this sandbox blocks network access, so torrential cannot reach peers",
     "hint": "in interactive Codex, rerun with sandbox_permissions \"require_escalated\" and prefix_rule [\"torrential\"]; unattended Codex (codex exec) has approvals off, so torrential cannot work there",
     "details": {
       "sandbox": {
@@ -260,9 +260,9 @@ hint: set TORRENTIAL_HOME to a shorter directory
   "next": null
 }
 === daemon_version, exit 6
-error[daemon_version]: the engine speaks wire 2, the client 1
+error[daemon_version]: the engine uses protocol version 2, but this client uses 1
   client 0.1.0, engine 0.2.0
-hint: torrential engine stop, then run the command again
+hint: run torrential engine stop, then run the command again
 next: torrential engine stop
 --- json
 {
@@ -270,8 +270,8 @@ next: torrential engine stop
   "type": "error",
   "error": {
     "code": "daemon_version",
-    "message": "the engine speaks wire 2, the client 1",
-    "hint": "torrential engine stop, then run the command again",
+    "message": "the engine uses protocol version 2, but this client uses 1",
+    "hint": "run torrential engine stop, then run the command again",
     "details": {
       "versions": {
         "client": "0.1.0",
@@ -283,7 +283,7 @@ next: torrential engine stop
 }
 === state_corrupt, exit 6
 error[state_corrupt]: the state database /Users/ada/.local/state/torrential/state.db is damaged: file is not a database
-hint: torrential never resets state on its own; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup
+hint: the state is never reset automatically; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup
 --- json
 {
   "schema": 1,
@@ -291,12 +291,12 @@ hint: torrential never resets state on its own; move /Users/ada/.local/state/tor
   "error": {
     "code": "state_corrupt",
     "message": "the state database /Users/ada/.local/state/torrential/state.db is damaged: file is not a database",
-    "hint": "torrential never resets state on its own; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup"
+    "hint": "the state is never reset automatically; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup"
   },
   "next": null
 }
 === disk_full, exit 7
-error[disk_full]: needs 70.0 GiB more on this disk, but only 3.0 GiB is free and 2.0 GiB stays in reserve
+error[disk_full]: needs 70.0 GiB more on this disk, but only 3.0 GiB is free and 2.0 GiB is kept in reserve
 hint: free some space, or choose another disk with --dir
 --- json
 {
@@ -304,7 +304,7 @@ hint: free some space, or choose another disk with --dir
   "type": "error",
   "error": {
     "code": "disk_full",
-    "message": "needs 70.0 GiB more on this disk, but only 3.0 GiB is free and 2.0 GiB stays in reserve",
+    "message": "needs 70.0 GiB more on this disk, but only 3.0 GiB is free and 2.0 GiB is kept in reserve",
     "hint": "free some space, or choose another disk with --dir",
     "details": {
       "space": {
@@ -345,7 +345,7 @@ next: torrential files 6b6b6b
   "next": "torrential files 6b6b6b"
 }
 === storage_error, exit 7
-error[storage_error]: the disk holding /Users/ada/.local/state/torrential/state.db is full
+error[storage_error]: the disk containing /Users/ada/.local/state/torrential/state.db is full
 hint: free some space on that disk
 --- json
 {
@@ -353,14 +353,14 @@ hint: free some space on that disk
   "type": "error",
   "error": {
     "code": "storage_error",
-    "message": "the disk holding /Users/ada/.local/state/torrential/state.db is full",
+    "message": "the disk containing /Users/ada/.local/state/torrential/state.db is full",
     "hint": "free some space on that disk"
   },
   "next": null
 }
 === verification_failed, exit 7
 error[verification_failed]: 3 damaged pieces in the selected files
-hint: torrential verify 6bc1af --repair downloads them again
+hint: run torrential verify 6bc1af --repair to download them again
 next: torrential verify 6bc1af --repair
 --- json
 {
@@ -369,13 +369,13 @@ next: torrential verify 6bc1af --repair
   "error": {
     "code": "verification_failed",
     "message": "3 damaged pieces in the selected files",
-    "hint": "torrential verify 6bc1af --repair downloads them again"
+    "hint": "run torrential verify 6bc1af --repair to download them again"
   },
   "next": "torrential verify 6bc1af --repair"
 }
 === no_source, exit 7
-error[no_source]: no peer or web seed has had the 2 pieces still missing (488.8 KiB) for 20m
-hint: torrential resume 770e77 looks for them again; the 33.0 MiB verified stays
+error[no_source]: no peer or web seed has had the remaining 2 pieces (488.8 KiB) for 20m
+hint: run torrential resume 770e77 to try again; the 33.0 MiB already verified is kept
 next: torrential resume 770e77
 --- json
 {
@@ -383,8 +383,8 @@ next: torrential resume 770e77
   "type": "error",
   "error": {
     "code": "no_source",
-    "message": "no peer or web seed has had the 2 pieces still missing (488.8 KiB) for 20m",
-    "hint": "torrential resume 770e77 looks for them again; the 33.0 MiB verified stays"
+    "message": "no peer or web seed has had the remaining 2 pieces (488.8 KiB) for 20m",
+    "hint": "run torrential resume 770e77 to try again; the 33.0 MiB already verified is kept"
   },
   "next": "torrential resume 770e77"
 }

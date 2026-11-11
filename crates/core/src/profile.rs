@@ -277,7 +277,7 @@ impl Profile {
         }
     }
 
-    /// `this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English`.
+    /// `this Mac: 1080p screen, HDR, HEVC, arm64, English`.
     pub fn describe(&self) -> String {
         let screen = match self.screen() {
             Some(screen) => Some(format!("{} screen", screen_label(screen.value))),
@@ -327,8 +327,8 @@ impl Profile {
 
 const fn playback_phrase(playback: Playback) -> &'static str {
     match playback {
-        Playback::HevcHdr => "shows HDR, plays HEVC",
-        Playback::Hevc => "no HDR, plays HEVC",
+        Playback::HevcHdr => "HDR, HEVC",
+        Playback::Hevc => "no HDR, HEVC",
         Playback::H264 => "no HDR, H.264 only",
     }
 }
@@ -521,7 +521,7 @@ mod tests {
         let line = |p: Profile| (p.describe(), p.overrides());
         assert_eq!(
             line(profile(Some(mac()), Preferences::default())),
-            ("this Mac: 1080p screen, shows HDR, plays HEVC, arm64, English".into(), None)
+            ("this Mac: 1080p screen, HDR, HEVC, arm64, English".into(), None)
         );
         assert_eq!(
             line(profile(Some(mac()), tv)),

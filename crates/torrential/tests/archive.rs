@@ -281,7 +281,7 @@ fn without_an_answer_from_the_metadata_api_an_item_downloads_from_the_torrents_o
     assert_eq!(wait.code, 0, "{}{}\n{}", wait.stdout, wait.stderr, home.log());
     assert!(item.intact(&home), "the downloaded files differ from the item's");
     let kept = format!(
-        "{} keeps the torrent's own web seeds: archive.org did not name the servers of {ITEM}: http 503",
+        "{} keeps the torrent's own web seeds: archive.org did not name the servers of {ITEM}: HTTP 503",
         &item.id()[..6]
     );
     assert!(home.logs(&kept), "{}", home.log());

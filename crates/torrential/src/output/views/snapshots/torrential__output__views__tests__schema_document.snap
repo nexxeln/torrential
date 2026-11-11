@@ -58,7 +58,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "--sort",
-          "help": "Order of the results. Relevance comes before popularity",
+          "help": "Sort order. The default, relevance, ranks match quality above seed count",
           "takes_value": true,
           "repeatable": false,
           "value_name": "SORT",
@@ -114,7 +114,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--files",
-          "help": "List only files matching this glob or exact path, as get --files would pick them. `*` crosses folders and case is ignored. Repeat to add more",
+          "help": "List only files matching this glob or exact path, the same way get --files selects them. `*` matches across folders and case is ignored. Repeat to add more",
           "takes_value": true,
           "repeatable": true,
           "value_name": "GLOB"
@@ -135,21 +135,21 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--files",
-          "help": "Download only files matching this glob or exact path. `*` crosses folders and case is ignored. Repeat to add more",
+          "help": "Download only files matching this glob or exact path. `*` matches across folders and case is ignored. Repeat to add more",
           "takes_value": true,
           "repeatable": true,
           "value_name": "GLOB"
         },
         {
           "name": "--dir",
-          "help": "The folder the download goes into",
+          "help": "The folder to download into",
           "takes_value": true,
           "repeatable": false,
           "value_name": "DIR"
         },
         {
           "name": "--max-size",
-          "help": "The largest download allowed, for example 120GiB. Without it the cap is the max size from torrential setup, or 50 GiB",
+          "help": "The largest download allowed, for example 120GiB. Defaults to the max size from torrential setup, or 50 GiB",
           "takes_value": true,
           "repeatable": false,
           "value_name": "SIZE"
@@ -164,7 +164,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "play",
-      "about": "Play a video in your player while it downloads, starting when it will not pause",
+      "about": "Play a video in your media player while it downloads",
       "arguments": [
         {
           "name": "WORDS",
@@ -176,7 +176,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--dir",
-          "help": "The folder a new download goes into",
+          "help": "The folder to download into, if this starts a new download",
           "takes_value": true,
           "repeatable": false,
           "value_name": "DIR"
@@ -189,7 +189,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "arguments": [
         {
           "name": "ID",
-          "help": "Download IDs from torrential status. None lists every download",
+          "help": "Download IDs from torrential status. Omit to list every download",
           "required": false,
           "repeatable": true
         }
@@ -198,7 +198,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "wait",
-      "about": "Follow downloads until they finish or the timeout passes",
+      "about": "Follow downloads until they finish or the timeout is reached",
       "arguments": [
         {
           "name": "ID",
@@ -210,7 +210,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--until",
-          "help": "Stop when the download is done, or as soon as its file list is known",
+          "help": "Stop when the download is done, or as soon as its file list is available",
           "takes_value": true,
           "repeatable": false,
           "value_name": "UNTIL",
@@ -222,7 +222,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "--timeout",
-          "help": "Give up after this long. Defaults to 100s, or no limit when a person watches in a terminal",
+          "help": "Stop waiting after this long. Defaults to 100s, or no limit in an interactive terminal",
           "takes_value": true,
           "repeatable": false,
           "value_name": "DURATION"
@@ -231,7 +231,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "pause",
-      "about": "Pause downloads, returning once writes stop",
+      "about": "Pause downloads and return once disk writes stop",
       "arguments": [
         {
           "name": "ID",
@@ -264,7 +264,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "rm",
-      "about": "Stop tracking downloads and keep their files",
+      "about": "Remove downloads from the list without deleting their files",
       "arguments": [
         {
           "name": "ID",
@@ -297,12 +297,12 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "setup",
-      "about": "Show what search ranks for on this machine, or set where you watch instead",
+      "about": "Show or change ranking and update settings",
       "arguments": [],
       "flags": [
         {
           "name": "--screen",
-          "help": "Where you watch, when it is not this machine's display. auto goes back to the display",
+          "help": "The screen you watch on, if it is not this machine's display. auto uses the detected display",
           "takes_value": true,
           "repeatable": false,
           "value_name": "SCREEN",
@@ -316,14 +316,14 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "--max-size",
-          "help": "The largest download get starts without its own --max-size, for example 8GB, or none",
+          "help": "Default size limit for get when --max-size is not passed, for example 8GB, or none",
           "takes_value": true,
           "repeatable": false,
           "value_name": "SIZE"
         },
         {
           "name": "--playback",
-          "help": "What your player handles, when it is not this machine's. auto goes back to the display",
+          "help": "The formats your player supports, if they differ from this machine's. auto uses the detected formats",
           "takes_value": true,
           "repeatable": false,
           "value_name": "PLAYBACK",
@@ -336,7 +336,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "--updates",
-          "help": "Whether torrential says when a newer version is out, installs it in the background, or never looks",
+          "help": "How to handle new versions: show a notice, install in the background, or never check",
           "takes_value": true,
           "repeatable": false,
           "value_name": "UPDATES",
@@ -355,7 +355,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--network",
-          "help": "Also search each enabled source once, and report how it answered and how long it took",
+          "help": "Also query each enabled source once and report its result and response time",
           "takes_value": false,
           "repeatable": false
         }
@@ -363,7 +363,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "tui",
-      "about": "Open the terminal UI, which `torrential` alone also opens on a terminal",
+      "about": "Open the terminal UI, the default when no command is given in a terminal",
       "arguments": [],
       "flags": []
     },
@@ -381,7 +381,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "stop",
-          "about": "Ask the engine to save its state and exit",
+          "about": "Stop the engine after it saves its state",
           "arguments": [],
           "flags": []
         },
@@ -420,7 +420,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "skill",
-      "about": "Install, check, or print the skill that teaches coding agents to use torrential",
+      "about": "Install, check, or print the torrential skill for coding agents",
       "arguments": [],
       "flags": [],
       "subcommands": [
@@ -456,7 +456,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
             },
             {
               "name": "--force",
-              "help": "Replace a copy that someone edited or that torrential did not write",
+              "help": "Replace a copy that was edited or that torrential did not write",
               "takes_value": false,
               "repeatable": false
             }
@@ -496,7 +496,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "show",
-          "about": "Print the skill this binary carries",
+          "about": "Print the skill bundled with this binary",
           "arguments": [],
           "flags": []
         },
@@ -536,7 +536,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "update",
-      "about": "Install the latest torrential, or check whether a newer one is out",
+      "about": "Install the latest version, or check whether a newer one is available",
       "arguments": [],
       "flags": [
         {

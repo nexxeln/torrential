@@ -215,7 +215,7 @@ impl FromStr for HexPrefix {
         if valid {
             Ok(Self { locator, hex })
         } else {
-            Err(invalid_ref(s, "an ID is 4 to 40 hex characters, or u and hex for a result without an infohash"))
+            Err(invalid_ref(s, "an ID is 4 to 40 hex characters, with a leading u for a result that has no infohash"))
         }
     }
 }

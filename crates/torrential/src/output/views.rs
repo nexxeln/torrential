@@ -60,11 +60,11 @@ pub fn source_outcome(outcome: &SourceOutcome) -> String {
     match outcome {
         SourceOutcome::Ok { results } => format::count(*results as usize, "result"),
         SourceOutcome::Cached { results } => format!("{}, cached", format::count(*results as usize, "result")),
-        SourceOutcome::Timeout => "timeout".to_string(),
-        SourceOutcome::Http { status } => format!("http {status}"),
-        SourceOutcome::Connect { reason } => format!("connect failed ({})", sanitize(reason)),
+        SourceOutcome::Timeout => "timed out".to_string(),
+        SourceOutcome::Http { status } => format!("HTTP {status}"),
+        SourceOutcome::Connect { reason } => format!("connection failed ({})", sanitize(reason)),
         SourceOutcome::BadResponse { reason } => format!("bad response ({})", sanitize(reason)),
-        SourceOutcome::Irrelevant => "irrelevant response".to_string(),
+        SourceOutcome::Irrelevant => "no relevant results".to_string(),
     }
 }
 
@@ -234,12 +234,12 @@ pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
     }];
     if count > MAX_FILE_ROWS {
         summary.push(format!(
-            "showing {MAX_FILE_ROWS} of {}; torrential files --files <GLOB> narrows the list",
+            "showing {MAX_FILE_ROWS} of {}; narrow the list with torrential files --files <GLOB>",
             format::count(count, "file")
         ));
     }
     if risky {
-        summary.push("executables inside a media torrent are a common malware sign".to_string());
+        summary.push("executables in a media torrent are a common sign of malware".to_string());
     }
     let id = short_ref(&reply.id);
     let next = match matched {
@@ -250,7 +250,7 @@ pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
         }
         None => {
             if count > 1 {
-                summary.push(format!("torrential get {id} --files <PATTERN> downloads only the matching files"));
+                summary.push(format!("to download only matching files: torrential get {id} --files <GLOB>"));
             }
             Some(format!("torrential get {id}"))
         }
@@ -326,7 +326,7 @@ pub fn get(reply: &GetReply, dir: Option<&Path>) -> Doc {
     Doc { body: Body::Fields { title, fields }, summary, next }
 }
 
-pub const UNKNOWN_RUNTIME: &str = "torrential cannot read how long this video runs, so it may pause while it downloads";
+pub const UNKNOWN_RUNTIME: &str = "could not read the video's runtime, so playback may pause while it downloads";
 
 /// The release, the files it plays, and how long the video runs once that is known.
 pub fn play(name: &str, reply: &PlayReply, runtime: Option<Duration>) -> Doc {
@@ -350,7 +350,9 @@ pub fn hold(hold: Hold) -> String {
     match hold {
         Hold::Reading => "Buffering…".to_string(),
         Hold::Buffering(wait) => format!("Buffering… ready in {}", format::clock(wait)),
-        Hold::Countdown(wait) => format!("Starts in {} so it never pauses. Enter starts now", format::clock(wait)),
+        Hold::Countdown(wait) => {
+            format!("Starts in {} so playback does not pause. Press Enter to start now", format::clock(wait))
+        }
         Hold::Stalled => "Waiting for peers".to_string(),
     }
 }
@@ -358,7 +360,7 @@ pub fn hold(hold: Hold) -> String {
 pub fn playing(player: &str, job: &Job) -> String {
     let id = short_ids(&[job.id]).remove(0);
     format!(
-        "{} Playing in {}. The rest keeps downloading: torrential status {id}\n",
+        "{} Playing in {}. The download continues: torrential status {id}\n",
         paint(Token::Mint, "▶"),
         sanitize(player)
     )
@@ -457,7 +459,7 @@ pub fn jobs(jobs: &[Job]) -> Doc {
         Some("torrential search <words>".to_string())
     } else if !active.is_empty() {
         if !restart.is_empty() {
-            summary.push(format!("torrential resume {} restarts the interrupted and failed ones", restart.join(" ")));
+            summary.push(format!("to retry interrupted and failed downloads: torrential resume {}", restart.join(" ")));
         }
         Some(format!("torrential wait {}", active.join(" ")))
     } else if !restart.is_empty() {
@@ -629,7 +631,7 @@ pub fn wait_end(end: &WaitEnd, elapsed: Duration, watched: &[Watched]) -> (Vec<S
                 .collect();
             (vec![format!("done after {after} · path {}", paths.join(", "))], None)
         }
-        WaitEnd::Metadata => (vec![format!("file list known after {after}")], Some(format!("torrential files {all}"))),
+        WaitEnd::Metadata => (vec![format!("file list ready after {after}")], Some(format!("torrential files {all}"))),
         WaitEnd::Timeout => {
             let eta = watched.iter().filter_map(|w| w.job.progress.eta).max();
             let mut line = format!("still running after {after}");
@@ -656,7 +658,7 @@ pub fn wait_end(end: &WaitEnd, elapsed: Duration, watched: &[Watched]) -> (Vec<S
         WaitEnd::Stopped { id } => {
             let state = find(id).map_or("stopped", |j| j.status.name());
             (
-                vec![format!("{id} is {state}, so it will not finish on its own")],
+                vec![format!("{id} is {state} and will not finish until resumed")],
                 Some(format!("torrential resume {id}")),
             )
         }
@@ -750,7 +752,7 @@ pub fn setup(profile: &Profile, updates: Policy, file: &Path, result: &str) -> D
     let overrides = profile.overrides().unwrap_or_else(|| "none".to_string());
     let mut summary = vec![format!("ranking for {} · overrides: {overrides}", profile.describe())];
     if let Some(max) = profile.preferences.max_size {
-        summary.push(format!("get refuses a download over {} unless --max-size allows it", format_limit(max)));
+        summary.push(format!("get rejects downloads over {} unless --max-size is higher", format_limit(max)));
     }
     let next = if result == "shown" { crate::cli::SETUP_FLAGS } else { "torrential search <words>" };
     Doc { body: Body::Fields { title, fields }, summary, next: Some(next.to_string()) }
@@ -787,7 +789,7 @@ pub fn skill_status(installed: &[Installed], version: &str, install: &str) -> Do
             ]
         })
         .collect();
-    let mut summary = vec![format!("this binary carries the skill from torrential {version}")];
+    let mut summary = vec![format!("this binary includes the skill from torrential {version}")];
     for i in installed {
         match i.state {
             State::Modified => summary.push(format!("{} was edited after torrential wrote it", i.target.name())),
@@ -797,7 +799,7 @@ pub fn skill_status(installed: &[Installed], version: &str, install: &str) -> Do
     }
     let kept = installed.iter().any(|i| matches!(i.state, State::Modified | State::Foreign));
     if kept {
-        summary.push(format!("{install} --force replaces them"));
+        summary.push(format!("to replace them: {install} --force"));
     }
     let stale = installed.iter().any(|i| matches!(i.state, State::Missing | State::Outdated));
     let next = (stale && !kept).then(|| install.to_string());

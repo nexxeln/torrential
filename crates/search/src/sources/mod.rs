@@ -288,7 +288,7 @@ pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error>
     }
     for name in &config.disabled {
         if !sources.iter().any(|s| s.meta.name == *name) {
-            return Err(config_error(format!("sources.disabled names an unknown source {name:?}")));
+            return Err(config_error(format!("sources.disabled lists an unknown source {name:?}")));
         }
     }
     sources.retain(|s| !config.disabled.contains(&s.meta.name));

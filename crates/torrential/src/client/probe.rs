@@ -25,12 +25,12 @@ pub fn checks(paths: &Paths, settings: Result<Config, Error>, network: bool) -> 
     };
     let detail = match file {
         Some(file) => file.display().to_string(),
-        None => format!("no {}, so the defaults apply", config::path(paths).display()),
+        None => format!("no {}; using the defaults", config::path(paths).display()),
     };
     let mut checks = vec![check("config", CheckStatus::Ok, detail)];
     let enabled: Vec<String> = search.sources().into_iter().filter(|s| s.default_on).map(|s| s.name).collect();
     if !network {
-        let detail = format!("{} enabled; torrential doctor --network asks each one", enabled.len());
+        let detail = format!("{} enabled; run torrential doctor --network to test each one", enabled.len());
         checks.push(check("sources", CheckStatus::Skipped, detail));
         return checks;
     }
@@ -38,7 +38,7 @@ pub fn checks(paths: &Paths, settings: Result<Config, Error>, network: bool) -> 
         Ok(reports) => {
             let answered = reports.iter().filter(|r| r.outcome.is_ok()).count();
             let status = if answered == reports.len() { CheckStatus::Ok } else { CheckStatus::Fail };
-            checks.push(check("sources", status, format!("{answered} of {} answered", reports.len())));
+            checks.push(check("sources", status, format!("{answered} of {} responded", reports.len())));
             checks.extend(reports.into_iter().map(|r| {
                 let status = match r.outcome {
                     ref ok if ok.is_ok() => CheckStatus::Ok,

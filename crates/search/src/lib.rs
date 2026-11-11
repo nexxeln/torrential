@@ -278,7 +278,7 @@ impl Search {
                 }
                 let known: Vec<&str> = all.iter().map(|s| s.meta.name.as_str()).collect();
                 return Err(Error::new(ErrorCode::Usage, format!("unknown source {name:?}"))
-                    .with_hint(format!("sources are {}", known.join(", "))));
+                    .with_hint(format!("available sources: {}", known.join(", "))));
             };
             if !chosen.iter().any(|c| Arc::ptr_eq(c, source)) {
                 chosen.push(source.clone());
@@ -330,8 +330,8 @@ impl Inner {
 
 fn fetch_reason(e: FetchError, within: Duration) -> String {
     match e {
-        FetchError::Timeout => format!("no answer within {} seconds", within.as_secs()),
-        FetchError::Status(status) => format!("http {status}"),
+        FetchError::Timeout => format!("no response within {} seconds", within.as_secs()),
+        FetchError::Status(status) => format!("HTTP {status}"),
         FetchError::Connect(reason) | FetchError::Decode(reason) => text::truncate(&text::sanitize(&reason), 160),
         FetchError::TooLarge(cap) => format!("larger than {} MiB", cap >> 20),
     }

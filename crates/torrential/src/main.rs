@@ -25,10 +25,10 @@ use output::Mode;
 
 const SHORT_HELP: &str = "torrential searches torrent indexes and downloads torrents.
 
-  torrential search <words>       find something
-  torrential files <ID>           list what is inside
-  torrential get <ID>             download it
-  torrential wait <ID>            follow it until it is done
+  torrential search <words>       search for torrents
+  torrential files <ID>           list a torrent's files
+  torrential get <ID>             start a download
+  torrential wait <ID>            follow a download until it finishes
   torrential status               list downloads
   torrential tui                  open the terminal UI
 

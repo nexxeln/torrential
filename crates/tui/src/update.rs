@@ -143,7 +143,7 @@ impl State {
             Msg::Played(result) => {
                 match result {
                     Ok(player) => self.say(Tone::Success, format!("Playing in {player}")),
-                    Err(error) => self.say(Tone::Error, format!("Playing failed: {}", error.message)),
+                    Err(error) => self.say(Tone::Error, format!("Playback failed: {}", error.message)),
                 }
                 Vec::new()
             }
@@ -417,13 +417,13 @@ impl State {
             }
             Ok(None) => {
                 self.upgrade = None;
-                self.say(Tone::Info, "This torrential is the latest.");
+                self.say(Tone::Info, "torrential is up to date.");
             }
             Err(error) => {
                 if let Some(Upgrade::Installing(latest)) = self.upgrade.take() {
                     self.upgrade = Some(Upgrade::Available(latest));
                 }
-                self.say(Tone::Error, format!("Updating failed: {}", error.message));
+                self.say(Tone::Error, format!("Update failed: {}", error.message));
             }
         }
     }
@@ -455,7 +455,7 @@ impl State {
         let preferences = match result {
             Ok(preferences) => preferences,
             Err(error) => {
-                self.say(Tone::Error, format!("Saving failed: {}", error.message));
+                self.say(Tone::Error, format!("Save failed: {}", error.message));
                 return Vec::new();
             }
         };
@@ -937,7 +937,7 @@ impl State {
                     titled.or_else(|| reply.job.name.clone()).unwrap_or_else(|| release.to_ref()[..6].to_string());
                 let text = match reply.outcome {
                     GetOutcome::Existing => "Already in downloads. Press d to view it.".to_string(),
-                    GetOutcome::Updated => format!("Changed the files of {name}"),
+                    GetOutcome::Updated => format!("Updated file selection for {name}"),
                     _ => format!("Started {name}"),
                 };
                 self.say(Tone::Success, text);
@@ -972,8 +972,8 @@ impl State {
                         let dir = self.job(id).map(|j| home_path(&j.dir, self.home.as_deref()));
                         self.forget(id);
                         match dir {
-                            Some(dir) => format!("Removed from the list. Files stay in {dir}."),
-                            None => "Removed from the list. Files stay on disk.".into(),
+                            Some(dir) => format!("Removed from the list. Files are kept in {dir}."),
+                            None => "Removed from the list. Files are kept on disk.".into(),
                         }
                     }
                 };

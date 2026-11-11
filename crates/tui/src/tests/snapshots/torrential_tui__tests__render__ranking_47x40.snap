@@ -4,9 +4,9 @@ expression: shot(&scenario(size))
 ---
 "  torrential                      ↓ 10.0 MiB/s "
 "                                               "
-"│ night of the living de…   8 found · 2 failed "
+"│ night of the living…    8 results · 2 failed "
 "│                                              "
-"│ getting                                      "
+"│ downloading                                  "
 "│ wikipedia-en-2026-09-text    ▃▁▃▂▂▂▂▂▂▁  22% "
 "│ error                                        "
 "│ openwebtext-2019             disk error  36% "

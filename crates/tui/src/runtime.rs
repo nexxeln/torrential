@@ -48,7 +48,7 @@ fn session<B: Backend>(terminal: &mut ratatui::DefaultTerminal, backend: Arc<B>,
     let size = terminal.size()?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut state = State::new(Instant::now(), unix_now(), (size.width, size.height), home);
-    state.say(Tone::Info, "Quitting keeps downloads running.");
+    state.say(Tone::Info, "Downloads keep running after you quit.");
     terminal.draw(|frame| draw(frame, &state, mode))?;
     let (tx, rx) = mpsc::channel();
     listen(tx.clone());

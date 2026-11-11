@@ -97,7 +97,7 @@ pub fn uid() -> u32 {
 }
 
 fn no_home() -> Error {
-    Error::new(ErrorCode::StateCorrupt, "HOME is not set, so torrential cannot place its state")
+    Error::new(ErrorCode::StateCorrupt, "HOME is not set, so torrential has no default location for its files")
         .with_hint("set HOME, or set TORRENTIAL_HOME to a directory for torrential's files")
 }
 

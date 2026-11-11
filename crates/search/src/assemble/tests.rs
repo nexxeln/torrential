@@ -703,7 +703,7 @@ fn every_source_failing_is_an_error_not_an_empty_list() {
     ];
     let err = assemble(&q, Profile::default(), &Terms::parse("ubuntu"), &runs, 6000).unwrap_err();
     assert_eq!(err.code, ErrorCode::ProvidersUnavailable);
-    assert_eq!(err.message, "no source answered (archive.org, knaben, apibay)");
+    assert_eq!(err.message, "all sources failed (archive.org, knaben, apibay)");
     assert_eq!(
         err.details,
         Some(Details::Sources(vec![

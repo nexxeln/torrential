@@ -6,7 +6,7 @@ expression: shot(&scenario(size))
 "                                               "
 "│ press / to search                            "
 "│                                              "
-"│ getting                                      "
+"│ downloading                                  "
 "│ wikipedia-en-2026-09-text    ▃▁▃▂▂▂▂▂▂▁  22% "
 "│ error                                        "
 "│ openwebtext-2019             disk error  36% "
