@@ -825,11 +825,14 @@ impl Owner {
             }
         }
         // A file already on disk is not the play's to delete, so a download over one is borrowed.
+        // The files are those its patterns select, which a discard deletes, and they can be more
+        // than the play asked for.
         let into = dir.clone().unwrap_or_else(|| self.config.default_dir.clone());
-        let held = discard::held(&metainfo, &(0..count).map(|i| files.contains(&(i as u32))).collect::<Vec<_>>());
-        let lease = match held.iter().any(|p| into.join(p).symlink_metadata().is_ok()) {
-            true => Lease::Borrowed,
-            false => Lease::Owned,
+        let selected = super::files::wanted(&metainfo, &Selection::Patterns(patterns.clone()));
+        let on_disk = |held: Vec<PathBuf>| held.iter().any(|p| into.join(p).symlink_metadata().is_ok());
+        let lease = match selected.map(|wanted| on_disk(discard::held(&metainfo, &wanted))) {
+            Ok(false) => Lease::Owned,
+            Ok(true) | Err(_) => Lease::Borrowed,
         };
         let made = title.as_ref().map(|play| Linked { link: TitleLink { lease, ..play.link.clone() }, played: false });
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };

@@ -350,6 +350,26 @@ async fn a_second_play_that_selects_a_file_the_person_had_ends_the_lease_and_the
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_download_whose_selection_takes_in_a_file_the_person_had_is_borrowed_from_the_start() {
+    let h = Harness::new();
+    // The pattern that selects the first file also matches the second, named alike but for a space.
+    let twins = torrent(89, "twins", &[("the  film.mp4", GIB), ("the film.mp4", GIB)]);
+    let theirs = h.downloads().join("twins/the film.mp4");
+    std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+    std::fs::write(&theirs, b"the person's own copy").unwrap();
+    let (job, hold) = h.play_for(&twins, &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(job.progress.size, Some(2 * GIB), "the selection holds both files");
+    assert_eq!(job.title.unwrap().lease, Lease::Borrowed);
+    h.until("it runs", |jobs| jobs[0].status.name() == "downloading").await;
+    write(&h.downloads().join("twins/the  film.mp4"));
+    h.give_up(hold).await;
+    h.settled().await;
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"the person's own copy");
+    assert_eq!(tree(&h.downloads()), ["twins", "twins/the  film.mp4", "twins/the film.mp4"]);
+    assert_eq!(h.states().await, Vec::<&str>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_get_by_hand_makes_a_download_under_test_the_persons_and_no_file_is_deleted() {
     for patterns in [&["*"][..], &[]] {
         let h = Harness::new();
