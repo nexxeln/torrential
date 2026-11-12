@@ -17,6 +17,17 @@
 //   GET  /api/files?ref=                                FileListing
 //   POST /api/pause | /api/resume | /api/remove  { refs }   { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
+//
+// Films and series, by IMDb ID:
+//
+//   GET  /api/titles?q=                                    { titles: TitleCard[] }
+//   GET  /api/title?id=                                    TitlePage
+//   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
+//   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
+//   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
+//   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
+//   POST /api/library        { title, saved }              { saved: boolean }
+//   GET  /api/home                                         Home
 
 export type Category = "video" | "audio" | "software" | "book" | "game" | "dataset" | "other";
 export type Flag = "official" | "trusted" | "public_domain" | "creative_commons" | "cam" | "adult";
@@ -47,6 +58,8 @@ export interface Release {
   magnet: string | null;
   torrent_url: string | null;
   info_url: string | null;
+  /** What of a title the release holds. Only in a title's sources. */
+  span?: Span;
 }
 
 export type SourceReport = { source: string; elapsed_ms: number } & (
@@ -121,6 +134,8 @@ export interface Job {
   progress: Progress;
   /** Unix seconds. */
   added_at: number;
+  /** The title this download was made for, when it was made by playing a title. */
+  title?: { title: string; span: Span; release: string | null };
 }
 
 export type JobEvent =
@@ -283,6 +298,121 @@ export interface FilePieces {
   pieces: string;
 }
 
+export type Kind = "film" | "series";
+/** What of a title a release holds: `film`, `s3e5`, `s3`, `s1-5`, or `complete`. */
+export type Span = string;
+/** What the browser decodes, from MediaSource.isTypeSupported. */
+export type Playback = "h264" | "hevc" | "hevc-hdr";
+
+export interface TitleCard {
+  /** An IMDb ID such as `tt0063350`. */
+  id: string;
+  kind: Kind;
+  name: string;
+  /** A film's year, or the year a series began. */
+  year: number | null;
+  /** 0 to 10. */
+  rating: number | null;
+}
+
+export interface EpisodeInfo {
+  season: number;
+  episode: number;
+  name: string | null;
+  /** Unix seconds. Null when no date is announced. An episode in the future has not aired. */
+  aired: number | null;
+  overview: string | null;
+  thumbnail: boolean;
+}
+
+export interface Season {
+  /** 0 holds specials. */
+  number: number;
+  episodes: EpisodeInfo[];
+}
+
+/** Where a person stopped one film or episode. */
+export interface Watched {
+  /** `tt0063350`, or `tt0903747:3:5`. */
+  video: string;
+  /** Seconds. */
+  position: number;
+  duration: number | null;
+  finished: boolean;
+  /** Unix seconds of the last update. */
+  at: number;
+}
+
+/** What Play on a title page plays. */
+export interface Next {
+  video: string;
+  /** Seconds to resume at, or null to start from the beginning. */
+  resume_at: number | null;
+}
+
+export interface TitlePage extends TitleCard {
+  synopsis: string | null;
+  genres: string[];
+  runtime_min: number | null;
+  cast: string[];
+  /** Which pictures artUrl can serve. */
+  art: { poster: boolean; background: boolean; logo: boolean };
+  /** Empty for a film. */
+  seasons: Season[];
+  saved: boolean;
+  /** Every film or episode of this title with a position. */
+  watched: Watched[];
+  /** Null when a film is finished or a series is caught up. Play then starts over. */
+  next: Next | null;
+  /** Downloads made by playing this title. */
+  downloads: Job[];
+}
+
+export interface PlayTitle {
+  /** `tt0063350`, `tt0903747:3:5`, or a series ID for its next episode. */
+  video: string;
+  playback?: Playback;
+  /** Play only this release, with no fallback. */
+  source?: string;
+  /** The download that stalled. The engine plays another source, then pauses this one. */
+  replace?: string;
+}
+
+export type Check = "file_list" | "start" | "first_bytes";
+
+export type Skip =
+  | { reason: "no_file_list" | "no_data"; waited_s: number }
+  | { reason: "no_video" | "stalled" }
+  | { reason: "unplayable"; container: string }
+  | { reason: "too_large" | "failed"; error: ApiError };
+
+/** One line of the /api/title/play stream. The last is `playing` or `failed`. */
+export type PlayMessage =
+  | { type: "resolved"; video: string; title: TitleCard; episode: EpisodeInfo | null }
+  | { type: "searched"; found: number; sources: SourceReport[] }
+  | { type: "trying"; rank: number; of: number; release: Release }
+  | { type: "check"; check: Check }
+  | { type: "skipped"; release: string; reason: Skip }
+  | { type: "playing"; video: string; release: Release; play: PlayInfo; resume_at: number | null }
+  | { type: "failed"; error: ApiError; tried: { release: string; reason: Skip }[] };
+
+export interface ContinueItem {
+  title: TitleCard;
+  /** The film or episode to play. */
+  video: string;
+  /** Null for a film. */
+  episode: EpisodeInfo | null;
+  /** Null when `video` has not been started, as the next episode after a finished one. */
+  resume_at: number | null;
+  duration: number | null;
+}
+
+export interface Home {
+  /** Newest first. */
+  continue: ContinueItem[];
+  saved: TitleCard[];
+}
+
 export class EngineError extends Error {
   constructor(
     readonly error: ApiError,
@@ -292,23 +422,56 @@ export class EngineError extends Error {
   }
 }
 
+const UNREACHABLE: ApiError = {
+  code: "engine_unreachable",
+  message: "Cannot reach the torrential engine.",
+  hint: "Run torrential web in a terminal to start it, then try again.",
+};
+
 /** The engine's error for anything a request threw, including a network failure when the engine is not running. */
 export function asApiError(thrown: unknown): ApiError {
-  if (thrown instanceof EngineError) return thrown.error;
-  return {
-    code: "engine_unreachable",
-    message: "Cannot reach the torrential engine.",
-    hint: "Run torrential web in a terminal to start it, then try again.",
-  };
+  return thrown instanceof EngineError ? thrown.error : UNREACHABLE;
 }
 
 async function json<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    const error = body?.error ?? { code: "internal", message: `the engine answered ${response.status}` };
-    throw new EngineError(error, response.status);
+    // The engine names every failure. A server error without a name is a proxy in front of an engine that is not running.
+    const unnamed = response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
+    throw new EngineError(body?.error ?? unnamed, response.status);
   }
   return body as T;
+}
+
+/** The JSON values of an NDJSON body, one per line, as they arrive. */
+async function* lines<T>(response: Response): AsyncGenerator<T> {
+  const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+  let rest = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      rest += value;
+      for (let end = rest.indexOf("\n"); end !== -1; end = rest.indexOf("\n")) {
+        const line = rest.slice(0, end).trim();
+        rest = rest.slice(end + 1);
+        if (line) yield JSON.parse(line) as T;
+      }
+    }
+  } finally {
+    // A reader that stops early hangs up, so the engine stops what the stream was for.
+    void reader.cancel().catch(() => {});
+  }
+}
+
+/** A search stream. A failed request becomes its `error` message. */
+async function* searchMessages(path: string, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
+  const response = await fetch(path, { signal });
+  if (!response.ok || !response.body) {
+    yield { type: "error", error: await json<never>(response).catch((e: EngineError) => e.error) };
+    return;
+  }
+  yield* lines<SearchMessage>(response);
 }
 
 function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
@@ -325,23 +488,7 @@ export async function* search(
   if (options.category) params.set("category", options.category);
   if (options.limit) params.set("limit", String(options.limit));
   if (options.fresh) params.set("fresh", "1");
-  const response = await fetch(`/api/search?${params}`, { signal: options.signal });
-  if (!response.ok || !response.body) {
-    yield { type: "error", error: await json<never>(response).catch((e: EngineError) => e.error) };
-    return;
-  }
-  const lines = response.body.pipeThrough(new TextDecoderStream()).getReader();
-  let rest = "";
-  for (;;) {
-    const { done, value } = await lines.read();
-    if (done) return;
-    rest += value;
-    for (let end = rest.indexOf("\n"); end !== -1; end = rest.indexOf("\n")) {
-      const line = rest.slice(0, end).trim();
-      rest = rest.slice(end + 1);
-      if (line) yield JSON.parse(line) as SearchMessage;
-    }
-  }
+  yield* searchMessages(`/api/search?${params}`, options.signal);
 }
 
 /**
@@ -432,4 +579,57 @@ export function watchJobs(onEvent: (event: JobEvent) => void, onConnection?: (co
   source.onopen = () => onConnection?.(true);
   source.onerror = () => onConnection?.(false);
   return () => source.close();
+}
+
+export function titles(query: string, signal?: AbortSignal): Promise<TitleCard[]> {
+  return fetch(`/api/titles?${new URLSearchParams({ q: query })}`, { signal })
+    .then(json<{ titles: TitleCard[] }>)
+    .then((body) => body.titles);
+}
+
+export function title(id: string, signal?: AbortSignal): Promise<TitlePage> {
+  return fetch(`/api/title?${new URLSearchParams({ id })}`, { signal }).then(json<TitlePage>);
+}
+
+/** A same-origin image URL. Answers 404 when the catalog has no such picture. */
+export function artUrl(id: string, kind: "poster" | "background" | "logo" | { season: number; episode: number }): string {
+  const params =
+    typeof kind === "string"
+      ? new URLSearchParams({ id, kind })
+      : new URLSearchParams({ id, kind: "thumbnail", season: String(kind.season), episode: String(kind.episode) });
+  return `/api/title/art?${params}`;
+}
+
+/** The releases of one film or episode, ranked for playing here, as each source answers. The last message is `done` or `error`. */
+export async function* sources(video: string, playback?: Playback, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
+  const params = new URLSearchParams({ video });
+  if (playback) params.set("playback", playback);
+  yield* searchMessages(`/api/title/sources?${params}`, signal);
+}
+
+/**
+ * Plays a film or an episode: the engine finds its sources and tries them in order, saying what it
+ * does at each step. Throws an EngineError when the engine refuses the request before it starts.
+ */
+export async function* playTitle(request: PlayTitle, signal?: AbortSignal): AsyncGenerator<PlayMessage> {
+  const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal };
+  const response = await fetch("/api/title/play", init);
+  if (!response.ok || !response.body) await json<never>(response);
+  yield* lines<PlayMessage>(response);
+}
+
+/** Kept alive past the page, since the player saves when the page hides. */
+export function saveWatched(entry: { video: string; position: number; duration: number | null; release?: string }): Promise<Watched> {
+  const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(entry), keepalive: true };
+  return fetch("/api/watched", init)
+    .then(json<{ watched: Watched }>)
+    .then((body) => body.watched);
+}
+
+export function setSaved(title: string, saved: boolean): Promise<boolean> {
+  return post<{ saved: boolean }>("/api/library", { title, saved }).then((body) => body.saved);
+}
+
+export function home(signal?: AbortSignal): Promise<Home> {
+  return fetch("/api/home", { signal }).then(json<Home>);
 }
