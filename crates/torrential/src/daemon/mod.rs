@@ -12,6 +12,7 @@ pub mod search_port;
 pub mod server;
 pub mod store;
 pub mod subtitle_port;
+pub mod titles;
 pub mod web;
 
 #[cfg(test)]
