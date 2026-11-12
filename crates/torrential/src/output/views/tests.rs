@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use torrential_core::error::{Details, EXIT_PENDING};
-use torrential_core::protocol::{Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream};
+use torrential_core::protocol::{
+    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream, TitlePlayed,
+};
 use torrential_core::{
     Error, ErrorCode, FileRisk, Flag, InfoHash, Job, JobStatus, LocatorId, Progress, Release, ReleaseId, SearchQuery,
     SearchResult, Selection, SourceOutcome, SourceReport, TorrentFile, TorrentId,
 };
 
 use super::*;
-use crate::client::play::Hold;
+use crate::client::play::{Hold, Playing};
 use crate::client::wait::Printer;
 use crate::client::{Files, keep_matching};
 use crate::output::{Mode, Typed, render};
@@ -959,9 +961,19 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
         streams: vec![stream(1, "Night.mp4", 596_399_542), stream(0, "Night.asr.srt", 52_633)],
     };
     let bare = PlayReply { job: film.clone(), streams: vec![stream(2, "VTS_01_1.mp4", 262_668_288)] };
+    let named = |name: &str, reply: &PlayReply| Playing { name: name.into(), reply: reply.clone(), title: None };
+    let title = TitlePlayed {
+        video: "tt0063350".parse().unwrap(),
+        name: "Night of the Living Dead (1968)".into(),
+        release: release(ReleaseId::Torrent(tid("6bc1af")), "Night of the Living Dead (1968) [DVD]"),
+        tried: Vec::new(),
+        resume_at: None,
+    };
+    let titled = Playing { title: Some(title), ..named("Night of the Living Dead (1968)", &bare) };
     let out = [
-        play("Night of the Living Dead (1968)", &reply, Some(Duration::from_secs(5772))).plain(),
-        play("night_of_the_living_dead_dvd", &bare, None).plain(),
+        play(&named("Night of the Living Dead (1968)", &reply), Some(Duration::from_secs(5772))).plain(),
+        play(&named("night_of_the_living_dead_dvd", &bare), None).plain(),
+        play(&titled, None).plain(),
     ];
     assert_eq!(
         out,
@@ -969,6 +981,8 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
             "6bc1af Night of the Living Dead (1968)\nvideo:     Night.mp4 (568.8 MiB)\nsubtitles: Night.asr.srt\n\
              runtime:   1:36:12\nnext:      torrential status 6bc1af\n",
             "6bc1af night_of_the_living_dead_dvd\nvideo: VTS_01_1.mp4 (250.5 MiB)\nnext:  torrential status 6bc1af\n",
+            "6bc1af Night of the Living Dead (1968)\nsource: Night of the Living Dead (1968) [DVD]\nvideo:  VTS_01_1.mp4 \
+             (250.5 MiB)\nnext:   torrential status 6bc1af\n",
         ]
     );
     assert_eq!(

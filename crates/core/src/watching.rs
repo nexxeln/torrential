@@ -1,7 +1,7 @@
 //! Where a person stopped each film and episode, what of a title to play next, and the steps a
 //! title play reports.
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::catalog::{EpisodeInfo, Kind, TitleCard, TitleDetails, TitleId, VideoRef};
 use crate::error::Error;
@@ -47,8 +47,23 @@ impl Serialize for Watched {
     }
 }
 
+/// Reads what `Serialize` writes, which leaves out the release, so a read has none.
+impl<'de> Deserialize<'de> for Watched {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            video: VideoRef,
+            position: f64,
+            duration: Option<f64>,
+            at: i64,
+        }
+        let Fields { video, position, duration, at } = Fields::deserialize(deserializer)?;
+        Ok(Watched { video, position, duration, release: None, at })
+    }
+}
+
 /// What Play on a title page plays.
-#[derive(Clone, PartialEq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Next {
     pub video: VideoRef,
     /// Seconds to resume at, or `None` to start from the beginning.

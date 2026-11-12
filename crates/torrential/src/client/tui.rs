@@ -112,7 +112,7 @@ impl torrential_tui::Backend for EngineBackend {
         let reply = play::start(&mut conn, target, &listing, None, config.preferences.max_size)?;
         let player = play::player(&config, &self.paths, &self.env, &reply.streams[0].url)?;
         let name = listing.name.unwrap_or_else(|| crate::output::views::short_ref(&listing.id));
-        play::open(&player, &Playing { name, reply }, &self.env)?;
+        play::open(&player, &Playing { name, reply, title: None }, &self.env)?;
         Ok(player.name())
     }
 

@@ -274,11 +274,12 @@ impl Target {
     }
 }
 
-/// The error for a command that takes a torrent and was given a title. No command takes a title
-/// yet.
+/// The error for a command that takes a torrent and was given a title. Only `play` and `get`
+/// take a title.
 pub fn not_a_torrent(video: &VideoRef, command: &str) -> Error {
     Error::new(ErrorCode::Usage, format!("{command} takes a torrent, not a title such as {video}"))
-        .with_hint("run torrential search with the title's name, and pass the ID of a result")
+        .with_hint(format!("run torrential sources {video} to list its torrents, and pass the ID of one"))
+        .with_next(format!("torrential sources {video}"))
 }
 
 /// A 40-character hex or 32-character base32 v1 infohash, or a 64-character hex v2 infohash.

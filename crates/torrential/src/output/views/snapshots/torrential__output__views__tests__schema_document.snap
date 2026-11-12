@@ -101,6 +101,51 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "titles",
+      "about": "Find films and series by name",
+      "arguments": [
+        {
+          "name": "WORDS",
+          "help": "Words of the name",
+          "required": true,
+          "repeatable": true
+        }
+      ],
+      "flags": []
+    },
+    {
+      "name": "title",
+      "about": "Show a film, or a series and its episodes, with where you stopped",
+      "arguments": [
+        {
+          "name": "ID",
+          "help": "A title ID from torrential titles, such as tt0063350",
+          "required": true,
+          "repeatable": false
+        }
+      ],
+      "flags": []
+    },
+    {
+      "name": "sources",
+      "about": "List the torrents of a film or an episode, in the order play tries them",
+      "arguments": [
+        {
+          "name": "VIDEO",
+          "help": "A film or an episode: tt0063350, tt0903747:3:5, or a series ID for its next episode",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "EPISODE",
+          "help": "With a series ID, the episode, such as s03e05 or 3x05",
+          "required": false,
+          "repeatable": false
+        }
+      ],
+      "flags": []
+    },
+    {
       "name": "files",
       "about": "List the files in a torrent, fetching its metadata if needed",
       "arguments": [
@@ -127,12 +172,25 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "arguments": [
         {
           "name": "REF",
-          "help": "An ID prefix, infohash, magnet link, .torrent file, or .torrent URL",
+          "help": "An ID prefix, infohash, magnet link, .torrent file, or .torrent URL, or a title ID such as tt0063350 or tt0903747:3:5",
           "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "EPISODE",
+          "help": "With a series ID, the episode, such as s03e05 or 3x05",
+          "required": false,
           "repeatable": false
         }
       ],
       "flags": [
+        {
+          "name": "--source",
+          "help": "With a title ID, download only this one of its torrents, by an ID from torrential sources",
+          "takes_value": true,
+          "repeatable": false,
+          "value_name": "ID"
+        },
         {
           "name": "--files",
           "help": "Download only files matching this glob or exact path. `*` matches across folders and case is ignored. Repeat to add more",
@@ -168,12 +226,19 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "arguments": [
         {
           "name": "WORDS",
-          "help": "A download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for",
+          "help": "A title ID such as tt0063350, tt0903747:3:5, or tt0903747 s03e05, a download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for",
           "required": true,
           "repeatable": true
         }
       ],
       "flags": [
+        {
+          "name": "--source",
+          "help": "With a title ID, play only this one of its torrents, by an ID from torrential sources",
+          "takes_value": true,
+          "repeatable": false,
+          "value_name": "ID"
+        },
         {
           "name": "--dir",
           "help": "The folder to download into, if this starts a new download",
@@ -750,6 +815,18 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     {
       "name": "result.query.profile",
       "help": "What the results were ranked for. screen and playback each carry a value and a source, detected or override, and are null when nothing is known. max_size comes from the preferences that torrential setup saves. room, arch, and language are detected, and room is the bytes a download may take in the download folder. detected is null until the engine finishes detecting the machine after it starts. Within equal relevance, results that fit max_size, the room, and the player come first, then official and lawful sources, then the resolution closest to the screen, then the machine's CPU architecture, then releases in the system language"
+    },
+    {
+      "name": "result.releases[].span",
+      "help": "In sources, what of the film or series a release holds: film, an episode such as s3e5, a season such as s3, seasons such as s1-5, or complete"
+    },
+    {
+      "name": "title.tried[].reason",
+      "help": "In play and get for a title, why the play moved past a release. no_file_list and no_data carry waited_s, the seconds it waited. no_video means none of its files is the film or the episode. unplayable carries container, a file that needs ffmpeg when ffmpeg is missing. too_large and failed carry the error. stalled means it stopped sending data"
+    },
+    {
+      "name": "title.watched[]",
+      "help": "In title, where you stopped each film or episode: position and duration in seconds, finished once only the credits are left, and at, the Unix time of the last change"
     }
   ],
   "next": null

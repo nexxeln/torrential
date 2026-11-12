@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
-use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, Response};
+use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, Response, TitlePlayed, TitleRequest};
 use torrential_core::stream::{self, Start};
 use torrential_core::text::sanitize;
 use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, Target, media};
 
 use super::connect::{self, Conn};
 use super::player::{self, Launch, Player};
-use super::{absolute, answer, emit, file_list};
+use super::{absolute, answer, emit, file_list, titles};
 use crate::cli::PlayArgs;
 use crate::config::{self, Config};
 use crate::env::Env;
@@ -36,6 +36,9 @@ pub struct Playing {
     pub name: String,
     #[serde(flatten)]
     pub reply: PlayReply,
+    /// For a film or an episode, the source that plays and those that did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<TitlePlayed>,
 }
 
 /// What the countdown knows about how long the video runs.
@@ -74,9 +77,34 @@ pub enum Hold {
 }
 
 pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Error> {
+    let video = titles::named(&args.words)?;
+    match &video {
+        Some(video) if args.dir.is_some() => return Err(titles::for_a_torrent("--dir", video)),
+        None if args.source.is_some() => return Err(titles::for_a_title("--source")),
+        _ => {}
+    }
     let paths = Paths::from_process(env)?;
     let config = Config::load(&paths, env)?;
     let mut conn = connect::ensure(&paths, env)?;
+    let playing = match video {
+        Some(video) => {
+            let (reply, title) = titles::play(&mut conn, TitleRequest { video, source: args.source }, mode)?;
+            Playing { name: title.name.clone(), reply, title: Some(title) }
+        }
+        None => torrent(&mut conn, args, mode, env, cwd, &config)?,
+    };
+    present(conn, playing, mode, env, &paths, &config)
+}
+
+/// Starts the video of the torrent `args` name, or of the top search result for its words.
+fn torrent(
+    conn: &mut Conn,
+    args: PlayArgs,
+    mode: Mode,
+    env: &Env,
+    cwd: &Path,
+    config: &Config,
+) -> Result<Playing, Error> {
     let finding = (mode == Mode::Human).then(|| {
         let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr())
             .with_style(ProgressStyle::with_template("{spinner} {msg}").expect("the template is valid"));
@@ -84,20 +112,24 @@ pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Erro
         bar.enable_steady_tick(Duration::from_millis(100));
         bar
     });
-    let found = resolve(&mut conn, &args.words, cwd, config.preferences);
+    let found = resolve(conn, &args.words, cwd, config.preferences);
     if let Some(bar) = finding {
         bar.finish_and_clear();
     }
     let (target, title, listing) = found?;
     let dir = args.dir.map(|d| absolute(&d, cwd, env));
-    let reply = start(&mut conn, target, &listing, dir, config.preferences.max_size)?;
+    let reply = start(conn, target, &listing, dir, config.preferences.max_size)?;
     let name = title.or(listing.name).unwrap_or_else(|| views::short_ref(&listing.id));
-    let playing = Playing { name, reply };
-    let doc = views::play(&playing.name, &playing.reply, None);
+    Ok(Playing { name, reply, title: None })
+}
+
+/// Hands the video to the person's player, or with `--json` prints where it is served.
+fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, config: &Config) -> Result<u8, Error> {
+    let doc = views::play(&playing, None);
     if mode == Mode::Json {
         return Ok(emit(mode, &doc, &Typed { kind: "play", body: &playing }));
     }
-    let player = player(&config, &paths, env, &playing.reply.streams[0].url)?;
+    let player = player(config, paths, env, &playing.reply.streams[0].url)?;
     if mode == Mode::Plain {
         open(&player, &playing, env)?;
         let summary = vec![format!("playing in {} · the download continues", player.name())];
@@ -110,7 +142,7 @@ pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Erro
     });
     let runtime = countdown(conn, &playing)?;
     open(&player, &playing, env)?;
-    let mut out = Doc { next: None, ..views::play(&playing.name, &playing.reply, known(runtime)) }.human();
+    let mut out = Doc { next: None, ..views::play(&playing, known(runtime)) }.human();
     if runtime == Runtime::Unknown {
         out.push_str(&paint(Token::Muted, views::UNKNOWN_RUNTIME));
         out.push('\n');
@@ -272,7 +304,7 @@ fn countdown(mut conn: Conn, playing: &Playing) -> Result<Runtime, Error> {
         };
         let rate = rates.mean(Instant::now(), rate);
         let Some(why) = hold(runtime, video.size, have, rate) else { break };
-        let header = Doc { next: None, ..views::play(&playing.name, &playing.reply, known(runtime)) }.human();
+        let header = Doc { next: None, ..views::play(playing, known(runtime)) }.human();
         bar.set_message(format!("{header}{}", paint(Token::Accent, &views::hold(why))));
         match rx.recv_timeout(TICK) {
             Ok(Wake::Enter) => break,

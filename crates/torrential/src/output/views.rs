@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use torrential_core::id::shortest_unique_prefix;
-use torrential_core::protocol::{Change, FilesReply, GetOutcome, GetReply, PlayReply};
+use torrential_core::protocol::{Change, FilesReply, GetOutcome, GetReply};
 use torrential_core::text::sanitize;
 use torrential_core::units::{format_limit, format_size, size_text};
 use torrential_core::{
@@ -13,9 +13,12 @@ use torrential_core::{
 use super::format::{self, NONE};
 use super::theme::{Token, paint};
 use super::{Body, Cell, Doc};
-use crate::client::play::Hold;
+use crate::client::play::{Hold, Playing};
 use crate::skill::{Change as SkillChange, Installed, State};
 use crate::update::Policy;
+
+mod titles;
+pub use titles::{check, get_title, search_for, sources, step, title, title_name, titles};
 
 const SHORT_ID: usize = 6;
 const MAX_FILE_ROWS: usize = 200;
@@ -71,35 +74,7 @@ pub fn source_outcome(outcome: &SourceOutcome) -> String {
 pub fn search(result: &SearchResult, now: i64) -> Doc {
     let ids = release_ids(&result.releases);
     let video = result.is_video();
-    let rows = result
-        .releases
-        .iter()
-        .zip(&ids)
-        .map(|(r, id)| {
-            let source = match r.sources.as_slice() {
-                [] => NONE.to_string(),
-                [one] => one.clone(),
-                [first, rest @ ..] => format!("{first}+{}", rest.len()),
-            };
-            let flags: Vec<&str> = r.flags.iter().map(|f| f.as_str()).collect();
-            let quality = r.quality().to_string();
-            let unknown = if video || r.category == Some(Category::Video) { format::UNKNOWN } else { NONE };
-            vec![
-                Cell::styled(id, Token::Accent),
-                Cell::new(r.seeders.map_or_else(|| format::UNKNOWN.to_string(), |s| s.to_string())),
-                Cell::new(format::size(r.size)),
-                if quality.is_empty() { Cell::styled(unknown, Token::Muted) } else { Cell::new(quality) },
-                Cell::new(format::age(r.published, now)),
-                Cell::styled(source, Token::Muted),
-                if flags.is_empty() {
-                    Cell::styled(NONE, Token::Muted)
-                } else {
-                    Cell::styled(flags.join(","), Token::Mint)
-                },
-                Cell::new(&r.name),
-            ]
-        })
-        .collect();
+    let rows = result.releases.iter().zip(&ids).map(|(r, id)| release_row(r, id, video, now)).collect();
     let ok = result.sources.iter().filter(|s| s.outcome.is_ok()).count();
     let found = if result.releases.is_empty() {
         "no results".to_string()
@@ -159,6 +134,28 @@ pub fn search(result: &SearchResult, now: i64) -> Doc {
         summary.push(format!("ranked for {}", profile.describe_arch()));
     }
     Doc { body: Body::Table { header, rows }, summary, next: Some(next) }
+}
+
+/// A search result as a row: its ID, seeds, size, quality, age, source, flags, and name.
+fn release_row(r: &Release, id: &str, video: bool, now: i64) -> Vec<Cell> {
+    let source = match r.sources.as_slice() {
+        [] => NONE.to_string(),
+        [one] => one.clone(),
+        [first, rest @ ..] => format!("{first}+{}", rest.len()),
+    };
+    let flags: Vec<&str> = r.flags.iter().map(|f| f.as_str()).collect();
+    let quality = r.quality().to_string();
+    let unknown = if video || r.category == Some(Category::Video) { format::UNKNOWN } else { NONE };
+    vec![
+        Cell::styled(id, Token::Accent),
+        Cell::new(r.seeders.map_or_else(|| format::UNKNOWN.to_string(), |s| s.to_string())),
+        Cell::new(format::size(r.size)),
+        if quality.is_empty() { Cell::styled(unknown, Token::Muted) } else { Cell::new(quality) },
+        Cell::new(format::age(r.published, now)),
+        Cell::styled(source, Token::Muted),
+        if flags.is_empty() { Cell::styled(NONE, Token::Muted) } else { Cell::styled(flags.join(","), Token::Mint) },
+        Cell::new(&r.name),
+    ]
 }
 
 pub fn ranked_for(profile: &Profile) -> String {
@@ -328,11 +325,16 @@ pub fn get(reply: &GetReply, dir: Option<&Path>) -> Doc {
 
 pub const UNKNOWN_RUNTIME: &str = "could not read the video's runtime, so playback may pause while it downloads";
 
-/// The release, the files it plays, and how long the video runs once that is known.
-pub fn play(name: &str, reply: &PlayReply, runtime: Option<Duration>) -> Doc {
+/// The release, the files it plays, and how long the video runs once that is known. A title play
+/// also names the source it chose.
+pub fn play(playing: &Playing, runtime: Option<Duration>) -> Doc {
+    let reply = &playing.reply;
     let id = short_ids(&[reply.job.id]).remove(0);
-    let title = vec![Cell::styled(id.clone(), Token::Accent), Cell::new(name)];
+    let title = vec![Cell::styled(id.clone(), Token::Accent), Cell::new(&playing.name)];
     let mut fields = Vec::new();
+    if let Some(title) = &playing.title {
+        fields.push(("source", Cell::new(&title.release.name)));
+    }
     if let [video, subtitles @ ..] = reply.streams.as_slice() {
         fields.push(("video", Cell::new(format!("{} ({})", video.path, format_size(video.size)))));
         if !subtitles.is_empty() {
