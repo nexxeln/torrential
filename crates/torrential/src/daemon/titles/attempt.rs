@@ -302,7 +302,7 @@ impl Walk<'_> {
 
 impl PlayTitle {
     /// Whether this play may try `release`: never the download it replaces, and only the pinned
-    /// release when one is.
+    /// release when one is. A trial checks again once it knows the release's torrent.
     fn may_try(&self, release: &Release) -> bool {
         self.replace.is_none_or(|old| release.id != ReleaseId::Torrent(old))
             && self.pin.is_none_or(|pin| release.id == pin)
@@ -343,6 +343,12 @@ impl Trial<'_> {
             Ok(Err(error)) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),
             _ => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
         };
+        // A release found by its .torrent link names no torrent until the file is read.
+        if let Some(stalled) = ask.replace
+            && download_of(ctx, &source).await == Some(stalled)
+        {
+            return Err(Skip::Stalled.into());
+        }
         let remux = (ctx.web.tools)().ffmpeg.is_some();
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
 
@@ -434,6 +440,17 @@ async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Sourc
             Ok((Source::Download(id), info.metainfo))
         }
     }
+}
+
+/// The download on this machine that `source` is, by either hash of its torrent.
+async fn download_of(ctx: &Ctx, source: &Source) -> Option<TorrentId> {
+    let reference = match source {
+        Source::Download(id) => id.to_hex(),
+        Source::Magnet(magnet) => magnet.uri.clone(),
+        Source::Torrent { metainfo, .. } => magnet::from_hash(metainfo.info_hash).uri,
+    };
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![reference], reply }).await.ok()?;
+    jobs.first().map(|job| job.id)
 }
 
 fn seconds(elapsed: Duration) -> u32 {

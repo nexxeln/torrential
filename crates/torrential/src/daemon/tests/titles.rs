@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
-use torrential_core::{AttemptEvent, Category, Check, Error, Job, Lease, Release, ReleaseId, TitleLink, TorrentId};
+use torrential_core::{
+    AttemptEvent, Category, Check, Error, Job, Lease, LocatorId, Release, ReleaseId, TitleLink, TorrentId,
+};
 
 use super::super::admission::GIB;
 use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
@@ -915,6 +917,46 @@ async fn replace_plays_another_source_and_then_pauses_the_one_that_stalled() {
     let states: Vec<(String, &str)> =
         h.status().await.iter().map(|j| (j.id.to_hex()[..6].to_string(), j.status.name())).collect();
     assert_eq!(states, [("a3a3a3".to_string(), "paused"), ("a4a4a4".to_string(), "downloading")]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_skips_a_release_whose_torrent_file_turns_out_to_be_the_stalled_download() {
+    let stalled = torrent(0xe1, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
+    let other = torrent(0xe2, "night_of_the_living_dead", &[("night_of_the_living_dead.mp4", 700 * MIB)]);
+    let url = "https://index.example/night.torrent";
+    let by_link = Release {
+        id: ReleaseId::Locator(LocatorId::from_bytes([0xee; 20])),
+        magnet: None,
+        torrent_url: Some(url.into()),
+        ..listed(&stalled, "knaben", Some(40))
+    };
+    let catalog = vec![by_link, listed(&other, "archive.org", None)];
+    let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
+    let torrents = BTreeMap::from([(url.to_string(), stalled.bytes())]);
+    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, torrents));
+    h.swarm.publish(stalled.clone());
+    h.swarm.publish(other.clone());
+    h.swarm.set_rate(100 * MIB);
+    let first = h.play_title("tt0063350", None, None).await;
+    assert_eq!(first.last().unwrap(), "playing tt0063350 e1e1e1 file 0 at null");
+    assert_eq!(
+        h.play_title("tt0063350", None, Some(stalled.info_hash.id())).await,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 2",
+            "trying 1 of 2 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            r#"skipped ueeeee {"reason":"stalled"}"#,
+            "trying 2 of 2 night_of_the_living_dead",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 e2e2e2 file 0 at null",
+        ]
+    );
+    let states: Vec<(String, &str)> =
+        h.status().await.iter().map(|j| (j.id.to_hex()[..6].to_string(), j.status.name())).collect();
+    assert_eq!(states, [("e1e1e1".to_string(), "paused"), ("e2e2e2".to_string(), "downloading")]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
