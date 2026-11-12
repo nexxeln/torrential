@@ -84,12 +84,6 @@ CREATE TABLE library (
     rating REAL,
     saved_at INTEGER NOT NULL
 ) STRICT;
-CREATE TABLE discards (
-    job TEXT PRIMARY KEY,
-    dir BLOB NOT NULL,
-    paths TEXT NOT NULL,
-    discarded_at INTEGER NOT NULL
-) STRICT;
 "#,
 ];
 
@@ -105,15 +99,6 @@ pub const TOMBSTONE_SECS: i64 = 86_400;
 pub const RESULTS_SECS: i64 = 7 * 86_400;
 pub const METAINFO_SECS: i64 = RESULTS_SECS;
 pub const METAINFO_BYTES: i64 = 64 << 20;
-
-/// The files a discarded download left, relative to its folder, which the owner deletes once
-/// the engine lets go of them.
-#[derive(Clone, PartialEq, Debug)]
-pub struct Discard {
-    pub id: TorrentId,
-    pub dir: PathBuf,
-    pub paths: Vec<PathBuf>,
-}
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct StoredJob {
@@ -464,43 +449,13 @@ impl Store {
         self.write(|tx| tx.execute("UPDATE job_titles SET played = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
     }
 
-    /// Removes a download and records the files it left, in one transaction, so a crash before
-    /// they are deleted leaves the record to finish from.
-    pub fn discard(&mut self, discard: &Discard, now: i64) -> Result<(), Error> {
-        let paths: Vec<String> = discard.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    /// Removes a download a title play gave up on. It leaves no tombstone, for the person never
+    /// had it.
+    pub fn discard(&mut self, id: TorrentId, now: i64) -> Result<(), Error> {
         self.write(|tx| {
-            let id = discard.id.to_hex();
-            tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
-            tx.execute(
-                "INSERT OR REPLACE INTO discards (job, dir, paths, discarded_at) VALUES (?1, ?2, ?3, ?4)",
-                params![id, discard.dir.as_os_str().as_bytes(), json(&paths), now],
-            )?;
+            tx.execute("DELETE FROM jobs WHERE id = ?1", [id.to_hex()])?;
             evict_metainfo(tx, now)
         })
-    }
-
-    pub fn discards(&self) -> Result<Vec<Discard>, Error> {
-        let mut stmt = self.conn.prepare("SELECT job, dir, paths FROM discards").map_err(|e| self.fail(e))?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| self.fail(e))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, dir, paths) = row.map_err(|e| self.fail(e))?;
-            let bad = || corrupt(&self.path, &format!("the discarded download {id} is unreadable"));
-            let paths: Vec<String> = serde_json::from_str(&paths).map_err(|_| bad())?;
-            out.push(Discard {
-                id: id.parse().map_err(|_| bad())?,
-                dir: PathBuf::from(std::ffi::OsString::from_vec(dir)),
-                paths: paths.into_iter().map(PathBuf::from).collect(),
-            });
-        }
-        Ok(out)
-    }
-
-    /// Forgets a discard whose files are gone.
-    pub fn discarded(&mut self, id: TorrentId) -> Result<(), Error> {
-        self.write(|tx| tx.execute("DELETE FROM discards WHERE job = ?1", [id.to_hex()]).map(drop))
     }
 
     pub fn remove_duplicate(&mut self, id: TorrentId) -> Result<(), Error> {
@@ -775,18 +730,13 @@ mod tests {
         let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
         assert_eq!(titles, [Some(owned), Some(Linked { link: link(Lease::Borrowed), played: true })]);
 
-        let discard = Discard {
-            id: TorrentId::from_bytes([1; 20]),
-            dir: PathBuf::from("/dl"),
-            paths: vec![PathBuf::from("Harbor Lights S01/e1.mkv"), PathBuf::from(".0101.parts")],
-        };
-        store.discard(&discard, 120).unwrap();
+        store.discard(TorrentId::from_bytes([1; 20]), 120).unwrap();
         let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
         assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
-        let links: i64 = store.conn.query_row("SELECT count(*) FROM job_titles", [], |r| r.get(0)).unwrap();
-        assert_eq!((links, store.discards().unwrap()), (1, vec![discard]));
-        store.discarded(TorrentId::from_bytes([1; 20])).unwrap();
-        assert_eq!(store.discards().unwrap(), []);
+        let count = |table: &str| -> i64 {
+            store.conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!((count("job_titles"), count("tombstones")), (1, 0));
     }
 
     #[test]

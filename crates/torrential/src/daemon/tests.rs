@@ -254,26 +254,40 @@ impl Harness {
     }
 }
 
-#[derive(Clone, Default)]
-struct Gate(Arc<Mutex<(bool, Vec<EngineEvent>)>>);
+/// Holds back some of an engine's events while it is closed.
+#[derive(Clone)]
+struct Gate {
+    state: Arc<Mutex<(bool, Vec<EngineEvent>)>>,
+    holds: fn(&EngineEvent) -> bool,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self::holding(|event| matches!(event, EngineEvent::Paused { .. }))
+    }
+}
 
 impl Gate {
+    fn holding(holds: fn(&EngineEvent) -> bool) -> Self {
+        Self { state: Arc::default(), holds }
+    }
+
     fn close(&self) {
-        self.0.lock().unwrap().0 = true;
+        self.state.lock().unwrap().0 = true;
     }
 
     fn open(&self) {
-        self.0.lock().unwrap().0 = false;
+        self.state.lock().unwrap().0 = false;
     }
 
     fn held(&self) -> usize {
-        self.0.lock().unwrap().1.len()
+        self.state.lock().unwrap().1.len()
     }
 
     async fn until_held(&self, n: usize) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while self.held() < n {
-            assert!(Instant::now() < deadline, "the engine never paused");
+            assert!(Instant::now() < deadline, "the engine never sent the event");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -348,13 +362,12 @@ impl<P: EnginePort> EnginePort for Gated<P> {
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         let events = self.port.poll(max_wait);
-        let (closed, held) = &mut *self.gate.0.lock().unwrap();
+        let (closed, held) = &mut *self.gate.state.lock().unwrap();
         if !*closed {
             return held.drain(..).chain(events).collect();
         }
-        let (paused, others): (Vec<_>, Vec<_>) =
-            events.into_iter().partition(|e| matches!(e, EngineEvent::Paused { .. }));
-        held.extend(paused);
+        let (kept, others): (Vec<_>, Vec<_>) = events.into_iter().partition(self.gate.holds);
+        held.extend(kept);
         others
     }
 }

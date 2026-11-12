@@ -10,13 +10,12 @@ use torrential_core::title::Span;
 use torrential_core::{Category, Error, ErrorCode, Job, Lease, Release, ReleaseId, TitleLink, TorrentId};
 
 use super::super::admission::GIB;
-use super::super::engine_port::FakeTorrentFile;
+use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
 use super::super::owner::{Command, Created, Finish, Origin, PlayCommand, Source};
 use super::super::search_port::{self, FakeSource};
-use super::super::store::{Discard, Store};
 use super::super::titles::Timing;
 use super::super::titles::attempt::{self, Containers, PlayTitle};
-use super::{Harness, MIB, Outside, TIMING, prefix, torrent};
+use super::{Gate, Gated, Harness, MIB, Outside, TIMING, prefix, torrent};
 
 /// A search result for a test torrent, listed by `source`.
 pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) -> Release {
@@ -128,12 +127,13 @@ impl Harness {
         self.running.ctx.owner.ask(|reply| Command::Discard { id, reply }).await.map_err(|e| (e.code, e.message))
     }
 
-    async fn restart_after(self, change: impl FnOnce(&Path)) -> Self {
+    /// Stops the engine where it is, lets `change` at the disk, and starts it again.
+    async fn restart_after(self, change: impl FnOnce()) -> Self {
         let Self { dir, running, swarm, disk, search, outside } = self;
         running.owner.abort();
         let _ = running.owner.await;
         drop(running.ctx);
-        change(&dir.path().join("state.db"));
+        change();
         let engine = Box::new(super::Fake::new(swarm.clone()));
         let running = Self::boot(&dir, engine, super::parse_fake, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
@@ -318,29 +318,50 @@ async fn discard_deletes_only_what_the_download_selected_never_through_a_link_or
     assert_eq!(tree(&outside), ["deep", "deep/c.mp4", "secret.srt"]);
     let ids: Vec<TorrentId> = h.status().await.into_iter().map(|j| j.id).collect();
     assert_eq!(ids, [failed.info_hash.id()]);
-    let store = Store::open(&h.dir.path().join("state.db")).unwrap();
-    assert_eq!(store.discards().unwrap(), []);
+}
+
+/// A trial given up whose discard still waits on the engine when the engine stops, and the file
+/// the trial wrote.
+async fn stopped_mid_discard() -> (Harness, PathBuf) {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
+    let engine = Gated { port: FakeEngine::new(Swarm::new(0)), gate: gate.clone() };
+    let h = Harness::with_engine(|_| Box::new(engine), parse_fake);
+    let film = torrent(80, "film", &[("film.mp4", GIB)]);
+    h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
+    let written = h.downloads().join("film/film.mp4");
+    write(&written);
+    gate.close();
+    assert_eq!(h.discard(&film).await, Ok(()));
+    gate.until_held(1).await;
+    (h, written)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_discard_a_crash_left_is_finished_when_the_engine_starts() {
-    let h = Harness::new();
-    let downloads = h.downloads();
-    for file in ["left/a.mp4", "left/sub/b.srt", "kept.mp4"] {
-        write(&downloads.join(file));
-    }
+async fn a_discard_the_engine_stopped_before_finishing_deletes_nothing_when_the_engine_starts() {
+    let (h, written) = stopped_mid_discard().await;
+    let h = h.restart_after(|| std::fs::write(&written, b"the person's own film").unwrap()).await;
+    assert_eq!(std::fs::read(&written).unwrap(), b"the person's own film");
+    assert_eq!(tree(&h.downloads()), ["film", "film/film.mp4"]);
+    assert_eq!(h.states().await, Vec::<&str>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_discard_the_engine_stopped_before_finishing_deletes_nothing_through_a_link_put_where_its_folder_was() {
+    let (h, _) = stopped_mid_discard().await;
+    let (downloads, elsewhere) = (h.downloads(), h.dir.path().join("elsewhere"));
+    let theirs = elsewhere.join("film/film.mp4");
     let h = h
-        .restart_after(|database| {
-            let left = Discard {
-                id: TorrentId::from_bytes([9; 20]),
-                dir: downloads.clone(),
-                paths: [PathBuf::from("left/a.mp4"), PathBuf::from("left/sub/b.srt")].into(),
-            };
-            Store::open(database).unwrap().discard(&left, 0).unwrap();
+        .restart_after(|| {
+            std::fs::rename(&downloads, downloads.with_file_name("moved")).unwrap();
+            std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+            std::fs::write(&theirs, b"the person's own film").unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &downloads).unwrap();
         })
         .await;
-    assert_eq!(tree(&h.downloads()), ["kept.mp4"]);
-    assert_eq!(Store::open(&h.dir.path().join("state.db")).unwrap().discards().unwrap(), []);
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"the person's own film");
+    assert_eq!(tree(&elsewhere), ["film", "film/film.mp4"]);
+    assert_eq!(h.states().await, Vec::<&str>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]

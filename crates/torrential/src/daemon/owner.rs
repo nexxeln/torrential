@@ -19,7 +19,7 @@ use super::files;
 use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
-use super::store::{Discard, Store, Tombstone};
+use super::store::{Store, Tombstone};
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -183,6 +183,12 @@ struct PendingPause {
     reply: Reply<Vec<Change>>,
 }
 
+/// The files a discarded download left, relative to its folder.
+struct Discard {
+    dir: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
 struct Stopping {
     waiting: BTreeSet<TorrentId>,
     deadline: Instant,
@@ -197,7 +203,8 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
-    /// Discarded downloads whose files go once the engine removes them.
+    /// Discarded downloads whose files go once the engine removes them. Only in memory, so an
+    /// engine that stops before then leaves the files on disk, and nothing deletes them later.
     discarding: BTreeMap<TorrentId, Discard>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
@@ -267,9 +274,6 @@ impl Owner {
             keep_until: None,
             resume_saved_at: Instant::now(),
         };
-        for left in owner.store.discards()? {
-            owner.finish_discard(left);
-        }
         owner.schedule();
         Ok(owner)
     }
@@ -784,8 +788,8 @@ impl Owner {
         };
         let dir = job.record.dir.clone();
         let paths = self.unclaimed(Some(id), &dir, held);
-        let discarded = Discard { id, dir, paths };
-        self.store.discard(&discarded, now())?;
+        let discarded = Discard { dir, paths };
+        self.store.discard(id, now())?;
         let job = self.jobs.remove(&id).expect("found above");
         self.streamed.remove(&id);
         for pause in &mut self.pauses {
@@ -808,7 +812,6 @@ impl Owner {
     fn finish_discard(&mut self, discarded: Discard) {
         let paths = self.unclaimed(None, &discarded.dir, discarded.paths);
         discard::delete(&discarded.dir, &paths);
-        let _ = self.store.discarded(discarded.id);
     }
 
     /// The paths in `dir` that no download but `except` holds.
