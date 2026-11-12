@@ -551,8 +551,11 @@ bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file,
     deadline_ms += 100;
   }
   // A reader goes on to the bytes after the range. Sequential picking skips
-  // the pieces with deadlines, so they still come first.
-  h.set_sequential_range(first, file_last);
+  // the pieces with deadlines, so they still come first. A range that ends
+  // the file moves nothing: a player reads a file's last bytes for its index
+  // and then returns to where it plays, and a range of one piece would leave
+  // every other peer picking at random.
+  if (last < file_last) h.set_sequential_range(first, file_last);
   return written;
 }
 
