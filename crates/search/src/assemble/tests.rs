@@ -817,6 +817,7 @@ fn night(namesakes: Namesakes, year: u16) -> Wanted {
         namesakes,
         runtime: Some(std::time::Duration::from_secs(96 * 60)),
         season_episodes: None,
+        countries: Default::default(),
     }
 }
 
@@ -940,6 +941,7 @@ fn friday() -> Wanted {
         namesakes: Namesakes::None,
         runtime: Some(std::time::Duration::from_secs(92 * 60)),
         season_episodes: None,
+        countries: Default::default(),
     }
 }
 
@@ -994,6 +996,7 @@ fn sintel() -> Wanted {
         namesakes: Namesakes::None,
         runtime: Some(std::time::Duration::from_secs(15 * 60)),
         season_episodes: None,
+        countries: Default::default(),
     }
 }
 
@@ -1034,6 +1037,7 @@ fn a_trailer_is_not_the_film() {
         namesakes: Namesakes::None,
         runtime: Some(std::time::Duration::from_secs(25 * 60)),
         season_episodes: Some(6),
+        countries: Default::default(),
     };
     let runs = [fresh(&knaben(), vec![video(0x87, "Trailer.Park.Boys.S01E01.720p.WEB.x264", Some(40), 500_000_000)])];
     assert_eq!(played(&boys, Profile::default(), &runs), ["Trailer.Park.Boys.S01E01.720p.WEB.x264"]);
@@ -1121,6 +1125,7 @@ fn an_episode_ranks_before_its_season_pack() {
         namesakes: Namesakes::None,
         runtime: Some(std::time::Duration::from_secs(47 * 60)),
         season_episodes: Some(13),
+        countries: Default::default(),
     };
     let runs = [fresh(
         &knaben(),

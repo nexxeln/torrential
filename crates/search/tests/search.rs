@@ -669,6 +669,7 @@ async fn a_title_searches_each_of_its_queries_and_reports_each_source_once() {
         namesakes: Namesakes::Leading,
         runtime: Some(Duration::from_secs(96 * 60)),
         season_episodes: None,
+        countries: Default::default(),
     };
     let q = SearchQuery { wanted: Some(wanted), ..query("night of the living dead", &sources) };
     let search = Search::new(&server.config(&sources), ResultCache::new()).unwrap();

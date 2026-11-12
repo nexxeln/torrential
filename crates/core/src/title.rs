@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::{Countries, Country};
 use crate::error::{Error, ErrorCode};
 use crate::quality::Quality;
 
@@ -198,15 +199,15 @@ pub struct Named {
     pub name: String,
     pub year: Option<u16>,
     pub span: Span,
+    /// The country whose code ends the name, as `US` ends `The.Office.US` or `The Office (US)`.
+    /// `name` then leaves the code out.
+    pub country: Option<Country>,
 }
-
-/// Countries that tell series of one name apart, as in `The Office (US)`. `tokens` drops what is
-/// in brackets, so `named` puts these back.
-const COUNTRIES: [&str; 5] = ["(US)", "(UK)", "(AU)", "(NZ)", "(CA)"];
 
 /// Reads a release's name as a title, keeping the season of a pack, which `read` drops. `S02`,
 /// `Season 2`, `S01-S05`, and `Complete` are packs. Several readings when a year may be part of
-/// the title, as `read` gives, or when one file holds several episodes, as `S01E01E02` does.
+/// the title, as `read` gives, when a country code may be part of it, as in This Is Us, or when
+/// one file holds several episodes, as `S01E01E02` does.
 pub fn named(release: &str) -> Vec<Named> {
     let reading = Reading::of(stem(release));
     let season = reading.season;
@@ -222,19 +223,33 @@ pub fn named(release: &str) -> Vec<Named> {
         (None, None) => vec![Span::Film],
     };
     let mut words = reading.words;
-    if let Some(country) = COUNTRIES.iter().find(|country| release.contains(**country))
+    if let Some(country) = bracketed_country(release)
         && !words.is_empty()
     {
-        words.push(country.trim_matches(['(', ')']).to_string());
+        words.push(country.code().to_string());
     }
-    let name = words.join(" ");
-    let mut readings: Vec<Named> =
-        spans.into_iter().map(|span| Named { name: name.clone(), year: reading.year, span }).collect();
+    let mut names = vec![(words.join(" "), None)];
+    if let Some((last, title)) = words.split_last()
+        && let Some(country) = Country::of_code(last)
+    {
+        names.insert(0, (title.join(" "), Some(country)));
+    }
+    let mut readings = Vec::new();
+    for (name, country) in names {
+        readings.extend(spans.iter().map(|&span| Named { name: name.clone(), year: reading.year, span, country }));
+    }
     if let Some(with_year) = reading.with_year {
-        readings.push(Named { name: with_year.join(" "), year: None, span: Span::Film });
+        readings.push(Named { name: with_year.join(" "), year: None, span: Span::Film, country: None });
     }
     readings.retain(|n| !n.name.is_empty());
     readings
+}
+
+/// The country a release names in brackets, as `The Office (US)` does. `tokens` drops what is in
+/// brackets, so `named` puts it back.
+fn bracketed_country(release: &str) -> Option<Country> {
+    let mut bracketed = release.split(['(', '[']).skip(1).filter_map(|after| Some(after.split_once([')', ']'])?.0));
+    bracketed.find_map(|inside| Country::of_code(inside.trim()))
 }
 
 /// Every episode a file in a torrent holds, as `read` reads it: none for a film, and several for
@@ -272,38 +287,51 @@ pub struct Wanted {
     pub runtime: Option<Duration>,
     /// Episodes in the wanted episode's season, to size a season pack per episode.
     pub season_episodes: Option<u32>,
+    /// The countries the title is from, whose codes tell its releases from a namesake's.
+    #[serde(default)]
+    pub countries: Countries,
 }
 
 impl Wanted {
     /// The reading of `release` that is this title, or `None`. The name must be the same once
     /// normalized. A film's year may be 1 off the catalog's, since a release can name the year
-    /// after the premiere. A series' year must be the year it began. A release without a year
-    /// fits unless another title of the name is listed first. For an episode, the release holds
-    /// the episode itself or a pack that covers it.
+    /// after the premiere. A series' year must be the year it began. A country code after the
+    /// name must be one this title is from, or with no country known, no other title may share
+    /// the name. A release without a year fits when it names this title's country, or unless
+    /// another title of the name is listed first. For an episode, the release holds the episode
+    /// itself or a pack that covers it.
     pub fn fit(&self, release: &str) -> Option<Named> {
         let name = normalized(&self.name);
         named(release).into_iter().find(|reading| {
+            let country = match reading.country {
+                None => true,
+                Some(_) if self.countries.is_empty() => self.namesakes == Namesakes::None,
+                Some(country) => self.countries.contains(country),
+            };
             let year = match (reading.year, self.year) {
-                (None, _) => self.namesakes != Namesakes::Shadowed,
+                (None, _) => reading.country.is_some() || self.namesakes != Namesakes::Shadowed,
                 (Some(_), None) => true,
                 (Some(named), Some(year)) if self.episode.is_some() => named == year,
                 (Some(named), Some(year)) => named.abs_diff(year) <= 1,
             };
-            year && reading.span.covers(self.episode) && normalized(&reading.name) == name
+            country && year && reading.span.covers(self.episode) && normalized(&reading.name) == name
         })
     }
 
     /// What to search for. A film: `name year`, then `name` for releases without the year
-    /// unless they cannot be this film. An episode: `name S03E05`, `name S03`, and `name complete`.
+    /// unless they cannot be this film. An episode: `name S03E05`, `name S03`, and `name complete`,
+    /// and when other series share the name, `name US S03E05` for each country it is from.
     pub fn queries(&self) -> Vec<String> {
         let name = &self.name;
         match (self.episode, self.year) {
             (Some(Episode { season, episode }), _) => {
-                vec![
-                    format!("{name} S{season:02}E{episode:02}"),
-                    format!("{name} S{season:02}"),
-                    format!("{name} complete"),
-                ]
+                let mut queries = vec![format!("{name} S{season:02}E{episode:02}")];
+                if self.namesakes != Namesakes::None {
+                    let coded = self.countries.iter().map(|c| format!("{name} {} S{season:02}E{episode:02}", c.code()));
+                    queries.extend(coded);
+                }
+                queries.extend([format!("{name} S{season:02}"), format!("{name} complete")]);
+                queries
             }
             (None, Some(year)) if self.namesakes == Namesakes::Shadowed => vec![format!("{name} {year}")],
             (None, Some(year)) => vec![format!("{name} {year}"), name.clone()],
@@ -313,7 +341,8 @@ impl Wanted {
 
     /// How many words `release` has beyond this title's own. Numbers and codes such as `5.1`
     /// and `60FPS` are not words, nor are the tags a title ends at or `Quality` reads, the words
-    /// of a season or an episode, or the group after a final dash. A plain release has none. An
+    /// of a season or an episode, the codes of the countries the title is from, or the group
+    /// after a final dash. A plain release has none. An
     /// alternate version names itself, as `Night Of The Living Dead (1968) Synthwave Horror Cut`
     /// does in three words.
     pub fn other_words(&self, release: &str) -> usize {
@@ -345,6 +374,7 @@ impl Wanted {
         let other = |(i, word): &(usize, &String)| {
             !(word.bytes().any(|b| b.is_ascii_digit())
                 || own.contains(&word.as_str())
+                || self.countries.iter().any(|country| country.code().eq_ignore_ascii_case(word))
                 || SPANS.contains(&word.as_str())
                 || LOOSE_TAGS.contains(&word.as_str())
                 || tag(*i, word))
@@ -761,7 +791,15 @@ mod tests {
     }
 
     fn film_named(name: &str, year: u16, namesakes: Namesakes) -> Wanted {
-        Wanted { name: name.into(), year: Some(year), episode: None, namesakes, runtime: None, season_episodes: None }
+        Wanted {
+            name: name.into(),
+            year: Some(year),
+            episode: None,
+            namesakes,
+            runtime: None,
+            season_episodes: None,
+            countries: Countries::default(),
+        }
     }
 
     fn episode_of(name: &str, year: u16, namesakes: Namesakes, season: u32, episode: u32) -> Wanted {
@@ -819,13 +857,69 @@ mod tests {
     }
 
     #[test]
+    fn a_country_after_the_name_tells_same_named_series_apart() {
+        let american = |season, episode| Wanted {
+            countries: [Country::Us].into(),
+            ..episode_of("The Office", 2005, Namesakes::Leading, season, episode)
+        };
+        let british = |season, episode| Wanted {
+            countries: [Country::Uk].into(),
+            ..episode_of("The Office", 2001, Namesakes::Shadowed, season, episode)
+        };
+        let rows = [
+            ("The.Office.US.S02E01.720p", 2, 1, Some("s2e1"), None),
+            ("The Office (UK) S01E01", 1, 1, None, Some("s1e1")),
+            ("The.Office.S02E01", 2, 1, Some("s2e1"), None),
+            ("The.Office.UK.S01E01.DVDRip.XviD", 1, 1, None, Some("s1e1")),
+            ("the.office.us.s02e01.720p.hdtv", 2, 1, Some("s2e1"), None),
+            ("The Office [US] S02 1080p", 2, 1, Some("s2"), None),
+            ("The.Office.US.2005.S02E01.1080p", 2, 1, Some("s2e1"), None),
+            ("The.Office.UK.2005.S02E01.1080p", 2, 1, None, None),
+            ("The.Office.AU.S01E01.720p", 1, 1, None, None),
+        ];
+        let span = |named: Option<Named>| named.map(|n| n.span.to_string());
+        let read = rows.map(|(release, season, episode, ..)| {
+            (release, span(american(season, episode).fit(release)), span(british(season, episode).fit(release)))
+        });
+        let expected = rows.map(|(release, _, _, us, uk)| (release, us.map(String::from), uk.map(String::from)));
+        assert_eq!(read, expected);
+
+        let unknown = |namesakes| episode_of("The Office", 2005, namesakes, 2, 1);
+        let coded = "The.Office.US.S02E01.720p";
+        assert_eq!(
+            [Namesakes::None, Namesakes::Leading].map(|namesakes| span(unknown(namesakes).fit(coded))),
+            [Some("s2e1".into()), None],
+            "with no country known, a code fits only a title no other shares the name with"
+        );
+        assert_eq!(american(2, 1).other_words("The.Office.US.S02E01.720p.HDTV.x264"), 0);
+    }
+
+    #[test]
+    fn a_title_that_ends_in_a_country_code_still_fits_its_releases() {
+        let made = film_named("Made in US", 2020, Namesakes::None);
+        let us = Wanted { countries: [Country::Us].into(), ..film_named("Us", 2019, Namesakes::Leading) };
+        let this = Wanted { countries: [Country::Us].into(), ..episode_of("This Is Us", 2016, Namesakes::None, 1, 1) };
+        let rows = [
+            (&made, "Made.in.US.2020.1080p.WEB-DL", Some("film")),
+            (&made, "Made In US (2020) 720p", Some("film")),
+            (&us, "Us.2019.1080p.BluRay.x264", Some("film")),
+            (&us, "Us (2019) [1080p]", Some("film")),
+            (&this, "This.Is.Us.S01E01.720p.HDTV.x264", Some("s1e1")),
+            (&this, "This Is Us S01 Complete 1080p", Some("s1")),
+            (&this, "This.Is.S01E01.720p", None),
+        ];
+        let read = rows.map(|(wanted, release, _)| (release, wanted.fit(release).map(|n| n.span.to_string())));
+        assert_eq!(read, rows.map(|(_, release, span)| (release, span.map(String::from))));
+    }
+
+    #[test]
     fn a_release_without_a_year_fits_only_the_title_listed_first() {
         let archive = "night_of_the_living_dead";
         let leading = film_named("Night of the Living Dead", 1968, Namesakes::Leading);
         let alone = film_named("Night of the Living Dead", 1968, Namesakes::None);
         let shadowed = film_named("Night of the Living Dead", 1990, Namesakes::Shadowed);
         let read = [&leading, &alone, &shadowed].map(|wanted| wanted.fit(archive));
-        let yearless = Named { name: "night of the living dead".into(), year: None, span: Span::Film };
+        let yearless = Named { name: "night of the living dead".into(), year: None, span: Span::Film, country: None };
         assert_eq!(read, [Some(yearless.clone()), Some(yearless), None]);
         let dated = leading.fit("Night.of.the.Living.Dead.1968.1080p").unwrap();
         assert_eq!((dated.year, dated.span), (Some(1968), Span::Film));
@@ -942,6 +1036,32 @@ mod tests {
         );
         let unknown = Wanted { year: None, ..film_named("Sintel", 2010, Namesakes::None) };
         assert_eq!(unknown.queries(), ["Sintel"]);
+        let office = |namesakes, countries: &[Country]| Wanted {
+            countries: countries.iter().copied().collect(),
+            ..episode_of("The Office", 2001, namesakes, 1, 2)
+        };
+        assert_eq!(
+            office(Namesakes::Shadowed, &[Country::Uk]).queries(),
+            ["The Office S01E02", "The Office UK S01E02", "The Office S01", "The Office complete"]
+        );
+        assert_eq!(
+            office(Namesakes::Leading, &[Country::Uk, Country::Us]).queries(),
+            [
+                "The Office S01E02",
+                "The Office US S01E02",
+                "The Office UK S01E02",
+                "The Office S01",
+                "The Office complete"
+            ]
+        );
+        assert_eq!(
+            office(Namesakes::None, &[Country::Uk]).queries(),
+            ["The Office S01E02", "The Office S01", "The Office complete"]
+        );
+        assert_eq!(
+            office(Namesakes::Leading, &[]).queries(),
+            ["The Office S01E02", "The Office S01", "The Office complete"]
+        );
     }
 
     #[test]
@@ -949,12 +1069,13 @@ mod tests {
         let wanted = Wanted {
             runtime: Some(std::time::Duration::from_secs(47 * 60)),
             season_episodes: Some(13),
+            countries: [Country::Us].into(),
             ..episode_of("Breaking Bad", 2008, Namesakes::None, 3, 5)
         };
         let json = serde_json::to_string(&wanted).unwrap();
         assert_eq!(
             json,
-            r#"{"name":"Breaking Bad","year":2008,"episode":{"season":3,"episode":5},"namesakes":"none","runtime_s":2820,"season_episodes":13}"#
+            r#"{"name":"Breaking Bad","year":2008,"episode":{"season":3,"episode":5},"namesakes":"none","runtime_s":2820,"season_episodes":13,"countries":["US"]}"#
         );
         assert_eq!(serde_json::from_str::<Wanted>(&json).unwrap(), wanted);
     }

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use torrential_core::catalog::Country;
+use torrential_core::catalog::{Countries, Country};
 use torrential_core::title::Episode;
 use torrential_core::{ArtKind, ErrorCode, Kind, TitleCard, TitleId};
 use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat};
@@ -206,7 +206,7 @@ async fn a_films_details_read_as_cinemeta_describes_it() {
     assert_eq!((film.card.rating, film.runtime_min), (Some(7.8), Some(96)));
     assert_eq!(film.cast, ["Duane Jones", "Judith O'Dea", "Karl Hardman"]);
     assert_eq!(film.genres, ["Horror", "Thriller"]);
-    assert_eq!(film.countries, [Country::Us]);
+    assert_eq!(film.countries, Countries::from([Country::Us]));
     assert_eq!(film.synopsis.as_deref().map(|s| &s[..45]), Some("A ragtag group of Pennsylvanians barricade th"));
     assert_eq!((film.art.poster, film.art.background, film.art.logo), (true, true, true));
     assert_eq!(film.seasons, []);
@@ -220,7 +220,7 @@ async fn a_films_details_read_as_cinemeta_describes_it() {
     assert_eq!((short.card.name.as_str(), short.card.year, short.runtime_min), ("Sintel", Some(2010), Some(14)));
     assert_eq!((short.card.kind, short.card.rating), (Kind::Film, Some(7.6)));
     assert_eq!(short.genres, ["Animation", "Short", "Fantasy"]);
-    assert_eq!(short.countries, [], "the Netherlands has no code in release names");
+    assert_eq!(short.countries, Countries::default(), "the Netherlands has no code in release names");
     assert_eq!(catalog.title(&id(NOTLD)).await.unwrap(), film, "kept");
     assert_eq!(server.asked().len(), 4, "a kept film is not asked for again");
 }
@@ -232,7 +232,7 @@ async fn a_series_details_list_its_seasons_with_specials_last() {
     assert_eq!(listed(std::slice::from_ref(&series.card)), [(BREAKING_BAD, Kind::Series, "Breaking Bad", Some(2008))]);
     assert_eq!((series.card.rating, series.runtime_min), (Some(9.5), Some(49)));
     assert_eq!(series.cast, ["Bryan Cranston", "Aaron Paul", "Anna Gunn"]);
-    assert_eq!(series.countries, [Country::Us]);
+    assert_eq!(series.countries, Countries::from([Country::Us]));
     let seasons: Vec<(u32, usize)> = series.seasons.iter().map(|s| (s.number, s.episodes.len())).collect();
     assert_eq!(seasons, [(1, 7), (2, 13), (3, 13), (4, 13), (5, 16), (0, 5)]);
     let numbers: Vec<u32> = series.seasons[0].episodes.iter().map(|e| e.episode.episode).collect();

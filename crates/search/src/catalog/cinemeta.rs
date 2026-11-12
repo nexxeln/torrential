@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 use serde_json::Value;
-use torrential_core::catalog::Country;
+use torrential_core::catalog::Countries;
 use torrential_core::title::Episode;
 use torrential_core::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetails, TitleId};
 use url::Url;
@@ -163,7 +163,7 @@ pub fn described(body: &[u8], id: &TitleId) -> Result<Option<Described>, serde_j
         genres: meta.genres.unwrap_or_default().iter().map(|genre| unescaped(genre)).collect(),
         runtime_min: meta.runtime.and_then(|runtime| minutes(&runtime.text())),
         cast: meta.cast.unwrap_or_default().iter().map(|name| unescaped(name)).collect(),
-        countries: meta.country.as_deref().map(Country::listed_in).unwrap_or_default(),
+        countries: meta.country.as_deref().map(Countries::listed_in).unwrap_or_default(),
         art: Art {
             poster: pictures.poster.is_some(),
             background: pictures.background.is_some(),

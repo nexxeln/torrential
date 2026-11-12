@@ -36,6 +36,7 @@ async fn main() {
         namesakes,
         runtime: details.runtime_min.map(|minutes| Duration::from_secs(u64::from(minutes) * 60)),
         season_episodes: season.map(|s| s.episodes.len() as u32),
+        countries: details.countries,
     };
     println!("{} ({:?}), {namesakes:?}, queries {:?}", wanted.name, wanted.year, wanted.queries());
     println!("ranked for {}", profile.describe());

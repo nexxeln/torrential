@@ -145,7 +145,7 @@ pub struct TitleDetails {
     /// The countries the title is from, of those whose codes release names carry. Empty when it
     /// is from none of them or the catalog does not say.
     #[serde(default)]
-    pub countries: Vec<Country>,
+    pub countries: Countries,
     pub art: Art,
     /// Empty for a film. Season 0 holds specials.
     pub seasons: Vec<Season>,
@@ -188,19 +188,8 @@ impl Country {
         Country::ALL.into_iter().find(|country| country.code().eq_ignore_ascii_case(code))
     }
 
-    /// The countries a catalog lists as `United States, United Kingdom`, in its order. A country
-    /// without a code here is left out.
-    pub fn listed_in(text: &str) -> Vec<Country> {
-        let mut countries = Vec::new();
-        for name in text.split(',').map(str::trim) {
-            let named = |country: &Country| country.spellings().1.iter().any(|n| n.eq_ignore_ascii_case(name));
-            if let Some(country) = Country::ALL.into_iter().find(named)
-                && !countries.contains(&country)
-            {
-                countries.push(country);
-            }
-        }
-        countries
+    fn bit(self) -> u8 {
+        1 << self as u8
     }
 }
 
@@ -215,6 +204,66 @@ impl TryFrom<String> for Country {
 impl From<Country> for String {
     fn from(country: Country) -> String {
         country.code().to_string()
+    }
+}
+
+/// Some of the countries in `Country`, written as a list of codes such as `["US","UK"]`. A set in
+/// one byte, since a title's search carries it in every answer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<Country>", into = "Vec<Country>")]
+pub struct Countries(u8);
+
+impl Countries {
+    /// The countries a catalog lists as `United States, United Kingdom`. A country without a code
+    /// in `Country` is left out.
+    pub fn listed_in(text: &str) -> Countries {
+        let named = |name: &str| {
+            Country::ALL.into_iter().find(|country| country.spellings().1.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        };
+        text.split(',').filter_map(|name| named(name.trim())).collect()
+    }
+
+    pub fn contains(self, country: Country) -> bool {
+        self.0 & country.bit() != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// In the order of `Country`.
+    pub fn iter(self) -> impl Iterator<Item = Country> {
+        Country::ALL.into_iter().filter(move |country| self.contains(*country))
+    }
+}
+
+impl FromIterator<Country> for Countries {
+    fn from_iter<I: IntoIterator<Item = Country>>(countries: I) -> Self {
+        Countries(countries.into_iter().fold(0, |bits, country| bits | country.bit()))
+    }
+}
+
+impl<const N: usize> From<[Country; N]> for Countries {
+    fn from(countries: [Country; N]) -> Self {
+        countries.into_iter().collect()
+    }
+}
+
+impl From<Vec<Country>> for Countries {
+    fn from(countries: Vec<Country>) -> Self {
+        countries.into_iter().collect()
+    }
+}
+
+impl From<Countries> for Vec<Country> {
+    fn from(countries: Countries) -> Self {
+        countries.iter().collect()
+    }
+}
+
+impl fmt::Debug for Countries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter().map(Country::code)).finish()
     }
 }
 
@@ -275,19 +324,27 @@ mod tests {
             ["US", "uk", "Ie", "GB", "USA"].map(Country::of_code),
             [Some(Country::Us), Some(Country::Uk), Some(Country::Ie), None, None]
         );
-        assert_eq!(Country::listed_in("United States"), [Country::Us]);
+        let listed = |text| Countries::listed_in(text).iter().collect::<Vec<_>>();
+        assert_eq!(listed("United States"), [Country::Us]);
         assert_eq!(
-            Country::listed_in("Ireland, United Kingdom, Netherlands, United States"),
-            [Country::Ie, Country::Uk, Country::Us]
+            listed("Ireland, United Kingdom, Netherlands, United States"),
+            [Country::Us, Country::Uk, Country::Ie]
         );
         assert_eq!(
-            Country::listed_in("Australia,New Zealand, Canada, USA, United States"),
-            [Country::Au, Country::Nz, Country::Ca, Country::Us]
+            listed("Australia,New Zealand, Canada, USA, United States"),
+            [Country::Us, Country::Au, Country::Ca, Country::Nz]
         );
-        assert_eq!(Country::listed_in("Netherlands"), []);
-        assert_eq!(serde_json::to_string(&[Country::Uk, Country::Nz]).unwrap(), r#"["UK","NZ"]"#);
-        assert_eq!(serde_json::from_str::<Vec<Country>>(r#"["US","ca"]"#).unwrap(), [Country::Us, Country::Ca]);
-        assert!(serde_json::from_str::<Country>(r#""FR""#).is_err());
+        assert_eq!(listed("Netherlands"), []);
+        assert!(Countries::listed_in("").is_empty());
+        let both = Countries::from([Country::Nz, Country::Uk]);
+        assert_eq!((both.contains(Country::Uk), both.contains(Country::Us)), (true, false));
+        assert_eq!(format!("{both:?}"), r#"{"UK", "NZ"}"#);
+        assert_eq!(serde_json::to_string(&both).unwrap(), r#"["UK","NZ"]"#);
+        assert_eq!(
+            serde_json::from_str::<Countries>(r#"["US","ca","US"]"#).unwrap(),
+            [Country::Us, Country::Ca].into()
+        );
+        assert!(serde_json::from_str::<Countries>(r#"["FR"]"#).is_err());
     }
 
     #[test]

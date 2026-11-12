@@ -382,6 +382,7 @@ mod tests {
             namesakes: crate::title::Namesakes::Leading,
             runtime: None,
             season_episodes: None,
+            countries: Default::default(),
         });
         let json = serde_json::to_value(&sources).unwrap();
         assert_eq!(

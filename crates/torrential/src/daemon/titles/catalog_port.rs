@@ -73,6 +73,7 @@ pub fn wanted(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<E
         namesakes,
         runtime: details.runtime_min.map(|minutes| Duration::from_secs(u64::from(minutes) * 60)),
         season_episodes,
+        countries: details.countries,
     })
 }
 
@@ -145,7 +146,7 @@ fn night() -> TitleDetails {
         genres: vec!["Horror".into(), "Thriller".into()],
         runtime_min: Some(96),
         cast: vec!["Duane Jones".into(), "Judith O'Dea".into(), "Karl Hardman".into()],
-        countries: vec![Country::Us],
+        countries: [Country::Us].into(),
         art: Art { poster: true, background: true, logo: true },
         seasons: Vec::new(),
     }
@@ -158,7 +159,7 @@ fn remake() -> TitleDetails {
         genres: vec!["Horror".into()],
         runtime_min: Some(88),
         cast: vec!["Tony Todd".into(), "Patricia Tallman".into()],
-        countries: vec![Country::Us],
+        countries: [Country::Us].into(),
         art: Art::default(),
         seasons: Vec::new(),
     }
@@ -200,7 +201,7 @@ fn harbor_lights() -> TitleDetails {
         genres: vec!["Drama".into()],
         runtime_min: Some(44),
         cast: vec!["Ada Byrne".into()],
-        countries: vec![Country::Ie],
+        countries: [Country::Ie].into(),
         art: Art { poster: true, background: false, logo: false },
         seasons,
     }
@@ -256,6 +257,8 @@ impl CatalogPort for Fake {
 
 #[cfg(test)]
 mod tests {
+    use torrential_core::catalog::Countries;
+
     use super::*;
 
     fn video(text: &str) -> VideoRef {
@@ -312,6 +315,11 @@ mod tests {
         assert_eq!((details.card.year, remake.namesakes), (Some(1990), Namesakes::Shadowed));
         let (_, episode) = fake.wanted(&video("tt9999901:2:1")).await.unwrap();
         assert_eq!((episode.namesakes, episode.season_episodes), (Namesakes::None, Some(3)));
+        assert_eq!(
+            episode.countries,
+            Countries::from([Country::Ie]),
+            "the catalog's countries tell its releases apart"
+        );
         assert_eq!(fake.title(&"tt0000001".parse().unwrap()).await.unwrap_err().code, ErrorCode::NotFound);
 
         let poster = fake.art(&"tt0063350".parse().unwrap(), ArtKind::Poster).await.unwrap();
