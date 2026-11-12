@@ -212,10 +212,11 @@ struct PlayRank {
     swarm: Swarm,
     undated: bool,
     standing: Reverse<u8>,
+    /// Ahead of the screen's resolution: a remux that fits the screen still does not stream.
+    off_band: bool,
     other_words: usize,
     span: u8,
     closeness: u8,
-    off_band: bool,
     /// Most first. `Reverse` puts unknown after every count.
     seeders: Reverse<Option<u32>>,
 }
@@ -411,7 +412,7 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
 }
 
 /// In a title's search the play order leads: not a cam, fits, not in another language, swarm,
-/// names the year, standing, a plain name, span, screen, bitrate, and seeders. The chain after
+/// names the year, standing, bitrate, a plain name, span, screen, and seeders. The chain after
 /// it orders every search.
 fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
     let fits = |c: &Candidate| profile.fits(c.release.size, c.quality);
@@ -426,10 +427,10 @@ fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
             swarm: t.swarm,
             undated: t.undated,
             standing: Reverse(standing(c)),
+            off_band: !t.in_band,
             other_words: t.other_words,
             span: breadth(c.release.span),
             closeness: profile.closeness(c.resolution),
-            off_band: !t.in_band,
             seeders: Reverse(c.release.seeders),
         })
     };

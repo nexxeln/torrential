@@ -975,6 +975,17 @@ fn a_small_encode_that_streams_comfortably_is_in_band() {
     );
 }
 
+#[test]
+fn a_remux_that_fits_the_screen_plays_after_a_copy_that_streams() {
+    let remux = "Night of the Living Dead (1968) 4K UHD Blu-ray Remux";
+    let runs = [fresh(
+        &archive(),
+        vec![video(0x95, remux, None, 59 * GB), video(0x96, "Night of the Living Dead (1968)", None, 1_200_000_000)],
+    )];
+    let on_4k = preferring(Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() });
+    assert_eq!(played(&night(Namesakes::Leading, 1968), on_4k, &runs), ["Night of the Living Dead (1968)", remux]);
+}
+
 fn sintel() -> Wanted {
     Wanted {
         name: "Sintel".into(),
