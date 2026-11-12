@@ -1,7 +1,8 @@
 import { isActive, useJobs } from "../lib/jobs";
 import { Link } from "../router";
 
-export function Header({ current }: { current: "search" | "downloads" }) {
+/** `current` is the page of the main navigation this one is, if any. */
+export function Header({ current }: { current: "search" | "downloads" | null }) {
   const { jobs, link } = useJobs();
   const active = jobs.filter(isActive).length;
   const item = "rounded-lg px-2.5 py-1.5 text-sm font-medium text-soft hover:bg-white/5 hover:text-ink aria-[current=page]:text-ink";

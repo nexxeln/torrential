@@ -75,6 +75,7 @@ interface Props {
   /** More than one video in the torrent. */
   hasFiles: boolean;
   hasNext: boolean;
+  nextLabel: string;
   /** Safari can send this video to an AirPlay screen. */
   airPlay: (() => void) | null;
   /** The timeline, above the buttons. */
@@ -100,7 +101,7 @@ export function Controls(props: Props) {
           {paused ? <PlayIcon /> : <PauseIcon />}
         </ControlButton>
         {props.hasNext && (
-          <ControlButton label="Next video (N)" onClick={props.onNext}>
+          <ControlButton label={props.nextLabel} onClick={props.onNext}>
             <ForwardIcon />
           </ControlButton>
         )}

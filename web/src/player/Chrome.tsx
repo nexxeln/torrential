@@ -7,6 +7,7 @@ import { readable } from "../lib/release";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { usePlayer } from "./context";
+import type { Heading } from "./Playback";
 import { useVideo } from "./video";
 
 /** How the download is doing, in a few words. Nothing once it is done. */
@@ -51,6 +52,8 @@ export function PlayingReadout({ play }: { play: PlayInfo }) {
 interface TopBarProps {
   /** The release name, once known. */
   name: string | null;
+  /** A title's own name, which takes the place of the release name. */
+  heading?: Heading | null;
   /** The file's name, when the torrent has several videos. */
   file: string | null;
   /** How the download is doing, at the right. */
@@ -59,14 +62,14 @@ interface TopBarProps {
 }
 
 /** The title at the top left, over a scrim, with the way back and the download's state. */
-export function TopBar({ name, file, readout, onBack }: TopBarProps) {
+export function TopBar({ name, heading, file, readout, onBack }: TopBarProps) {
   const release = name ? readable(name) : null;
   const own = file ? readable(file) : null;
   // A file of a season reads as the show over the episode. A single film reads as its title over its tags.
   const whole = own ? `${own.title} ${own.tags}`.trim() : null;
   const episode = whole && release && whole.startsWith(release.title) ? whole.slice(release.title.length).trim() : whole;
-  const title = release?.title;
-  const under = episode || release?.tags;
+  const title = heading?.title ?? release?.title;
+  const under = heading ? heading.detail : episode || release?.tags;
   return (
     <header className="flex items-start gap-2 bg-linear-to-b from-black/80 via-black/40 to-transparent px-[max(--spacing(3),2vw)] pt-[max(--spacing(3),1.5vh)] pb-16">
       <button
@@ -148,7 +151,7 @@ const STALLED_MS = 8000;
  * Shown when playback has to wait in the middle of a video. Says what it is waiting for: pieces
  * arriving at some rate from some peers, or a swarm that is sending nothing.
  */
-export function Buffering({ play }: { play: PlayInfo }) {
+export function Buffering({ play, quiet = false }: { play: PlayInfo; quiet?: boolean }) {
   const job = usePlayingJob(play);
   const waiting = useVideo(usePlayer().video, (state) => state.started && state.waiting && !state.ended);
   const [patient, setPatient] = useState(true);
@@ -175,7 +178,7 @@ export function Buffering({ play }: { play: PlayInfo }) {
     <div role="status" className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 text-center">
       <div className="flex flex-col items-center gap-3 rounded-2xl bg-black/55 px-6 py-5 backdrop-blur-md">
         <Spinner className="size-8 text-white" />
-        {fetching && (
+        {fetching && !quiet && (
           <p className="max-w-[40ch] text-sm text-pretty text-white/90 tabular-nums">
             {job.state !== "downloading"
               ? "This part of the video has not downloaded, and the download is not running."
@@ -197,10 +200,12 @@ interface EndedProps {
   onNext: () => void;
   onReplay: () => void;
   onBack: () => void;
+  /** What the way back says. */
+  back?: string;
 }
 
 /** The end of a video. A season goes on to its next episode after a countdown that can be cancelled. */
-export function Ended({ next, onNext, onReplay, onBack }: EndedProps) {
+export function Ended({ next, onNext, onReplay, onBack, back = "Back to search" }: EndedProps) {
   const [left, setLeft] = useState(next ? UP_NEXT_SECONDS : null);
   useEffect(() => {
     if (left === null) return;
@@ -239,7 +244,7 @@ export function Ended({ next, onNext, onReplay, onBack }: EndedProps) {
         <Button variant={next ? "secondary" : "primary"} onClick={onReplay}>
           Watch again
         </Button>
-        {left === null && <Button onClick={onBack}>Back to search</Button>}
+        {left === null && <Button onClick={onBack}>{back}</Button>}
       </div>
     </div>
   );
@@ -255,10 +260,12 @@ interface ProblemProps {
   note?: ReactNode;
   onRetry: () => void;
   onBack: () => void;
+  /** What the way back says. */
+  back?: string;
 }
 
 /** Playback cannot go on. Says why in the engine's words, and what to do. */
-export function Problem({ title, error, children, fix, note, onRetry, onBack }: ProblemProps) {
+export function Problem({ title, error, children, fix, note, onRetry, onBack, back = "Back to search" }: ProblemProps) {
   return (
     <div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-5 bg-black/70 p-6 text-center">
       <div className="flex max-w-[52ch] flex-col gap-2">
@@ -277,7 +284,7 @@ export function Problem({ title, error, children, fix, note, onRetry, onBack }: 
         <Button variant="primary" onClick={onRetry}>
           Try again
         </Button>
-        <Button onClick={onBack}>Back to search</Button>
+        <Button onClick={onBack}>{back}</Button>
       </div>
     </div>
   );
