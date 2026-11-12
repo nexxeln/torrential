@@ -227,7 +227,7 @@ fn get_title(engine: impl FnOnce() -> Result<Conn, Error>, args: GetArgs, mode: 
         [(!args.files.is_empty(), "--files"), (args.dir.is_some(), "--dir"), (args.max_size.is_some(), "--max-size")];
     let given = torrent_only.into_iter().chain([(args.dry_run, "--dry-run")]).find(|(given, _)| *given);
     if let Some((_, flag)) = given {
-        return Err(titles::for_a_torrent(flag, &video));
+        return Err(torrential_core::id::not_a_torrent(&video, flag));
     }
     let (exit, job) = titles::get(&mut engine()?, TitleRequest { video, source: args.source }, mode)?;
     follow(exit, &job, mode, env)

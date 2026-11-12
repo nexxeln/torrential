@@ -75,7 +75,7 @@ pub enum Request {
     Title {
         id: TitleId,
     },
-    /// A film's or an episode's releases, ranked for playing here.
+    /// A film's or an episode's releases, in the order a play tries them.
     Sources {
         video: VideoRef,
     },

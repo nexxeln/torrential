@@ -64,13 +64,6 @@ pub fn named(words: &[String]) -> Result<Option<VideoRef>, Error> {
     }
 }
 
-/// The error for a flag that takes a torrent, given with a title.
-pub fn for_a_torrent(flag: &str, video: &VideoRef) -> Error {
-    Error::new(ErrorCode::Usage, format!("{flag} takes a torrent, not a title such as {video}"))
-        .with_hint(format!("run torrential sources {video} to list its torrents, and pass the ID of one"))
-        .with_next(format!("torrential sources {video}"))
-}
-
 /// The error for `--source` or an episode, given with a torrent.
 pub fn for_a_title(what: &str) -> Error {
     Error::new(ErrorCode::Usage, format!("{what} goes with a title ID such as tt0063350"))

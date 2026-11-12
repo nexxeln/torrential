@@ -274,10 +274,10 @@ impl Target {
     }
 }
 
-/// The error for a command that takes a torrent and was given a title. Only `play` and `get`
-/// take a title.
-pub fn not_a_torrent(video: &VideoRef, command: &str) -> Error {
-    Error::new(ErrorCode::Usage, format!("{command} takes a torrent, not a title such as {video}"))
+/// The error for a command or a flag that takes a torrent and was given a title. Only `play` and
+/// `get` take a title.
+pub fn not_a_torrent(video: &VideoRef, taker: &str) -> Error {
+    Error::new(ErrorCode::Usage, format!("{taker} takes a torrent, not a title such as {video}"))
         .with_hint(format!("run torrential sources {video} to list its torrents, and pass the ID of one"))
         .with_next(format!("torrential sources {video}"))
 }

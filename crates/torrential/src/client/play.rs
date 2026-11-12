@@ -79,7 +79,7 @@ pub enum Hold {
 pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Error> {
     let video = titles::named(&args.words)?;
     match &video {
-        Some(video) if args.dir.is_some() => return Err(titles::for_a_torrent("--dir", video)),
+        Some(video) if args.dir.is_some() => return Err(torrential_core::id::not_a_torrent(video, "--dir")),
         None if args.source.is_some() => return Err(titles::for_a_title("--source")),
         _ => {}
     }

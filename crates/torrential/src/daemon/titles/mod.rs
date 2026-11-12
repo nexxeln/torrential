@@ -124,12 +124,7 @@ pub struct Resolved {
 impl Resolved {
     /// The film's name and year, or the series' name and the episode, as a person reads it.
     pub fn name(&self) -> String {
-        let card = &self.details.card;
-        match (self.video.episode, card.year) {
-            (Some(e), _) => format!("{} {}", card.name, label(e)),
-            (None, Some(year)) => format!("{} ({year})", card.name),
-            (None, None) => card.name.clone(),
-        }
+        crate::output::views::title_name(&self.details.card, self.video.episode)
     }
 
     /// The search for this title's releases, ranked for playing now with `preferences`.
