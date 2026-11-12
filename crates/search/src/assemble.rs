@@ -209,6 +209,8 @@ struct PlayRank {
     span: u8,
     closeness: u8,
     off_band: bool,
+    /// Most first. `Reverse` puts unknown after every count.
+    seeders: Reverse<Option<u32>>,
 }
 
 /// How much more than the film or episode a release holds: none, a season, several, or all.
@@ -396,7 +398,7 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
 }
 
 /// In a title's search the play order leads: not a cam, fits, swarm, names the year, standing,
-/// span, screen, and bitrate. The chain after it orders every search.
+/// span, screen, bitrate, and seeders. The chain after it orders every search.
 fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
     let fits = |c: &Candidate| profile.fits(c.release.size, c.quality);
     let is_video = |c: &Candidate| c.release.category == Some(Category::Video) || c.quality.resolution.is_some();
@@ -412,6 +414,7 @@ fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
             span: breadth(c.release.span),
             closeness: profile.closeness(c.resolution),
             off_band: !t.in_band,
+            seeders: Reverse(c.release.seeders),
         })
     };
     candidates.sort_by(|a, b| {

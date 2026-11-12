@@ -959,6 +959,26 @@ fn a_small_encode_that_streams_comfortably_is_in_band() {
     );
 }
 
+fn sintel() -> Wanted {
+    Wanted {
+        name: "Sintel".into(),
+        year: Some(2010),
+        episode: None,
+        namesakes: Namesakes::None,
+        runtime: Some(std::time::Duration::from_secs(15 * 60)),
+        season_episodes: None,
+    }
+}
+
+#[test]
+fn the_more_seeded_release_wins_a_tie_in_play_order() {
+    let runs = [
+        fresh(&knaben(), vec![video(0x82, "Sintel", Some(3), 500_000_000)]),
+        fresh(&apibay(), vec![video(0x83, "Sintel.2010.HDRip.XviD.AC3-ViSiON", Some(1), 300_000_000)]),
+    ];
+    assert_eq!(played(&sintel(), Profile::default(), &runs), ["Sintel", "Sintel.2010.HDRip.XviD.AC3-ViSiON"]);
+}
+
 #[test]
 fn a_release_too_small_for_the_runtime_is_dropped_as_a_fake() {
     let fake = video(0x6a, "Night.of.the.Living.Dead.1968.1080p.WEB-DL.x264", Some(900), 150_000_000);
