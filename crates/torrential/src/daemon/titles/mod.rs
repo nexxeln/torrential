@@ -24,6 +24,9 @@ const FAILED_FOR: Duration = Duration::from_secs(6 * 60 * 60);
 /// What the engine knows about films and series, beside its downloads.
 pub struct Titles {
     pub catalog: Arc<dyn CatalogPort>,
+    /// False when config.yaml turns title lookups off. The catalog then answers only from what
+    /// it keeps on this machine.
+    pub online: bool,
     pub shelf: Shelf,
     pub timing: Timing,
     /// When each release last failed to play. In memory, so a restart gives every one a chance.
@@ -52,8 +55,8 @@ impl Default for Timing {
 }
 
 impl Titles {
-    pub fn new(catalog: Arc<dyn CatalogPort>, shelf: Shelf, timing: Timing) -> Self {
-        Self { catalog, shelf, timing, failed: Mutex::default() }
+    pub fn new(catalog: Arc<dyn CatalogPort>, online: bool, shelf: Shelf, timing: Timing) -> Self {
+        Self { catalog, online, shelf, timing, failed: Mutex::default() }
     }
 
     fn failed(&self, release: ReleaseId) {
@@ -173,8 +176,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         drop(crate::daemon::store::Store::open(&path).unwrap());
-        let titles =
-            Titles::new(Arc::new(catalog_port::Fake::default()), Shelf::open(&path).unwrap(), Timing::default());
+        let catalog = Arc::new(catalog_port::Fake::default());
+        let titles = Titles::new(catalog, true, Shelf::open(&path).unwrap(), Timing::default());
         assert_eq!(resolve(&titles, "tt9999901").await, Ok("Harbor Lights S01E01".into()));
         assert_eq!(resolve(&titles, "tt0063350").await, Ok("Night of the Living Dead (1968)".into()));
         let finished = |text: &str, at| Watched {

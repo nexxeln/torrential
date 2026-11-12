@@ -23,9 +23,13 @@ const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
 /// Titles listed under Continue on the home page.
 const CONTINUE_MOST: usize = 20;
 
-/// `GET /api/titles?q=`: films and series named like the words.
+/// `GET /api/titles?q=`: films and series named like the words. With title lookups off in
+/// config.yaml it finds none, and says it is offline.
 pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     let words = required(request, "q")?;
+    if !ctx.titles.online {
+        return Ok(json!({ "titles": [], "offline": true }));
+    }
     Ok(json!({ "titles": ctx.titles.catalog.search(words.trim()).await? }))
 }
 

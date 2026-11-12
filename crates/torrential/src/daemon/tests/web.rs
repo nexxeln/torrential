@@ -1017,6 +1017,7 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     let (_, found) = get(&h, "/api/titles?q=night%20of%20the%20living%20dead").await;
     let cards: Vec<Value> = found["titles"].as_array().unwrap().iter().map(|c| json!([c["id"], c["year"]])).collect();
     assert_eq!(cards, [json!(["tt0063350", 1968]), json!(["tt0100258", 1990])]);
+    assert_eq!(get(&h, "/api/titles?q=zzzz").await, (200, json!({ "titles": [] })), "nothing matches");
 
     let (status, headers, poster) = fetch(&h, "GET", "/api/title/art?id=tt0063350&kind=poster", &[], "").await;
     assert_eq!((status, poster.len()), (200, 67));
@@ -1060,11 +1061,12 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn with_title_lookups_off_title_search_is_empty_and_torrent_search_still_works() {
+async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_works() {
     use torrential_search::catalog::CatalogConfig;
     let off = CatalogConfig { online: false, endpoint: None, imdb_endpoint: None, cache_dir: None };
-    let h = Harness::with_titles(std::sync::Arc::new(super::super::titles::catalog_port::Live::new(&off).unwrap()));
-    assert_eq!(get(&h, "/api/titles?q=night").await, (200, json!({ "titles": [] })));
+    let catalog = std::sync::Arc::new(super::super::titles::catalog_port::Live::new(&off).unwrap());
+    let h = Harness::with_titles(catalog, off.online);
+    assert_eq!(get(&h, "/api/titles?q=night").await, (200, json!({ "titles": [], "offline": true })));
     assert_eq!(
         error(&get(&h, "/api/title?id=tt0063350").await),
         (400, "usage", "title lookups are off in config.yaml, and tt0063350 is not kept on this machine")
