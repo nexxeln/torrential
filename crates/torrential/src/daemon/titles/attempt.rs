@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Lease, Playback, Release, ReleaseId, SearchResult,
-    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Playback, Release, ReleaseId, SearchResult, Skip,
+    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
@@ -358,8 +358,7 @@ impl Trial<'_> {
 
         report(AttemptEvent::Check { check: Check::Start });
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));
-        let link =
-            TitleLink { title: title.video.title.clone(), span, release: Some(release.id), lease: Lease::Borrowed };
+        let link = TitleLink { title: title.video.title.clone(), span, release: Some(release.id) };
         let hold = Hold::fresh();
         // Held before the owner is asked, so a play that goes away at any point after gives it up.
         self.hold = Some(hold);

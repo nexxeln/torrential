@@ -118,19 +118,6 @@ pub struct TitleLink {
     pub span: Span,
     /// The search result the download came from.
     pub release: Option<ReleaseId>,
-    pub lease: Lease,
-}
-
-/// Whether a title play may delete a download it gives up on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Lease {
-    /// A title play created the download, and nothing else has used it or changed its selection.
-    /// Its files go if that play gives it up before it plays.
-    Owned,
-    /// A file of it was on disk before the play, or a `get` or another play has used it. Nothing
-    /// deletes its files.
-    Borrowed,
 }
 
 /// One step of a title play. The web app reads these as NDJSON lines, and the last is `playing`
@@ -472,20 +459,16 @@ mod tests {
     }
 
     #[test]
-    fn a_title_link_writes_its_span_and_lease() {
+    fn a_title_link_writes_its_span_and_the_release_it_came_from() {
         let link = TitleLink {
             title: "tt0903747".parse().unwrap(),
             span: Span::Season(1),
             release: Some(ReleaseId::Torrent(HASH.parse().unwrap())),
-            lease: Lease::Owned,
         };
         let json = serde_json::to_string(&link).unwrap();
-        assert_eq!(json, format!(r#"{{"title":"tt0903747","span":"s1","release":"{HASH}","lease":"owned"}}"#));
+        assert_eq!(json, format!(r#"{{"title":"tt0903747","span":"s1","release":"{HASH}"}}"#));
         assert_eq!(serde_json::from_str::<TitleLink>(&json).unwrap(), link);
-        let borrowed = TitleLink { release: None, lease: Lease::Borrowed, ..link };
-        assert_eq!(
-            serde_json::to_string(&borrowed).unwrap(),
-            r#"{"title":"tt0903747","span":"s1","release":null,"lease":"borrowed"}"#
-        );
+        let unlisted = TitleLink { release: None, ..link };
+        assert_eq!(serde_json::to_string(&unlisted).unwrap(), r#"{"title":"tt0903747","span":"s1","release":null}"#);
     }
 }

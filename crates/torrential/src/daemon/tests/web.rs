@@ -899,7 +899,7 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
     assert!(gone_from_the_engine(&h, &tried).await, "no file list probe or trial is left in the engine");
     let (_, jobs) = get(&h, "/api/jobs").await;
     let listed: Vec<Value> = jobs["jobs"].as_array().unwrap().iter().map(|j| json!([j["id"], j["title"]])).collect();
-    assert_eq!(listed, [json!([id, { "title": "tt0063350", "span": "film", "release": id, "lease": "borrowed" }])]);
+    assert_eq!(listed, [json!([id, { "title": "tt0063350", "span": "film", "release": id }])]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -2,7 +2,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{Error, ErrorCode, InfoHash, Lease, PieceMap, Release, Selection, TitleLink, TorrentId};
+use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
 use super::book::{Intent, JobRecord, Linked};
@@ -62,7 +62,6 @@ CREATE TABLE job_titles (
     title TEXT NOT NULL,
     span TEXT NOT NULL,
     release TEXT,
-    lease TEXT NOT NULL CHECK (lease IN ('owned', 'borrowed')),
     played INTEGER NOT NULL DEFAULT 0 CHECK (played IN (0, 1)),
     linked_at INTEGER NOT NULL
 ) STRICT;
@@ -186,7 +185,7 @@ impl Store {
             .prepare(
                 "SELECT j.id, j.info_hash, j.name, j.dir, j.selection, j.max_size, j.magnet, j.intent, j.finished_at, \
                  j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup, \
-                 t.title, t.span, t.release, t.lease, t.played FROM jobs j \
+                 t.title, t.span, t.release, t.played FROM jobs j \
                  LEFT JOIN metainfo m ON m.id = j.id \
                  LEFT JOIN job_titles t ON t.job = j.id \
                  ORDER BY j.added_at",
@@ -215,8 +214,7 @@ impl Store {
                         r.get::<_, Option<String>>(16)?,
                         r.get::<_, Option<String>>(17)?,
                         r.get::<_, Option<String>>(18)?,
-                        r.get::<_, Option<String>>(19)?,
-                        r.get::<_, Option<bool>>(20)?,
+                        r.get::<_, Option<bool>>(19)?,
                     ),
                 ))
             })
@@ -561,36 +559,26 @@ fn intent_columns(intent: &Intent) -> (&'static str, Option<i64>, Option<String>
 }
 
 fn insert_link(tx: &Transaction, id: TorrentId, link: &TitleLink, now: i64) -> rusqlite::Result<()> {
-    let lease = match link.lease {
-        Lease::Owned => "owned",
-        Lease::Borrowed => "borrowed",
-    };
     tx.execute(
-        "INSERT OR REPLACE INTO job_titles (job, title, span, release, lease, played, linked_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        "INSERT OR REPLACE INTO job_titles (job, title, span, release, played, linked_at) \
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)",
         params![
             id.to_hex(),
             link.title.as_str(),
             link.span.to_string(),
             link.release.as_ref().map(|r| r.to_ref()),
-            lease,
             now
         ],
     )
     .map(drop)
 }
 
-type LinkColumns = (Option<String>, Option<String>, Option<String>, Option<String>, Option<bool>);
+type LinkColumns = (Option<String>, Option<String>, Option<String>, Option<bool>);
 
 fn linked(columns: LinkColumns) -> Result<Option<Linked>, ()> {
-    let (Some(title), Some(span), release, Some(lease), Some(played)) = columns else { return Ok(None) };
-    let lease = match lease.as_str() {
-        "owned" => Lease::Owned,
-        "borrowed" => Lease::Borrowed,
-        _ => return Err(()),
-    };
+    let (Some(title), Some(span), release, Some(played)) = columns else { return Ok(None) };
     let release = release.map(|r| serde_json::from_value(serde_json::Value::String(r))).transpose().map_err(drop)?;
-    let link = TitleLink { title: title.parse().map_err(drop)?, span: span.parse().map_err(drop)?, release, lease };
+    let link = TitleLink { title: title.parse().map_err(drop)?, span: span.parse().map_err(drop)?, release };
     Ok(Some(Linked { link, played }))
 }
 
@@ -701,25 +689,24 @@ mod tests {
     }
 
     #[test]
-    fn a_title_link_keeps_its_lease_and_whether_it_played_and_goes_with_its_job() {
+    fn a_title_link_keeps_whether_it_played_and_goes_with_its_job() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let mut store = Store::open(&path).unwrap();
-        let link = |lease| TitleLink {
+        let link = TitleLink {
             title: "tt9999901".parse().unwrap(),
             span: "s1".parse().unwrap(),
             release: Some(ReleaseId::Torrent(TorrentId::from_bytes([1; 20]))),
-            lease,
         };
-        let owned = Linked { link: link(Lease::Owned), played: false };
-        store.insert(&JobRecord { title: Some(owned.clone()), ..record(1) }, None, 100).unwrap();
+        let made = Linked { link: link.clone(), played: false };
+        store.insert(&JobRecord { title: Some(made.clone()), ..record(1) }, None, 100).unwrap();
         store.insert(&record(3), None, 100).unwrap();
-        store.link(TorrentId::from_bytes([3; 20]), &link(Lease::Borrowed), 110).unwrap();
+        store.link(TorrentId::from_bytes([3; 20]), &link, 110).unwrap();
         store.played(TorrentId::from_bytes([3; 20])).unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
         let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
-        assert_eq!(titles, [Some(owned.clone()), Some(Linked { link: link(Lease::Borrowed), played: true })]);
+        assert_eq!(titles, [Some(made), Some(Linked { link, played: true })]);
 
         let gone = Tombstone { id: TorrentId::from_bytes([1; 20]), name: None, path: None, removed_at: 120 };
         store.remove(&gone).unwrap();

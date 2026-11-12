@@ -298,18 +298,10 @@ mod tests {
         );
         assert_eq!(serde_json::from_value::<Job>(json).unwrap(), job);
 
-        let link = TitleLink {
-            title: "tt0063350".parse().unwrap(),
-            span: crate::title::Span::Film,
-            release: None,
-            lease: crate::watching::Lease::Owned,
-        };
+        let link = TitleLink { title: "tt0063350".parse().unwrap(), span: crate::title::Span::Film, release: None };
         let linked = Job { title: Some(link), ..job };
         let json = serde_json::to_value(&linked).unwrap();
-        assert_eq!(
-            json["title"],
-            serde_json::json!({"title": "tt0063350", "span": "film", "release": null, "lease": "owned"})
-        );
+        assert_eq!(json["title"], serde_json::json!({"title": "tt0063350", "span": "film", "release": null}));
         assert_eq!(serde_json::from_value::<Job>(json).unwrap(), linked);
     }
 

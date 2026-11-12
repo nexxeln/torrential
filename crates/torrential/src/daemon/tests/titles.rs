@@ -8,9 +8,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
-use torrential_core::{
-    AttemptEvent, Category, Check, Error, Job, Lease, LocatorId, Release, ReleaseId, TitleLink, TorrentId,
-};
+use torrential_core::{AttemptEvent, Category, Check, Error, Job, LocatorId, Release, ReleaseId, TitleLink, TorrentId};
 
 use super::super::admission::GIB;
 use super::super::engine_port::{Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
@@ -115,12 +113,7 @@ impl Harness {
     /// tests a source for `title`, and the hold that play has on the download.
     fn play_command(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> (PlayCommand, Hold) {
         let hold = Hold::fresh();
-        let link = |title: &str| TitleLink {
-            title: title.parse().unwrap(),
-            span: Span::Film,
-            release: None,
-            lease: Lease::Borrowed,
-        };
+        let link = |title: &str| TitleLink { title: title.parse().unwrap(), span: Span::Film, release: None };
         let play = PlayCommand {
             source: Source::Torrent { metainfo: t.metainfo().unwrap(), origin: Origin::File },
             dir: Some(self.downloads()),

@@ -187,7 +187,7 @@ fn aired(details: &TitleDetails, info: &EpisodeInfo, now: i64) -> Result<(), Err
 mod tests {
     use super::*;
     use torrential_core::title::Span;
-    use torrential_core::{InfoHash, JobStatus, Lease, Progress, Selection, TitleLink, Watched};
+    use torrential_core::{InfoHash, JobStatus, Progress, Selection, TitleLink, Watched};
 
     fn video(text: &str) -> VideoRef {
         text.parse().unwrap()
@@ -224,8 +224,7 @@ mod tests {
             swarm: None,
             failed: None,
         };
-        let film =
-            TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: None, lease: Lease::Owned };
+        let film = TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: None };
         let job = |n: u8, title: Option<TitleLink>| Job {
             id: TorrentId::from_bytes([n; 20]),
             info_hash: InfoHash::V1([n; 20]),
