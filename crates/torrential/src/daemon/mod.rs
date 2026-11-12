@@ -259,6 +259,10 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         .unwrap_or(SAVE_RESUME_EVERY);
     let stall_after =
         env.var("TORRENTIAL_TEST_STALL_AFTER").and_then(torrential_core::units::parse_duration).unwrap_or(STALL_AFTER);
+    let timing = match env.var("TORRENTIAL_TEST_TITLE_WAIT").and_then(torrential_core::units::parse_duration) {
+        Some(wait) => titles::Timing { file_list: wait, first_bytes: wait, ..titles::Timing::default() },
+        None => titles::Timing::default(),
+    };
     let config = OwnerConfig {
         default_dir,
         probe_dir: paths.cache.join("probes"),
@@ -284,11 +288,6 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
         let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
-        let wait = env.var("TORRENTIAL_TEST_TITLE_WAIT").and_then(torrential_core::units::parse_duration);
-        let timing = match wait {
-            Some(wait) => titles::Timing { file_list: wait, first_bytes: wait, ..titles::Timing::default() },
-            None => titles::Timing::default(),
-        };
         let running =
             start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
