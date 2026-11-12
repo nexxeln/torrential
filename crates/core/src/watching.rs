@@ -329,6 +329,7 @@ mod tests {
             magnet: None,
             torrent_url: None,
             info_url: None,
+            span: Some(Span::Film),
         }
     }
 
@@ -336,7 +337,7 @@ mod tests {
         r#"{"id":"9b521219bc48550140a666f74a29048ed78e933b","name":"Night.of.the.Living.Dead.1968.1080p.BluRay.x264","#,
         r#""size":1500000000,"seeders":40,"leechers":null,"published":null,"category":"video","#,
         r#""quality":{"resolution":"1080p","codec":"h264","hdr":false},"flags":[],"sources":["knaben"],"#,
-        r#""magnet":null,"torrent_url":null,"info_url":null}"#
+        r#""magnet":null,"torrent_url":null,"info_url":null,"span":"film"}"#
     );
 
     #[test]

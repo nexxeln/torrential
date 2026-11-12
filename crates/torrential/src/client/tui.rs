@@ -43,7 +43,7 @@ struct EngineBackend {
 #[serde(untagged)]
 enum SearchFrame {
     Update(Event),
-    Reply(Response),
+    Reply(Box<Response>),
 }
 
 impl EngineBackend {
@@ -75,9 +75,11 @@ impl torrential_tui::Backend for EngineBackend {
             match conn.read_within::<SearchFrame>(within)? {
                 SearchFrame::Update(Event::SearchUpdate { result, pending }) => partial(*result, pending),
                 SearchFrame::Update(_) => {}
-                SearchFrame::Reply(Response::Search { result }) => return Ok(result),
-                SearchFrame::Reply(Response::Error { error }) => return Err(error),
-                SearchFrame::Reply(other) => return Err(connect::unexpected(&other)),
+                SearchFrame::Reply(reply) => match *reply {
+                    Response::Search { result } => return Ok(result),
+                    Response::Error { error } => return Err(error),
+                    other => return Err(connect::unexpected(&other)),
+                },
             }
         }
     }

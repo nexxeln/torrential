@@ -96,6 +96,7 @@ fn merges_one_torrent_listed_by_two_sources() {
             )),
             torrent_url: None,
             info_url: Some("https://thepiratebay.org/description.php?id=1".into()),
+            span: None,
         }]
     );
     assert_eq!(result.total, 1);

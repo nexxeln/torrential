@@ -106,6 +106,7 @@ mod tests {
             magnet: None,
             torrent_url: None,
             info_url: None,
+            span: None,
         }
     }
 

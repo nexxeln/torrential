@@ -50,6 +50,7 @@ fn job(short: &str, name: &str, status: JobStatus, size: u64, done: u64, rate: u
         },
         selection: Selection::All,
         added_at: CLOCK - days_ago * 86_400,
+        title: None,
     }
 }
 
@@ -109,6 +110,7 @@ fn release(
         magnet: None,
         torrent_url: None,
         info_url: None,
+        span: None,
     }
 }
 

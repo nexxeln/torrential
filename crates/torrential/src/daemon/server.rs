@@ -187,6 +187,7 @@ pub(super) async fn resolve(ctx: &Ctx, target: Target, command: &'static str) ->
         Target::TorrentFile(path) => {
             Ok(Source::Torrent { metainfo: read_torrent(ctx, &path).await?, origin: Origin::File })
         }
+        Target::Title(video) => Err(torrential_core::id::not_a_torrent(&video, command)),
     }
 }
 

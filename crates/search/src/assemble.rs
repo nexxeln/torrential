@@ -217,6 +217,7 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
             sources: authorities.into_iter().map(|(_, name)| name.to_string()).collect(),
             torrent_url: link.map(|(_, _, url, _)| url.to_string()),
             info_url: info.map(|(.., url)| url.to_string()),
+            span: None,
         },
         relevance,
         extra_words,

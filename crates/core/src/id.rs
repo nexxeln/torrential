@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::catalog::VideoRef;
 use crate::error::{Error, ErrorCode};
 
 /// The identity torrential uses everywhere: the v1 infohash, or the v2 infohash
@@ -234,11 +235,14 @@ pub enum Target {
     TorrentUrl(String),
     /// An absolute path to a `.torrent` file.
     TorrentFile(PathBuf),
+    /// A film or an episode, such as `tt0063350` or `tt0903747:3:5`. A title ID is never an ID
+    /// prefix, since `t` is not hex.
+    Title(VideoRef),
 }
 
 impl Target {
     /// Parses user input in a fixed order: magnet link, URL, full infohash, `.torrent`
-    /// path, ID prefix, then any other existing file. `cwd` resolves relative paths.
+    /// path, title, ID prefix, then any other existing file. `cwd` resolves relative paths.
     pub fn parse(input: &str, cwd: &std::path::Path) -> Result<Self, Error> {
         let input = input.trim();
         if input.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("magnet:?")) {
@@ -259,12 +263,22 @@ impl Target {
                 Err(Error::new(ErrorCode::InvalidRef, format!("no such file: {}", path.display())))
             };
         }
+        if let Ok(video) = input.parse::<VideoRef>() {
+            return Ok(Self::Title(video));
+        }
         match input.parse::<HexPrefix>() {
             Ok(prefix) => Ok(Self::Prefix(if prefix.locator { format!("u{}", prefix.hex) } else { prefix.hex })),
             Err(_) if path.is_file() => Ok(Self::TorrentFile(path)),
             Err(err) => Err(err),
         }
     }
+}
+
+/// The error for a command that takes a torrent and was given a title. No command takes a title
+/// yet.
+pub fn not_a_torrent(video: &VideoRef, command: &str) -> Error {
+    Error::new(ErrorCode::Usage, format!("{command} takes a torrent, not a title such as {video}"))
+        .with_hint("run torrential search with the title's name, and pass the ID of a result")
 }
 
 /// A 40-character hex or 32-character base32 v1 infohash, or a 64-character hex v2 infohash.
@@ -371,7 +385,10 @@ mod tests {
             Target::parse("https://example.org/a.torrent", cwd).unwrap(),
             Target::TorrentUrl("https://example.org/a.torrent".into())
         );
+        assert_eq!(Target::parse("tt0063350", cwd).unwrap(), Target::Title("tt0063350".parse().unwrap()));
+        assert_eq!(Target::parse(" tt0903747:3:5 ", cwd).unwrap(), Target::Title("tt0903747:3:5".parse().unwrap()));
         assert_eq!(Target::parse("9b5", cwd).unwrap_err().code, ErrorCode::InvalidRef);
+        assert_eq!(Target::parse("tt12", cwd).unwrap_err().code, ErrorCode::InvalidRef);
         assert_eq!(Target::parse("missing.torrent", cwd).unwrap_err().code, ErrorCode::InvalidRef);
     }
 

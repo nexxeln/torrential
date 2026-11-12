@@ -374,6 +374,7 @@ impl Owner {
             )
             .with_hint("run torrential status to list download IDs")
             .with_next("torrential status")),
+            Target::Title(video) => Err(torrential_core::id::not_a_torrent(&video, command)),
         }
     }
 

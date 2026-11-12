@@ -220,6 +220,7 @@ impl JobEntry {
             },
             selection: self.record.selection.clone(),
             added_at: self.record.added_at,
+            title: None,
         }
     }
 }

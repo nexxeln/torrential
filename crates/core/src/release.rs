@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::id::ReleaseId;
 use crate::profile::Profile;
 use crate::quality::Quality;
+use crate::title::{Span, Wanted};
 
 /// A torrent offered by one or more search sources, merged by infohash. Its JSON
 /// also carries the [`Quality`] its name gives.
@@ -29,6 +30,9 @@ pub struct Release {
     pub torrent_url: Option<String>,
     /// A page about the item at its source, for people.
     pub info_url: Option<String>,
+    /// What of the wanted title this release holds. Only in a title's sources.
+    #[serde(default)]
+    pub span: Option<Span>,
 }
 
 impl Release {
@@ -54,6 +58,8 @@ impl Serialize for Release {
             magnet: &'a Option<String>,
             torrent_url: &'a Option<String>,
             info_url: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            span: Option<Span>,
         }
         let Release {
             id,
@@ -68,6 +74,7 @@ impl Serialize for Release {
             magnet,
             torrent_url,
             info_url,
+            span,
         } = self;
         Fields {
             id,
@@ -83,6 +90,7 @@ impl Serialize for Release {
             magnet,
             torrent_url,
             info_url,
+            span: *span,
         }
         .serialize(serializer)
     }
@@ -183,6 +191,11 @@ pub struct SearchQuery {
     /// detected about the machine, so a result's query holds the profile it ranked for.
     #[serde(default)]
     pub profile: Profile,
+    /// Set by the engine for a title's sources, never by a client. Searches each of the title's
+    /// queries in place of `text`, keeps the releases that are this title, and ranks them for
+    /// playing now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wanted: Option<Wanted>,
 }
 
 impl SearchQuery {
@@ -202,6 +215,7 @@ impl SearchQuery {
             adult: false,
             fresh: false,
             profile: Profile::default(),
+            wanted: None,
         }
     }
 }
@@ -285,6 +299,7 @@ mod tests {
             magnet: None,
             torrent_url: None,
             info_url: None,
+            span: None,
         }
     }
 
@@ -312,6 +327,68 @@ mod tests {
         let mut asked = found(vec![iso]);
         asked.query.category = Some(Category::Video);
         assert!(asked.is_video(), "--category video");
+    }
+
+    fn keys(value: &serde_json::Value) -> BTreeSet<&str> {
+        value.as_object().unwrap().keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn a_raw_search_result_writes_no_span_or_wanted_title() {
+        let raw = found(vec![named("Night of the Living Dead (1968)", Some(Category::Video))]);
+        let json = serde_json::to_value(&raw).unwrap();
+        assert_eq!(
+            keys(&json["query"]),
+            BTreeSet::from([
+                "adult",
+                "category",
+                "fresh",
+                "limit",
+                "max_size",
+                "min_seeds",
+                "profile",
+                "sort",
+                "sources",
+                "text",
+                "timeout_ms",
+            ])
+        );
+        assert_eq!(
+            keys(&json["releases"][0]),
+            BTreeSet::from([
+                "category",
+                "flags",
+                "id",
+                "info_url",
+                "leechers",
+                "magnet",
+                "name",
+                "published",
+                "quality",
+                "seeders",
+                "size",
+                "sources",
+                "torrent_url",
+            ])
+        );
+        assert_eq!(serde_json::from_value::<SearchResult>(json).unwrap(), raw);
+
+        let mut sources = raw;
+        sources.releases[0].span = Some(Span::Film);
+        sources.query.wanted = Some(Wanted {
+            name: "Night of the Living Dead".into(),
+            year: Some(1968),
+            episode: None,
+            namesakes: crate::title::Namesakes::Leading,
+            runtime: None,
+            season_episodes: None,
+        });
+        let json = serde_json::to_value(&sources).unwrap();
+        assert_eq!(
+            (&json["releases"][0]["span"], &json["query"]["wanted"]["namesakes"]),
+            (&"film".into(), &"leading".into())
+        );
+        assert_eq!(serde_json::from_value::<SearchResult>(json).unwrap(), sources);
     }
 
     #[test]

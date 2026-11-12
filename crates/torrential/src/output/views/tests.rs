@@ -45,6 +45,7 @@ fn release(id: ReleaseId, name: &str) -> Release {
         magnet: None,
         torrent_url: None,
         info_url: None,
+        span: None,
     }
 }
 
@@ -300,6 +301,7 @@ fn job(hex: &str, name: Option<&str>, status: JobStatus, progress: Progress) -> 
         progress,
         selection: Selection::All,
         added_at: NOW - 3600,
+        title: None,
     }
 }
 

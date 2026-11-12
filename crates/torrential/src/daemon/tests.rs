@@ -342,6 +342,53 @@ fn prefix(t: &FakeTorrentFile) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn every_command_answers_usage_for_a_title() {
+    let h = Harness::new();
+    let film = || Target::Title("tt0063350".parse().unwrap());
+    let refs = || vec!["tt0903747:3:5".to_string()];
+    let requests = [
+        Request::Get(GetRequest {
+            target: film(),
+            dir: None,
+            files: Vec::new(),
+            max_size: None,
+            setup_max_size: None,
+            dry_run: false,
+        }),
+        Request::Play(PlayRequest { target: film(), dir: None, files: Vec::new(), setup_max_size: None }),
+        Request::Files { target: film(), timeout_ms: 1_000 },
+        Request::Status { refs: refs() },
+        Request::Pause { refs: refs() },
+        Request::Resume { refs: refs(), all: false },
+        Request::Remove { refs: refs() },
+        Request::Verify { reference: "tt0903747:3:5".into(), repair: false },
+    ];
+    let mut answers = Vec::new();
+    for request in requests {
+        match h.ask(request).await {
+            Response::Error { error } => answers.push((error.code, error.message)),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let usage = |command: &str, title: &str| {
+        (ErrorCode::Usage, format!("{command} takes a torrent, not a title such as {title}"))
+    };
+    assert_eq!(
+        answers,
+        [
+            usage("get", "tt0063350"),
+            usage("play", "tt0063350"),
+            usage("files", "tt0063350"),
+            usage("status", "tt0903747:3:5"),
+            usage("pause", "tt0903747:3:5"),
+            usage("resume", "tt0903747:3:5"),
+            usage("rm", "tt0903747:3:5"),
+            usage("verify", "tt0903747:3:5"),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_crash_after_the_intent_commit_leaves_one_interrupted_download() {
     let h = Harness::new();
     let film = torrent(1, "film", &[("film.mkv", GIB)]);

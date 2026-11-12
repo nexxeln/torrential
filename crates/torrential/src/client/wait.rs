@@ -313,6 +313,7 @@ mod tests {
             progress: Progress { size, ..Progress::default() },
             selection: Selection::All,
             added_at: 0,
+            title: None,
         }
     }
 

@@ -223,6 +223,7 @@ pub fn search(now: i64) -> search_port::Fake {
             magnet: Some(format!("magnet:?xt=urn:btih:{hex}&dn={}", t.name)),
             torrent_url: archive.then(|| torrent_url(t)),
             info_url: archive.then(|| format!("https://archive.org/details/{}", t.name)),
+            span: None,
         });
     }
     let script = vec![

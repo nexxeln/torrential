@@ -169,6 +169,7 @@ pub fn fake_catalog() -> Vec<Release> {
         magnet: Some(format!("magnet:?xt=urn:btih:{hex}&dn={name}&xl={size}")),
         torrent_url: None,
         info_url: None,
+        span: None,
     };
     vec![
         release("9b521219bc48550140a666f74a29048ed78e933b", "archlinux-2026.10.01-x86_64.iso", 1_640_497_152, 412),

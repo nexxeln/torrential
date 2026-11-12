@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::Error;
 use crate::id::{InfoHash, TorrentId};
+use crate::watching::TitleLink;
 
 /// A download. Its ID is the torrent's ID, so a search result keeps its ID when downloaded.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -23,6 +24,9 @@ pub struct Job {
     pub selection: Selection,
     /// Unix seconds.
     pub added_at: i64,
+    /// The title the download was made for, when playing a title made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<TitleLink>,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -269,6 +273,44 @@ mod tests {
         for bad in ["8".repeat(63), "9".repeat(64), format!("{}x", "0".repeat(63))] {
             assert!(bad.parse::<PieceMap>().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_job_names_a_title_only_when_playing_one_made_it() {
+        let id: TorrentId = "9b521219bc48550140a666f74a29048ed78e933b".parse().unwrap();
+        let job = Job {
+            id,
+            info_hash: InfoHash::V1(*id.as_bytes()),
+            name: Some("Night.of.the.Living.Dead.1968.1080p.BluRay.x264".into()),
+            dir: "/downloads".into(),
+            path: None,
+            status: JobStatus::Queued,
+            progress: Progress::default(),
+            selection: Selection::All,
+            added_at: 7,
+            title: None,
+        };
+        let json = serde_json::to_value(&job).unwrap();
+        let keys: std::collections::BTreeSet<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["added_at", "dir", "id", "info_hash", "name", "path", "progress", "selection", "state"].into()
+        );
+        assert_eq!(serde_json::from_value::<Job>(json).unwrap(), job);
+
+        let link = TitleLink {
+            title: "tt0063350".parse().unwrap(),
+            span: crate::title::Span::Film,
+            release: None,
+            lease: crate::watching::Lease::Owned,
+        };
+        let linked = Job { title: Some(link), ..job };
+        let json = serde_json::to_value(&linked).unwrap();
+        assert_eq!(
+            json["title"],
+            serde_json::json!({"title": "tt0063350", "span": "film", "release": null, "lease": "owned"})
+        );
+        assert_eq!(serde_json::from_value::<Job>(json).unwrap(), linked);
     }
 
     #[test]

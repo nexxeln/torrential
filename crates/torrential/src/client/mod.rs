@@ -161,6 +161,7 @@ fn search(mut conn: Conn, args: SearchArgs, preferences: Preferences, mode: Mode
         adult: args.adult,
         fresh: args.fresh,
         profile: Profile { preferences, ..Profile::default() },
+        wanted: None,
     };
     let within = args.timeout + Duration::from_secs(10);
     match answer(conn.call_within(&Request::Search { query, stream: false }, within)?)? {
@@ -233,6 +234,7 @@ fn job_refs(references: &[String], cwd: &Path) -> Result<Vec<String>, Error> {
             Target::Magnet(magnet) => Ok(magnet),
             Target::TorrentUrl(_) => Err(not_a_download("a .torrent URL")),
             Target::TorrentFile(_) => Err(not_a_download("a .torrent file")),
+            Target::Title(video) => Err(torrential_core::id::not_a_torrent(&video, "this command")),
         })
         .collect()
 }
