@@ -378,7 +378,7 @@ fn source_plays_only_the_release_it_names() {
 #[test]
 fn an_episode_reads_the_same_as_two_words_or_one() {
     let home = Home::new(&[]);
-    let expected = "Finding sources of Harbor Lights S01E02\nFound 0 sources\nerror[no_source]: no torrent of Harbor \
+    let expected = "Finding sources of Harbor Lights S01E02\nFound 0 sources\nerror[no_source]: no source of Harbor \
                     Lights S01E02 was found\nhint: search the torrents for it by name\nnext: torrential search Harbor \
                     Lights S01E02\n";
     for words in [&["tt9999901", "s01e02"][..], &["tt9999901", "1x02"], &["tt9999901:1:2"]] {

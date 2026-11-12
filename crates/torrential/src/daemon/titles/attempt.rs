@@ -519,7 +519,7 @@ fn first_bytes(status: &JobStatus, video_bytes: u64, waited: Duration, within: D
 fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error {
     let every = |skip: fn(&Skip) -> bool| !tried.is_empty() && tried.iter().all(|t| skip(&t.reason));
     if tried.is_empty() {
-        return Error::new(ErrorCode::NoSource, format!("no torrent of {name} was found"))
+        return Error::new(ErrorCode::NoSource, format!("no source of {name} was found"))
             .with_hint("search the torrents for it by name");
     }
     if every(|s| matches!(s, Skip::Unplayable { .. })) {
@@ -691,7 +691,7 @@ mod tests {
             (e.code, e.message)
         };
         let no_source = |message: &str| (ErrorCode::NoSource, message.to_string());
-        assert_eq!(read(&[], false, false), no_source("no torrent of Night of the Living Dead (1968) was found"));
+        assert_eq!(read(&[], false, false), no_source("no source of Night of the Living Dead (1968) was found"));
         assert_eq!(
             read(&[tried(Skip::Unplayable { container: "mkv".into() })], false, false),
             no_source("no source of Night of the Living Dead (1968) plays in the browser without ffmpeg")

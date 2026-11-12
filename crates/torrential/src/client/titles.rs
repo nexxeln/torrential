@@ -143,7 +143,7 @@ pub fn get(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(u8, Jo
     Ok((exit, reply.job))
 }
 
-/// Sends a title play and shows each of its steps until the reply. When no torrent of the title
+/// Sends a title play and shows each of its steps until the reply. When no source of the title
 /// is found, a search for its name comes next.
 fn steps(conn: &mut Conn, request: &Request, video: &VideoRef, mode: Mode, started: &str) -> Result<Response, Error> {
     conn.send(request)?;
