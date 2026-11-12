@@ -11,6 +11,8 @@ pub mod resolve;
 pub mod search_port;
 pub mod server;
 pub mod store;
+pub mod subtitle_port;
+pub mod web;
 
 #[cfg(test)]
 mod tests;
@@ -24,7 +26,7 @@ use std::time::Duration;
 
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
-use torrential_core::{Error, ErrorCode};
+use torrential_core::{Error, ErrorCode, Preferences};
 
 use crate::config::Config;
 use crate::env::Env;
@@ -51,10 +53,27 @@ pub struct Ports {
     pub search: Arc<dyn SearchPort>,
     pub disk: Box<dyn Disk>,
     pub machine: Arc<Detector>,
+    /// The preferences in config.yaml now.
+    pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
+    /// Where ffmpeg and ffprobe are now.
+    pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
+    pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
 }
 
 impl Ports {
     fn from_env(env: &Env, paths: &Paths, settings: &Config, runtime: &tokio::runtime::Handle) -> Result<Self, Error> {
+        let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
+        let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
+            Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
+        let tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync> =
+            Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        // The fake engine's subtitles are made up too, unless a test asks for the real sources.
+        let subtitles: Arc<dyn subtitle_port::SubtitlePort> =
+            if fake(env) && env.var("TORRENTIAL_TEST_SUBTITLES") != Some("live") {
+                Arc::new(subtitle_port::Fake::default())
+            } else {
+                Arc::new(subtitle_port::Live::new(&settings.subtitles)?)
+            };
         if fake(env) {
             let rate =
                 env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
@@ -64,6 +83,9 @@ impl Ports {
                 search: Arc::new(fixture::search(owner::now())),
                 disk: Box::new(admission::RoomyDisk),
                 machine: Detector::start(env, settings.downloads_dir(paths), Box::new(admission::RoomyDisk)),
+                preferences,
+                tools,
+                subtitles,
             });
         }
         let network = match env.var("TORRENTIAL_TEST_NETWORK") {
@@ -83,6 +105,9 @@ impl Ports {
             parse: libtorrent::parse,
             disk: disk(),
             machine: Detector::start(env, settings.downloads_dir(paths), disk()),
+            preferences,
+            tools,
+            subtitles,
         })
     }
 }
@@ -140,6 +165,7 @@ pub fn start(
         parse: ports.parse,
         version,
         http_port,
+        web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })
@@ -234,10 +260,11 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         })?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
-        let running = start(&tokio::runtime::Handle::current(), store, ports, config, version.clone(), http::PORT)?;
+        let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        let running = start(&tokio::runtime::Handle::current(), store, ports, config, version.clone(), http_port)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         log(&format!(
-            "engine {version} started, pid {pid}, socket {}, players http://127.0.0.1:{players}",
+            "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
             socket.display()
         ));
         let ctx = running.ctx.clone();

@@ -46,6 +46,9 @@ pub enum Command {
         after_help = "Examples:\n  torrential play night of the living dead\n  torrential play 6bc1af\n  torrential play 6bc1af --json"
     )]
     Play(PlayArgs),
+    /// Open the web app, to search and watch in your browser
+    #[command(after_help = "Examples:\n  torrential web\n  torrential web --no-open")]
+    Web(WebArgs),
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -91,6 +94,13 @@ pub enum Command {
     /// Install the latest version, or check whether a newer one is available
     #[command(after_help = "Examples:\n  torrential update\n  torrential update --check")]
     Update(UpdateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct WebArgs {
+    /// Print the address without opening a browser
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 #[derive(Args, Debug)]

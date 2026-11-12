@@ -1,0 +1,122 @@
+//! `POST /api/play`: starts or joins a download and fetches one video first, in playing order.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+use torrential_core::stream::{self, Playable};
+use torrential_core::text::sanitize;
+use torrential_core::{Error, ErrorCode, Job, TorrentFile};
+
+use super::super::engine_port::Metainfo;
+use super::super::http;
+use super::super::owner::{Command, MetaTarget, Origin, PlayCommand, Source};
+use super::super::server::{self, Ctx, METADATA_WAIT};
+
+#[derive(Deserialize)]
+pub struct Play {
+    /// A download or search result ID, an infohash, a magnet link, or the URL of a .torrent file.
+    #[serde(rename = "ref")]
+    reference: String,
+    /// The index of the file to watch. Without it, the engine picks the main video.
+    file: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct Playing {
+    id: String,
+    name: String,
+    job: Job,
+    files: Vec<TorrentFile>,
+    total_size: u64,
+    video: Streamed,
+    subtitles: Vec<Streamed>,
+}
+
+/// A file the engine serves while it downloads.
+#[derive(Serialize)]
+struct Streamed {
+    index: u32,
+    path: String,
+    size: u64,
+    /// The path of `http::url`, for a page on the engine's own origin.
+    url: String,
+    /// Where the file starts in the torrent, in bytes.
+    offset: u64,
+}
+
+pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
+    let deadline = Instant::now() + METADATA_WAIT;
+    let (source, metainfo) = match server::resolve(ctx, super::target(&request.reference)?, "play").await? {
+        Source::Download(id) => {
+            let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
+            (Source::Download(id), info.metainfo)
+        }
+        Source::Magnet(magnet) => {
+            let info = server::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
+            let source = match info.download {
+                Some(_) => Source::Download(info.id),
+                None => Source::Torrent { metainfo: (*info.metainfo).clone(), origin: Origin::Peers },
+            };
+            (source, info.metainfo)
+        }
+        Source::Torrent { metainfo, origin } => {
+            let shared = Arc::new(metainfo.clone());
+            (Source::Torrent { metainfo, origin }, shared)
+        }
+    };
+    let playable = choose(&metainfo, request.file)?;
+    let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
+    let setup_max_size = (ctx.web.preferences)().max_size;
+    let play = PlayCommand { source, dir: None, files, setup_max_size };
+    let (job, metainfo) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+    let info = server::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
+    let streamed = |index: u32| {
+        let file = &metainfo.files[index as usize];
+        let path = sanitize(&file.path);
+        Streamed {
+            index,
+            url: http::route_of(job.id, index, &path),
+            path,
+            size: file.size,
+            offset: metainfo.files[..index as usize].iter().map(|f| f.size).sum(),
+        }
+    };
+    Ok(Playing {
+        id: job.id.to_hex(),
+        name: sanitize(&metainfo.name),
+        files: server::listed(ctx, &info).await,
+        total_size: metainfo.total(),
+        video: streamed(playable.video),
+        subtitles: playable.subtitles.iter().map(|&index| streamed(index)).collect(),
+        job,
+    })
+}
+
+/// The file to watch and its subtitles: the one the page chose, or the torrent's main video.
+fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable, Error> {
+    let listing: Vec<TorrentFile> = (0..)
+        .zip(&metainfo.files)
+        .map(|(index, f)| TorrentFile {
+            index,
+            path: sanitize(&f.path),
+            size: f.size,
+            selected: false,
+            verified: 0,
+            risk: None,
+        })
+        .collect();
+    let name = sanitize(&metainfo.name);
+    match file {
+        Some(index) => stream::around(&listing, index).ok_or_else(|| {
+            let count = listing.len();
+            let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+            Error::new(ErrorCode::Usage, format!("{name} has {files}, so it has no file {index}"))
+        }),
+        None => stream::pick(&listing).ok_or_else(|| {
+            let id = metainfo.info_hash.id().to_hex();
+            Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
+                .with_hint(format!("run torrential files {} to list its files", &id[..8]))
+        }),
+    }
+}

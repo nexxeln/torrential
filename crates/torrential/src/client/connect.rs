@@ -18,6 +18,8 @@ pub struct Conn {
     pub engine_version: String,
     pub wire: u32,
     pub pid: u32,
+    /// Where the engine serves the web app, and downloads to players.
+    pub http_port: u16,
     log: String,
 }
 
@@ -69,15 +71,22 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
             ));
         }
     };
-    let mut conn =
-        Conn { stream, engine_version: String::new(), wire: 0, pid: 0, log: paths.log().display().to_string() };
+    let mut conn = Conn {
+        stream,
+        engine_version: String::new(),
+        wire: 0,
+        pid: 0,
+        http_port: 0,
+        log: paths.log().display().to_string(),
+    };
     match conn
         .call_within(&Request::Hello { client_version: env.version(), wire: WIRE_VERSION }, Duration::from_secs(5))?
     {
-        Response::Hello { engine_version, wire, pid } => {
+        Response::Hello { engine_version, wire, pid, http_port } => {
             conn.engine_version = engine_version;
             conn.wire = wire;
             conn.pid = pid;
+            conn.http_port = http_port;
             Ok(Some(conn))
         }
         Response::Error { error } => Err(error),

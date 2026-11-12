@@ -15,6 +15,7 @@ use super::engine_port::{
 use super::owner::OwnerConfig;
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
+use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
 
 const ROOMY: Space = Space { device: 1, total: 1000 * GIB, free: 500 * GIB };
@@ -28,6 +29,15 @@ struct Harness {
     swarm: Swarm,
     disk: FakeDisk,
     search: search_port::Fake,
+    outside: Outside,
+}
+
+/// What the web app's API reaches outside the engine, which a test sets.
+#[derive(Clone, Default)]
+struct Outside {
+    /// Where the engine finds ffmpeg and ffprobe. Nowhere, until a test says.
+    tools: Arc<Mutex<Tools>>,
+    subtitles: super::subtitle_port::Fake,
 }
 
 fn config(dir: &std::path::Path) -> OwnerConfig {
@@ -54,26 +64,29 @@ impl Harness {
 
     fn with_search(search: search_port::Fake) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let outside = Outside::default();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search);
-        Self { dir, running, swarm, disk, search }
+        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        Self { dir, running, swarm, disk, search, outside }
     }
 
     fn with_engine(engine: impl FnOnce(&std::path::Path) -> Box<dyn EnginePort>, parse: ParseTorrent) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let outside = Outside::default();
         let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
-        let running = Self::boot(&dir, engine(dir.path()), parse, &disk, &search);
-        Self { dir, running, swarm, disk, search }
+        let running = Self::boot(&dir, engine(dir.path()), parse, &disk, &search, &outside);
+        Self { dir, running, swarm, disk, search, outside }
     }
 
     fn seeded() -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let outside = Outside::default();
         let mut store = Store::open(&dir.path().join("state.db")).unwrap();
         super::fixture::seed(&mut store, &dir.path().join("downloads"), 0).unwrap();
         drop(store);
         let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search);
-        Self { dir, running, swarm, disk, search }
+        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        Self { dir, running, swarm, disk, search, outside }
     }
 
     fn boot(
@@ -82,6 +95,7 @@ impl Harness {
         parse: ParseTorrent,
         disk: &FakeDisk,
         search: &search_port::Fake,
+        outside: &Outside,
     ) -> Running {
         let ports = Ports {
             engine,
@@ -98,18 +112,24 @@ impl Harness {
                 dir.path().join("downloads"),
                 Box::new(disk.clone()),
             ),
+            preferences: Arc::new(torrential_core::Preferences::default),
+            tools: Arc::new({
+                let tools = outside.tools.clone();
+                move || tools.lock().unwrap().clone()
+            }),
+            subtitles: Arc::new(outside.subtitles.clone()),
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         start(&tokio::runtime::Handle::current(), store, ports, config(dir.path()), "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
-        let Self { dir, running, swarm, disk, search } = self;
+        let Self { dir, running, swarm, disk, search, outside } = self;
         running.owner.abort();
         let _ = running.owner.await;
         drop(running.ctx);
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search);
-        Self { dir, running, swarm, disk, search }
+        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        Self { dir, running, swarm, disk, search, outside }
     }
 
     async fn ask(&self, request: Request) -> Response {
@@ -275,6 +295,17 @@ impl<P: EnginePort> EnginePort for Gated<P> {
         length: u64,
     ) -> Result<bool, Error> {
         self.port.want_range(id, file, offset, length)
+    }
+
+    fn written(
+        &mut self,
+        id: torrential_core::TorrentId,
+        file: u32,
+        offset: u64,
+        length: u64,
+        runs: u32,
+    ) -> Result<Vec<torrential_core::Slice>, Error> {
+        self.port.written(id, file, offset, length, runs)
     }
 
     fn stream(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
@@ -1504,3 +1535,5 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     h.play(h.torrent_file(&film), &[0]).await.unwrap();
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
 }
+
+mod web;

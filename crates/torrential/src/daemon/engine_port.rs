@@ -141,6 +141,9 @@ pub trait EnginePort: Send {
     fn file_progress(&mut self, id: TorrentId) -> Result<Vec<u64>, Error>;
     /// Fetches the pieces under this byte range of a file first. True when all of them are verified and on disk.
     fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error>;
+    /// How much of each of `runs` equal runs of this byte range of a file is verified and on disk,
+    /// in order. Unlike `want_range`, this asks peers for nothing.
+    fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error>;
     /// Downloads pieces in file order, for a download someone watches as it arrives.
     fn stream(&mut self, id: TorrentId) -> Result<(), Error>;
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent>;
@@ -157,6 +160,7 @@ pub enum EngineCommand {
     Remove(TorrentId),
     FileProgress(TorrentId, oneshot::Sender<Result<Vec<u64>, Error>>),
     WantRange(TorrentId, u32, u64, u64, oneshot::Sender<Result<bool, Error>>),
+    Written(TorrentId, u32, u64, u64, u32, oneshot::Sender<Result<Vec<Slice>, Error>>),
     Stream(TorrentId),
 }
 
@@ -176,6 +180,17 @@ impl EngineHandle {
 
     pub async fn want_range(&self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
         self.ask(|reply| EngineCommand::WantRange(id, file, offset, length, reply)).await
+    }
+
+    pub async fn written(
+        &self,
+        id: TorrentId,
+        file: u32,
+        offset: u64,
+        length: u64,
+        runs: u32,
+    ) -> Result<Vec<Slice>, Error> {
+        self.ask(|reply| EngineCommand::Written(id, file, offset, length, runs, reply)).await
     }
 
     async fn ask<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> EngineCommand) -> Result<T, Error> {
@@ -235,6 +250,10 @@ fn apply(port: &mut dyn EnginePort, command: EngineCommand) -> Option<EngineEven
         }
         EngineCommand::WantRange(id, file, offset, length, reply) => {
             let _ = reply.send(port.want_range(id, file, offset, length));
+            return None;
+        }
+        EngineCommand::Written(id, file, offset, length, runs, reply) => {
+            let _ = reply.send(port.written(id, file, offset, length, runs));
             return None;
         }
     };
@@ -364,6 +383,11 @@ impl FakeTorrent {
     }
 
     fn written(&self, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+        Ok(self.runs(file, offset, length, 1)?.iter().all(|run| run.is_complete()))
+    }
+
+    /// How much of each of `runs` equal runs of a byte range of a file has arrived.
+    fn runs(&self, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error> {
         let Some(metainfo) = &self.metainfo else {
             return Err(Error::internal(format!("{} has no file list", self.id)));
         };
@@ -372,10 +396,17 @@ impl FakeTorrent {
             return Err(Error::internal(format!("byte range {offset}+{length} is outside file {file} of {}", self.id)));
         }
         let start = metainfo.files[..file as usize].iter().map(|f| f.size).sum::<u64>() + offset;
-        let end = start + length.min(size - offset);
+        let span = length.min(size - offset);
         let piece = fake_piece_size(metainfo.total());
         let have = self.landing().map(|l| l.have).unwrap_or_default();
-        Ok((start / piece..end.div_ceil(piece)).all(|p| have.get(p as usize) == Some(&true)))
+        let run = |r: u64| {
+            let begin = start + r * span / u64::from(runs);
+            let end = (begin + 1).max(start + (r + 1) * span / u64::from(runs));
+            let pieces = begin / piece..end.div_ceil(piece);
+            let arrived = pieces.clone().filter(|&p| have.get(p as usize) == Some(&true)).count();
+            Slice::of(arrived as u32, pieces.count() as u32)
+        };
+        Ok((0..u64::from(runs)).map(run).collect())
     }
 
     fn wanted_size(&self) -> Option<u64> {
@@ -517,6 +548,10 @@ impl EnginePort for Fake {
 
     fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
         self.torrent(id)?.written(file, offset, length)
+    }
+
+    fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error> {
+        self.torrent(id)?.runs(file, offset, length, runs)
     }
 
     fn stream(&mut self, id: TorrentId) -> Result<(), Error> {

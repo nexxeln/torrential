@@ -13,7 +13,7 @@
       devShells = forAll (pkgs: let openssl = pkgs.openssl.override { static = true; }; in {
         default = pkgs.mkShellNoCC {
           # Linux needs a compiler/linker using the same glibc as static OpenSSL.
-          packages = [ pkgs.cmake pkgs.ninja pkgs.pkg-config pkgs.boost.dev openssl.dev openssl.out ]
+          packages = [ pkgs.cmake pkgs.ninja pkgs.pkg-config pkgs.boost.dev openssl.dev openssl.out pkgs.bun ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc ];
           # Cargo links C++ through rustc, so expose the matching runtime as well.
           LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux

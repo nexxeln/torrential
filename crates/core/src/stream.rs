@@ -39,14 +39,34 @@ pub fn pick(files: &[TorrentFile]) -> Option<Playable> {
     let videos: Vec<&TorrentFile> = files.iter().filter(|f| kind(&f.path) == Some(Kind::Video)).collect();
     let features: Vec<&TorrentFile> = videos.iter().copied().filter(|f| !is_sample(&f.path)).collect();
     let video = if features.is_empty() { &videos } else { &features }.iter().max_by_key(|f| f.size)?;
+    let subtitles = subtitles(files, video, features.len());
+    Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
+}
+
+/// The file a person chose to watch, plus the subtitle files that belong with it. When some of
+/// them carry the video's name, as each episode's do in a season, only those belong.
+pub fn around(files: &[TorrentFile], video: u32) -> Option<Playable> {
+    let video = files.iter().find(|f| f.index == video)?;
+    let features = files.iter().filter(|f| kind(&f.path) == Some(Kind::Video) && !is_sample(&f.path)).count();
+    let mut subtitles = subtitles(files, video, features);
+    let name = video.path.rsplit('/').next().unwrap_or(&video.path);
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem).to_lowercase();
+    if subtitles.iter().any(|f| f.path.to_lowercase().contains(&stem)) {
+        subtitles.retain(|f| f.path.to_lowercase().contains(&stem));
+    }
+    Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
+}
+
+/// The subtitle files that belong with `video`, ordered by path, in a torrent with `features` videos.
+fn subtitles<'a>(files: &'a [TorrentFile], video: &TorrentFile, features: usize) -> Vec<&'a TorrentFile> {
     let home = folder(&video.path);
     let mut subtitles: Vec<&TorrentFile> = files
         .iter()
         .filter(|f| kind(&f.path) == Some(Kind::Subtitle))
-        .filter(|f| features.len() <= 1 || folder(&f.path) == home || in_subtitle_folder(&f.path))
+        .filter(|f| features <= 1 || folder(&f.path) == home || in_subtitle_folder(&f.path))
         .collect();
     subtitles.sort_by(|a, b| a.path.cmp(&b.path));
-    Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
+    subtitles
 }
 
 /// When playback can start so it never catches up with the download.
@@ -156,6 +176,39 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn a_chosen_episode_takes_the_subtitles_that_carry_its_name() {
+        let listing = [
+            ("Show.S01E01.mkv", 1_000_000_000),
+            ("Show.S01E02.mkv", 2_000_000_000),
+            ("Show.S01E01.en.srt", 40_000),
+            ("Show.S01E02.en.srt", 40_000),
+            ("Subs/Show.S01E01/2_English.srt", 40_000),
+            ("Extras/Making Of.mkv", 500_000_000),
+            ("Extras/Making Of.srt", 10_000),
+            ("Bonus/Clip.mkv", 100_000_000),
+            ("Bonus/English.srt", 10_000),
+        ];
+        let files: Vec<TorrentFile> = (0..)
+            .zip(listing)
+            .map(|(index, (path, size))| TorrentFile {
+                index,
+                path: path.into(),
+                size,
+                selected: false,
+                verified: 0,
+                risk: None,
+            })
+            .collect();
+        let chosen = |video| around(&files, video).map(|playable| (playable.video, playable.subtitles));
+        assert_eq!(chosen(0), Some((0, vec![2, 4])));
+        assert_eq!(chosen(1), Some((1, vec![3])));
+        assert_eq!(chosen(5), Some((5, vec![6])));
+        // No subtitle carries this name, so every one in its folder or a subtitle folder belongs.
+        assert_eq!(chosen(7), Some((7, vec![8, 4])));
+        assert_eq!(chosen(9), None);
     }
 
     #[test]

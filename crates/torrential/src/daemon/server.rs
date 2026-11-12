@@ -25,7 +25,7 @@ use crate::wire;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
 pub const METADATA_WAIT: Duration = Duration::from_secs(60);
-const HEARTBEAT: Duration = Duration::from_secs(15);
+pub(super) const HEARTBEAT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct OwnerHandle(pub mpsc::UnboundedSender<Command>);
@@ -54,8 +54,9 @@ pub struct Ctx {
     pub engine: EngineHandle,
     pub parse: ParseTorrent,
     pub version: String,
-    /// Where `http` serves downloads to players.
+    /// Where `http` serves downloads to players, and the web app.
     pub http_port: u16,
+    pub web: super::web::State,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
@@ -103,7 +104,7 @@ async fn search(ctx: &Ctx, query: SearchQuery) -> Result<SearchResult, Error> {
     Ok(result)
 }
 
-fn record(ctx: &Ctx, result: &mut SearchResult) {
+pub(super) fn record(ctx: &Ctx, result: &mut SearchResult) {
     for release in &mut result.releases {
         release.name = sanitize(&release.name);
     }
@@ -167,7 +168,7 @@ async fn fetch(ctx: &Ctx, url: String) -> Result<Metainfo, Error> {
     Ok(metainfo)
 }
 
-async fn resolve(ctx: &Ctx, target: Target, command: &'static str) -> Result<Source, Error> {
+pub(super) async fn resolve(ctx: &Ctx, target: Target, command: &'static str) -> Result<Source, Error> {
     match target {
         Target::Prefix(prefix) => {
             let prefix = prefix.parse()?;
@@ -225,7 +226,7 @@ async fn release_source(ctx: &Ctx, release: Release, cached: Option<Arc<Metainfo
     }
 }
 
-async fn metadata(ctx: &Ctx, target: MetaTarget, deadline: Instant) -> Result<FilesInfo, Error> {
+pub(super) async fn metadata(ctx: &Ctx, target: MetaTarget, deadline: Instant) -> Result<FilesInfo, Error> {
     ctx.owner.ask(|reply| Command::Metadata { target, deadline, reply }).await
 }
 
@@ -260,7 +261,7 @@ async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
     Ok(PlayReply { job, streams })
 }
 
-async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesReply, Error> {
+pub(super) async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesReply, Error> {
     let started = Instant::now();
     let deadline = started + timeout;
     let info = match resolve(ctx, target, "files").await? {
@@ -274,14 +275,26 @@ async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesRepl
         },
     };
     let m = &info.metainfo;
+    Ok(FilesReply {
+        id: info.id.to_hex(),
+        name: Some(sanitize(&m.name)),
+        total_size: m.total(),
+        files: listed(ctx, &info).await,
+        metadata_source: info.source.to_string(),
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+    })
+}
+
+/// A torrent's files, with what its download has selected and verified of each.
+pub(super) async fn listed(ctx: &Ctx, info: &FilesInfo) -> Vec<TorrentFile> {
+    let m = &info.metainfo;
     let verified: Vec<u64> = match info.download.as_ref().map(|d| &d.verified) {
         Some(FileBytes::Known(bytes)) => bytes.clone(),
         Some(FileBytes::Engine { saved }) => ctx.engine.file_progress(info.id).await.unwrap_or_else(|_| saved.clone()),
         None => Vec::new(),
     };
     let risks = files::risks(m);
-    let files = m
-        .files
+    m.files
         .iter()
         .enumerate()
         .map(|(i, f)| TorrentFile {
@@ -292,15 +305,7 @@ async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesRepl
             verified: verified.get(i).copied().unwrap_or(0),
             risk: risks[i],
         })
-        .collect();
-    Ok(FilesReply {
-        id: info.id.to_hex(),
-        name: Some(sanitize(&m.name)),
-        total_size: m.total(),
-        files,
-        metadata_source: info.source.to_string(),
-        elapsed_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
-    })
+        .collect()
 }
 
 pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
@@ -314,7 +319,12 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let Some(Request::Hello { wire: client_wire, .. }) = wire::read_async::<Request>(&mut rd).await? else {
         return Ok(());
     };
-    let hello = Response::Hello { engine_version: ctx.version.clone(), wire: WIRE_VERSION, pid: std::process::id() };
+    let hello = Response::Hello {
+        engine_version: ctx.version.clone(),
+        wire: WIRE_VERSION,
+        pid: std::process::id(),
+        http_port: ctx.http_port,
+    };
     wire::write_async(&mut wr, &hello).await?;
     while let Some(request) = wire::read_async::<Request>(&mut rd).await? {
         if client_wire != WIRE_VERSION && request != Request::Shutdown {

@@ -8,6 +8,7 @@ mod setup;
 pub mod tui;
 mod update;
 pub mod wait;
+mod web;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -74,6 +75,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         }
         Command::Get(args) => get(engine()?, args, mode, &cwd, env),
         Command::Play(args) => play::run(args, mode, env, &cwd),
+        Command::Web(args) => web::run(&engine()?, args, mode, env),
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;
@@ -467,6 +469,7 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
     };
     checks.extend(probe::checks(&paths, settings, network));
     checks.push(profile);
+    checks.push(web::check(env));
     emit(mode, &views::doctor(&checks, fix), &Typed { kind: "doctor", body: Checks { checks: &checks } })
 }
 

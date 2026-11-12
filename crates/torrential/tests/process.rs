@@ -665,3 +665,62 @@ fn errors_name_a_reference_by_its_hash_or_kind_never_its_url() {
         ]
     );
 }
+
+#[test]
+fn web_prints_the_address_of_the_web_app_and_opens_it_unless_told_not_to() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let mut home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0")]);
+    // Stands in for the browser, and records the address it was asked to open.
+    let (opener, opened) = (home.dir.path().join("opener"), home.dir.path().join("opened"));
+    std::fs::write(&opener, format!("#!/bin/sh\necho \"$1\" > '{}'\n", opened.display())).unwrap();
+    std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+    home.set("TORRENTIAL_TEST_OPENER", &opener.display().to_string());
+
+    let json = home.run(&["web", "--json"]);
+    assert_eq!(json.code, 0, "{}", json.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    let url = doc["url"].as_str().unwrap().to_string();
+    assert_eq!((doc["type"].as_str(), doc["opened"].as_bool()), (Some("web"), Some(false)));
+    let port: u16 = url.strip_prefix("http://127.0.0.1:").expect("a local address").parse().unwrap();
+    let quiet = home.run(&["web", "--no-open"]);
+    assert_eq!(quiet.stdout, format!("url:   {url}\nstate: ready\n# the web app works while the engine runs\n"));
+    assert!(!opened.exists(), "neither --json nor --no-open opens a browser");
+
+    let run = home.run(&["web"]);
+    assert_eq!(
+        run.stdout,
+        format!("url:   {url}\nstate: opened in your browser\n# the web app works while the engine runs\n")
+    );
+    eventually("the browser is asked to open the address", Duration::from_secs(5), || {
+        std::fs::read_to_string(&opened).is_ok_and(|asked| asked.trim() == url)
+    });
+
+    let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    page.write_all(b"GET /api/jobs HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+    let mut answer = String::new();
+    page.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    assert!(answer.contains("\r\n\r\n{\"jobs\":["), "{answer}");
+}
+
+#[test]
+fn an_open_page_keeps_the_engine_running_and_a_closed_one_lets_it_exit() {
+    use std::io::{Read, Write};
+    let mut home = Home::with(&[("TORRENTIAL_TEST_HTTP_PORT", "0")]);
+    home.set("TORRENTIAL_TEST_IDLE_TIMEOUT", "1s");
+    let json = home.run(&["web", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    let port: u16 = doc["url"].as_str().unwrap().rsplit(':').next().unwrap().parse().unwrap();
+    let (pid, _) = home.engine().unwrap();
+    // The page follows downloads for as long as it is open.
+    let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    page.write_all(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+    let mut head = [0; 15];
+    page.read_exact(&mut head).unwrap();
+    assert_eq!(&head, b"HTTP/1.1 200 OK");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(alive(pid), "the engine exited under an open page");
+    drop(page);
+    eventually("the idle engine exits", Duration::from_secs(10), || !alive(pid));
+}

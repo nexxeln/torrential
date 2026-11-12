@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_saphyr::{Localizer, Location, SnippetMode, Spanned, UserMessageFormatter};
 use torrential_core::units::{parse_size, size_text};
 use torrential_core::{Error, ErrorCode, Playback, Preferences, Screen};
+use torrential_search::subtitles::SubtitleConfig;
 use torrential_search::{SearchConfig, TorznabConfig};
 
 use crate::client::player::Choice;
@@ -22,6 +23,7 @@ pub struct Config {
     pub preferences: Preferences,
     pub updates: Policy,
     pub player: Option<Choice>,
+    pub subtitles: SubtitleConfig,
 }
 
 #[derive(Deserialize, Default)]
@@ -32,6 +34,7 @@ struct File {
     preferences: Option<Overrides>,
     updates: Option<Policy>,
     player: Option<Spanned<String>>,
+    subtitles: Subtitles,
 }
 
 #[derive(Deserialize, Default)]
@@ -52,6 +55,13 @@ struct Overrides {
     screen: Option<Screen>,
     max_size: Option<Spanned<String>>,
     playback: Option<Playback>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct Subtitles {
+    /// False stops the web player from looking for subtitles online.
+    online: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -90,7 +100,8 @@ impl Config {
                 Config { file: Some(path), ..config }
             }
         };
-        config.search.endpoints = test_endpoints(env)?;
+        config.search.endpoints = test_endpoints(env, "TORRENTIAL_TEST_ENDPOINTS")?;
+        config.subtitles.endpoints = test_endpoints(env, "TORRENTIAL_TEST_SUBTITLE_ENDPOINTS")?;
         Ok(config)
     }
 
@@ -313,7 +324,9 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
             })
         })
         .transpose()?;
-    Ok(Config { downloads, search, file: None, preferences, updates: file.updates.unwrap_or_default(), player })
+    let subtitles = SubtitleConfig { online: file.subtitles.online.unwrap_or(true), ..SubtitleConfig::default() };
+    let updates = file.updates.unwrap_or_default();
+    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles })
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -335,13 +348,14 @@ fn invalid(path: &Path, line: Option<u64>, message: &str) -> Error {
     Error::new(ErrorCode::Usage, format!("{place}: {message}")).with_hint(format!("fix {}", path.display()))
 }
 
-fn test_endpoints(env: &Env) -> Result<BTreeMap<String, String>, Error> {
-    let Some(list) = env.var("TORRENTIAL_TEST_ENDPOINTS") else { return Ok(BTreeMap::new()) };
+/// Replacement base URLs for tests, as `name=url` pairs separated by commas in the variable `key`.
+fn test_endpoints(env: &Env, key: &str) -> Result<BTreeMap<String, String>, Error> {
+    let Some(list) = env.var(key) else { return Ok(BTreeMap::new()) };
     list.split(',')
         .map(|pair| {
-            pair.split_once('=').map(|(name, url)| (name.trim().to_string(), url.trim().to_string())).ok_or_else(|| {
-                Error::new(ErrorCode::Usage, format!("TORRENTIAL_TEST_ENDPOINTS has {pair:?}, which is not name=url"))
-            })
+            pair.split_once('=')
+                .map(|(name, url)| (name.trim().to_string(), url.trim().to_string()))
+                .ok_or_else(|| Error::new(ErrorCode::Usage, format!("{key} has {pair:?}, which is not name=url")))
         })
         .collect()
 }
@@ -611,6 +625,20 @@ sources:
 
         let mode = std::fs::metadata(&config).unwrap().permissions().mode() & 0o777;
         assert_eq!((format!("{mode:o}"), preferences(&folder.paths).unwrap()), ("600".to_string(), LAPTOP));
+    }
+
+    #[test]
+    fn online_subtitles_are_on_unless_the_file_turns_them_off() {
+        let online = |text: &str| parse(text, &env()).unwrap().subtitles.online;
+        assert_eq!(
+            [online(""), online("subtitles:\n  online: true\n"), online("subtitles:\n  online: false\n")],
+            [true, true, false]
+        );
+        assert!(online("subtitles: {}\nupdates: auto\n"));
+        let error = load("subtitles:\n  online: sometimes\n").unwrap_err();
+        assert!(error.message.starts_with("$TORRENTIAL_HOME/config/config.yaml line 2: "), "{}", error.message);
+        let error = load("subtitles:\n  offline: true\n").unwrap_err();
+        assert!(error.message.contains("unknown field `offline`"), "{}", error.message);
     }
 
     #[test]

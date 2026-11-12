@@ -13,7 +13,7 @@ use crate::id::Target;
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{SearchQuery, SearchResult};
 
-pub const WIRE_VERSION: u32 = 3;
+pub const WIRE_VERSION: u32 = 4;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -95,15 +95,37 @@ pub struct PlayRequest {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Response {
-    Hello { engine_version: String, wire: u32, pid: u32 },
-    Search { result: SearchResult },
-    Files { files: FilesReply },
-    Get { reply: Box<GetReply> },
-    Play { reply: Box<PlayReply> },
-    Jobs { jobs: Vec<Job> },
-    Changed { changes: Vec<Change> },
+    Hello {
+        engine_version: String,
+        wire: u32,
+        pid: u32,
+        /// Where the engine serves downloads to players, and the web app, on 127.0.0.1. Zero from an
+        /// engine older than the web app.
+        #[serde(default)]
+        http_port: u16,
+    },
+    Search {
+        result: SearchResult,
+    },
+    Files {
+        files: FilesReply,
+    },
+    Get {
+        reply: Box<GetReply>,
+    },
+    Play {
+        reply: Box<PlayReply>,
+    },
+    Jobs {
+        jobs: Vec<Job>,
+    },
+    Changed {
+        changes: Vec<Change>,
+    },
     Ok,
-    Error { error: Error },
+    Error {
+        error: Error,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

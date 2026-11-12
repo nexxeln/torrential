@@ -205,6 +205,7 @@ mod tests {
                 "files",
                 "get",
                 "play",
+                "web",
                 "status",
                 "wait",
                 "pause",
@@ -221,7 +222,7 @@ mod tests {
                 "update"
             ]
         );
-        let daemon = &schema()["commands"][13]["subcommands"];
+        let daemon = &schema()["commands"][14]["subcommands"];
         let subs: Vec<&str> = daemon.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
         assert_eq!(subs, ["status", "stop", "install", "uninstall"]);
     }
@@ -233,7 +234,7 @@ mod tests {
         let files = get["flags"].as_array().unwrap().iter().find(|f| f["name"] == "--files").unwrap();
         assert_eq!(files["repeatable"], true);
         assert_eq!(files["value_name"], "GLOB");
-        let wait = &s["commands"][5];
+        let wait = &s["commands"][6];
         let until = wait["flags"].as_array().unwrap().iter().find(|f| f["name"] == "--until").unwrap();
         assert_eq!(until["values"], serde_json::json!(["done", "metadata"]));
         assert_eq!(until["default"], "done");

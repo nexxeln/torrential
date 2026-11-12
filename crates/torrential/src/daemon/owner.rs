@@ -111,6 +111,9 @@ pub struct PlayCommand {
 #[derive(Clone, Debug)]
 pub struct StreamFile {
     pub path: PathBuf,
+    /// The torrent's name and the file's path inside it, which say what a video is.
+    pub torrent: String,
+    pub inside: String,
     pub size: u64,
     /// The download is done, so every byte is on disk.
     pub complete: bool,
@@ -318,6 +321,8 @@ impl Owner {
             let file = metainfo.files.get(index as usize)?;
             job.wanted()?[index as usize].then(|| StreamFile {
                 path: job.record.dir.join(files::relative(metainfo, file)),
+                torrent: metainfo.name.clone(),
+                inside: file.path.clone(),
                 size: file.size,
                 complete: matches!(job.record.intent, Intent::Done { .. }),
             })

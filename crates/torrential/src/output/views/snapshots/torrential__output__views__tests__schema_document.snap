@@ -184,6 +184,19 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "web",
+      "about": "Open the web app, to search and watch in your browser",
+      "arguments": [],
+      "flags": [
+        {
+          "name": "--no-open",
+          "help": "Print the address without opening a browser",
+          "takes_value": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
       "name": "status",
       "about": "List downloads, or show one in detail",
       "arguments": [

@@ -522,6 +522,13 @@ impl EnginePort for Libtorrent {
         self.session.want_range(engine_id(id), index, offset, length).map_err(engine_error)
     }
 
+    fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error> {
+        let index = self.torrents.get(&id).and_then(|t| t.files.as_ref()?.get(file as usize).copied());
+        let index = index.ok_or_else(|| Error::internal(format!("the engine has no file {file} in torrent {id}")))?;
+        let counted = self.session.written_pieces(engine_id(id), index, offset, length, runs).map_err(engine_error)?;
+        Ok(counted.into_iter().map(|run| Slice::of(run.written, run.pieces)).collect())
+    }
+
     fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
         self.session.download_in_order(engine_id(id)).map_err(engine_error)
     }
