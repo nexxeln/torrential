@@ -47,7 +47,14 @@ case "$target" in
     else
       cargo="cargo build --release --locked -p torrential"
     fi
+    # The Alpine image has no bun, so the web app is built here and handed to the build inside.
+    if ! command -v bun >/dev/null 2>&1; then
+      echo "release.sh needs bun to build the web app: https://bun.sh" >&2
+      exit 1
+    fi
+    (cd web && bun install --frozen-lockfile && bun run build --outDir ../target/linux/web --emptyOutDir)
     docker run --rm --init -v "$PWD:/src" -w /src -e OWNER="$(id -u):$(id -g)" -e CARGO="$cargo" \
+      -e TORRENTIAL_WEB_DIST=/src/target/linux/web \
       -e RUSTUP_HOME=/src/target/linux/rustup -e CARGO_HOME=/src/target/linux/cargo alpine:3.24 sh -euc '
       apk add --no-cache build-base cmake samurai boost-dev openssl-dev openssl-libs-static linux-headers curl file >/dev/null
       [ -x "$CARGO_HOME/bin/cargo" ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path >/dev/null 2>&1

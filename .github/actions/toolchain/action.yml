@@ -22,6 +22,8 @@ runs:
     - if: runner.os == 'macOS'
       shell: bash
       run: nix --extra-experimental-features 'nix-command flakes' develop -c true
+    - if: runner.os == 'Linux'
+      uses: oven-sh/setup-bun@v2
     - uses: actions/cache@v4
       with:
         path: |
