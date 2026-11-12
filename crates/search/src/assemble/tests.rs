@@ -808,3 +808,247 @@ fn a_thousand_shuffles_give_one_order() {
         assert_eq!(shuffled.sources, expected.sources);
     }
 }
+
+fn night(namesakes: Namesakes, year: u16) -> Wanted {
+    Wanted {
+        name: "Night of the Living Dead".into(),
+        year: Some(year),
+        episode: None,
+        namesakes,
+        runtime: Some(std::time::Duration::from_secs(96 * 60)),
+        season_episodes: None,
+    }
+}
+
+fn video(byte: u8, name: &str, seeders: Option<u32>, size: u64) -> Observation {
+    let mut o = with(row(&h(byte), name), seeders, Some(size), None);
+    o.category = Some(Category::Video);
+    o
+}
+
+fn bluray() -> Observation {
+    video(0x60, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP", Some(120), 8 * GB)
+}
+
+fn dvdrip() -> Observation {
+    video(0x62, "Night of the Living Dead 1968 DVDRip XviD", Some(3), 700_000_000)
+}
+
+fn for_title(wanted: &Wanted, profile: Profile) -> SearchQuery {
+    SearchQuery { wanted: Some(wanted.clone()), profile, ..SearchQuery::new(wanted.queries()[0].clone()) }
+}
+
+fn played(wanted: &Wanted, profile: Profile, runs: &[Run]) -> Vec<String> {
+    names(&search(&for_title(wanted, profile), runs)).iter().map(|n| n.to_string()).collect()
+}
+
+#[test]
+fn a_cam_ranks_last_even_with_the_most_seeders() {
+    let cam = video(0x61, "Night of the Living Dead 1968 HDCAM x264", Some(300), 1_400_000_000);
+    let runs = [fresh(&knaben(), vec![cam, dvdrip(), bluray()])];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
+        [
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
+            "Night of the Living Dead 1968 DVDRip XviD",
+            "Night of the Living Dead 1968 HDCAM x264",
+        ]
+    );
+}
+
+#[test]
+fn a_release_known_to_have_no_seeders_is_dropped_outside_a_lawful_catalog() {
+    let dead = video(0x63, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", Some(0), 4 * GB);
+    let lawful = video(0x64, "Night of the Living Dead (1968)", Some(0), 500_000_000);
+    let runs = [fresh(&archive(), vec![lawful]), fresh(&knaben(), vec![dead, bluray()])];
+    let result = search(&for_title(&night(Namesakes::Leading, 1968), Profile::default()), &runs);
+    assert_eq!(
+        names(&result),
+        ["Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP", "Night of the Living Dead (1968)"]
+    );
+    assert_eq!(result.total, 2);
+}
+
+#[test]
+fn archive_org_without_seeders_counts_as_a_fair_swarm() {
+    let lawful = video(0x64, "Night of the Living Dead (1968)", None, 500_000_000);
+    let fair = video(0x65, "Night Of The Living Dead 1968 720p BRRip x264", Some(12), 1_200_000_000);
+    let runs = [fresh(&archive(), vec![lawful]), fresh(&knaben(), vec![dvdrip(), fair, bluray()])];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
+        [
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
+            "Night of the Living Dead (1968)",
+            "Night Of The Living Dead 1968 720p BRRip x264",
+            "Night of the Living Dead 1968 DVDRip XviD",
+        ]
+    );
+}
+
+#[test]
+fn hevc_ranks_after_h264_for_a_player_that_may_not_play_it() {
+    let hevc = video(0x66, "Night.of.the.Living.Dead.1968.1080p.BluRay.x265-RARBG", Some(200), 3 * GB);
+    let runs = [fresh(&knaben(), vec![hevc, bluray()])];
+    let for_player = |playback| {
+        let profile = preferring(Preferences { playback: Some(playback), ..Preferences::default() });
+        played(&night(Namesakes::Leading, 1968), profile, &runs)
+    };
+    assert_eq!(
+        for_player(Playback::H264),
+        [
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x265-RARBG"
+        ]
+    );
+    assert_eq!(
+        for_player(Playback::Hevc),
+        [
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x265-RARBG",
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP"
+        ]
+    );
+}
+
+#[test]
+fn a_remux_ranks_after_an_encode_in_its_band() {
+    let remux = video(0x67, "Night.of.the.Living.Dead.1968.1080p.BluRay.REMUX.AVC.DTS-HD.MA-FGT", Some(150), 30 * GB);
+    let runs = [fresh(&knaben(), vec![remux, bluray()])];
+    let wanted = night(Namesakes::Leading, 1968);
+    assert_eq!(
+        played(&wanted, Profile::default(), &runs),
+        [
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.REMUX.AVC.DTS-HD.MA-FGT",
+        ]
+    );
+    let raw = SearchQuery { wanted: None, ..for_title(&wanted, Profile::default()) };
+    assert_eq!(
+        names(&search(&raw, &runs)),
+        [
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.REMUX.AVC.DTS-HD.MA-FGT",
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
+        ]
+    );
+}
+
+#[test]
+fn a_release_too_small_for_the_runtime_is_dropped_as_a_fake() {
+    let fake = video(0x6a, "Night.of.the.Living.Dead.1968.1080p.WEB-DL.x264", Some(900), 150_000_000);
+    let runs = [fresh(&knaben(), vec![fake, bluray()])];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
+        ["Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP"]
+    );
+}
+
+#[test]
+fn an_episode_ranks_before_its_season_pack() {
+    let wanted = Wanted {
+        name: "Breaking Bad".into(),
+        year: Some(2008),
+        episode: Some(torrential_core::title::Episode { season: 3, episode: 5 }),
+        namesakes: Namesakes::None,
+        runtime: Some(std::time::Duration::from_secs(47 * 60)),
+        season_episodes: Some(13),
+    };
+    let runs = [fresh(
+        &knaben(),
+        vec![
+            video(0x70, "Breaking.Bad.S03.1080p.BluRay.x264-ROVERS", Some(300), 19_500_000_000),
+            video(0x71, "Breaking.Bad.S03E05.1080p.WEB-DL.DD5.1.H.264", Some(25), 1_600_000_000),
+            video(0x72, "Breaking.Bad.S01-S05.1080p.BluRay.x265", Some(900), 60 * GB),
+            video(0x73, "Breaking.Bad.The.Complete.Series.720p.BluRay", Some(200), 40 * GB),
+            video(0x74, "Breaking.Bad.S03E06.1080p.WEB-DL.DD5.1.H.264", Some(80), 1_600_000_000),
+        ],
+    )];
+    let result = search(&for_title(&wanted, Profile::default()), &runs);
+    let spans: Vec<(&str, String)> =
+        result.releases.iter().map(|r| (r.name.as_str(), r.span.map(|s| s.to_string()).unwrap_or_default())).collect();
+    assert_eq!(
+        spans,
+        [
+            ("Breaking.Bad.S03E05.1080p.WEB-DL.DD5.1.H.264", "s3e5".to_string()),
+            ("Breaking.Bad.S03.1080p.BluRay.x264-ROVERS", "s3".to_string()),
+            ("Breaking.Bad.S01-S05.1080p.BluRay.x265", "s1-5".to_string()),
+            ("Breaking.Bad.The.Complete.Series.720p.BluRay", "complete".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_remake_with_another_year_is_absent() {
+    let remake = video(0x68, "Night of the Living Dead (1990) 1080p BluRay", Some(500), 9 * GB);
+    let fair = video(0x65, "Night Of The Living Dead 1968 720p BRRip x264", Some(12), 1_200_000_000);
+    let yearless = video(0x6b, "night_of_the_living_dead", None, 1_100_000_000);
+    let runs = [fresh(&archive(), vec![yearless]), fresh(&knaben(), vec![remake, fair])];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
+        ["Night Of The Living Dead 1968 720p BRRip x264", "night_of_the_living_dead"],
+        "beside a namesake, a release that names the year leads a lawful one that does not"
+    );
+    assert_eq!(
+        played(&night(Namesakes::None, 1968), Profile::default(), &runs),
+        ["night_of_the_living_dead", "Night Of The Living Dead 1968 720p BRRip x264"],
+        "without one, the lawful source leads"
+    );
+    assert_eq!(
+        played(&night(Namesakes::Shadowed, 1990), Profile::default(), &runs),
+        ["Night of the Living Dead (1990) 1080p BluRay"]
+    );
+}
+
+#[test]
+fn a_search_without_a_wanted_title_ranks_and_writes_as_before() {
+    let remake = video(0x68, "Night of the Living Dead (1990) 1080p BluRay", Some(500), 9 * GB);
+    let cam = video(0x61, "Night of the Living Dead 1968 HDCAM x264", Some(300), 1_400_000_000);
+    let runs = [fresh(&knaben(), vec![remake, cam, dvdrip(), bluray()])];
+    let result = search(&SearchQuery::new("night of the living dead 1968"), &runs);
+    assert_eq!(
+        names(&result),
+        [
+            "Night of the Living Dead 1968 HDCAM x264",
+            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
+            "Night of the Living Dead 1968 DVDRip XviD",
+            "Night of the Living Dead (1990) 1080p BluRay",
+        ]
+    );
+    assert!(result.releases.iter().all(|r| r.span.is_none()));
+}
+
+#[test]
+fn each_source_reports_once_over_a_titles_queries() {
+    let yearless = video(0x69, "Night.of.the.Living.Dead.1080p.WEB-DL", Some(400), 3 * GB);
+    let fair = video(0x65, "Night Of The Living Dead 1968 720p BRRip x264", Some(12), 1_200_000_000);
+    let runs = [
+        fresh(&knaben(), vec![bluray()]),
+        fresh(&knaben(), vec![bluray(), yearless]),
+        failed(&apibay(), Failure::Timeout),
+        fresh(&apibay(), vec![fair]),
+        failed(&archive(), Failure::Http(503)),
+        failed(&archive(), Failure::Timeout),
+    ];
+    let result = search(&for_title(&night(Namesakes::Leading, 1968), Profile::default()), &runs);
+    assert_eq!(
+        result.sources,
+        [
+            SourceReport {
+                source: "archive.org".into(),
+                outcome: SourceOutcome::Http { status: 503 },
+                elapsed_ms: 6000
+            },
+            SourceReport { source: "knaben".into(), outcome: SourceOutcome::Ok { results: 3 }, elapsed_ms: 40 },
+            SourceReport { source: "apibay".into(), outcome: SourceOutcome::Ok { results: 1 }, elapsed_ms: 6000 },
+        ]
+    );
+    let listed: Vec<(&str, &[String])> = result.releases.iter().map(|r| (r.name.as_str(), &r.sources[..])).collect();
+    let knaben = ["knaben".to_string()];
+    let apibay = ["apibay".to_string()];
+    assert_eq!(
+        listed,
+        [
+            ("Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP", &knaben[..]),
+            ("Night.of.the.Living.Dead.1080p.WEB-DL", &knaben[..]),
+            ("Night Of The Living Dead 1968 720p BRRip x264", &apibay[..]),
+        ]
+    );
+}
