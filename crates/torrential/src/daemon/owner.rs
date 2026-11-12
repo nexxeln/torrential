@@ -110,6 +110,16 @@ pub struct PlayCommand {
     pub setup_max_size: Option<u64>,
     /// The title the play is for. The owner sets its lease from whether it creates the download.
     pub title: Option<TitleLink>,
+    pub finish: Finish,
+}
+
+/// What the caller does with a play's download once it starts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Finish {
+    /// Watches it as it arrives, so it downloads in playing order and takes no download slot.
+    Stream,
+    /// Keeps it, so it downloads as `get` downloads.
+    Keep,
 }
 
 /// Whether a play created its download or joined one that existed.
@@ -652,7 +662,7 @@ impl Owner {
     }
 
     fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>, Created), Error> {
-        let PlayCommand { source, dir, files, setup_max_size, title } = play;
+        let PlayCommand { source, dir, files, setup_max_size, title, finish } = play;
         let id = match &source {
             Source::Download(id) if self.jobs.contains_key(id) => *id,
             Source::Download(id) => return Err(no_download(&id.to_hex())),
@@ -724,9 +734,11 @@ impl Owner {
         if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
             self.resume(&[id.to_hex()], false)?;
         }
-        self.streamed.insert(id);
-        if self.jobs[&id].observed.in_engine() {
-            self.engine.send(EngineCommand::Stream(id));
+        if finish == Finish::Stream {
+            self.streamed.insert(id);
+            if self.jobs[&id].observed.in_engine() {
+                self.engine.send(EngineCommand::Stream(id));
+            }
         }
         self.schedule();
         self.publish(id);

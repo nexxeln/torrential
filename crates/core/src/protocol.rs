@@ -82,8 +82,8 @@ pub enum Request {
     /// Plays a film or an episode from the first of its releases that starts. The engine sends a
     /// `TitleFrame::Step` for each step, then `Response::PlayTitle`.
     PlayTitle(TitleRequest),
-    /// The same play, answered as `get` answers, for a download kept without a player. The
-    /// download keeps the streaming order a play gives it.
+    /// The same play, answered as `get` answers, for a download kept without a player. Once a
+    /// source starts, it downloads as `get` downloads, not in playing order.
     GetTitle(TitleRequest),
 }
 

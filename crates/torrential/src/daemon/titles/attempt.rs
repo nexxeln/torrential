@@ -16,7 +16,7 @@ use torrential_core::{
 
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
-use super::super::owner::{Command, Created, MetaTarget, Origin, PlayCommand, Source};
+use super::super::owner::{Command, Created, Finish, MetaTarget, Origin, PlayCommand, Source};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
 use super::Resolved;
@@ -47,6 +47,7 @@ pub struct PlayTitle {
     pub replace: Option<TorrentId>,
     /// What the caller's player decodes, in place of the preference in config.yaml.
     pub playback: Option<Playback>,
+    pub finish: Finish,
 }
 
 /// Plays `ask` and reports each step, the last being `playing` or `failed`. A download here that
@@ -79,8 +80,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         replace: ask.replace,
         pin: ask.pin.as_ref(),
     };
-    let mut walk =
-        Walk { ctx, title: &title, here: &here, replace: ask.replace, end, tried: Vec::new(), asked: HashMap::new() };
+    let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let held = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. }));
     let held = held.filter_map(|j| holding(j, &title.video)).filter(|r| !(line.failed_lately)(&r.id)).collect();
     if let Some(release) = line.order(held, Vec::new(), &[]).into_iter().next()
@@ -228,10 +228,10 @@ fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
 /// A title play's way through its sources.
 struct Walk<'a> {
     ctx: &'a Ctx,
+    ask: &'a PlayTitle,
     title: &'a Resolved,
     /// The downloads on this machine.
     here: &'a BTreeSet<TorrentId>,
-    replace: Option<TorrentId>,
     end: Instant,
     /// The sources that did not play, in the order they were tried.
     tried: Vec<Tried>,
@@ -279,7 +279,7 @@ impl Walk<'_> {
         report(AttemptEvent::Trying { rank: self.tried.len() as u32 + 1, of, release: release.clone() });
         let asked = *self.asked.entry(release.id).or_insert_with(Instant::now);
         let mut trial = Trial { owner: &ctx.owner, undo: None };
-        match trial.run(ctx, self.title, &release, asked, self.end, report).await {
+        match trial.run(self, &release, asked, report).await {
             Ok((job, file)) => {
                 trial.undo = None;
                 let id = job.id;
@@ -290,7 +290,7 @@ impl Walk<'_> {
                 let video = self.title.video.clone();
                 let resume_at = resume_at(ctx, &video);
                 report(AttemptEvent::Playing { video, release, job: id, file, resume_at });
-                if let Some(old) = self.replace.filter(|old| *old != id) {
+                if let Some(old) = self.ask.replace.filter(|old| *old != id) {
                     let _ = ctx.owner.ask(|reply| Command::Pause { refs: vec![old.to_hex()], reply }).await;
                 }
                 true
@@ -353,17 +353,16 @@ enum Undo {
 }
 
 impl Trial<'_> {
-    /// Checks `release` step by step and answers the download and the file that play. Its file
-    /// list has been on its way since `asked`.
+    /// Checks `release` step by step for `walk` and answers the download and the file that play.
+    /// Its file list has been on its way since `asked`.
     async fn run(
         &mut self,
-        ctx: &Ctx,
-        title: &Resolved,
+        walk: &Walk<'_>,
         release: &Release,
         asked: Instant,
-        end: Instant,
         report: &mut (impl FnMut(AttemptEvent) + Send),
     ) -> Result<(Job, u32), Box<Skip>> {
+        let Walk { ctx, ask, title, end, .. } = *walk;
         let timing = ctx.titles.timing;
         report(AttemptEvent::Check { check: Check::FileList });
         let deadline = end.min(asked + timing.file_list).max(Instant::now() + ANSWER_WITHIN);
@@ -385,6 +384,7 @@ impl Trial<'_> {
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
             setup_max_size: (ctx.web.preferences)().max_size,
             title: Some(link),
+            finish: ask.finish,
         };
         let (job, _, created) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await.map_err(
             |error| match error.code {

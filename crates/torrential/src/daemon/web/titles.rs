@@ -13,7 +13,7 @@ use torrential_core::{
 };
 
 use super::super::http::{Connection, Request};
-use super::super::owner::now;
+use super::super::owner::{Finish, now};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, PlayTitle};
 use super::{NDJSON, fail, line, number, required};
@@ -125,7 +125,9 @@ struct Play {
 pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
     let ask = match super::body::<Play>(request) {
-        Ok(Play { video, playback, source, replace }) => PlayTitle { video, pin: source, replace, playback },
+        Ok(Play { video, playback, source, replace }) => {
+            PlayTitle { video, pin: source, replace, playback, finish: Finish::Stream }
+        }
         Err(error) => return fail(conn, request, &error).await,
     };
     conn.begin(NDJSON, request).await?;

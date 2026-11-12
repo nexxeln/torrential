@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
 use torrential_core::{Category, Error, ErrorCode, Job, Lease, Release, ReleaseId, TitleLink, TorrentId};
 
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
-use super::super::owner::{Command, Created, Origin, PlayCommand, Source};
+use super::super::owner::{Command, Created, Finish, Origin, PlayCommand, Source};
 use super::super::search_port::{self, FakeSource};
 use super::super::store::{Discard, Store};
 use super::super::titles::Timing;
@@ -114,6 +115,7 @@ impl Harness {
                 release: None,
                 lease: Lease::Borrowed,
             }),
+            finish: Finish::Stream,
         };
         let (job, _, created) =
             self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
@@ -148,6 +150,7 @@ impl Harness {
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace,
             playback: None,
+            finish: Finish::Stream,
         };
         let mut steps = Vec::new();
         attempt::run(&self.running.ctx, ask, |event| steps.push(step(&serde_json::to_value(event).unwrap()))).await;
@@ -245,6 +248,19 @@ async fn discard_refuses_a_download_a_title_play_does_not_own_or_that_finished_o
     let missing = torrent(76, "missing", &[("missing.mp4", GIB)]);
     assert_eq!(h.discard(&missing).await.unwrap_err().0, ErrorCode::NotFound);
     assert_eq!(h.status().await.len(), 4, "every refused download stays");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_downloaded_with_get_comes_in_plain_order_until_it_is_played() {
+    let (h, night) = night();
+    let id = night[3].info_hash.id();
+    let ask = || TitleRequest { video: "tt0063350".parse().unwrap(), source: Some(prefix(&night[3])) };
+    let Response::GetTitle { reply, .. } = h.ask(Request::GetTitle(ask())).await else { panic!("get answers a title") };
+    assert_eq!((reply.job.id, h.swarm.streamed(id)), (id, false));
+    let Response::PlayTitle { reply, .. } = h.ask(Request::PlayTitle(ask())).await else {
+        panic!("play answers a title")
+    };
+    assert_eq!((reply.job.id, h.swarm.streamed(id)), (id, true));
 }
 
 #[tokio::test(flavor = "multi_thread")]
