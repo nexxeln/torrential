@@ -1041,6 +1041,41 @@ fn a_plainly_named_release_plays_before_an_alternate_version() {
 }
 
 #[test]
+fn a_release_in_another_language_plays_after_the_original() {
+    let english = Profile { detected: Some(machine("en-US", None, Arch::Arm64)), ..Profile::default() };
+    let dub = "Night Of The Living Dead ( 1968) Doblada Al Español FULL HD";
+    let runs = [
+        fresh(&archive(), vec![video(0x8d, dub, None, 3_600_000_000)]),
+        fresh(
+            &knaben(),
+            vec![
+                video(0x8e, "Night of the Living Dead (1968) 1080p Ita Eng MIRCrew", Some(6), 2_200_000_000),
+                video(0x8f, "Night of the Living Dead 1968 1080p BluRay x264-OFT", Some(7), 4_300_000_000),
+            ],
+        ),
+    ];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), english.clone(), &runs),
+        [
+            "Night of the Living Dead 1968 1080p BluRay x264-OFT",
+            "Night of the Living Dead (1968) 1080p Ita Eng MIRCrew",
+            dub,
+        ]
+    );
+    let runs = [fresh(
+        &knaben(),
+        vec![
+            video(0x90, "Sintel.2010.720p.SWESUB.x264-SMS", Some(25), 400_000_000),
+            video(0x91, "Sintel.2010.720p.WEB.H264-CLASSiCALHD", Some(5), 400_000_000),
+        ],
+    )];
+    assert_eq!(
+        played(&sintel(), english, &runs),
+        ["Sintel.2010.720p.WEB.H264-CLASSiCALHD", "Sintel.2010.720p.SWESUB.x264-SMS"]
+    );
+}
+
+#[test]
 fn a_release_too_small_for_the_runtime_is_dropped_as_a_fake() {
     let fake = video(0x6a, "Night.of.the.Living.Dead.1968.1080p.WEB-DL.x264", Some(900), 150_000_000);
     let runs = [fresh(&knaben(), vec![fake, bluray()])];

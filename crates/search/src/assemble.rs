@@ -207,6 +207,8 @@ fn bitrate(size: Option<u64>, span: Span, wanted: &Wanted) -> Option<f64> {
 struct PlayRank {
     cam: bool,
     unfit: bool,
+    /// The name marks languages, and none is the system's or the original English.
+    foreign: bool,
     swarm: Swarm,
     undated: bool,
     standing: Reverse<u8>,
@@ -408,8 +410,9 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
     Some(c)
 }
 
-/// In a title's search the play order leads: not a cam, fits, swarm, names the year, standing,
-/// a plain name, span, screen, bitrate, and seeders. The chain after it orders every search.
+/// In a title's search the play order leads: not a cam, fits, not in another language, swarm,
+/// names the year, standing, a plain name, span, screen, bitrate, and seeders. The chain after
+/// it orders every search.
 fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
     let fits = |c: &Candidate| profile.fits(c.release.size, c.quality);
     let is_video = |c: &Candidate| c.release.category == Some(Category::Video) || c.quality.resolution.is_some();
@@ -419,6 +422,7 @@ fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
         c.title.as_ref().map(|t| PlayRank {
             cam: c.release.flags.contains(&Flag::Cam),
             unfit: !fits(c),
+            foreign: profile.language_rank(&c.languages) == 2,
             swarm: t.swarm,
             undated: t.undated,
             standing: Reverse(standing(c)),
