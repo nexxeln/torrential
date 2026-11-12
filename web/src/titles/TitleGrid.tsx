@@ -1,24 +1,14 @@
 import { type KeyboardEvent, type Ref } from "react";
 import { artUrl, type TitleCard } from "../api";
 import { Link, titlePath } from "../router";
-import { Picture } from "./Picture";
+import { Blank, Picture } from "./Picture";
 import { cardFacts } from "./words";
 
-/** A title's poster, or its name on a plain tile when the catalog has none. */
-export function Poster({ card }: { card: TitleCard }) {
+/** A title's poster, or a plain tile when the catalog has none. The name is under it either way. */
+function Poster({ card }: { card: TitleCard }) {
   return (
     <div className="relative aspect-2/3 overflow-hidden rounded-lg bg-raised outline-1 -outline-offset-1 outline-white/10 group-hover/card:outline-white/30">
-      <Picture
-        src={artUrl(card.id, "poster")}
-        alt=""
-        className="absolute inset-0 size-full object-cover"
-        fallback={
-          <div aria-hidden="true" className="absolute inset-0 flex flex-col justify-end gap-1 bg-linear-to-b from-raised to-white/5 p-3">
-            <p className="line-clamp-4 text-base font-medium text-balance text-soft sm:text-sm">{card.name}</p>
-            {card.year && <p className="text-sm text-pencil tabular-nums">{card.year}</p>}
-          </div>
-        }
-      />
+      <Picture src={artUrl(card.id, "poster")} alt="" className="absolute inset-0 size-full object-cover" fallback={<Blank kind={card.kind} />} />
     </div>
   );
 }

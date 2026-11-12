@@ -4,7 +4,7 @@ import { count, minutes, sentence } from "../lib/format";
 import { useJobs } from "../lib/jobs";
 import { SearchField, useSearchText } from "../search/SearchField";
 import { homePath, Link, navigate, playPath, titlePath, torrentsPath } from "../router";
-import { Picture } from "../titles/Picture";
+import { Blank, Picture } from "../titles/Picture";
 import { TitleGrid } from "../titles/TitleGrid";
 import { type TitlesState, useTitles } from "../titles/useTitles";
 import { episodeCode, episodeName } from "../titles/words";
@@ -77,16 +77,7 @@ function Results({ query, state, onLeaveTop, grid }: { query: string; state: Tit
 function ContinueCard({ item }: { item: ContinueItem }) {
   const { title, episode } = item;
   const background = (
-    <Picture
-      src={artUrl(title.id, "background")}
-      alt=""
-      className="absolute inset-0 size-full object-cover"
-      fallback={
-        <div aria-hidden="true" className="absolute inset-0 flex items-end bg-linear-to-br from-white/8 to-raised p-4">
-          <p className="line-clamp-2 text-lg font-medium text-balance text-soft">{title.name}</p>
-        </div>
-      }
-    />
+    <Picture src={artUrl(title.id, "background")} alt="" className="absolute inset-0 size-full object-cover" fallback={<Blank kind={title.kind} />} />
   );
   const started = item.resume_at !== null && item.duration !== null && item.duration > 0;
   const left = started ? `${minutes((item.duration! - item.resume_at!) / 60)} left` : episode ? "Next episode" : "Not started";

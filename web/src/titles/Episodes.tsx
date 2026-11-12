@@ -3,7 +3,7 @@ import { artUrl, type EpisodeInfo, type TitlePage, type Watched } from "../api";
 import { day, minutes } from "../lib/format";
 import { Link, playPath } from "../router";
 import { Meter } from "../ui/Meter";
-import { Picture } from "./Picture";
+import { Blank, Picture } from "./Picture";
 import { episodeName, hasAired, seasonName, videoOf } from "./words";
 
 /** The regular seasons in order, then the specials. */
@@ -26,7 +26,12 @@ function EpisodeRow({ id, episode, watched, next }: { id: string; episode: Episo
   const body = (
     <>
       <div className="relative aspect-video overflow-hidden rounded-md bg-raised outline-1 -outline-offset-1 outline-white/10 sm:row-span-2">
-        {episode.thumbnail && <Picture src={artUrl(id, episode)} alt="" className="absolute inset-0 size-full object-cover" />}
+        <Picture
+          src={episode.thumbnail ? artUrl(id, episode) : null}
+          alt=""
+          className="absolute inset-0 size-full object-cover"
+          fallback={<Blank kind="series" />}
+        />
         {started !== null && (
           <div className="absolute inset-x-0 bottom-0 bg-linear-to-t from-black/70 to-transparent px-2 pt-4 pb-2">
             <Meter fraction={started} label="Watched" />
