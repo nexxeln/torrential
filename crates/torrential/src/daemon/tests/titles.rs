@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use torrential_core::protocol::{Request, Response, TitleRequest};
@@ -15,8 +16,8 @@ use super::super::admission::GIB;
 use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{self, FakeSource};
-use super::super::titles::Timing;
 use super::super::titles::attempt::{self, Containers, PlayTitle};
+use super::super::titles::{Timing, catalog_port};
 use super::{Gate, Gated, Harness, MIB, Outside, TIMING, prefix, torrent};
 
 /// A search result for a test torrent, listed by `source`.
@@ -755,6 +756,36 @@ async fn a_download_here_that_holds_the_film_plays_before_any_search() {
             "check first_bytes",
             "playing tt0063350 a4a4a4 file 0 at null",
         ]
+    );
+    assert_eq!(h.search.searches(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_whose_download_is_here_plays_while_the_catalog_search_is_unreachable() {
+    let h = Harness::with_titles(Arc::new(catalog_port::Fake::without_search()));
+    let film = torrent(0xa4, "night_of_the_living_dead", &[("night_of_the_living_dead.mp4", 700 * MIB)]);
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.played(&film).await;
+    assert_eq!(
+        h.play_title("tt0063350", None, None).await,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "trying 1 of 1 night_of_the_living_dead",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 a4a4a4 file 0 at null",
+        ]
+    );
+    assert_eq!(
+        h.play_title("tt0100258", None, None).await,
+        [
+            "resolved tt0100258 Night of the Living Dead",
+            "failed fetch_failed: cannot search IMDb or Cinemeta: no network []",
+        ],
+        "a title with no download here needs the search"
     );
     assert_eq!(h.search.searches(), 0);
 }

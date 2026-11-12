@@ -105,9 +105,13 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let preferences = (ctx.web.preferences)();
     let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
     let rank_for = || ctx.machine.profile(preferences);
+    let query = match ctx.titles.query(&title, preferences).await {
+        Ok(query) => query,
+        Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
+    };
     let (progress, answers) = mpsc::unbounded_channel();
     let mut search = Searching {
-        running: Some(ctx.search.search_stream(title.query(preferences), &rank_for, progress)),
+        running: Some(ctx.search.search_stream(query, &rank_for, progress)),
         answers,
         started: Instant::now(),
         releases: Vec::new(),

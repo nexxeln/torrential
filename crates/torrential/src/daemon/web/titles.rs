@@ -93,7 +93,8 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result
         let title = ctx.titles.resolve(&video, now()).await?;
         let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
         let preferences = (ctx.web.preferences)();
-        let query = title.query(Preferences { playback: playback.or(preferences.playback), ..preferences });
+        let preferences = Preferences { playback: playback.or(preferences.playback), ..preferences };
+        let query = ctx.titles.query(&title, preferences).await?;
         Ok::<_, Error>((query, title.video, jobs))
     };
     let asked = tokio::select! {

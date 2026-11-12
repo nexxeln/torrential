@@ -5,9 +5,7 @@ use std::time::Duration;
 
 use torrential_core::catalog::Country;
 use torrential_core::title::{Episode, Namesakes, Wanted, normalized};
-use torrential_core::{
-    Art, ArtKind, EpisodeInfo, Error, ErrorCode, Kind, Season, TitleCard, TitleDetails, TitleId, VideoRef,
-};
+use torrential_core::{Art, ArtKind, EpisodeInfo, Error, ErrorCode, Kind, Season, TitleCard, TitleDetails, TitleId};
 use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat, Picture};
 
 use super::super::search_port::BoxFuture;
@@ -23,34 +21,21 @@ pub trait CatalogPort: Send + Sync {
     /// catalog lists them.
     fn namesakes<'a>(&'a self, card: &'a TitleCard) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>>;
     fn art<'a>(&'a self, id: &'a TitleId, kind: ArtKind) -> BoxFuture<'a, Result<Picture, Error>>;
-
-    /// The details of `video`'s title, and how to search for the film or the episode.
-    fn wanted<'a>(&'a self, video: &'a VideoRef) -> BoxFuture<'a, Result<(TitleDetails, Wanted), Error>> {
-        Box::pin(async move {
-            let details = self.title(&video.title).await?;
-            let namesakes = self.namesakes(&details.card).await?;
-            let wanted = wanted(&details, &namesakes, video.episode)?;
-            Ok((details, wanted))
-        })
-    }
 }
 
-/// How to tell the releases of `episode` of the title `details` describes, or of the film, from
-/// others. `namesakes` are the titles of its kind that share its name, in the catalog's order.
-pub fn wanted(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<Episode>) -> Result<Wanted, Error> {
+/// How many episodes the season of `episode` has, or `None` for a film. Refuses an episode of a
+/// film, a series without an episode, and an episode the series does not have.
+pub fn season_episodes(details: &TitleDetails, episode: Option<Episode>) -> Result<Option<u32>, Error> {
     let card = &details.card;
-    let season_episodes = match (card.kind, episode) {
-        (Kind::Film, None) => None,
+    match (card.kind, episode) {
+        (Kind::Film, None) => Ok(None),
         (Kind::Film, Some(e)) => {
-            return Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {}", card.name, label(e)))
-                .with_hint(format!("play {} without an episode", card.id)));
+            Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {}", card.name, label(e)))
+                .with_hint(format!("play {} without an episode", card.id)))
         }
         (Kind::Series, None) => {
-            return Err(Error::new(
-                ErrorCode::Usage,
-                format!("{} is a series, so name one of its episodes", card.name),
-            )
-            .with_hint(format!("name an episode such as {}:1:1", card.id)));
+            Err(Error::new(ErrorCode::Usage, format!("{} is a series, so name one of its episodes", card.name))
+                .with_hint(format!("name an episode such as {}:1:1", card.id)))
         }
         (Kind::Series, Some(e)) => {
             let season = details.seasons.iter().find(|s| s.number == e.season);
@@ -60,9 +45,16 @@ pub fn wanted(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<E
                     format!("{} is not an episode of {}", label(e), card.name),
                 ));
             }
-            season.map(|s| s.episodes.len() as u32)
+            Ok(season.map(|s| s.episodes.len() as u32))
         }
-    };
+    }
+}
+
+/// How to tell the releases of `episode` of the title `details` describes, or of the film, from
+/// others. `namesakes` are the titles of its kind that share its name, in the catalog's order.
+pub fn wanted(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<Episode>) -> Result<Wanted, Error> {
+    let card = &details.card;
+    let season_episodes = season_episodes(details, episode)?;
     let shared = namesakes.iter().any(|other| other.id != card.id);
     let namesakes = match namesakes.first() {
         _ if !shared => Namesakes::None,
@@ -128,11 +120,14 @@ const PIXEL: &[u8] = &[
 /// episode that has not aired. Every picture it has is one pixel.
 pub struct Fake {
     titles: Vec<TitleDetails>,
+    /// False when its search is unreachable. It still describes each title, as the real catalog
+    /// does from the copy it keeps on this machine.
+    searches: bool,
 }
 
 impl Default for Fake {
     fn default() -> Self {
-        Self { titles: vec![night(), remake(), harbor_lights()] }
+        Self { titles: vec![night(), remake(), harbor_lights()], searches: true }
     }
 }
 
@@ -215,6 +210,19 @@ fn harbor_lights() -> TitleDetails {
 }
 
 impl Fake {
+    /// A catalog whose search is unreachable, so it finds no title by name and no namesakes.
+    #[cfg(test)]
+    pub fn without_search() -> Self {
+        Self { searches: false, ..Self::default() }
+    }
+
+    fn searched<T>(&self, found: T) -> Result<T, Error> {
+        match self.searches {
+            true => Ok(found),
+            false => Err(Error::new(ErrorCode::FetchFailed, "cannot search IMDb or Cinemeta: no network")),
+        }
+    }
+
     fn find(&self, id: &TitleId) -> Result<&TitleDetails, Error> {
         self.titles
             .iter()
@@ -233,8 +241,8 @@ impl CatalogPort for Fake {
         let named = |t: &&TitleDetails| !words.is_empty() && normalized(&t.card.name).contains(&words);
         let (exact, rest): (Vec<_>, Vec<_>) =
             self.titles.iter().filter(named).partition(|t| normalized(&t.card.name) == words);
-        let cards = exact.into_iter().chain(rest).map(|t| t.card.clone()).collect();
-        Box::pin(async move { Ok(cards) })
+        let cards = self.searched(exact.into_iter().chain(rest).map(|t| t.card.clone()).collect());
+        Box::pin(async move { cards })
     }
 
     fn title<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Result<TitleDetails, Error>> {
@@ -245,8 +253,8 @@ impl CatalogPort for Fake {
     fn namesakes<'a>(&'a self, card: &'a TitleCard) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>> {
         let name = normalized(&card.name);
         let same = self.titles.iter().filter(|t| t.card.kind == card.kind && normalized(&t.card.name) == name);
-        let cards = same.map(|t| t.card.clone()).collect();
-        Box::pin(async move { Ok(cards) })
+        let cards = self.searched(same.map(|t| t.card.clone()).collect());
+        Box::pin(async move { cards })
     }
 
     fn art<'a>(&'a self, id: &'a TitleId, kind: ArtKind) -> BoxFuture<'a, Result<Picture, Error>> {
@@ -268,12 +276,18 @@ impl CatalogPort for Fake {
 
 #[cfg(test)]
 mod tests {
+    use torrential_core::VideoRef;
     use torrential_core::catalog::Countries;
 
     use super::*;
 
-    fn video(text: &str) -> VideoRef {
-        text.parse().unwrap()
+    /// What to search for to find `video`, as a title's search asks the catalog.
+    async fn wanted_of(fake: &Fake, video: &str) -> (TitleDetails, Wanted) {
+        let video: VideoRef = video.parse().unwrap();
+        let details = fake.title(&video.title).await.unwrap();
+        let namesakes = fake.namesakes(&details.card).await.unwrap();
+        let wanted = wanted(&details, &namesakes, video.episode).unwrap();
+        (details, wanted)
     }
 
     #[test]
@@ -322,9 +336,9 @@ mod tests {
         assert_eq!(ids(fake.search("night of the living dead").await.unwrap()), ["tt0063350", "tt0100258"]);
         assert_eq!(ids(fake.search("Harbor").await.unwrap()), ["tt9999901"]);
         assert_eq!(ids(fake.search("  ").await.unwrap()), Vec::<String>::new());
-        let (details, remake) = fake.wanted(&video("tt0100258")).await.unwrap();
+        let (details, remake) = wanted_of(&fake, "tt0100258").await;
         assert_eq!((details.card.year, remake.namesakes), (Some(1990), Namesakes::Shadowed));
-        let (_, episode) = fake.wanted(&video("tt9999901:2:1")).await.unwrap();
+        let (_, episode) = wanted_of(&fake, "tt9999901:2:1").await;
         assert_eq!((episode.namesakes, episode.season_episodes), (Namesakes::None, Some(3)));
         assert_eq!(
             episode.countries,

@@ -9,14 +9,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use torrential_core::title::Wanted;
 use torrential_core::watching::next;
 use torrential_core::{
     Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Preferences, Profile, Release, ReleaseId, SearchQuery, Skip,
     TitleDetails, TorrentId, VideoRef,
 };
 
-use catalog_port::{CatalogPort, label};
+use catalog_port::{CatalogPort, label, season_episodes, wanted};
 use shelf::Shelf;
 
 /// How long a release that failed stays at the back of the line.
@@ -84,32 +83,36 @@ impl Titles {
         line
     }
 
-    /// The film or episode `video` names, with how to find its releases. A series without an
+    /// The film or episode `video` names, from the catalog's details alone. A series without an
     /// episode is its next episode to watch, or its first when the person has caught up.
     pub async fn resolve(&self, video: &VideoRef, now: i64) -> Result<Resolved, Error> {
-        let video = match video.episode {
-            Some(_) => video.clone(),
-            None => {
-                let details = self.catalog.title(&video.title).await?;
-                match details.card.kind {
-                    Kind::Film => video.clone(),
-                    Kind::Series => next_episode(&details, &self.shelf.watched(&video.title)?, now)?,
-                }
-            }
+        let details = self.catalog.title(&video.title).await?;
+        let video = match (details.card.kind, video.episode) {
+            (Kind::Series, None) => next_episode(&details, &self.shelf.watched(&video.title)?, now)?,
+            _ => video.clone(),
         };
-        let (details, wanted) = self.catalog.wanted(&video).await?;
-        let episode = match video.episode {
-            None => None,
-            Some(e) => {
-                let info = details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e);
-                let info = info.cloned().ok_or_else(|| {
-                    Error::new(ErrorCode::NotFound, format!("{} is not an episode of {}", label(e), details.card.name))
-                })?;
-                aired(&details, &info, now)?;
-                Some(info)
-            }
-        };
-        Ok(Resolved { video, details, wanted, episode })
+        season_episodes(&details, video.episode)?;
+        let mut episodes = details.seasons.iter().flat_map(|season| &season.episodes);
+        let episode = episodes.find(|info| Some(info.episode) == video.episode).cloned();
+        if let Some(info) = &episode {
+            aired(&details, info, now)?;
+        }
+        Ok(Resolved { video, details, episode })
+    }
+
+    /// The search for `title`'s releases, ranked for playing now with `preferences`. It asks the
+    /// catalog which titles share the name, which takes the catalog's search. So a play asks for
+    /// this only when it is about to search, and a title whose download is here plays without it.
+    pub async fn query(&self, title: &Resolved, preferences: Preferences) -> Result<SearchQuery, Error> {
+        let namesakes = self.catalog.namesakes(&title.details.card).await?;
+        let wanted = wanted(&title.details, &namesakes, title.video.episode)?;
+        let text = wanted.queries().into_iter().next().unwrap_or_else(|| wanted.name.clone());
+        Ok(SearchQuery {
+            category: Some(Category::Video),
+            profile: Profile { preferences, ..Profile::default() },
+            wanted: Some(wanted),
+            ..SearchQuery::new(text)
+        })
     }
 }
 
@@ -117,7 +120,6 @@ impl Titles {
 pub struct Resolved {
     pub video: VideoRef,
     pub details: TitleDetails,
-    pub wanted: Wanted,
     pub episode: Option<EpisodeInfo>,
 }
 
@@ -125,17 +127,6 @@ impl Resolved {
     /// The film's name and year, or the series' name and the episode, as a person reads it.
     pub fn name(&self) -> String {
         crate::output::views::title_name(&self.details.card, self.video.episode)
-    }
-
-    /// The search for this title's releases, ranked for playing now with `preferences`.
-    pub fn query(&self, preferences: Preferences) -> SearchQuery {
-        let text = self.wanted.queries().into_iter().next().unwrap_or_else(|| self.wanted.name.clone());
-        SearchQuery {
-            category: Some(Category::Video),
-            profile: Profile { preferences, ..Profile::default() },
-            wanted: Some(self.wanted.clone()),
-            ..SearchQuery::new(text)
-        }
     }
 }
 
