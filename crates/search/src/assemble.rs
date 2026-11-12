@@ -128,6 +128,8 @@ pub(crate) struct Candidate {
     private_info: bool,
     relevance: Relevance,
     extra_words: u16,
+    /// A trailer, a clip, or another extra, by a word the query does not hold.
+    extra: bool,
     downloads: Option<u64>,
     lawful: bool,
     quality: Quality,
@@ -306,8 +308,8 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
     let extra_words = terms.extra_words(&name);
     let quality = Quality::parse(&name);
     let size = first(group, |o| o.size);
-    let resolution =
-        quality.resolution.filter(|r| !classify::is_extra(&name, terms) && !classify::is_too_small(size, *r));
+    let extra = classify::is_extra(&name, terms);
+    let resolution = quality.resolution.filter(|r| !extra && !classify::is_too_small(size, *r));
     let arches = Arch::named_in(&name);
     let languages = Language::named_in(&name, terms.words());
     Candidate {
@@ -332,6 +334,7 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
         },
         relevance,
         extra_words,
+        extra,
         downloads: group.iter().filter_map(|(_, o)| o.downloads).max(),
         lawful: group.iter().any(|(s, _)| s.lawful),
         quality,
@@ -379,9 +382,13 @@ fn filter(candidates: Vec<Candidate>, q: &SearchQuery) -> (Vec<Candidate>, u32) 
     (kept, hidden_adult)
 }
 
-/// The candidate as a release of the wanted title, or `None` when it is another title, when its
-/// swarm is known to be dead, or when its bitrate says it is a fake.
+/// The candidate as a release of the wanted title, or `None` when it is another title or an
+/// extra such as its trailer, when its swarm is known to be dead, or when its bitrate says it
+/// is a fake.
 fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
+    if c.extra {
+        return None;
+    }
     let reading = wanted.fit(&c.release.name)?;
     let swarm = Swarm::of(c.release.seeders, c.lawful)?;
     let bitrate = bitrate(c.release.size, reading.span, wanted);

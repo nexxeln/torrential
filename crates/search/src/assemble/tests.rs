@@ -980,6 +980,39 @@ fn the_more_seeded_release_wins_a_tie_in_play_order() {
 }
 
 #[test]
+fn a_trailer_is_not_the_film() {
+    let runs = [fresh(
+        &archive(),
+        vec![
+            video(0x84, "Night Of The Living Dead (1968) Trailer HD 1080p", None, 300_000_000),
+            video(0x64, "Night of the Living Dead (1968)", None, 1_200_000_000),
+        ],
+    )];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
+        ["Night of the Living Dead (1968)"]
+    );
+    let runs = [fresh(
+        &archive(),
+        vec![
+            video(0x85, "His Girl Friday (1940) Trailer HD", None, 800_000_000),
+            video(0x86, "His Girl Friday (1940)", None, 2_300_000_000),
+        ],
+    )];
+    assert_eq!(played(&friday(), Profile::default(), &runs), ["His Girl Friday (1940)"]);
+    let boys = Wanted {
+        name: "Trailer Park Boys".into(),
+        year: Some(2001),
+        episode: Some(torrential_core::title::Episode { season: 1, episode: 1 }),
+        namesakes: Namesakes::None,
+        runtime: Some(std::time::Duration::from_secs(25 * 60)),
+        season_episodes: Some(6),
+    };
+    let runs = [fresh(&knaben(), vec![video(0x87, "Trailer.Park.Boys.S01E01.720p.WEB.x264", Some(40), 500_000_000)])];
+    assert_eq!(played(&boys, Profile::default(), &runs), ["Trailer.Park.Boys.S01E01.720p.WEB.x264"]);
+}
+
+#[test]
 fn a_release_too_small_for_the_runtime_is_dropped_as_a_fake() {
     let fake = video(0x6a, "Night.of.the.Living.Dead.1968.1080p.WEB-DL.x264", Some(900), 150_000_000);
     let runs = [fresh(&knaben(), vec![fake, bluray()])];
