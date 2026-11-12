@@ -37,11 +37,17 @@ impl Http {
 
     /// A client that introduces itself as `agent`.
     pub fn named(agent: &str, record: bool) -> Result<Http, reqwest::Error> {
+        Http::redirecting(agent, record, reqwest::redirect::Policy::default())
+    }
+
+    /// A client that introduces itself as `agent` and follows only the redirects `policy` allows.
+    pub fn redirecting(agent: &str, record: bool, policy: reqwest::redirect::Policy) -> Result<Http, reqwest::Error> {
         let client = reqwest::Client::builder()
             .user_agent(agent)
             .gzip(true)
             .brotli(true)
             .connect_timeout(Duration::from_secs(5))
+            .redirect(policy)
             .build()?;
         Ok(Http { client, recorded: record.then(Mutex::default) })
     }

@@ -7,6 +7,7 @@
 
 mod assemble;
 mod cache;
+pub mod catalog;
 mod classify;
 mod dates;
 mod http;
