@@ -33,7 +33,7 @@ nix develop -c cargo install --path crates/torrential
 torrential web
 ```
 
-Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. A torrent that never starts is removed again. One you watched part of is kept.
+Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. A torrent that gets no data is taken off your downloads again. One that got some, or that you watched part of, is kept. Playing a title never deletes a file or writes over one you already have.
 
 <p align="center">
   <img src="docs/web-title.png" alt="The page of Night of the Living Dead in the web app, with its poster, synopsis, and a Play button" width="800">
