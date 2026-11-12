@@ -179,6 +179,7 @@ fn title_shows_a_film_or_a_series_and_what_plays_next() {
             "genres": ["Horror", "Thriller"],
             "runtime_min": 96,
             "cast": ["Duane Jones", "Judith O'Dea", "Karl Hardman"],
+            "countries": ["US"],
             "art": {"poster": true, "background": true, "logo": true},
             "seasons": [],
             "saved": false,
@@ -217,8 +218,8 @@ fn sources_lists_a_films_releases_in_the_order_play_tries_them() {
             r#"e3a915 film "Night.of.the.Living.Dead.1968.1080p.BluRay.x264""#,
             r#"09cd47 film "Night of the Living Dead 4K Restoration""#,
             r#"7a0c3f film "Night of the Living Dead (1968) colorized""#,
-            r#"2d9b6a film "Night of the Living Dead 1968 720p WEB""#,
-        ]
+        ],
+        "2d9b6a has no seeder and no lawful catalog lists it, so it is left out"
     );
     assert_eq!(
         (doc["type"].as_str(), doc["video"].as_str(), doc["title"]["id"].as_str(), doc["next"].as_str()),
@@ -269,9 +270,11 @@ fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
         "{}",
         run.stderr
     );
+    // The fake's indexes answer one after another, archive.org before knaben. The play reads each
+    // answer in turn and starts on archive.org's, whose lawful swarm leads, with its three sources.
     assert_eq!(
         run.stderr,
-        "Finding sources of Night of the Living Dead (1968)\nFound 6 sources\nTrying 1 of 6: 4c1e9a Night of the Living \
+        "Finding sources of Night of the Living Dead (1968)\nFound 3 sources\nTrying 1 of 3: 4c1e9a Night of the Living \
          Dead (1968), 1.3 GiB\nPlaying 4c1e9a Night of the Living Dead (1968), 1.3 GiB\n"
     );
     let argv = home.path("argv");
