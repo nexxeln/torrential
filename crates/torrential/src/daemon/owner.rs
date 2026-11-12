@@ -808,6 +808,10 @@ impl Owner {
                 patterns.push(pattern);
             }
         }
+        if title.is_some() && matches!(before, Before::Absent) {
+            let into = dir.as_deref().unwrap_or(&self.config.default_dir);
+            admission::check_free(&files::footprint(&metainfo, into), id)?;
+        }
         let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false });
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
         let id = self.get(get, made.filter(|_| matches!(before, Before::Absent)))?.job.id;
@@ -911,8 +915,7 @@ impl Owner {
             return OnDisk::Unsettled;
         }
         let Some(metainfo) = job.metainfo.as_deref() else { return OnDisk::Nothing };
-        let wanted = job.wanted().unwrap_or_else(|| vec![false; metainfo.files.len()]);
-        match admission::taken(&files::footprint(metainfo, &job.record.dir, &wanted)) {
+        match admission::taken(&files::footprint(metainfo, &job.record.dir)) {
             None => OnDisk::Nothing,
             Some(_) => OnDisk::Something,
         }

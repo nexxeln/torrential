@@ -47,14 +47,10 @@ pub fn relative(metainfo: &Metainfo, file: &MetaFile) -> PathBuf {
     if metainfo.single_file { PathBuf::from(&metainfo.name) } else { Path::new(&metainfo.name).join(&file.path) }
 }
 
-/// Every path a download writes below `dir`: the torrent's folder or single file, each selected
-/// file, and the parts file where libtorrent keeps pieces a selected file shares with one that
-/// is not selected.
-pub fn footprint(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {
-    let mut paths = vec![dir.join(&metainfo.name)];
-    paths.extend(targets(metainfo, dir, wanted));
-    paths.push(dir.join(parts_file(&metainfo.info_hash)));
-    paths
+/// Where a download writes in `dir`: at or below the torrent's folder or single file, and to the
+/// parts file where libtorrent keeps pieces a selected file shares with one that is not selected.
+pub fn footprint(metainfo: &Metainfo, dir: &Path) -> [PathBuf; 2] {
+    [dir.join(&metainfo.name), dir.join(parts_file(&metainfo.info_hash))]
 }
 
 /// libtorrent names the parts file after the torrent's v2 hash cut to 20 bytes, or after its v1
@@ -149,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn a_download_writes_its_folder_its_selected_files_and_the_parts_file_named_by_its_best_hash() {
+    fn a_download_writes_at_its_folder_or_single_file_and_to_the_parts_file_named_by_its_best_hash() {
         let torrent = |info_hash, name: &str, files: &[&str]| {
             let files = files.iter().map(|path| (path.to_string(), 1_000)).collect();
             FakeTorrentFile { info_hash, name: name.into(), files }.metainfo().unwrap()
@@ -157,15 +153,14 @@ mod tests {
         let dir = Path::new("/d");
         let pack = torrent(InfoHash::V1([0xab; 20]), "Pack", &["a.mkv", "extras/b.mkv", "c.nfo"]);
         assert_eq!(
-            footprint(&pack, dir, &[true, true, false]),
-            ["/d/Pack", "/d/Pack/a.mkv", "/d/Pack/extras/b.mkv", "/d/.abababababababababababababababababababab.parts"]
-                .map(PathBuf::from)
+            footprint(&pack, dir),
+            ["/d/Pack", "/d/.abababababababababababababababababababab.parts"].map(PathBuf::from)
         );
         let single = torrent(InfoHash::Hybrid { v1: [0x11; 20], v2: [0x22; 32] }, "film.mp4", &["film.mp4"]);
         let parts = format!("/d/.{}.parts", "22".repeat(20));
-        assert_eq!(footprint(&single, dir, &[true]), ["/d/film.mp4", "/d/film.mp4", parts.as_str()].map(PathBuf::from));
+        assert_eq!(footprint(&single, dir), ["/d/film.mp4", parts.as_str()].map(PathBuf::from));
         let v2 = torrent(InfoHash::V2([0x33; 32]), "Two", &["x.mp4"]);
-        assert_eq!(footprint(&v2, dir, &[false])[1], PathBuf::from(format!("/d/.{}.parts", "33".repeat(20))));
+        assert_eq!(footprint(&v2, dir)[1], PathBuf::from(format!("/d/.{}.parts", "33".repeat(20))));
     }
 
     #[test]

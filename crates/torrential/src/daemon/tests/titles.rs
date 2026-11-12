@@ -6,9 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use torrential_core::error::Details;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
-use torrential_core::{AttemptEvent, Category, Check, Error, Job, LocatorId, Release, ReleaseId, TitleLink, TorrentId};
+use torrential_core::{
+    AttemptEvent, Category, Check, Error, ErrorCode, Job, LocatorId, Release, ReleaseId, TitleLink, TorrentId,
+};
 
 use super::super::admission::GIB;
 use super::super::engine_port::{Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
@@ -180,6 +183,22 @@ impl Harness {
         steps
     }
 
+    /// Plays the film from the search, or from `pin` alone, and answers each step as the web app
+    /// reads it.
+    async fn play_film(&self, pin: Option<&FakeTorrentFile>) -> Vec<Value> {
+        let ask = PlayTitle {
+            video: "tt0063350".parse().unwrap(),
+            pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
+            replace: None,
+            playback: None,
+            containers: Containers::Browser,
+            finish: Finish::Stream,
+        };
+        let mut steps = Vec::new();
+        attempt::run(&self.running.ctx, ask, |event| steps.push(serde_json::to_value(event).unwrap())).await;
+        steps
+    }
+
     async fn job(&self, t: &FakeTorrentFile) -> Option<Job> {
         self.status().await.into_iter().find(|j| j.id == t.info_hash.id())
     }
@@ -210,6 +229,23 @@ fn tree(root: &Path) -> Vec<String> {
 
 fn parts(n: u8) -> String {
     format!(".{}.parts", format!("{n:02x}").repeat(20))
+}
+
+/// Everything below `root` with what it holds: a file's bytes, a link's target, `/` for a folder.
+fn contents(root: &Path) -> Vec<(String, String)> {
+    let holds = |name: &str| {
+        let path = root.join(name);
+        match path.symlink_metadata().unwrap().file_type() {
+            kind if kind.is_symlink() => format!("-> {}", std::fs::read_link(&path).unwrap().display()),
+            kind if kind.is_dir() => "/".to_string(),
+            _ => String::from_utf8(std::fs::read(&path).unwrap()).unwrap(),
+        }
+    };
+    tree(root).into_iter().map(|name| (holds(&name), name)).map(|(holds, name)| (name, holds)).collect()
+}
+
+fn pairs(there: &[(&str, &str)]) -> Vec<(String, String)> {
+    there.iter().map(|(name, holds)| (name.to_string(), holds.to_string())).collect()
 }
 
 /// The title each download is linked to, in the order of the list.
@@ -350,6 +386,142 @@ async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
     left.extend(files);
     left.sort();
     assert_eq!(tree(&h.downloads()), left, "no file is deleted");
+}
+
+/// Something a person has in the download folder.
+enum Theirs {
+    File(&'static str, &'static str),
+    Folder(&'static str),
+    Link(&'static str),
+}
+
+/// A source, what a person has where it writes, the path a refusal names, and what the download
+/// folder holds afterwards.
+type Taken<'a> = (&'a FakeTorrentFile, &'a [Theirs], &'a str, &'a [(&'a str, &'a str)]);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_makes_no_download_where_anything_already_is_and_leaves_it_as_it_was() {
+    use Theirs::{File, Folder, Link};
+    let film = torrent(90, "film", &[("film.mp4", 21), ("film.srt", 10)]);
+    let solo = torrent(91, "solo.mp4", &[("solo.mp4", 21)]);
+    let parts = parts(90);
+    let cases: [Taken; 8] = [
+        (
+            &film,
+            &[Folder("film"), File("film/film.mp4", "the person's own film")],
+            "film",
+            &[("film", "/"), ("film/film.mp4", "the person's own film")],
+        ),
+        (
+            &film,
+            &[Folder("film"), File("film/film.mp4", "another cut")],
+            "film",
+            &[("film", "/"), ("film/film.mp4", "another cut")],
+        ),
+        (&film, &[Folder("film")], "film", &[("film", "/")]),
+        (&film, &[Link("film")], "film", &[("film", "-> ../elsewhere")]),
+        (&film, &[File(".5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a.parts", "pieces")], &parts, &[(&parts, "pieces")]),
+        (&solo, &[File("solo.mp4", "the person's own film")], "solo.mp4", &[("solo.mp4", "the person's own film")]),
+        (&solo, &[File("solo.mp4", "another cut")], "solo.mp4", &[("solo.mp4", "another cut")]),
+        (&solo, &[Link("solo.mp4")], "solo.mp4", &[("solo.mp4", "-> ../elsewhere")]),
+    ];
+    for (source, theirs, named, there) in cases {
+        let h = Harness::new();
+        let downloads = h.downloads();
+        std::fs::create_dir_all(&downloads).unwrap();
+        for thing in theirs {
+            match thing {
+                File(at, bytes) => std::fs::write(downloads.join(at), bytes).unwrap(),
+                Folder(at) => std::fs::create_dir(downloads.join(at)).unwrap(),
+                Link(at) => std::os::unix::fs::symlink("../elsewhere", downloads.join(at)).unwrap(),
+            }
+        }
+        let refused = h.play_for(source, &[0], Some("tt0063350")).await.unwrap_err();
+        let at = downloads.join(named);
+        assert_eq!(
+            (refused.code, refused.message, refused.details),
+            (
+                ErrorCode::PathConflict,
+                format!("{} already exists, and playing a title writes only where nothing is", at.display()),
+                Some(Details::Paths(vec![at.display().to_string()]))
+            )
+        );
+        assert_eq!((h.states().await, contents(&downloads)), (Vec::new(), pairs(there)), "{named}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_or_get_by_hand_still_starts_over_a_file_that_is_there() {
+    let h = Harness::new();
+    let film = torrent(92, "film", &[("film.mp4", 21)]);
+    let solo = torrent(93, "solo.mp4", &[("solo.mp4", 21)]);
+    std::fs::create_dir_all(h.downloads().join("film")).unwrap();
+    std::fs::write(h.downloads().join("film/film.mp4"), "the person's own film").unwrap();
+    std::fs::write(h.downloads().join("solo.mp4"), "the person's own film").unwrap();
+    assert_eq!(h.play(h.torrent_file(&film), &[0]).await.unwrap().job.id, film.info_hash.id());
+    assert_eq!(h.get(h.torrent_file(&solo), &[]).await.unwrap().job.id, solo.info_hash.id());
+    let (joined, _) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(joined.id, film.info_hash.id(), "a title play joins a download that is on the list");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_skips_a_source_whose_folder_already_exists_and_plays_the_next() {
+    let (h, night) = night();
+    let theirs = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(theirs.join("Night.1968.1080p.mp4"), "the person's own film").unwrap();
+    let steps = h.play_film(None).await;
+    let third = night[2].info_hash.id().to_hex();
+    let skipped = steps.iter().find(|s| s["type"] == "skipped" && s["release"] == third.as_str());
+    assert_eq!(
+        skipped.map(|s| &s["reason"]),
+        Some(&serde_json::json!({
+            "reason": "failed",
+            "error": {
+                "code": "path_conflict",
+                "message": format!(
+                    "{} already exists, and playing a title writes only where nothing is",
+                    theirs.display()
+                ),
+                "hint": "move it away, or run torrential get a3a3a3 to download this torrent yourself",
+                "details": { "paths": [theirs.display().to_string()] },
+            }
+        }))
+    );
+    assert_eq!(step(steps.last().unwrap()), "playing tt0063350 a4a4a4 file 0 at null");
+    let left = h.until("the other trials are gone", |jobs| jobs.len() == 1).await;
+    assert_eq!(left[0].id, night[3].info_hash.id(), "the source in the way never became a download");
+    assert_eq!(contents(&theirs), pairs(&[("Night.1968.1080p.mp4", "the person's own film")]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_skips_a_source_when_the_disk_cannot_say_that_its_path_is_free() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (h, night) = night();
+    let downloads = h.downloads();
+    let theirs = downloads.join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(theirs.join("Night.1968.1080p.mp4"), "the person's own film").unwrap();
+    let shut = |mode| std::fs::set_permissions(&downloads, std::fs::Permissions::from_mode(mode)).unwrap();
+    shut(0o000);
+    let steps = h.play_film(Some(&night[2])).await;
+    shut(0o755);
+    let reason = &steps[steps.len() - 2]["reason"];
+    let message = format!(
+        "cannot see whether {} exists, and playing a title writes only where nothing is: \
+         Permission denied (os error 13)",
+        theirs.display()
+    );
+    assert_eq!(
+        (reason["reason"].as_str(), reason["error"]["code"].as_str(), reason["error"]["message"].as_str()),
+        (Some("failed"), Some("path_conflict"), Some(message.as_str()))
+    );
+    assert_eq!(steps.last().unwrap()["type"], "failed", "the source is not played");
+    assert_eq!(h.states().await, Vec::<&str>::new());
+    assert_eq!(contents(&theirs), pairs(&[("Night.1968.1080p.mp4", "the person's own film")]));
 }
 
 fn pack() -> FakeTorrentFile {

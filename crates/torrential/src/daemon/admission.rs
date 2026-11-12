@@ -219,6 +219,23 @@ pub fn taken(paths: &[PathBuf]) -> Option<(&Path, Option<std::io::Error>)> {
     })
 }
 
+/// Refuses the download a title play would make when any of the `paths` it writes is not free.
+/// The play writes only where nothing is, so it cannot change a file that was there before it.
+pub fn check_free(paths: &[PathBuf], id: TorrentId) -> Result<(), Error> {
+    let Some((path, unread)) = taken(paths) else { return Ok(()) };
+    let message = match unread {
+        None => format!("{} already exists, and playing a title writes only where nothing is", path.display()),
+        Some(e) => format!(
+            "cannot see whether {} exists, and playing a title writes only where nothing is: {e}",
+            path.display()
+        ),
+    };
+    let get = format!("torrential get {}", &id.to_hex()[..6]);
+    Err(Error::new(ErrorCode::PathConflict, message)
+        .with_details(Details::Paths(vec![path.display().to_string()]))
+        .with_hint(format!("move it away, or run {get} to download this torrent yourself")))
+}
+
 pub fn check_disk(space: Space, needed: u64, others_remaining: u64) -> Result<(), Error> {
     let keep = reserve(space.total);
     let required = needed + others_remaining + keep;
