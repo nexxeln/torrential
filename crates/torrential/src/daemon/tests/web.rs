@@ -1035,15 +1035,19 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
     let done = lines(&body).pop().unwrap();
-    let sources: Vec<Value> =
-        done["result"]["releases"].as_array().unwrap().iter().map(|r| json!([r["name"], r["span"]])).collect();
+    let sources: Vec<Value> = done["result"]["releases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| json!([r["name"], r["span"], r["swarm"]]))
+        .collect();
     assert_eq!(
         sources,
         [
-            json!(["Night.of.the.Living.Dead.1968.720p.BluRay.x264", "film"]),
-            json!(["Night.of.the.Living.Dead.1968.DVD9", "film"]),
-            json!(["Night.of.the.Living.Dead.1968.1080p.WEB.x264", "film"]),
-            json!(["night_of_the_living_dead", "film"]),
+            json!(["Night.of.the.Living.Dead.1968.720p.BluRay.x264", "film", "strong"]),
+            json!(["Night.of.the.Living.Dead.1968.DVD9", "film", "strong"]),
+            json!(["Night.of.the.Living.Dead.1968.1080p.WEB.x264", "film", "strong"]),
+            json!(["night_of_the_living_dead", "film", "strong"]),
         ]
     );
     assert_eq!(done["result"]["query"]["profile"]["preferences"]["playback"], json!("h264"));
@@ -1051,7 +1055,8 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
 
     let (_, _, raw) = fetch(&h, "GET", "/api/search?q=night", &[], "").await;
     let raw = lines(&raw).pop().unwrap();
-    assert!(raw["result"]["releases"][0].get("span").is_none(), "a torrent search names no span");
+    let raw = &raw["result"]["releases"][0];
+    assert!(raw.get("span").is_none() && raw.get("swarm").is_none(), "a torrent search names no span or swarm");
     assert_eq!(
         error(&post(&h, "/api/play", json!({ "ref": "tt0063350" })).await),
         (404, "invalid_ref", "tt0063350 is a film or a series, not a torrent")

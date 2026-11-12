@@ -8,7 +8,7 @@ use torrential_core::error::Details;
 use torrential_core::title::{Namesakes, Span, Wanted};
 use torrential_core::{
     Arch, Category, Error, ErrorCode, Flag, InfoHash, Language, LocatorId, Profile, Quality, Release, ReleaseId,
-    Resolution, SearchQuery, SearchResult, Sort, SourceOutcome, SourceReport, TorrentId,
+    Resolution, SearchQuery, SearchResult, Sort, SourceOutcome, SourceReport, Swarm, TorrentId,
 };
 
 use crate::classify;
@@ -149,29 +149,6 @@ struct TitleFit {
     in_band: bool,
     /// Words in the name beyond the title, its year, and tags, as an alternate version has.
     other_words: usize,
-}
-
-/// How likely a swarm is to send data now. Lower plays first.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum Swarm {
-    Strong,
-    Fair,
-    Weak,
-    Unknown,
-}
-
-impl Swarm {
-    /// `None` for a swarm known to have no seeder outside a lawful catalog. A lawful catalog that
-    /// does not count seeders serves its files from web seeds over HTTP, as dependable as any swarm.
-    fn of(seeders: Option<u32>, lawful: bool) -> Option<Swarm> {
-        match (seeders, lawful) {
-            (Some(20..), _) | (None, true) => Some(Swarm::Strong),
-            (Some(5..=19), _) => Some(Swarm::Fair),
-            (Some(1..=4), _) => Some(Swarm::Weak),
-            (Some(0), true) | (None, false) => Some(Swarm::Unknown),
-            (Some(0), false) => None,
-        }
-    }
 }
 
 /// Below this many Mbit/s a release is a fake or a broken file.
@@ -337,6 +314,7 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
             torrent_url: link.map(|(_, _, url, _)| url.to_string()),
             info_url: info.map(|(.., url)| url.to_string()),
             span: None,
+            swarm: None,
         },
         relevance,
         extra_words,
@@ -402,6 +380,7 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
         return None;
     }
     c.release.span = Some(reading.span);
+    c.release.swarm = Some(swarm);
     c.title = Some(TitleFit {
         swarm,
         undated: wanted.namesakes == Namesakes::Leading && reading.year.is_none(),

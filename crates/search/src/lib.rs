@@ -36,8 +36,8 @@ use crate::assemble::{Answer, Linked, Run, assemble, merged, vet};
 use crate::cache::AnswerKey;
 pub use crate::cache::ResultCache;
 use crate::http::{FetchError, Http, Retry};
-pub use crate::sources::SavedLink;
 use crate::sources::{Ctx, Failure, Source, Stores};
+pub use crate::sources::{SavedLink, lawful};
 use crate::terms::Terms;
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]

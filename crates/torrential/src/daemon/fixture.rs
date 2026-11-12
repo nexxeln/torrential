@@ -224,6 +224,7 @@ pub fn search(now: i64) -> search_port::Fake {
             torrent_url: archive.then(|| torrent_url(t)),
             info_url: archive.then(|| format!("https://archive.org/details/{}", t.name)),
             span: None,
+            swarm: None,
         });
     }
     let script = vec![

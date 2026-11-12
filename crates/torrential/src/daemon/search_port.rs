@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult, SourceOutcome, SourceReport,
+    Swarm,
 };
 pub use torrential_search::{Progress, SavedLink};
 use torrential_search::{ResultCache, Search, SearchConfig};
@@ -185,6 +186,7 @@ pub fn fake_catalog() -> Vec<Release> {
         torrent_url: None,
         info_url: None,
         span: None,
+        swarm: None,
     };
     vec![
         release("9b521219bc48550140a666f74a29048ed78e933b", "archlinux-2026.10.01-x86_64.iso", 1_640_497_152, 412),
@@ -200,9 +202,14 @@ fn compose(
     elapsed: Duration,
 ) -> SearchResult {
     let words: Vec<String> = query.text.split_whitespace().map(str::to_lowercase).collect();
-    // A title's search keeps its releases in the catalog's order, each with what of it it holds.
+    // A title's search keeps its releases in the catalog's order, each with what of it it holds
+    // and how its swarm stands, and drops a dead swarm as the real search does.
     let found = |r: &Release| match &query.wanted {
-        Some(wanted) => wanted.fit(&r.name).map(|named| Release { span: Some(named.span), ..r.clone() }),
+        Some(wanted) => {
+            let span = Some(wanted.fit(&r.name)?.span);
+            let swarm = Some(Swarm::of(r.seeders, r.sources.iter().any(|s| torrential_search::lawful(s)))?);
+            Some(Release { span, swarm, ..r.clone() })
+        }
         None => words.iter().all(|w| r.name.to_lowercase().contains(w.as_str())).then(|| r.clone()),
     };
     let matches = |r: &Release| found(r).is_some();

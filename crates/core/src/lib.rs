@@ -22,5 +22,5 @@ pub use job::{Eighths, FileRisk, Job, JobStatus, PieceMap, Progress, Selection, 
 pub use preferences::{Playback, Preferences, Screen};
 pub use profile::{Arch, Display, Language, Machine, Os, Profile, Setting, Source};
 pub use quality::{Codec, Quality, Resolution};
-pub use release::{Category, Flag, Release, SearchQuery, SearchResult, Sort, SourceOutcome, SourceReport};
+pub use release::{Category, Flag, Release, SearchQuery, SearchResult, Sort, SourceOutcome, SourceReport, Swarm};
 pub use watching::{AttemptEvent, Check, Lease, Next, Skip, TitleLink, Tried, Watched};

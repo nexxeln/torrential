@@ -48,6 +48,7 @@ fn release(id: ReleaseId, name: &str) -> Release {
         torrent_url: None,
         info_url: None,
         span: None,
+        swarm: None,
     }
 }
 

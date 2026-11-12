@@ -33,6 +33,7 @@ pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) ->
         torrent_url: None,
         info_url: None,
         span: None,
+        swarm: None,
     }
 }
 
@@ -468,6 +469,38 @@ async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
             "trying 1 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_starts_on_a_lawful_catalog_at_once_and_does_not_wait_for_a_slow_index() {
+    let dead = torrent(0xc1, "Night.of.the.Living.Dead.1968.DVDRip.x264", &[("Night.1968.mp4", 700 * MIB)]);
+    let good = torrent(0xc2, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
+    let catalog = vec![listed(&dead, "archive.org", None), listed(&good, "knaben", Some(40))];
+    let script = vec![
+        FakeSource::answers("archive.org", 0),
+        FakeSource::answers("knaben", 300),
+        FakeSource::answers("nyaa", 5000),
+    ];
+    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, BTreeMap::new()));
+    h.swarm.publish(good.clone());
+    h.swarm.set_rate(GIB);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        h.play_title("tt0063350", None, None).await,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 1",
+            "trying 1 of 1 Night.of.the.Living.Dead.1968.DVDRip.x264",
+            "check file_list",
+            r#"skipped c1c1c1 {"reason":"no_file_list","waited_s":1}"#,
+            "trying 2 of 2 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 c2c2c2 file 0 at null",
+        ]
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(4), "it took {:?}", started.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread")]

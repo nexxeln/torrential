@@ -346,6 +346,7 @@ mod tests {
             torrent_url: None,
             info_url: None,
             span: Some(Span::Film),
+            swarm: None,
         }
     }
 

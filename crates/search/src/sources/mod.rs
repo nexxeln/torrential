@@ -285,6 +285,11 @@ impl Source {
     }
 }
 
+/// Whether the built-in source named `name` is a lawful catalog. A Torznab indexer never is.
+pub fn lawful(name: &str) -> bool {
+    BUILTIN.iter().any(|row| row.name == name && row.lawful)
+}
+
 pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error> {
     for name in config.endpoints.keys() {
         if !BUILTIN.iter().any(|row| row.name == name) {

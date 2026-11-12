@@ -33,6 +33,9 @@ pub struct Release {
     /// What of the wanted title this release holds. Only in a title's sources.
     #[serde(default)]
     pub span: Option<Span>,
+    /// How likely its swarm is to send data now. Only in a title's sources.
+    #[serde(default)]
+    pub swarm: Option<Swarm>,
 }
 
 impl Release {
@@ -60,6 +63,8 @@ impl Serialize for Release {
             info_url: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             span: Option<Span>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            swarm: Option<Swarm>,
         }
         let Release {
             id,
@@ -75,6 +80,7 @@ impl Serialize for Release {
             torrent_url,
             info_url,
             span,
+            swarm,
         } = self;
         Fields {
             id,
@@ -91,8 +97,34 @@ impl Serialize for Release {
             torrent_url,
             info_url,
             span: *span,
+            swarm: *swarm,
         }
         .serialize(serializer)
+    }
+}
+
+/// How likely a release's swarm is to send data now. Lower plays first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Swarm {
+    Strong,
+    Fair,
+    Weak,
+    Unknown,
+}
+
+impl Swarm {
+    /// The tier of a swarm with `seeders`, listed by a lawful catalog or not. `None` for a swarm
+    /// known to have no seeder outside a lawful catalog. A lawful catalog that does not count
+    /// seeders serves its files from web seeds over HTTP, as dependable as any swarm.
+    pub fn of(seeders: Option<u32>, lawful: bool) -> Option<Swarm> {
+        match (seeders, lawful) {
+            (Some(20..), _) | (None, true) => Some(Swarm::Strong),
+            (Some(5..=19), _) => Some(Swarm::Fair),
+            (Some(1..=4), _) => Some(Swarm::Weak),
+            (Some(0), true) | (None, false) => Some(Swarm::Unknown),
+            (Some(0), false) => None,
+        }
     }
 }
 
@@ -300,6 +332,7 @@ mod tests {
             torrent_url: None,
             info_url: None,
             span: None,
+            swarm: None,
         }
     }
 

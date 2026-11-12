@@ -5,17 +5,18 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Category, Check, Error, ErrorCode, Job, JobStatus, Lease, Playback, Release, ReleaseId, Skip,
-    TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Category, Check, Error, ErrorCode, Job, JobStatus, Lease, Playback, Release, ReleaseId, SearchResult,
+    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
 use super::super::owner::{Command, Created, MetaTarget, Origin, PlayCommand, Source};
+use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
 use super::Resolved;
 
@@ -26,6 +27,9 @@ const MOST_TRIED: usize = 6;
 const LOOK_EVERY: Duration = Duration::from_millis(100);
 /// What the browser plays without ffmpeg remuxing it.
 const BROWSER_PLAYS: [&str; 4] = ["mp4", "m4v", "mov", "webm"];
+/// How long a title's search runs before a strong swarm from any index may go first. The quick
+/// indexes have answered by then, and a lawful catalog among them would lead.
+const STRONG_AFTER: Duration = Duration::from_millis(2500);
 
 /// What a caller asks a title play for.
 pub struct PlayTitle {
@@ -39,7 +43,9 @@ pub struct PlayTitle {
 }
 
 /// Plays `ask` and reports each step, the last being `playing` or `failed`. A download here that
-/// holds the video plays first, before any search. Dropping the future stops the play, and the
+/// holds the video plays first, before any search. Otherwise sources are tried once the search
+/// so far holds one that could lead, while slower indexes go on answering, and each next source
+/// is the best of what has been found by then. Dropping the future stops the play, and the
 /// download under test is discarded if the play made it.
 pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) {
     let end = Instant::now() + ctx.titles.timing.budget;
@@ -78,25 +84,108 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let preferences = (ctx.web.preferences)();
     let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
     let rank_for = || ctx.machine.profile(preferences);
-    let mut result = match ctx.search.search(title.query(preferences), &rank_for).await {
-        Ok(result) => result,
-        Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
+    let (progress, answers) = mpsc::unbounded_channel();
+    let mut search = Searching {
+        running: Some(ctx.search.search_stream(title.query(preferences), &rank_for, progress)),
+        answers,
+        started: Instant::now(),
+        releases: Vec::new(),
+        sources: Vec::new(),
+        error: None,
     };
-    server::record(ctx, &mut result);
-    report(AttemptEvent::Searched { found: result.releases.len() as u32, sources: result.sources });
-    let linked = jobs.iter().filter_map(|job| holding(job, &title.video)).collect();
-    let candidates = line.order(linked, result.releases, &walk.tried);
-    let of = (walk.tried.len() + candidates.len()) as u32;
-    for release in candidates {
-        if Instant::now() >= end {
+    let linked: Vec<Release> = jobs.iter().filter_map(|job| holding(job, &title.video)).collect();
+    loop {
+        let ran = search.started.elapsed();
+        let first = line.order(linked.clone(), search.releases.clone(), &walk.tried).into_iter().next();
+        if may_start(first.as_ref(), ran, search.over()) {
             break;
         }
-        if walk.try_source(release, of, &mut report).await {
+        let strong_after = tokio::time::Instant::from_std(search.started + STRONG_AFTER);
+        tokio::select! {
+            () = search.next(ctx) => {}
+            () = tokio::time::sleep_until(strong_after), if ran < STRONG_AFTER => {}
+        }
+    }
+    if search.releases.is_empty()
+        && let Some(error) = search.error.take()
+    {
+        return report(AttemptEvent::Failed { error, tried: walk.tried });
+    }
+    report(AttemptEvent::Searched { found: search.releases.len() as u32, sources: search.sources.clone() });
+    while Instant::now() < end {
+        let candidates = line.order(linked.clone(), search.releases.clone(), &walk.tried);
+        let Some(release) = candidates.first().cloned() else {
+            if search.over() {
+                break;
+            }
+            search.next(ctx).await;
+            continue;
+        };
+        let of = (walk.tried.len() + candidates.len()) as u32;
+        let trial = walk.try_source(release, of, &mut report);
+        tokio::pin!(trial);
+        let over = loop {
+            tokio::select! {
+                over = &mut trial => break over,
+                () = search.next(ctx) => {}
+            }
+        };
+        if over {
             return;
         }
     }
     let error = failure(&title.name(), &walk.tried, ask.pin.is_some(), ask.replace.is_some());
     report(AttemptEvent::Failed { error, tried: walk.tried });
+}
+
+/// Whether a title play may stop waiting for its search and try `first`, the best of its sources
+/// so far, `ran` into the search. A strong swarm in a lawful catalog leads whatever slower
+/// indexes find. Any strong swarm may go once the quick indexes have answered. Anything goes once
+/// the search is `over`.
+fn may_start(first: Option<&Release>, ran: Duration, over: bool) -> bool {
+    let lawful = |r: &Release| r.sources.iter().any(|source| torrential_search::lawful(source));
+    let strong = first.filter(|r| r.swarm == Some(Swarm::Strong));
+    over || strong.is_some_and(|r| lawful(r) || ran >= STRONG_AFTER)
+}
+
+/// A title's search as it runs, and the best of what it has found so far.
+struct Searching<'a> {
+    /// `None` once every source has answered or the deadline has passed.
+    running: Option<BoxFuture<'a, Result<SearchResult, Error>>>,
+    answers: mpsc::UnboundedReceiver<Progress>,
+    started: Instant,
+    /// Ranked for playing here.
+    releases: Vec<Release>,
+    sources: Vec<SourceReport>,
+    error: Option<Error>,
+}
+
+impl Searching<'_> {
+    fn over(&self) -> bool {
+        self.running.is_none()
+    }
+
+    /// Waits for the next source to answer, and keeps what the search has found by then. Once
+    /// the search is over it never returns.
+    async fn next(&mut self, ctx: &Ctx) {
+        let Some(running) = &mut self.running else { return std::future::pending().await };
+        let found = tokio::select! {
+            biased;
+            Some(Progress { result, .. }) = self.answers.recv() => Ok(result),
+            result = running => {
+                self.running = None;
+                result
+            }
+        };
+        match found {
+            Ok(mut result) => {
+                server::record(ctx, &mut result);
+                self.releases = result.releases;
+                self.sources = result.sources;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
 }
 
 /// Where the person stopped `video`, unless they finished it.
@@ -123,6 +212,7 @@ fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
         torrent_url: None,
         info_url: None,
         span: Some(link.span),
+        swarm: None,
     })
 }
 
@@ -447,6 +537,7 @@ mod tests {
             torrent_url: None,
             info_url: None,
             span: None,
+            swarm: None,
         }
     }
 
@@ -492,6 +583,37 @@ mod tests {
         let tried = [Tried { release: release(1).id, reason: Skip::NoVideo }];
         let ranked = many.iter().map(|n| release(*n)).collect();
         assert_eq!(numbers(line.order(Vec::new(), ranked, &tried)), [3, 4, 5, 6, 7], "six in all, the tried one gone");
+    }
+
+    #[test]
+    fn a_play_starts_before_its_search_ends_only_on_a_source_that_could_lead() {
+        let listed = |source: &str, seeders: Option<u32>| Release {
+            seeders,
+            sources: vec![source.into()],
+            swarm: Swarm::of(seeders, torrential_search::lawful(source)),
+            ..release(1)
+        };
+        let archive = listed("archive.org", None);
+        let crowded = listed("knaben", Some(40));
+        let fair = listed("knaben", Some(9));
+        let counted_none = listed("archive.org", Some(0));
+        let here = release(2);
+        let ms = Duration::from_millis;
+        let table = [
+            (Some(&archive), ms(0), false, true),
+            (Some(&crowded), ms(0), false, false),
+            (Some(&crowded), ms(2499), false, false),
+            (Some(&crowded), ms(2500), false, true),
+            (Some(&fair), ms(7000), false, false),
+            (Some(&fair), ms(10), true, true),
+            (Some(&counted_none), ms(7000), false, false),
+            (Some(&here), ms(7000), false, false),
+            (None, ms(7000), false, false),
+            (None, ms(10), true, true),
+        ];
+        for (n, (first, ran, over, expected)) in table.into_iter().enumerate() {
+            assert_eq!(may_start(first, ran, over), expected, "row {n}");
+        }
     }
 
     fn torrent(name: &str, files: &[(&str, u64)]) -> Metainfo {

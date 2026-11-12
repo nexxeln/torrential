@@ -111,6 +111,7 @@ fn release(
         torrent_url: None,
         info_url: None,
         span: None,
+        swarm: None,
     }
 }
 
