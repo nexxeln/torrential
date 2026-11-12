@@ -80,7 +80,8 @@ pub async fn playing_file(ctx: &Ctx, id: TorrentId, file: u32) -> Result<Playing
     let info = server::metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
     let playable = choose(&info.metainfo, Some(file))?;
     let mut jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
-    Ok(playing(ctx, jobs.remove(0), &info, &playable).await)
+    let job = jobs.pop().ok_or_else(|| Error::new(ErrorCode::NotFound, "the download that played is gone"))?;
+    Ok(playing(ctx, job, &info, &playable).await)
 }
 
 /// Where a download's video and its subtitles are served, and its files. `POST /api/play` and a
