@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use torrential_core::catalog::Country;
 use torrential_core::title::{Episode, Namesakes, Wanted, normalized};
 use torrential_core::{
     Art, ArtKind, EpisodeInfo, Error, ErrorCode, Kind, Season, TitleCard, TitleDetails, TitleId, VideoRef,
@@ -144,6 +145,7 @@ fn night() -> TitleDetails {
         genres: vec!["Horror".into(), "Thriller".into()],
         runtime_min: Some(96),
         cast: vec!["Duane Jones".into(), "Judith O'Dea".into(), "Karl Hardman".into()],
+        countries: vec![Country::Us],
         art: Art { poster: true, background: true, logo: true },
         seasons: Vec::new(),
     }
@@ -156,6 +158,7 @@ fn remake() -> TitleDetails {
         genres: vec!["Horror".into()],
         runtime_min: Some(88),
         cast: vec!["Tony Todd".into(), "Patricia Tallman".into()],
+        countries: vec![Country::Us],
         art: Art::default(),
         seasons: Vec::new(),
     }
@@ -197,6 +200,7 @@ fn harbor_lights() -> TitleDetails {
         genres: vec!["Drama".into()],
         runtime_min: Some(44),
         cast: vec!["Ada Byrne".into()],
+        countries: vec![Country::Ie],
         art: Art { poster: true, background: false, logo: false },
         seasons,
     }

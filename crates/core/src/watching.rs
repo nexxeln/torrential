@@ -269,6 +269,7 @@ mod tests {
             genres: Vec::new(),
             runtime_min: None,
             cast: Vec::new(),
+            countries: Vec::new(),
             art: Art::default(),
             seasons,
         }

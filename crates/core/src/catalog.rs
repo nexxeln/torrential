@@ -142,9 +142,80 @@ pub struct TitleDetails {
     pub genres: Vec<String>,
     pub runtime_min: Option<u32>,
     pub cast: Vec<String>,
+    /// The countries the title is from, of those whose codes release names carry. Empty when it
+    /// is from none of them or the catalog does not say.
+    #[serde(default)]
+    pub countries: Vec<Country>,
     pub art: Art,
     /// Empty for a film. Season 0 holds specials.
     pub seasons: Vec<Season>,
+}
+
+/// A country whose code release names carry to tell same-named series apart, as `US` does in
+/// `The.Office.US.S02E01`. The text form is that code.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Country {
+    Us,
+    Uk,
+    Au,
+    Ca,
+    Nz,
+    Ie,
+}
+
+impl Country {
+    const ALL: [Country; 6] = [Country::Us, Country::Uk, Country::Au, Country::Ca, Country::Nz, Country::Ie];
+
+    /// The code release names use, and the names a catalog writes the country by.
+    fn spellings(self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Country::Us => ("US", &["United States", "United States of America", "USA"]),
+            Country::Uk => ("UK", &["United Kingdom", "UK"]),
+            Country::Au => ("AU", &["Australia"]),
+            Country::Ca => ("CA", &["Canada"]),
+            Country::Nz => ("NZ", &["New Zealand"]),
+            Country::Ie => ("IE", &["Ireland"]),
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        self.spellings().0
+    }
+
+    /// The country a code such as `US` or `uk` stands for.
+    pub fn of_code(code: &str) -> Option<Country> {
+        Country::ALL.into_iter().find(|country| country.code().eq_ignore_ascii_case(code))
+    }
+
+    /// The countries a catalog lists as `United States, United Kingdom`, in its order. A country
+    /// without a code here is left out.
+    pub fn listed_in(text: &str) -> Vec<Country> {
+        let mut countries = Vec::new();
+        for name in text.split(',').map(str::trim) {
+            let named = |country: &Country| country.spellings().1.iter().any(|n| n.eq_ignore_ascii_case(name));
+            if let Some(country) = Country::ALL.into_iter().find(named)
+                && !countries.contains(&country)
+            {
+                countries.push(country);
+            }
+        }
+        countries
+    }
+}
+
+impl TryFrom<String> for Country {
+    type Error = String;
+
+    fn try_from(code: String) -> Result<Self, String> {
+        Country::of_code(&code).ok_or_else(|| format!("{code:?} is not a country code"))
+    }
+}
+
+impl From<Country> for String {
+    fn from(country: Country) -> String {
+        country.code().to_string()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -196,6 +267,27 @@ mod tests {
         for bad in ["", "tt12", "0063350", "tt006335x", "tt0903747:3", "tt0903747:3:5:1", "tt0903747:a:b"] {
             assert_eq!(bad.parse::<VideoRef>().unwrap_err().code, ErrorCode::InvalidRef, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_country_reads_from_its_code_or_the_names_a_catalog_lists() {
+        assert_eq!(
+            ["US", "uk", "Ie", "GB", "USA"].map(Country::of_code),
+            [Some(Country::Us), Some(Country::Uk), Some(Country::Ie), None, None]
+        );
+        assert_eq!(Country::listed_in("United States"), [Country::Us]);
+        assert_eq!(
+            Country::listed_in("Ireland, United Kingdom, Netherlands, United States"),
+            [Country::Ie, Country::Uk, Country::Us]
+        );
+        assert_eq!(
+            Country::listed_in("Australia,New Zealand, Canada, USA, United States"),
+            [Country::Au, Country::Nz, Country::Ca, Country::Us]
+        );
+        assert_eq!(Country::listed_in("Netherlands"), []);
+        assert_eq!(serde_json::to_string(&[Country::Uk, Country::Nz]).unwrap(), r#"["UK","NZ"]"#);
+        assert_eq!(serde_json::from_str::<Vec<Country>>(r#"["US","ca"]"#).unwrap(), [Country::Us, Country::Ca]);
+        assert!(serde_json::from_str::<Country>(r#""FR""#).is_err());
     }
 
     #[test]
