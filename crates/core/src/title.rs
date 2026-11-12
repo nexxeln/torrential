@@ -297,9 +297,9 @@ impl Wanted {
     /// normalized. A film's year may be 1 off the catalog's, since a release can name the year
     /// after the premiere. A series' year must be the year it began. A country code after the
     /// name must be one this title is from, or with no country known, no other title may share
-    /// the name. A release without a year fits when it names this title's country, or unless
-    /// another title of the name is listed first. For an episode, the release holds the episode
-    /// itself or a pack that covers it.
+    /// the name. A release without a year fits unless another title of the name is listed first,
+    /// or for a series when it names this title's country. For an episode, the release holds the
+    /// episode itself or a pack that covers it.
     pub fn fit(&self, release: &str) -> Option<Named> {
         let name = normalized(&self.name);
         named(release).into_iter().find(|reading| {
@@ -309,7 +309,9 @@ impl Wanted {
                 Some(country) => self.countries.contains(country),
             };
             let year = match (reading.year, self.year) {
-                (None, _) => reading.country.is_some() || self.namesakes != Namesakes::Shadowed,
+                (None, _) => {
+                    self.namesakes != Namesakes::Shadowed || reading.country.is_some() && self.episode.is_some()
+                }
                 (Some(_), None) => true,
                 (Some(named), Some(year)) if self.episode.is_some() => named == year,
                 (Some(named), Some(year)) => named.abs_diff(year) <= 1,
@@ -922,6 +924,23 @@ mod tests {
         assert_eq!(read, [Some(yearless.clone()), Some(yearless), None]);
         let dated = leading.fit("Night.of.the.Living.Dead.1968.1080p").unwrap();
         assert_eq!((dated.year, dated.span), (Some(1968), Span::Film));
+    }
+
+    #[test]
+    fn a_country_stands_in_for_the_year_only_for_a_series() {
+        let remake = Wanted {
+            countries: [Country::Us].into(),
+            ..film_named("Night of the Living Dead", 1990, Namesakes::Shadowed)
+        };
+        let office =
+            Wanted { countries: [Country::Us].into(), ..episode_of("The Office", 2005, Namesakes::Shadowed, 1, 1) };
+        let read = [
+            (&remake, "Night.of.the.Living.Dead.US.1080p"),
+            (&remake, "Night.of.the.Living.Dead.US.1990.1080p"),
+            (&office, "The Office US S01E01"),
+        ]
+        .map(|(wanted, release)| wanted.fit(release).map(|n| n.span.to_string()));
+        assert_eq!(read, [None, Some("film".into()), Some("s1e1".into())]);
     }
 
     #[test]
