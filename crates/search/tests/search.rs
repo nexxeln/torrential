@@ -644,7 +644,7 @@ async fn progress_shows_each_answer_and_the_final_ranking_is_unchanged() {
 }
 
 #[tokio::test]
-async fn a_title_searches_each_of_its_queries_and_reports_each_source_once() {
+async fn a_title_searches_each_of_its_queries_and_reports_each_source_that_lists_video_once() {
     let row = |hash: char, name: &str, seeders: u32, size: u64| {
         format!(
             r#"{{"id":"1","name":"{name}","info_hash":"{}","leechers":"1","seeders":"{seeders}","size":"{size}","num_files":"1","username":"u","added":"1600000000","status":"member","category":"207","imdb":""}}"#,
@@ -659,9 +659,11 @@ async fn a_title_searches_each_of_its_queries_and_reports_each_source_once() {
         ("/apibay/q.php?q=night%20of%20the%20living%20dead%201968&", vec![ok(dated.into_bytes())]),
         ("/apibay/q.php?q=night%20of%20the%20living%20dead&", vec![late(yearless)]),
         ("/knaben/", vec![status(404)]),
+        ("/ubuntu/", vec![status(404)]),
+        ("/academictorrents/", vec![status(404)]),
     ])
     .await;
-    let sources = ["knaben", "apibay"];
+    let sources = ["knaben", "apibay", "ubuntu", "academictorrents"];
     let wanted = Wanted {
         name: "Night of the Living Dead".into(),
         year: Some(1968),
@@ -694,6 +696,7 @@ async fn a_title_searches_each_of_its_queries_and_reports_each_source_once() {
     assert_eq!(server.hits("/apibay/q.php?q=night%20of%20the%20living%20dead%201968&"), 1);
     assert_eq!(server.hits("/apibay/q.php?q=night%20of%20the%20living%20dead&"), 1);
     assert_eq!(server.hits("/knaben/"), 2);
+    assert_eq!((server.hits("/ubuntu/"), server.hits("/academictorrents/")), (0, 0), "they hold no films");
 }
 
 const UBUNTU_TORRENT: &str = "/ubuntu/24.04/ubuntu-24.04.5-live-server-amd64.iso.torrent";

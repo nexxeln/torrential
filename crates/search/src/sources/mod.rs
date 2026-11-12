@@ -32,6 +32,8 @@ struct Row {
     name: &'static str,
     default_on: bool,
     lawful: bool,
+    /// It can list films and series, so a title's search asks it.
+    video: bool,
     base: &'static str,
     adapter: Adapter,
 }
@@ -41,6 +43,7 @@ const BUILTIN: [Row; 8] = [
         name: "archlinux",
         default_on: true,
         lawful: true,
+        video: false,
         base: "https://archlinux.org/",
         adapter: Adapter::Archlinux,
     },
@@ -48,6 +51,7 @@ const BUILTIN: [Row; 8] = [
         name: "ubuntu",
         default_on: true,
         lawful: true,
+        video: false,
         base: "https://releases.ubuntu.com/",
         adapter: Adapter::Ubuntu,
     },
@@ -55,6 +59,7 @@ const BUILTIN: [Row; 8] = [
         name: "debian",
         default_on: true,
         lawful: true,
+        video: false,
         base: "https://cdimage.debian.org/",
         adapter: Adapter::Debian,
     },
@@ -62,6 +67,7 @@ const BUILTIN: [Row; 8] = [
         name: "archive.org",
         default_on: true,
         lawful: true,
+        video: true,
         base: "https://archive.org/",
         adapter: Adapter::ArchiveOrg,
     },
@@ -69,12 +75,34 @@ const BUILTIN: [Row; 8] = [
         name: "academictorrents",
         default_on: true,
         lawful: true,
+        video: false,
         base: "https://academictorrents.com/",
         adapter: Adapter::AcademicTorrents,
     },
-    Row { name: "knaben", default_on: true, lawful: false, base: "https://api.knaben.org/", adapter: Adapter::Knaben },
-    Row { name: "apibay", default_on: true, lawful: false, base: "https://apibay.org/", adapter: Adapter::Apibay },
-    Row { name: "nyaa", default_on: true, lawful: false, base: "https://nyaa.si/", adapter: Adapter::Nyaa },
+    Row {
+        name: "knaben",
+        default_on: true,
+        lawful: false,
+        video: true,
+        base: "https://api.knaben.org/",
+        adapter: Adapter::Knaben,
+    },
+    Row {
+        name: "apibay",
+        default_on: true,
+        lawful: false,
+        video: true,
+        base: "https://apibay.org/",
+        adapter: Adapter::Apibay,
+    },
+    Row {
+        name: "nyaa",
+        default_on: true,
+        lawful: false,
+        video: true,
+        base: "https://nyaa.si/",
+        adapter: Adapter::Nyaa,
+    },
 ];
 
 pub(crate) enum Adapter {
@@ -102,6 +130,8 @@ pub(crate) struct SourceMeta {
 pub(crate) struct Source {
     pub meta: Arc<SourceMeta>,
     pub default_on: bool,
+    /// It can list films and series. A Torznab indexer is assumed to.
+    pub video: bool,
     base: Url,
     adapter: Adapter,
 }
@@ -265,7 +295,9 @@ pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error>
     for row in BUILTIN {
         let base = base_url(row.name, config.endpoints.get(row.name).map_or(row.base, String::as_str))?;
         let meta = SourceMeta { name: row.name.into(), authority: next(&sources), lawful: row.lawful, public: true };
-        sources.push(Arc::new(Source { meta: Arc::new(meta), default_on: row.default_on, base, adapter: row.adapter }));
+        let source =
+            Source { meta: Arc::new(meta), default_on: row.default_on, video: row.video, base, adapter: row.adapter };
+        sources.push(Arc::new(source));
     }
     for TorznabConfig { name, url, api_key } in &config.torznab {
         let valid = !name.is_empty()
@@ -284,7 +316,7 @@ pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error>
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .ok_or_else(|| config_error(format!("torznab source {name:?} needs an http or https URL")))?;
         let adapter = Adapter::Torznab { api_key: api_key.clone() };
-        sources.push(Arc::new(Source { meta: Arc::new(meta), default_on: true, base, adapter }));
+        sources.push(Arc::new(Source { meta: Arc::new(meta), default_on: true, video: true, base, adapter }));
     }
     for name in &config.disabled {
         if !sources.iter().any(|s| s.meta.name == *name) {

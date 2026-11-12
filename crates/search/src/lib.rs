@@ -156,7 +156,10 @@ impl Search {
         let terms = &texts[0];
         let deadline = started + Duration::from_millis(query.timeout_ms.into());
         let cache = &self.inner.cache;
-        let selected = self.select(&query.sources)?;
+        let mut selected = self.select(&query.sources)?;
+        if query.wanted.is_some() {
+            selected.retain(|source| source.video);
+        }
         let lookups = selected.iter().flat_map(|source| texts.iter().map(move |terms| (source, terms))).enumerate();
         let lookups = lookups.map(|(index, (source, terms))| {
             let key = AnswerKey {
