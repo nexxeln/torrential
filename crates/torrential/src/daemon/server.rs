@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use torrential_core::error::Details;
 use torrential_core::protocol::{
     Event, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream, TitleFrame,
     TitlePage, TitlePlayed, TitleRequest, TitleSources, WIRE_VERSION,
@@ -374,7 +375,8 @@ async fn play_title(
     .await;
     let (video, release, id, file, resume_at) = match seen.end {
         Some(AttemptEvent::Playing { video, release, job, file, resume_at }) => (video, release, job, file, resume_at),
-        Some(AttemptEvent::Failed { error, .. }) => return Err(error),
+        Some(AttemptEvent::Failed { error, tried }) if tried.is_empty() => return Err(error),
+        Some(AttemptEvent::Failed { error, tried }) => return Err(error.with_details(Details::Tried(tried))),
         _ => return Err(Error::internal("the title play ended without playing or failing")),
     };
     let card = seen.title.ok_or_else(|| Error::internal("the title play played before it found the title"))?;

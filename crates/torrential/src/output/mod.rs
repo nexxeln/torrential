@@ -261,6 +261,8 @@ fn detail_lines(details: Option<&Details>) -> Vec<String> {
         },
         Some(Details::Versions { client, daemon }) => vec![format!("client {client}, engine {daemon}")],
         Some(Details::Paths(paths)) => paths.iter().map(|p| sanitize(p)).collect(),
+        // The play has shown each as it moved past it.
+        Some(Details::Tried(_)) => Vec::new(),
     }
 }
 

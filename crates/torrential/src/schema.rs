@@ -66,7 +66,7 @@ struct FieldSchema {
     help: &'static str,
 }
 
-const FIELDS: [FieldSchema; 6] = [
+const FIELDS: [FieldSchema; 7] = [
     FieldSchema {
         name: "progress.piece_map",
         help: "Where a download's data has arrived, in status, wait, and the TUI's watch stream: 64 characters, one \
@@ -101,6 +101,11 @@ const FIELDS: [FieldSchema; 6] = [
                waited_s, the seconds it waited. no_video means none of its files is the film or the episode. \
                unplayable carries container, a file that needs ffmpeg when ffmpeg is missing. too_large and failed \
                carry the error. stalled means it stopped sending data",
+    },
+    FieldSchema {
+        name: "error.details.tried[]",
+        help: "In play and get for a title, when no release started: each release the play tried, as release, its \
+               ID, and reason, why it did not start, as in title.tried[].reason",
     },
     FieldSchema {
         name: "title.watched[]",

@@ -256,6 +256,32 @@ fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
 }
 
 #[test]
+fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
+    let home = Home::new(&[("TORRENTIAL_TEST_DEAD", ARCHIVE), ("TORRENTIAL_TEST_TITLE_WAIT", "1s")]);
+    let run = home.run(&["play", "tt0063350", "--source", "4c1e9a", "--json"]);
+    let doc: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(
+        (run.code, doc),
+        (
+            7,
+            json!({
+                "schema": 1,
+                "type": "error",
+                "error": {
+                    "code": "no_source",
+                    "message": "this source of Night of the Living Dead (1968) does not play now",
+                    "hint": "let torrential choose a source",
+                    "details": {"tried": [{"release": ARCHIVE, "reason": {"reason": "no_data", "waited_s": 1}}]}
+                },
+                "next": "torrential search Night of the Living Dead 1968"
+            })
+        ),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
 fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
     let home = Home::new(&[]);
     let run = home.run(&["play", "tt0063350"]);

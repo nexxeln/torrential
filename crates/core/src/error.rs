@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::release::SourceReport;
+use crate::watching::Tried;
 
 /// Exit code for a `wait` that hit its timeout while the download is still running.
 /// It is an observation, not an error, so it has no `ErrorCode`.
@@ -156,10 +157,21 @@ pub struct Candidate {
 pub enum Details {
     Candidates(Vec<Candidate>),
     Sources(Vec<SourceReport>),
-    Space { required: u64, available: u64 },
-    Sandbox { signal: String, harness: Option<String> },
-    Versions { client: String, daemon: String },
+    Space {
+        required: u64,
+        available: u64,
+    },
+    Sandbox {
+        signal: String,
+        harness: Option<String>,
+    },
+    Versions {
+        client: String,
+        daemon: String,
+    },
     Paths(Vec<String>),
+    /// The releases a title play tried, and why each did not start.
+    Tried(Vec<Tried>),
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
