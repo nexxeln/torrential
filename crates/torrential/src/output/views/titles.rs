@@ -44,23 +44,26 @@ pub fn search_for(words: &str) -> String {
 
 /// Films and series named like `words`, as `torrential titles` lists them.
 pub fn titles(titles: &[TitleCard], words: &str) -> Doc {
+    // IMDb's suggestions carry no ratings, so a list made only of them has no rating column.
+    let rated = titles.iter().any(|t| t.rating.is_some());
     let rows = titles
         .iter()
         .map(|t| {
-            vec![
-                Cell::styled(t.id.as_str(), Token::Accent),
-                Cell::new(kind(t.kind)),
-                Cell::new(t.year.map_or_else(|| UNKNOWN.to_string(), |y| y.to_string())),
-                Cell::new(rating(t.rating)),
-                Cell::new(&t.name),
-            ]
+            let year = t.year.map_or_else(|| UNKNOWN.to_string(), |y| y.to_string());
+            let mut row = vec![Cell::styled(t.id.as_str(), Token::Accent), Cell::new(kind(t.kind)), Cell::new(year)];
+            row.extend(rated.then(|| Cell::new(rating(t.rating))));
+            row.push(Cell::new(&t.name));
+            row
         })
         .collect();
     let (summary, next) = match titles.first() {
         Some(first) => (format::count(titles.len(), "title"), format!("torrential title {}", first.id)),
         None => ("no film or series has that name".to_string(), search_for(words)),
     };
-    let header = vec!["ID", "KIND", "YEAR", "RATING", "NAME"];
+    let header = match rated {
+        true => vec!["ID", "KIND", "YEAR", "RATING", "NAME"],
+        false => vec!["ID", "KIND", "YEAR", "NAME"],
+    };
     Doc { body: Body::Table { header, rows }, summary: vec![summary], next: Some(next) }
 }
 

@@ -1065,3 +1065,26 @@ fn a_title_play_says_each_step_and_why_it_skipped_a_source_in_plain_words() {
         .map(|line| line.map(String::from))
     );
 }
+
+#[test]
+fn a_title_list_shows_ratings_only_when_a_title_has_one() {
+    use torrential_core::{Kind, TitleCard};
+    let card = |id: &str, name: &str, rating| TitleCard {
+        id: id.parse().unwrap(),
+        kind: Kind::Film,
+        name: name.into(),
+        year: Some(2010),
+        rating,
+    };
+    let unrated = [card("tt1727587", "Sintel", None)];
+    assert_eq!(
+        render(Mode::Plain, &titles(&unrated, "sintel"), &()),
+        "ID\tKIND\tYEAR\tNAME\ntt1727587\tfilm\t2010\tSintel\n# 1 title\nnext: torrential title tt1727587\n"
+    );
+    let mixed = [card("tt1727587", "Sintel", Some(7.4)), card("tt0000001", "Sintel Two", None)];
+    assert_eq!(
+        render(Mode::Plain, &titles(&mixed, "sintel"), &()),
+        "ID\tKIND\tYEAR\tRATING\tNAME\ntt1727587\tfilm\t2010\t7.4\tSintel\ntt0000001\tfilm\t2010\t?\tSintel Two\n\
+         # 2 titles\nnext: torrential title tt1727587\n"
+    );
+}
