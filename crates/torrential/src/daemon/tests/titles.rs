@@ -409,6 +409,26 @@ async fn a_download_made_by_hand_is_tried_first_and_kept_when_it_does_not_start(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_paused_download_a_trial_resumes_is_paused_again_when_it_does_not_start() {
+    let (h, night) = night();
+    h.get(h.torrent_file(&night[2]), &[]).await.unwrap();
+    let pause = torrential_core::protocol::Request::Pause { refs: vec![prefix(&night[2])] };
+    assert_eq!(h.changes(pause).await.unwrap(), [(prefix(&night[2]), "paused".into())]);
+    assert_eq!(
+        h.play_title("tt0063350", Some(&night[2]), None).await[1..7],
+        [
+            "searched 4",
+            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
+        ]
+    );
+    assert_eq!(h.states().await, ["paused"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn replace_plays_another_source_and_then_pauses_the_one_that_stalled() {
     let (h, night) = night();
     h.swarm.withhold(night[2].info_hash.id(), 0);

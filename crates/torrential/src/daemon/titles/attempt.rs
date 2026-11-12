@@ -86,10 +86,10 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
             break;
         }
         report(AttemptEvent::Trying { rank, of, release: release.clone() });
-        let mut trial = Trial { owner: &ctx.owner, made: None };
+        let mut trial = Trial { owner: &ctx.owner, undo: None };
         match trial.run(ctx, &title, &release, end, &mut report).await {
             Ok((job, file)) => {
-                trial.made = None;
+                trial.undo = None;
                 let id = job.id;
                 if let Err(error) = ctx.owner.ask(|reply| Command::Played { id, reply }).await {
                     return report(AttemptEvent::Failed { error, tried });
@@ -103,7 +103,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
             }
             Err(reason) => {
                 let reason = *reason;
-                trial.discard().await;
+                trial.undo().await;
                 ctx.titles.failed(release.id);
                 report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
                 tried.push(Tried { release: release.id, reason });
@@ -172,11 +172,18 @@ impl Line<'_> {
     }
 }
 
-/// The source under test. Dropped before it plays, it discards the download it made.
+/// The source under test. Dropped before it plays, it puts back what it changed.
 struct Trial<'a> {
     owner: &'a OwnerHandle,
-    /// The download this trial made, which only it may discard.
-    made: Option<TorrentId>,
+    undo: Option<Undo>,
+}
+
+/// What a trial changed that it puts back when its source does not play.
+enum Undo {
+    /// It made the download, which only it may discard.
+    Discard(TorrentId),
+    /// It resumed a download the person had paused.
+    Pause(TorrentId),
 }
 
 impl Trial<'_> {
@@ -218,9 +225,11 @@ impl Trial<'_> {
                 _ => Skip::Failed { error },
             },
         )?;
-        if created == Created::Yes {
-            self.made = Some(job.id);
-        }
+        self.undo = match created {
+            Created::Yes => Some(Undo::Discard(job.id)),
+            Created::Resumed => Some(Undo::Pause(job.id)),
+            Created::No => None,
+        };
 
         report(AttemptEvent::Check { check: Check::FirstBytes });
         let begun = Instant::now();
@@ -244,26 +253,40 @@ impl Trial<'_> {
         }
     }
 
-    /// Lets go of the download this trial made, and waits until the owner has. The owner deletes
-    /// its files when the play owns them. When they were on disk before, it removes the download
-    /// and keeps them.
-    async fn discard(&mut self) {
-        let Some(id) = self.made.take() else { return };
-        if self.owner.ask(|reply| Command::Discard { id, reply }).await.is_err() {
-            let _ = self.owner.ask(|reply| Command::Remove { refs: vec![id.to_hex()], reply }).await;
+    /// Puts back what this trial changed, and waits until the owner has. A download the trial
+    /// made goes, with its files when the play owns them. When they were on disk before, the
+    /// owner removes the download and keeps them.
+    async fn undo(&mut self) {
+        match self.undo.take() {
+            None => {}
+            Some(Undo::Discard(id)) => {
+                if self.owner.ask(|reply| Command::Discard { id, reply }).await.is_err() {
+                    let _ = self.owner.ask(|reply| Command::Remove { refs: vec![id.to_hex()], reply }).await;
+                }
+            }
+            Some(Undo::Pause(id)) => {
+                let _ = self.owner.ask(|reply| Command::Pause { refs: vec![id.to_hex()], reply }).await;
+            }
         }
     }
 }
 
 impl Drop for Trial<'_> {
     fn drop(&mut self) {
-        if let Some(id) = self.made.take() {
-            let (discarded, _) = oneshot::channel();
-            self.owner.tell(Command::Discard { id, reply: discarded });
-            // The owner takes commands in order, so this finds the download only if the discard
-            // was refused.
-            let (removed, _) = oneshot::channel();
-            self.owner.tell(Command::Remove { refs: vec![id.to_hex()], reply: removed });
+        match self.undo.take() {
+            None => {}
+            Some(Undo::Discard(id)) => {
+                let (discarded, _) = oneshot::channel();
+                self.owner.tell(Command::Discard { id, reply: discarded });
+                // The owner takes commands in order, so this finds the download only if the
+                // discard was refused.
+                let (removed, _) = oneshot::channel();
+                self.owner.tell(Command::Remove { refs: vec![id.to_hex()], reply: removed });
+            }
+            Some(Undo::Pause(id)) => {
+                let (paused, _) = oneshot::channel();
+                self.owner.tell(Command::Pause { refs: vec![id.to_hex()], reply: paused });
+            }
         }
     }
 }

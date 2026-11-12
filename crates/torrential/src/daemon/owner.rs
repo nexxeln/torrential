@@ -117,6 +117,8 @@ pub struct PlayCommand {
 pub enum Created {
     Yes,
     No,
+    /// It joined a download the person had paused, and resumed it.
+    Resumed,
 }
 
 /// A selected file of a download, for the HTTP server.
@@ -715,6 +717,10 @@ impl Owner {
             _ => {}
         }
         let job = &self.jobs[&id];
+        let created = match job.record.intent {
+            Intent::Paused if created == Created::No => Created::Resumed,
+            _ => created,
+        };
         if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
             self.resume(&[id.to_hex()], false)?;
         }
