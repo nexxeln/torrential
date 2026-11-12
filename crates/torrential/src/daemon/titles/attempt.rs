@@ -16,7 +16,7 @@ use torrential_core::{
 
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
-use super::super::owner::{Command, Created, Finish, MetaTarget, Origin, PlayCommand, Source};
+use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
 use super::Resolved;
@@ -72,8 +72,8 @@ impl Containers {
 /// Plays `ask` and reports each step, the last being `playing` or `failed`. A download here that
 /// holds the video plays first, before any search. Otherwise sources are tried once the search
 /// so far holds one that could lead, while slower indexes go on answering, and each next source
-/// is the best of what has been found by then. Dropping the future stops the play, and the
-/// source under test is put back as it was.
+/// is the best of what has been found by then. Dropping the future stops the play and gives up
+/// the source under test.
 pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) {
     let end = Instant::now() + ctx.titles.timing.budget;
     if let Some(id) = ask.replace {
@@ -271,15 +271,15 @@ impl Walk<'_> {
         let ctx = self.ctx;
         report(AttemptEvent::Trying { rank: self.tried.len() as u32 + 1, of, release: release.clone() });
         let asked = *self.asked.entry(release.id).or_insert_with(Instant::now);
-        let mut trial = Trial { owner: &ctx.owner, undo: None };
+        let mut trial = Trial { owner: &ctx.owner, hold: None };
         match trial.run(self, &release, asked, report).await {
             Ok((job, file)) => {
-                trial.undo = None;
                 let id = job.id;
                 if let Err(error) = ctx.owner.ask(|reply| Command::Played { id, reply }).await {
                     report(AttemptEvent::Failed { error, tried: std::mem::take(&mut self.tried) });
                     return true;
                 }
+                trial.hold = None;
                 let video = self.title.video.clone();
                 let resume_at = resume_at(ctx, &video);
                 report(AttemptEvent::Playing { video, release, job: id, file, resume_at });
@@ -290,7 +290,7 @@ impl Walk<'_> {
             }
             Err(reason) => {
                 let reason = *reason;
-                trial.undo().await;
+                trial.give_up().await;
                 ctx.titles.failed(release.id, reason.clone());
                 report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
                 self.tried.push(Tried { release: release.id, reason });
@@ -317,18 +317,11 @@ fn next_up(ask: &PlayTitle, line: Vec<Release>, tried: &[Tried]) -> Vec<Release>
     next.take(MOST_TRIED.saturating_sub(tried.len())).collect()
 }
 
-/// The source under test. Dropped before it plays, it puts back what it changed.
+/// The source under test. Dropped before it plays, it gives the source up.
 struct Trial<'a> {
     owner: &'a OwnerHandle,
-    undo: Option<Undo>,
-}
-
-/// What a trial changed that it puts back when its source does not play.
-enum Undo {
-    /// It made the download, which only it may discard.
-    Discard(TorrentId),
-    /// It resumed a download the person had paused.
-    Pause(TorrentId),
+    /// Its hold on the download, from before it asks for one until that download plays.
+    hold: Option<Hold>,
 }
 
 impl Trial<'_> {
@@ -357,25 +350,24 @@ impl Trial<'_> {
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));
         let link =
             TitleLink { title: title.video.title.clone(), span, release: Some(release.id), lease: Lease::Borrowed };
+        let hold = Hold::fresh();
+        // Held before the owner is asked, so a play that goes away at any point after gives it up.
+        self.hold = Some(hold);
         let play = PlayCommand {
             source,
             dir: None,
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
             setup_max_size: (ctx.web.preferences)().max_size,
-            title: Some(link),
+            title: Some(TitlePlay { link, hold }),
             finish: ask.finish,
         };
-        let (job, _, created) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await.map_err(
-            |error| match error.code {
-                ErrorCode::TooLarge | ErrorCode::DiskFull => Skip::TooLarge { error },
-                _ => Skip::Failed { error },
-            },
-        )?;
-        self.undo = match created {
-            Created::Yes => Some(Undo::Discard(job.id)),
-            Created::Resumed => Some(Undo::Pause(job.id)),
-            Created::No => None,
-        };
+        let (job, _) =
+            ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await.map_err(
+                |error| match error.code {
+                    ErrorCode::TooLarge | ErrorCode::DiskFull => Skip::TooLarge { error },
+                    _ => Skip::Failed { error },
+                },
+            )?;
 
         report(AttemptEvent::Check { check: Check::FirstBytes });
         let begun = Instant::now();
@@ -399,40 +391,18 @@ impl Trial<'_> {
         }
     }
 
-    /// Puts back what this trial changed, and waits until the owner has. A download the trial
-    /// made goes, with its files when the play owns them. When they were on disk before, the
-    /// owner removes the download and keeps them.
-    async fn undo(&mut self) {
-        match self.undo.take() {
-            None => {}
-            Some(Undo::Discard(id)) => {
-                if self.owner.ask(|reply| Command::Discard { id, reply }).await.is_err() {
-                    let _ = self.owner.ask(|reply| Command::Remove { refs: vec![id.to_hex()], reply }).await;
-                }
-            }
-            Some(Undo::Pause(id)) => {
-                let _ = self.owner.ask(|reply| Command::Pause { refs: vec![id.to_hex()], reply }).await;
-            }
+    /// Gives the source up, and waits until the owner has put its download back.
+    async fn give_up(&mut self) {
+        if let Some(hold) = self.hold.take() {
+            let _ = self.owner.ask(|reply| Command::Release { hold, reply }).await;
         }
     }
 }
 
 impl Drop for Trial<'_> {
     fn drop(&mut self) {
-        match self.undo.take() {
-            None => {}
-            Some(Undo::Discard(id)) => {
-                let (discarded, _) = oneshot::channel();
-                self.owner.tell(Command::Discard { id, reply: discarded });
-                // The owner takes commands in order, so this finds the download only if the
-                // discard was refused.
-                let (removed, _) = oneshot::channel();
-                self.owner.tell(Command::Remove { refs: vec![id.to_hex()], reply: removed });
-            }
-            Some(Undo::Pause(id)) => {
-                let (paused, _) = oneshot::channel();
-                self.owner.tell(Command::Pause { refs: vec![id.to_hex()], reply: paused });
-            }
+        if let Some(hold) = self.hold.take() {
+            self.owner.tell(Command::Release { hold, reply: oneshot::channel().0 });
         }
     }
 }

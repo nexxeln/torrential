@@ -69,7 +69,7 @@ pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
     let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
     let setup_max_size = (ctx.web.preferences)().max_size;
     let play = PlayCommand { source, dir: None, files, setup_max_size, title: None, finish: Finish::Stream };
-    let (job, _, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+    let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let info = server::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
     Ok(playing(ctx, job, &info, &playable).await)
 }

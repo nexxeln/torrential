@@ -270,7 +270,7 @@ async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
     let PlayRequest { target, dir, files, setup_max_size } = request;
     let source = resolve(ctx, target, "play").await?;
     let play = PlayCommand { source, dir, files: files.clone(), setup_max_size, title: None, finish: Finish::Stream };
-    let (job, metainfo, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+    let (job, metainfo) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let streams = streams(ctx, job.id, &metainfo, files);
     Ok(PlayReply { job, streams })
 }

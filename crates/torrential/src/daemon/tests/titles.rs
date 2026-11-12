@@ -1,4 +1,4 @@
-//! Playing a title: trying its sources in turn, the downloads that makes, and what discarding one
+//! Playing a title: trying its sources in turn, the downloads that makes, and what giving one up
 //! deletes.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
-use torrential_core::{Category, Error, ErrorCode, Job, Lease, Release, ReleaseId, TitleLink, TorrentId};
+use torrential_core::{AttemptEvent, Category, Check, Error, Job, Lease, Release, ReleaseId, TitleLink, TorrentId};
 
 use super::super::admission::GIB;
 use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
-use super::super::owner::{Command, Created, Finish, Origin, PlayCommand, Source};
+use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{self, FakeSource};
 use super::super::titles::Timing;
 use super::super::titles::attempt::{self, Containers, PlayTitle};
@@ -43,6 +43,11 @@ pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) ->
 /// first never sends its file list, the second holds no video, no peer has any piece of the
 /// third, and the fourth plays. The search also finds the 1990 remake, which is not this film.
 pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
+    night_within(TIMING)
+}
+
+/// `night`, with `timing` for its plays.
+fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
     let night = [
         torrent(0xa1, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", &[("Night.1968.720p.mp4", 2 * GIB)]),
         torrent(0xa2, "Night.of.the.Living.Dead.1968.DVD9", &[("VIDEO_TS/NIGHT.iso", 4 * GIB)]),
@@ -62,7 +67,8 @@ pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
     catalog.push(listed(&night[3], "archive.org", None));
     catalog.push(listed(&remake, "knaben", Some(90)));
     let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
-    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, BTreeMap::new()));
+    let search = search_port::Fake::scripted(catalog, script, BTreeMap::new());
+    let h = Harness::with_outside(search, Outside { timing, ..Outside::default() });
     for t in &night[1..] {
         h.swarm.publish(t.clone());
     }
@@ -102,29 +108,43 @@ pub(super) fn step(line: &Value) -> String {
 }
 
 impl Harness {
-    /// Plays `files` of `torrent` from its file, for `title` when given, as a title play does.
-    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Created), Error> {
+    /// Plays `files` of `torrent` from its file, by hand or as a title play tests a source for
+    /// `title`, and answers the hold that play has on the download.
+    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Hold), Error> {
+        let hold = Hold::fresh();
+        let link = |title: &str| TitleLink {
+            title: title.parse().unwrap(),
+            span: Span::Film,
+            release: None,
+            lease: Lease::Borrowed,
+        };
         let play = PlayCommand {
             source: Source::Torrent { metainfo: t.metainfo().unwrap(), origin: Origin::File },
             dir: Some(self.downloads()),
             files: files.to_vec(),
             setup_max_size: None,
-            title: title.map(|title| TitleLink {
-                title: title.parse().unwrap(),
-                span: Span::Film,
-                release: None,
-                lease: Lease::Borrowed,
-            }),
+            title: title.map(|title| TitlePlay { link: link(title), hold }),
             finish: Finish::Stream,
         };
-        let (job, _, created) =
-            self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
-        Ok((job, created))
+        let (job, _) = self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+        Ok((job, hold))
     }
 
-    async fn discard(&self, t: &FakeTorrentFile) -> Result<(), (ErrorCode, String)> {
+    /// Gives up a source under test, as a title play does when the source does not play or the
+    /// play goes away.
+    async fn give_up(&self, hold: Hold) {
+        self.running.ctx.owner.ask(|reply| Command::Release { hold, reply }).await.unwrap();
+    }
+
+    /// Says a download plays, as a title play does once its video has bytes.
+    async fn played(&self, t: &FakeTorrentFile) {
         let id = t.info_hash.id();
-        self.running.ctx.owner.ask(|reply| Command::Discard { id, reply }).await.map_err(|e| (e.code, e.message))
+        self.running.ctx.owner.ask(|reply| Command::Played { id, reply }).await.unwrap();
+    }
+
+    /// Waits long enough for the engine to confirm a removal and the owner to delete after it.
+    async fn settled(&self) {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
 
     /// Stops the engine where it is, lets `change` at the disk, and starts it again.
@@ -196,18 +216,15 @@ async fn a_title_play_links_the_download_it_makes_and_borrows_one_that_existed()
     let made = torrent(70, "made", &[("made.mp4", GIB)]);
     let mine = torrent(71, "mine", &[("mine.mp4", GIB)]);
     h.get(h.torrent_file(&mine), &[]).await.unwrap();
-    let (job, created) = h.play_for(&made, &[0], Some("tt0063350")).await.unwrap();
+    let (job, _) = h.play_for(&made, &[0], Some("tt0063350")).await.unwrap();
     let link = job.title.unwrap();
-    assert_eq!((created, link.title.as_str(), link.lease), (Created::Yes, "tt0063350", Lease::Owned));
-    let (job, created) = h.play_for(&mine, &[0], Some("tt0063350")).await.unwrap();
-    assert_eq!((created, job.title.unwrap().lease), (Created::No, Lease::Borrowed));
-    let (job, created) = h.play_for(&made, &[0], Some("tt0100258")).await.unwrap();
-    let link = job.title.unwrap();
-    assert_eq!((created, link.title.as_str(), link.lease), (Created::No, "tt0063350", Lease::Owned), "a link stays");
+    assert_eq!((link.title.as_str(), link.lease), ("tt0063350", Lease::Owned));
+    let (job, _) = h.play_for(&mine, &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(job.title.unwrap().lease, Lease::Borrowed);
     let over = torrent(69, "over", &[("over.mp4", GIB), ("other.srt", 10)]);
     write(&h.downloads().join("over/over.mp4"));
-    let (job, created) = h.play_for(&over, &[0], Some("tt0063350")).await.unwrap();
-    assert_eq!((created, job.title.unwrap().lease), (Created::Yes, Lease::Borrowed), "a file was there before");
+    let (job, _) = h.play_for(&over, &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(job.title.unwrap().lease, Lease::Borrowed, "a file was there before");
 
     let h = h.crash_and_restart().await;
     let leases: Vec<Option<Lease>> = h.status().await.iter().map(|j| j.title.as_ref().map(|t| t.lease)).collect();
@@ -215,41 +232,131 @@ async fn a_title_play_links_the_download_it_makes_and_borrows_one_that_existed()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn discard_refuses_a_download_a_title_play_does_not_own_or_that_finished_or_played() {
+async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
     let h = Harness::new();
-    let own = torrent(72, "own", &[("own.mp4", GIB)]);
-    let joined = torrent(73, "joined", &[("joined.mp4", GIB)]);
-    let finished = torrent(74, "finished", &[("finished.mp4", 1_000)]);
-    let watched = torrent(75, "watched", &[("watched.mp4", GIB)]);
-    for t in [&own, &joined, &watched] {
-        h.swarm.withhold(t.info_hash.id(), u32::MAX);
+    let made = torrent(72, "made", &[("made.mp4", GIB)]);
+    let over = torrent(73, "over", &[("over.mp4", GIB)]);
+    let mine = torrent(74, "mine", &[("mine.mp4", GIB)]);
+    let paused = torrent(75, "paused", &[("paused.mp4", GIB)]);
+    let stopped = torrent(76, "stopped", &[("stopped.mp4", GIB)]);
+    let finished = torrent(77, "finished", &[("finished.mp4", 1_000)]);
+    let watched = torrent(78, "watched", &[("watched.mp4", GIB)]);
+    h.swarm.withhold(stopped.info_hash.id(), u32::MAX);
+    write(&h.downloads().join("over/over.mp4"));
+    for t in [&mine, &paused, &stopped] {
+        h.get(h.torrent_file(t), &[]).await.unwrap();
     }
-    h.get(h.torrent_file(&own), &[]).await.unwrap();
-    h.get(h.torrent_file(&joined), &[]).await.unwrap();
-    let created = [
-        h.play_for(&joined, &[0], Some("tt0063350")).await.unwrap().1,
-        h.play_for(&finished, &[0], Some("tt0063350")).await.unwrap().1,
-        h.play_for(&watched, &[0], Some("tt0063350")).await.unwrap().1,
-    ];
-    assert_eq!(created, [Created::No, Created::Yes, Created::Yes]);
-    h.swarm.set_rate(100 * GIB);
-    h.until("finished is done", |jobs| {
-        jobs.iter().any(|j| j.name.as_deref() == Some("finished") && j.status.name() == "done")
-    })
-    .await;
-    let id = watched.info_hash.id();
-    h.running.ctx.owner.ask(|reply| Command::Played { id, reply }).await.unwrap();
-
-    let refused = |t: &FakeTorrentFile, why: &str| {
-        Err((ErrorCode::JobConflict, format!("{} {why}, so its files stay", prefix(t))))
+    let pause = Request::Pause { refs: vec![prefix(&paused)] };
+    assert_eq!(h.changes(pause).await.unwrap(), [(prefix(&paused), "paused".into())]);
+    let names = |jobs: &[Job], state: &str| -> Vec<String> {
+        jobs.iter().filter(|j| j.status.name() == state).filter_map(|j| j.name.clone()).collect()
     };
-    assert_eq!(h.discard(&own).await, refused(&own, "was not made by playing a title"));
-    assert_eq!(h.discard(&joined).await, refused(&joined, "was on this machine before a title play used it"));
-    assert_eq!(h.discard(&finished).await, refused(&finished, "is finished"));
-    assert_eq!(h.discard(&watched).await, refused(&watched, "has played"));
-    let missing = torrent(76, "missing", &[("missing.mp4", GIB)]);
-    assert_eq!(h.discard(&missing).await.unwrap_err().0, ErrorCode::NotFound);
-    assert_eq!(h.status().await.len(), 4, "every refused download stays");
+    let before = h.until("one stops with no source", |jobs| names(jobs, "error") == ["stopped"]).await;
+    let no_source = before.iter().find(|j| j.name.as_deref() == Some("stopped")).unwrap().status.clone();
+
+    let mut holds = Vec::new();
+    for t in [&made, &over, &mine, &paused, &stopped, &finished, &watched] {
+        holds.push(h.play_for(t, &[0], Some("tt0063350")).await.unwrap().1);
+    }
+    h.swarm.set_rate(MIB);
+    h.until("the small one is done", |jobs| names(jobs, "done") == ["finished"]).await;
+    h.swarm.set_rate(0);
+    h.played(&watched).await;
+    for file in ["made/made.mp4", "mine/mine.mp4", "paused/paused.mp4", "finished/finished.mp4", "watched/watched.mp4"]
+    {
+        write(&h.downloads().join(file));
+    }
+    for hold in holds {
+        h.give_up(hold).await;
+    }
+    h.settled().await;
+
+    let mut jobs = h.status().await;
+    jobs.sort_by_key(|j| j.name.clone());
+    let states: Vec<(&str, &str)> = jobs.iter().map(|j| (j.name.as_deref().unwrap(), j.status.name())).collect();
+    assert_eq!(
+        states,
+        [
+            ("finished", "done"),
+            ("mine", "downloading"),
+            ("paused", "paused"),
+            ("stopped", "error"),
+            ("watched", "downloading")
+        ],
+        "the two downloads the play made and never played are off the list"
+    );
+    assert_eq!(jobs[3].status, no_source, "it stopped again on the error it had");
+    assert_eq!(
+        tree(&h.downloads()),
+        [
+            "finished",
+            "finished/finished.mp4",
+            "mine",
+            "mine/mine.mp4",
+            "over",
+            "over/over.mp4",
+            "paused",
+            "paused/paused.mp4",
+            "watched",
+            "watched/watched.mp4",
+        ],
+        "only the file of the download the play made over nothing is deleted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hold_given_up_twice_or_never_taken_changes_nothing() {
+    let h = Harness::new();
+    let film = torrent(81, "film", &[("film.mp4", GIB)]);
+    let (_, first) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    let (_, second) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.until("it runs", |jobs| jobs[0].status.name() == "downloading").await;
+    write(&h.downloads().join("film/film.mp4"));
+    h.give_up(Hold::fresh()).await;
+    h.give_up(first).await;
+    h.give_up(first).await;
+    h.settled().await;
+    assert_eq!(h.states().await, ["downloading"], "the second play still tests it");
+    assert_eq!(tree(&h.downloads()), ["film", "film/film.mp4"]);
+    h.give_up(second).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_two_plays_test_stays_until_both_give_up_and_stays_for_good_once_it_plays() {
+    let film = torrent(82, "film", &[("film.mp4", GIB)]);
+    let shared = || async {
+        let h = Harness::new();
+        let (_, first) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+        let (job, second) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+        assert_eq!(job.title.unwrap().lease, Lease::Owned, "a second play of the title shares the lease");
+        h.until("it runs", |jobs| jobs[0].status.name() == "downloading").await;
+        write(&h.downloads().join("film/film.mp4"));
+        write(&h.downloads().join(parts(82)));
+        (h, first, second)
+    };
+    let there = || vec![parts(82), "film".to_string(), "film/film.mp4".to_string()];
+
+    let (h, first, second) = shared().await;
+    h.give_up(first).await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], there()), "the second still tests it");
+    h.played(&film).await;
+    h.give_up(second).await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], there()), "it plays, so it stays");
+
+    let (h, first, second) = shared().await;
+    h.played(&film).await;
+    h.give_up(first).await;
+    h.give_up(second).await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], there()), "it played first");
+
+    let (h, first, second) = shared().await;
+    h.give_up(second).await;
+    h.give_up(first).await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (Vec::new(), Vec::<String>::new()), "neither played it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -266,19 +373,82 @@ async fn a_title_downloaded_with_get_comes_in_plain_order_until_it_is_played() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_download_that_played_and_was_paused_is_paused_again_when_a_later_play_gives_it_up() {
+    let h = Harness::new();
+    let film = torrent(83, "film", &[("film.mp4", GIB)]);
+    h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.played(&film).await;
+    let pause = Request::Pause { refs: vec![prefix(&film)] };
+    assert_eq!(h.changes(pause).await.unwrap(), [(prefix(&film), "paused".into())]);
+    let (_, later) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.until("the later play resumes it", |jobs| jobs[0].status.name() == "downloading").await;
+    h.give_up(later).await;
+    assert_eq!(h.states().await, ["paused"]);
+}
+
+/// Starts a play of the film from `source` alone, and answers it once it waits for the source's
+/// first bytes.
+async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHandle<()> {
+    let ctx = h.running.ctx.clone();
+    let ask = PlayTitle {
+        video: "tt0063350".parse().unwrap(),
+        pin: Some(ReleaseId::Torrent(source.info_hash.id())),
+        replace: None,
+        playback: None,
+        containers: Containers::Browser,
+        finish: Finish::Stream,
+    };
+    let (told, mut steps) = tokio::sync::mpsc::unbounded_channel();
+    let play = tokio::spawn(async move {
+        let report = move |event| drop(told.send(event));
+        attempt::run(&ctx, ask, report).await
+    });
+    while let Some(event) = steps.recv().await {
+        if matches!(event, AttemptEvent::Check { check: Check::FirstBytes }) {
+            return play;
+        }
+    }
+    panic!("the play ended before it waited for first bytes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last_to_go_takes_it() {
+    let patient = Timing { first_bytes: std::time::Duration::from_secs(10), ..TIMING };
+    let (h, night) = night_within(patient);
+    h.swarm.set_rate(0);
+    let first = testing(&h, &night[3]).await;
+    let second = testing(&h, &night[3]).await;
+    write(&h.downloads().join("night_of_the_living_dead/night_of_the_living_dead.mp4"));
+    let on_disk = ["night_of_the_living_dead", "night_of_the_living_dead/night_of_the_living_dead.mp4"];
+
+    first.abort();
+    let _ = first.await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], on_disk.map(String::from).to_vec()));
+
+    second.abort();
+    let _ = second.await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (Vec::new(), Vec::<String>::new()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_download_played_by_hand_is_never_discarded() {
     let h = Harness::new();
     let film = torrent(77, "film", &[("film.mp4", GIB)]);
-    h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
     h.play(super::magnet(&film), &[0]).await.unwrap();
+    write(&h.downloads().join("film/film.mp4"));
+    h.give_up(hold).await;
+    h.settled().await;
     assert_eq!(
-        h.discard(&film).await,
-        Err((ErrorCode::JobConflict, format!("{} has played, so its files stay", prefix(&film))))
+        (h.states().await, tree(&h.downloads())),
+        (vec!["downloading"], vec!["film".to_string(), "film/film.mp4".into()])
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn discard_deletes_only_what_the_download_selected_never_through_a_link_or_what_another_holds() {
+async fn giving_up_deletes_only_what_the_download_selected_never_through_a_link_or_what_another_holds() {
     let h = Harness::new();
     let downloads = h.downloads();
     let outside = h.dir.path().join("outside");
@@ -292,7 +462,7 @@ async fn discard_deletes_only_what_the_download_selected_never_through_a_link_or
         "trial",
         &[("a.mp4", GIB), ("b.srt", 10), ("deep/c.mp4", 10), ("notes.nfo", 10), ("shared.mp4", GIB)],
     );
-    h.play_for(&trial, &[0, 1, 2, 4], Some("tt0063350")).await.unwrap();
+    let (_, hold) = h.play_for(&trial, &[0, 1, 2, 4], Some("tt0063350")).await.unwrap();
     h.until("the trial runs", |jobs| {
         jobs.iter().any(|j| j.name.as_deref() == Some("trial") && j.status.name() == "downloading")
     })
@@ -305,7 +475,7 @@ async fn discard_deletes_only_what_the_download_selected_never_through_a_link_or
     std::os::unix::fs::symlink(outside.join("secret.srt"), downloads.join("trial/b.srt")).unwrap();
     std::os::unix::fs::symlink(outside.join("deep"), downloads.join("trial/deep")).unwrap();
 
-    assert_eq!(h.discard(&trial).await, Ok(()));
+    h.give_up(hold).await;
     let mut left = Vec::new();
     for _ in 0..500 {
         left = tree(&downloads);
@@ -327,12 +497,12 @@ async fn stopped_mid_discard() -> (Harness, PathBuf) {
     let engine = Gated { port: FakeEngine::new(Swarm::new(0)), gate: gate.clone() };
     let h = Harness::with_engine(|_| Box::new(engine), parse_fake);
     let film = torrent(80, "film", &[("film.mp4", GIB)]);
-    h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
     h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
     let written = h.downloads().join("film/film.mp4");
     write(&written);
     gate.close();
-    assert_eq!(h.discard(&film).await, Ok(()));
+    h.give_up(hold).await;
     gate.until_held(1).await;
     (h, written)
 }
