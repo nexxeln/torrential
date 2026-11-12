@@ -318,6 +318,9 @@ impl Wanted {
     /// does in three words.
     pub fn other_words(&self, release: &str) -> usize {
         const SPANS: [&str; 5] = ["season", "seasons", "episode", "complete", "series"];
+        // Tags that `TAGS` leaves out because titles use them, as Charlotte's Web does. The
+        // title's own words do not count here, so they are safe.
+        const LOOSE_TAGS: [&str; 2] = ["web", "hd"];
         let own = normalized(&self.name);
         let own: Vec<&str> = own.split(' ').collect();
         let name = stem(release);
@@ -343,6 +346,7 @@ impl Wanted {
             !(word.bytes().any(|b| b.is_ascii_digit())
                 || own.contains(&word.as_str())
                 || SPANS.contains(&word.as_str())
+                || LOOSE_TAGS.contains(&word.as_str())
                 || tag(*i, word))
         };
         words.iter().enumerate().filter(other).count()
@@ -916,9 +920,12 @@ mod tests {
         let cases = [
             ("Pioneer.One.S01E01.720p.x264-VODO", 0),
             ("Pioneer One Season One Complete XviD", 0),
+            ("Pioneer One S01E01 [720p HD]", 0),
             ("Pioneer One S01E01 720p x264 VODO", 1),
         ];
         assert_eq!(cases.map(|(release, _)| (release, pioneer.other_words(release))), cases);
+        let sintel = film_named("Sintel", 2010, Namesakes::None);
+        assert_eq!(sintel.other_words("Sintel.2010.1080p.WEB.H264-CLASSiCALHD"), 0);
         let greys = episode_of("Grey's Anatomy", 2005, Namesakes::None, 12, 1);
         assert_eq!(greys.other_words("Grey's Anatomy Season Twelve 720p"), 1);
     }
