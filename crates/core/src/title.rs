@@ -10,7 +10,7 @@ pub struct Title {
     pub episode: Option<Episode>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Episode {
     pub season: u32,
     pub episode: u32,

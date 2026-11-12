@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod error;
 pub mod id;
 pub mod job;
@@ -13,6 +14,7 @@ pub mod text;
 pub mod title;
 pub mod units;
 
+pub use catalog::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetails, TitleId, VideoRef};
 pub use error::{Error, ErrorCode};
 pub use id::{HexPrefix, InfoHash, LocatorId, ReleaseId, Target, TorrentId};
 pub use job::{Eighths, FileRisk, Job, JobStatus, PieceMap, Progress, Selection, Slice, TorrentFile};
