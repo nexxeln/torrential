@@ -8,7 +8,9 @@ pub mod protocol;
 pub mod quality;
 pub mod release;
 pub mod stream;
+pub mod subtitle;
 pub mod text;
+pub mod title;
 pub mod units;
 
 pub use error::{Error, ErrorCode};

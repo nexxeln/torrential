@@ -13,6 +13,7 @@ mod http;
 mod metainfo;
 mod observation;
 mod sources;
+pub mod subtitles;
 mod terms;
 
 use std::collections::BTreeMap;

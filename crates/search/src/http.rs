@@ -32,8 +32,13 @@ pub(crate) enum Retry {
 
 impl Http {
     pub fn new(record: bool) -> Result<Http, reqwest::Error> {
+        Http::named(USER_AGENT, record)
+    }
+
+    /// A client that introduces itself as `agent`.
+    pub fn named(agent: &str, record: bool) -> Result<Http, reqwest::Error> {
         let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
+            .user_agent(agent)
             .gzip(true)
             .brotli(true)
             .connect_timeout(Duration::from_secs(5))
