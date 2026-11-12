@@ -325,7 +325,6 @@ impl Swarm {
         self.0.lock().unwrap().damaged.insert(id, pieces);
     }
 
-    #[cfg(test)]
     pub fn withhold(&self, id: TorrentId, pieces: u32) {
         self.0.lock().unwrap().unavailable.insert(id, pieces);
     }

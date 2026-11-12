@@ -90,8 +90,13 @@ impl Ports {
         if fake(env) {
             let rate =
                 env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
+            let swarm = fixture::swarm(rate);
+            // Torrents no peer sends a piece of, so a title play moves past them.
+            for id in env.var("TORRENTIAL_TEST_DEAD").unwrap_or_default().split(',').filter_map(|id| id.parse().ok()) {
+                swarm.withhold(id, u32::MAX);
+            }
             return Ok(Self {
-                engine: Box::new(engine_port::Fake::new(fixture::swarm(rate))),
+                engine: Box::new(engine_port::Fake::new(swarm)),
                 parse: engine_port::parse_fake,
                 search: Arc::new(fixture::search(owner::now())),
                 disk: Box::new(admission::RoomyDisk),
@@ -279,7 +284,11 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
         let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
-        let timing = titles::Timing::default();
+        let wait = env.var("TORRENTIAL_TEST_TITLE_WAIT").and_then(torrential_core::units::parse_duration);
+        let timing = match wait {
+            Some(wait) => titles::Timing { file_list: wait, first_bytes: wait, ..titles::Timing::default() },
+            None => titles::Timing::default(),
+        };
         let running =
             start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
