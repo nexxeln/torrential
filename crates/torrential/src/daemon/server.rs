@@ -204,7 +204,11 @@ async fn resolve_prefix(
     }
 }
 
-async fn release_source(ctx: &Ctx, release: Release, cached: Option<Arc<Metainfo>>) -> Result<Source, Error> {
+pub(super) async fn release_source(
+    ctx: &Ctx,
+    release: Release,
+    cached: Option<Arc<Metainfo>>,
+) -> Result<Source, Error> {
     if let Some(metainfo) = cached {
         return Ok(Source::Torrent { metainfo: (*metainfo).clone(), origin: Origin::Cache });
     }

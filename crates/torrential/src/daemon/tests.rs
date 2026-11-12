@@ -15,6 +15,7 @@ use super::engine_port::{
 use super::owner::OwnerConfig;
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
+use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
 use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
@@ -23,6 +24,11 @@ const ROOMY: Space = Space { device: 1, total: 1000 * GIB, free: 500 * GIB };
 const GIB_PIECE: u64 = GIB / 1024;
 const STALL: Duration = Duration::from_secs(1);
 const WRITES_STOP_WITHIN: Duration = Duration::from_secs(1);
+const TIMING: Timing = Timing {
+    file_list: Duration::from_millis(500),
+    first_bytes: Duration::from_millis(500),
+    budget: Duration::from_secs(20),
+};
 
 struct Harness {
     dir: tempfile::TempDir,
@@ -133,7 +139,8 @@ impl Harness {
             catalog: outside.catalog.clone(),
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
-        start(&tokio::runtime::Handle::current(), store, ports, config(dir.path()), "0.1.0".into(), 0).unwrap()
+        let handle = tokio::runtime::Handle::current();
+        start(&handle, store, ports, config(dir.path()), TIMING, "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -1422,7 +1429,7 @@ async fn a_selection_widened_while_the_engine_finishes_is_done_only_once_the_new
     );
 }
 
-const MIB: u64 = 1 << 20;
+pub(super) const MIB: u64 = 1 << 20;
 
 fn written(path: &std::path::Path, size: u64) -> Vec<u8> {
     let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();

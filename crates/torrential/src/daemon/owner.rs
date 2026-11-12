@@ -694,9 +694,16 @@ impl Owner {
                 patterns.push(pattern);
             }
         }
+        // A file already on disk is not the play's to delete, so a download over one is borrowed.
+        let into = dir.clone().unwrap_or_else(|| self.config.default_dir.clone());
+        let held = discard::held(&metainfo, &(0..count).map(|i| files.contains(&(i as u32))).collect::<Vec<_>>());
+        let lease = match held.iter().any(|p| into.join(p).symlink_metadata().is_ok()) {
+            true => Lease::Borrowed,
+            false => Lease::Owned,
+        };
+        let made = title.clone().map(|link| Linked { link: TitleLink { lease, ..link }, played: false });
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
-        let owned = title.clone().map(|link| Linked { link: TitleLink { lease: Lease::Owned, ..link }, played: false });
-        let id = self.get(get, owned.filter(|_| created == Created::Yes))?.job.id;
+        let id = self.get(get, made.filter(|_| created == Created::Yes))?.job.id;
         match (created, title) {
             (Created::No, Some(link)) if self.jobs[&id].record.title.is_none() => {
                 let link = TitleLink { lease: Lease::Borrowed, ..link };

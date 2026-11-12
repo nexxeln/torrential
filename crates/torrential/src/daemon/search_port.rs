@@ -185,7 +185,12 @@ fn compose(
     elapsed: Duration,
 ) -> SearchResult {
     let words: Vec<String> = query.text.split_whitespace().map(str::to_lowercase).collect();
-    let matches = |r: &Release| words.iter().all(|w| r.name.to_lowercase().contains(w.as_str()));
+    // A title's search keeps its releases in the catalog's order, each with what of it it holds.
+    let found = |r: &Release| match &query.wanted {
+        Some(wanted) => wanted.fit(&r.name).map(|named| Release { span: Some(named.span), ..r.clone() }),
+        None => words.iter().all(|w| r.name.to_lowercase().contains(w.as_str())).then(|| r.clone()),
+    };
+    let matches = |r: &Release| found(r).is_some();
     let listed_by = |r: &Release, source: &FakeSource| r.sources.first() == Some(&source.name);
     let sources = answered
         .iter()
@@ -198,8 +203,8 @@ fn compose(
         .collect();
     let matching: Vec<Release> = catalog
         .iter()
-        .filter(|r| matches(r) && answered.iter().any(|s| s.failure.is_none() && listed_by(r, s)))
-        .cloned()
+        .filter(|r| answered.iter().any(|s| s.failure.is_none() && listed_by(r, s)))
+        .filter_map(found)
         .collect();
     let total = matching.len() as u32;
     let releases = matching.into_iter().take(query.limit as usize).collect();

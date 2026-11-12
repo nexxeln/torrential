@@ -154,6 +154,7 @@ pub fn start(
     store: Store,
     ports: Ports,
     config: OwnerConfig,
+    timing: titles::Timing,
     version: String,
     http_port: u16,
 ) -> Result<Running, Error> {
@@ -182,7 +183,7 @@ pub fn start(
         version,
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
-        titles: titles::Titles { catalog: ports.catalog, shelf },
+        titles: titles::Titles::new(ports.catalog, shelf, timing),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })
@@ -278,7 +279,9 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
         let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
-        let running = start(&tokio::runtime::Handle::current(), store, ports, config, version.clone(), http_port)?;
+        let timing = titles::Timing::default();
+        let running =
+            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
