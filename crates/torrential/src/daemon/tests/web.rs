@@ -1066,6 +1066,47 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_player_plays() {
+    use torrential_core::protocol::{Request, Response, TitleRequest};
+    let film = torrent(0xb1, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264", &[("Night.1968.1080p.mkv", 2 * GIB)]);
+    let catalog = vec![titles::listed(&film, "archive.org", None)];
+    let script = vec![FakeSource::answers("archive.org", 0)];
+    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, Default::default()));
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    let ask = r#"{"video":"tt0063350"}"#;
+    let (status, _, body) = fetch(&h, "POST", "/api/title/play", &["Content-Type: application/json"], ask).await;
+    let steps: Vec<String> = lines(&body).iter().map(titles::step).collect();
+    let skipped = r#"b1b1b1 {"reason":"unplayable","container":"mkv"}"#;
+    assert_eq!(
+        (status, steps),
+        (
+            200,
+            vec![
+                "resolved tt0063350 Night of the Living Dead".to_string(),
+                "searched 1".into(),
+                "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.BluRay.x264".into(),
+                "check file_list".into(),
+                format!("skipped {skipped}"),
+                format!(
+                    "failed no_source: no source of Night of the Living Dead (1968) plays in the browser without \
+                     ffmpeg {:?}",
+                    [skipped]
+                ),
+            ]
+        )
+    );
+
+    let video = "tt0063350".parse().unwrap();
+    let Response::PlayTitle { reply, title } = h.ask(Request::PlayTitle(TitleRequest { video, source: None })).await
+    else {
+        panic!("the command line's play answers a title")
+    };
+    let streams: Vec<&str> = reply.streams.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!((reply.job.id, streams, title.tried), (film.info_hash.id(), vec!["Night.1968.1080p.mkv"], vec![]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_web_app_and_the_socket_read_the_same_title_page() {
     use torrential_core::protocol::{Request, Response};
     let h = Harness::new();

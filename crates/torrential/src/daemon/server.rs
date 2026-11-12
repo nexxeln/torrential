@@ -24,7 +24,7 @@ use super::owner::{
     Command, FileBytes, FilesInfo, Finish, GetCommand, MetaTarget, Origin, PlayCommand, Reply, Resolved, Source, Update,
 };
 use super::search_port::{Progress, SearchPort};
-use super::titles::attempt::{self, PlayTitle};
+use super::titles::attempt::{self, Containers, PlayTitle};
 use crate::machine::Detector;
 use crate::output::views::title_name;
 use crate::wire;
@@ -366,7 +366,7 @@ async fn play_title(
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let before: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
     let mut seen = Seen::default();
-    let ask = PlayTitle { video, pin, replace: None, playback: None, finish };
+    let ask = PlayTitle { video, pin, replace: None, playback: None, containers: Containers::Any, finish };
     attempt::run(ctx, ask, |step| {
         seen.note(&step);
         let _ = steps.send(step);

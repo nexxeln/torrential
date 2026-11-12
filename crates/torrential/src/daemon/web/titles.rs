@@ -15,7 +15,7 @@ use torrential_core::{
 use super::super::http::{Connection, Request};
 use super::super::owner::{Finish, now};
 use super::super::server::{self, Ctx};
-use super::super::titles::attempt::{self, PlayTitle};
+use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::{NDJSON, fail, line, number, required};
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
@@ -126,7 +126,7 @@ pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bo
     let ctx = conn.ctx;
     let ask = match super::body::<Play>(request) {
         Ok(Play { video, playback, source, replace }) => {
-            PlayTitle { video, pin: source, replace, playback, finish: Finish::Stream }
+            PlayTitle { video, pin: source, replace, playback, containers: Containers::Browser, finish: Finish::Stream }
         }
         Err(error) => return fail(conn, request, &error).await,
     };

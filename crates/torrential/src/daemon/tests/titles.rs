@@ -15,7 +15,7 @@ use super::super::owner::{Command, Created, Finish, Origin, PlayCommand, Source}
 use super::super::search_port::{self, FakeSource};
 use super::super::store::{Discard, Store};
 use super::super::titles::Timing;
-use super::super::titles::attempt::{self, PlayTitle};
+use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::{Harness, MIB, Outside, TIMING, prefix, torrent};
 
 /// A search result for a test torrent, listed by `source`.
@@ -150,6 +150,7 @@ impl Harness {
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace,
             playback: None,
+            containers: Containers::Browser,
             finish: Finish::Stream,
         };
         let mut steps = Vec::new();

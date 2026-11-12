@@ -32,7 +32,7 @@ const LOOK_AHEAD: usize = 2;
 const ANSWER_WITHIN: Duration = Duration::from_millis(100);
 /// How often a trial looks for the first bytes of its video.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
-/// What the browser plays without ffmpeg remuxing it.
+/// What a browser plays without ffmpeg remuxing it.
 const BROWSER_PLAYS: [&str; 4] = ["mp4", "m4v", "mov", "webm"];
 /// How long a title's search runs before a strong swarm from any index may go first. The quick
 /// indexes have answered by then, and a lawful catalog among them would lead.
@@ -47,7 +47,29 @@ pub struct PlayTitle {
     pub replace: Option<TorrentId>,
     /// What the caller's player decodes, in place of the preference in config.yaml.
     pub playback: Option<Playback>,
+    /// What the caller's player opens.
+    pub containers: Containers,
     pub finish: Finish,
+}
+
+/// The containers a caller's player opens.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Containers {
+    /// A browser's: MP4, M4V, MOV, and WebM, and any other once ffmpeg remuxes it.
+    Browser,
+    /// Any, as mpv, IINA, and VLC open. A download kept with `get` takes any too.
+    Any,
+}
+
+impl Containers {
+    /// Whether the file at `path` opens, when ffmpeg is there to `remux` it or not.
+    fn open(self, path: &str, remux: bool) -> bool {
+        let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase());
+        match self {
+            Containers::Any => true,
+            Containers::Browser => remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str())),
+        }
+    }
 }
 
 /// Plays `ask` and reports each step, the last being `playing` or `failed`. A download here that
@@ -372,7 +394,7 @@ impl Trial<'_> {
             _ => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
         };
         let remux = (ctx.web.tools)().ffmpeg.is_some();
-        let playable = video_of(&metainfo, title.video.episode, remux)?;
+        let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
 
         report(AttemptEvent::Check { check: Check::Start });
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));
@@ -491,9 +513,14 @@ fn seconds(elapsed: Duration) -> u32 {
     elapsed.as_secs_f64().round() as u32
 }
 
-/// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays. A
-/// torrent that holds only sample clips holds no video.
-fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Result<Playable, Box<Skip>> {
+/// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays in a
+/// player that opens `containers`. A torrent that holds only sample clips holds no video.
+fn video_of(
+    metainfo: &Metainfo,
+    episode: Option<Episode>,
+    containers: Containers,
+    remux: bool,
+) -> Result<Playable, Box<Skip>> {
     let listing: Vec<TorrentFile> = (0..)
         .zip(&metainfo.files)
         .map(|(index, f)| TorrentFile {
@@ -511,18 +538,12 @@ fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Resul
     };
     let playable = playable.filter(|p| !stream::is_sample(&listing[p.video as usize].path)).ok_or(Skip::NoVideo)?;
     let path = &listing[playable.video as usize].path;
-    if container_plays(path, remux) {
+    if containers.open(path, remux) {
         Ok(playable)
     } else {
         let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
         Err(Skip::Unplayable { container }.into())
     }
-}
-
-/// Whether the browser plays the file at `path`, directly or once ffmpeg remuxes it.
-fn container_plays(path: &str, remux: bool) -> bool {
-    let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase());
-    remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str()))
 }
 
 /// Whether a download under test has started: the video has bytes, or the download is done. A
@@ -669,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn the_video_is_the_film_or_the_episode_never_a_sample_and_plays_without_ffmpeg_only_in_a_browser_container() {
+    fn the_video_is_the_film_or_the_episode_never_a_sample_and_a_browser_without_ffmpeg_opens_only_its_containers() {
         let film = torrent("Night", &[("Night.mp4", 900), ("Night.en.srt", 9), ("Sample.mp4", 99)]);
         let pack = torrent(
             "Harbor.Lights.S01.1080p",
@@ -678,7 +699,7 @@ mod tests {
         let disc = torrent("Night DVD", &[("NIGHT.iso", 900), ("readme.txt", 9)]);
         let samples = torrent("Night", &[("Sample/Night.sample.mp4", 90), ("sample-night.mkv", 80)]);
         let episode = |season, episode| Some(Episode { season, episode });
-        let read = |m: &Metainfo, e, remux| video_of(m, e, remux).map(|p| (p.video, p.subtitles));
+        let read = |m: &Metainfo, e, remux| video_of(m, e, Containers::Browser, remux).map(|p| (p.video, p.subtitles));
         let table = [
             (read(&film, None, false), Ok((0, vec![1]))),
             (read(&pack, episode(1, 2), false), Ok((1, vec![2]))),
@@ -691,9 +712,11 @@ mod tests {
         for (n, (got, expected)) in table.into_iter().enumerate() {
             assert_eq!(got, expected, "row {n}");
         }
-        let plays = ["a.mp4", "a.M4V", "a.mov", "a.webm", "a.mkv", "a.avi", "mp4"].map(|p| container_plays(p, false));
-        assert_eq!(plays, [true, true, true, true, false, false, false]);
-        assert!(container_plays("a.mkv", true));
+        let paths = ["a.mp4", "a.M4V", "a.mov", "a.webm", "a.mkv", "a.avi", "mp4"];
+        let open = |containers: Containers, remux| paths.map(|p| containers.open(p, remux));
+        assert_eq!(open(Containers::Browser, false), [true, true, true, true, false, false, false]);
+        assert_eq!(open(Containers::Browser, true), [true; 7]);
+        assert_eq!(open(Containers::Any, false), [true; 7]);
     }
 
     #[test]

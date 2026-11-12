@@ -186,7 +186,7 @@ pub enum Skip {
     },
     /// No file reads as this film or episode, or the largest is a sample.
     NoVideo,
-    /// ffmpeg is missing and the file is not MP4 or WebM.
+    /// The video plays in a browser, ffmpeg is missing, and the file is not MP4, M4V, MOV, or WebM.
     Unplayable {
         container: String,
     },
