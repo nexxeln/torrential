@@ -955,9 +955,9 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
     post(&h, "/api/watched", watch("tt0063350", 1834.2, 5760.0)).await;
 
     let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "overview": null, "thumbnail": true });
-    let harbor =
-        json!({ "id": "tt9999901", "kind": "series", "name": "Harbor Lights", "year": 2019, "rating": 8.1f32 });
-    let night = json!({ "id": "tt0063350", "kind": "film", "name": "Night of the Living Dead", "year": 1968, "rating": 7.8f32 });
+    let harbor = json!({ "id": "tt9999901", "kind": "series", "name": "Harbor Lights", "year": 2019, "rating": 8.1 });
+    let night =
+        json!({ "id": "tt0063350", "kind": "film", "name": "Night of the Living Dead", "year": 1968, "rating": 7.8 });
     let (_, home) = get(&h, "/api/home").await;
     assert_eq!(
         home,

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::{Error, ErrorCode};
 use crate::title::Episode;
@@ -122,8 +122,14 @@ pub struct TitleCard {
     pub name: String,
     /// A film's year, or the year a series began.
     pub year: Option<u16>,
-    /// IMDb's rating, 0 to 10.
+    /// IMDb's rating, 0 to 10, written with the one decimal IMDb shows.
+    #[serde(serialize_with = "one_decimal")]
     pub rating: Option<f32>,
+}
+
+/// Writes 7.6 as `7.6`, which an `f32` would write as `7.599999904632568`.
+fn one_decimal<S: Serializer>(rating: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
+    rating.map(|rating| (f64::from(rating) * 10.0).round() / 10.0).serialize(s)
 }
 
 /// One title as the catalog describes it. Pictures are served by title ID, so only whether each
@@ -190,5 +196,21 @@ mod tests {
         for bad in ["", "tt12", "0063350", "tt006335x", "tt0903747:3", "tt0903747:3:5:1", "tt0903747:a:b"] {
             assert_eq!(bad.parse::<VideoRef>().unwrap_err().code, ErrorCode::InvalidRef, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_rating_is_written_with_one_decimal() {
+        let card = TitleCard {
+            id: "tt1727587".parse().unwrap(),
+            kind: Kind::Film,
+            name: "Sintel".into(),
+            year: Some(2010),
+            rating: Some(7.6),
+        };
+        let json = serde_json::to_string(&card).unwrap();
+        assert_eq!(json, r#"{"id":"tt1727587","kind":"film","name":"Sintel","year":2010,"rating":7.6}"#);
+        assert_eq!(serde_json::from_str::<TitleCard>(&json).unwrap(), card);
+        let unrated = serde_json::to_string(&TitleCard { rating: None, ..card }).unwrap();
+        assert_eq!(unrated, r#"{"id":"tt1727587","kind":"film","name":"Sintel","year":2010,"rating":null}"#);
     }
 }
