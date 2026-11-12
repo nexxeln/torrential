@@ -13,7 +13,8 @@ pub enum Choice {
     Iina,
     Mpv,
     Vlc,
-    /// Called with the video's URL as its last argument.
+    /// Called with the video's URL as its last argument. One named as a known player also gets
+    /// that player's flag for where to start.
     Program(PathBuf),
 }
 
@@ -151,13 +152,11 @@ fn command(player: &Player, launch: &Launch) -> (PathBuf, Vec<String>) {
             }
             args.extend(launch.language.map(|code| format!("--mpv-slang={code}")));
             args.push(format!("--mpv-force-media-title={}", launch.title));
-            args.extend(launch.start.map(|at| format!("--mpv-start={}", at.as_secs())));
         }
         Kind::Mpv => {
             args.extend(launch.subtitles.iter().map(|url| format!("--sub-file={url}")));
             args.extend(launch.language.map(|code| format!("--slang={code}")));
             args.push(format!("--force-media-title={}", launch.title));
-            args.extend(launch.start.map(|at| format!("--start={}", at.as_secs())));
         }
         Kind::Vlc => {
             // --sub-file reads its value as a local path, while each input slave may be a URL.
@@ -166,12 +165,38 @@ fn command(player: &Player, launch: &Launch) -> (PathBuf, Vec<String>) {
             }
             args.extend(launch.language.map(|code| format!("--sub-language={code}")));
             args.push(format!("--meta-title={}", launch.title));
-            args.extend(launch.start.map(|at| format!("--start-time={}", at.as_secs())));
         }
         Kind::Opener | Kind::Program => {}
     }
+    let starts_as = match player.kind {
+        Kind::Program => named(&player.program).unwrap_or(Kind::Program),
+        kind => kind,
+    };
+    args.extend(launch.start.and_then(|at| start_flag(starts_as, at)));
     args.push(launch.video.to_string());
     (player.program.clone(), args)
+}
+
+/// The known player a program's file name names, in any case: `mpv`, `iina` or its `iina-cli`,
+/// or `vlc`. An app's program inside its bundle is named as the app.
+fn named(program: &Path) -> Option<Kind> {
+    match program.file_name()?.to_str()?.to_ascii_lowercase().as_str() {
+        "mpv" => Some(Kind::Mpv),
+        "iina" | "iina-cli" => Some(Kind::Iina),
+        "vlc" => Some(Kind::Vlc),
+        _ => None,
+    }
+}
+
+/// The argument that starts a player of `kind` at `at`, for the players that have one.
+fn start_flag(kind: Kind, at: Duration) -> Option<String> {
+    let seconds = at.as_secs();
+    match kind {
+        Kind::Iina => Some(format!("--mpv-start={seconds}")),
+        Kind::Mpv => Some(format!("--start={seconds}")),
+        Kind::Vlc => Some(format!("--start-time={seconds}")),
+        Kind::Opener | Kind::Program => None,
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +288,41 @@ mod tests {
                 vec!["--no-stdin", "--mpv-force-media-title=Night", "--mpv-start=200", VIDEO],
                 vec!["--force-media-title=Night", "--start=200", VIDEO],
                 vec!["--meta-title=Night", "--start-time=200", VIDEO],
+                vec![VIDEO],
+                vec![VIDEO],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_program_given_as_a_path_starts_where_a_person_stopped_when_its_name_is_a_known_players() {
+        let started = |program: &str| {
+            let player = Player { kind: Kind::Program, program: program.into() };
+            let start = Some(Duration::from_secs_f64(200.9));
+            let launch = Launch { video: VIDEO, subtitles: vec![ENGLISH], language: Some("en"), title: "Night", start };
+            command(&player, &launch).1
+        };
+        let programs = [
+            "/opt/homebrew/bin/mpv",
+            "/usr/local/bin/MPV",
+            "/usr/local/bin/iina",
+            "/Applications/IINA.app/Contents/MacOS/iina-cli",
+            "/Applications/IINA.app/Contents/MacOS/IINA",
+            "/usr/bin/vlc",
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            "/usr/local/bin/mpv-wrapper",
+            "/usr/local/bin/play",
+        ];
+        assert_eq!(
+            programs.map(started),
+            [
+                vec!["--start=200", VIDEO],
+                vec!["--start=200", VIDEO],
+                vec!["--mpv-start=200", VIDEO],
+                vec!["--mpv-start=200", VIDEO],
+                vec!["--mpv-start=200", VIDEO],
+                vec!["--start-time=200", VIDEO],
+                vec!["--start-time=200", VIDEO],
                 vec![VIDEO],
                 vec![VIDEO],
             ]

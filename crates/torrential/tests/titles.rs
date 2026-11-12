@@ -406,6 +406,25 @@ fn play_starts_the_player_where_the_person_stopped() {
 }
 
 #[test]
+fn a_player_set_as_a_path_named_mpv_starts_where_the_person_stopped() {
+    let home = Home::new(&[]);
+    let stub = home.dir.path().join("bin/mpv");
+    std::fs::write(home.dir.path().join("th/config/config.yaml"), format!("player: {}\n", stub.display())).unwrap();
+    let first = home.json(&["play", "tt0063350", "--json"]);
+    let saved = r#"{"video": "tt0063350", "position": 200.5, "duration": 5760.0}"#;
+    assert_eq!(post_to_web(player_port(&first), "/api/watched", saved), "HTTP/1.1 200 OK");
+
+    let run = home.run(&["play", "tt0063350"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let argv = home.path("argv");
+    eventually("the player starts", Duration::from_secs(10), || argv.exists());
+    assert_eq!(
+        portless(&std::fs::read_to_string(&argv).unwrap()),
+        format!("--start=200\nhttp://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n")
+    );
+}
+
+#[test]
 fn source_plays_only_the_release_it_names() {
     let home = Home::new(&[]);
     let doc = home.json(&["play", "tt0063350", "--source", "b7f2", "--json"]);
