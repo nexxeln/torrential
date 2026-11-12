@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::job::TorrentFile;
+use crate::title::{self, Episode};
 
 /// Folders that hold the subtitles for every video in the torrent.
 const SUBTITLE_FOLDERS: [&str; 4] = ["sub", "subs", "subtitle", "subtitles"];
@@ -55,6 +56,17 @@ pub fn around(files: &[TorrentFile], video: u32) -> Option<Playable> {
         subtitles.retain(|f| f.path.to_lowercase().contains(&stem));
     }
     Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
+}
+
+/// The file of `episode` in a pack, plus the subtitle files that belong with it: the largest
+/// video, not a sample, whose own name, folder, or torrent reads as that episode.
+pub fn episode(files: &[TorrentFile], torrent: &str, episode: Episode) -> Option<Playable> {
+    let video = files
+        .iter()
+        .filter(|f| kind(&f.path) == Some(Kind::Video) && !is_sample(&f.path))
+        .filter(|f| title::episodes(&f.path, torrent).contains(&episode))
+        .max_by_key(|f| f.size)?;
+    around(files, video.index)
 }
 
 /// The subtitle files that belong with `video`, ordered by path, in a torrent with `features` videos.
@@ -209,6 +221,52 @@ mod tests {
         // No subtitle carries this name, so every one in its folder or a subtitle folder belongs.
         assert_eq!(chosen(7), Some((7, vec![8, 4])));
         assert_eq!(chosen(9), None);
+    }
+
+    #[test]
+    fn an_episode_is_the_file_in_the_pack_that_holds_it() {
+        let listed = |listing: &[(&str, u64)]| -> Vec<TorrentFile> {
+            (0..)
+                .zip(listing)
+                .map(|(index, &(path, size))| TorrentFile {
+                    index,
+                    path: path.into(),
+                    size,
+                    selected: false,
+                    verified: 0,
+                    risk: None,
+                })
+                .collect()
+        };
+        let season = listed(&[
+            ("Show.S01E01.mkv", 1_000_000_000),
+            ("Show.S01E02.mkv", 2_000_000_000),
+            ("Show.S01E01.en.srt", 40_000),
+            ("Show.S01E02.en.srt", 40_000),
+            ("Subs/Show.S01E01/2_English.srt", 40_000),
+            ("Sample/Show.S01E03.sample.mkv", 30_000_000),
+            ("Show.S01E04E05.mkv", 2_500_000_000),
+            ("Extras/Making Of.mkv", 500_000_000),
+        ]);
+        let found = |files: &[TorrentFile], torrent: &str, season: u32, number: u32| {
+            episode(files, torrent, Episode { season, episode: number }).map(|p| (p.video, p.subtitles))
+        };
+        let pack = "Show.S01.1080p.WEB-DL.x265";
+        assert_eq!(found(&season, pack, 1, 1), Some((0, vec![2, 4])));
+        assert_eq!(found(&season, pack, 1, 2), Some((1, vec![3])));
+        assert_eq!(found(&season, pack, 1, 3), None, "only a sample holds it");
+        assert_eq!(found(&season, pack, 1, 5), Some((6, vec![2, 3, 4])));
+        assert_eq!(found(&season, pack, 2, 1), None);
+
+        let series = listed(&[
+            ("Show Name/Season 1/01 - Pilot.mkv", 900_000_000),
+            ("Show Name/Season 2/01 - Return.mkv", 1_100_000_000),
+            ("Show Name/Season 2/01 - Return.srt", 50_000),
+        ]);
+        assert_eq!(found(&series, "Show Name Complete", 2, 1), Some((1, vec![2])));
+        assert_eq!(found(&series, "Show Name Complete", 1, 1), Some((0, vec![])));
+        let single = listed(&[("bb305.mkv", 700_000_000), ("bb305.srt", 30_000)]);
+        assert_eq!(found(&single, "Breaking.Bad.S03E05.720p.HDTV.x264-IMMERSE", 3, 5), Some((0, vec![1])));
     }
 
     #[test]
