@@ -957,6 +957,22 @@ fn a_small_encode_that_streams_comfortably_is_in_band() {
         played(&friday(), Profile::default(), &runs),
         ["His Girl Friday (1940) 1080p BRRip x264 -YTS", criterion]
     );
+    let runs = [fresh(
+        &knaben(),
+        vec![
+            video(0x92, "Night Of The Living Dead 1968 720p BRRip x264-x0r", Some(22), 1_700_000_000),
+            video(0x93, "Night of the Living Dead (1968) 2160p BRRip 5.1 10Bit x265 -YTS", Some(50), 4_700_000_000),
+            video(0x94, "Night of the Living Dead (1968) 1080p BRRip x264 -YTS", Some(232), 1_600_000_000),
+        ],
+    )];
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
+        [
+            "Night of the Living Dead (1968) 1080p BRRip x264 -YTS",
+            "Night of the Living Dead (1968) 2160p BRRip 5.1 10Bit x265 -YTS",
+            "Night Of The Living Dead 1968 720p BRRip x264-x0r",
+        ]
+    );
 }
 
 fn sintel() -> Wanted {
