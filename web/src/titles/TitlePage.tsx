@@ -7,6 +7,7 @@ import { Button } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Spinner } from "../ui/Spinner";
 import { Episodes, seasonOrder } from "./Episodes";
+import { Logo } from "./Logo";
 import { Picture } from "./Picture";
 import { Sources } from "./Sources";
 import { useTitle } from "./useTitle";
@@ -101,12 +102,7 @@ function Name({ page }: { page: Title }) {
   return (
     <h1 className="flex min-h-24 items-end sm:min-h-32">
       {page.art.logo ? (
-        <Picture
-          src={artUrl(page.id, "logo")}
-          alt={page.name}
-          className="h-24 w-auto max-w-[min(100%,--spacing(96))] object-contain object-left-bottom drop-shadow-lg sm:h-32"
-          fallback={name}
-        />
+        <Logo src={artUrl(page.id, "logo")} alt={page.name} fallback={name} />
       ) : (
         name
       )}
