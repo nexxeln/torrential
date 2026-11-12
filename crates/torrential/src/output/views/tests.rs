@@ -1009,3 +1009,57 @@ fn a_held_start_says_why_and_for_how_long() {
         ]
     );
 }
+
+#[test]
+fn a_title_play_says_each_step_and_why_it_skipped_a_source_in_plain_words() {
+    use torrential_core::{AttemptEvent, Check, Kind, Skip, TitleCard};
+    let card = TitleCard {
+        id: "tt9999901".parse().unwrap(),
+        kind: Kind::Series,
+        name: "Harbor Lights".into(),
+        year: Some(2019),
+        rating: None,
+    };
+    let mut pack = release(ReleaseId::Torrent(tid("a1b2c3")), "Harbor.Lights.S01.1080p.WEB.x264");
+    pack.size = Some(9 * GIB);
+    let id = pack.id;
+    let skipped = |reason| AttemptEvent::Skipped { release: id, reason };
+    let full = Error::new(ErrorCode::DiskFull, "not enough space for Harbor.Lights.S01");
+    let steps = [
+        AttemptEvent::Resolved { video: "tt9999901:1:2".parse().unwrap(), title: card, episode: None },
+        AttemptEvent::Searched { found: 1, sources: Vec::new() },
+        AttemptEvent::Trying { rank: 1, of: 1, release: pack.clone() },
+        AttemptEvent::Check { check: Check::FileList },
+        skipped(Skip::NoFileList { waited_s: 20 }),
+        skipped(Skip::NoVideo),
+        skipped(Skip::Unplayable { container: "mkv".into() }),
+        skipped(Skip::TooLarge { error: full }),
+        skipped(Skip::NoData { waited_s: 30 }),
+        skipped(Skip::Stalled),
+        AttemptEvent::Playing {
+            video: "tt9999901:1:2".parse().unwrap(),
+            release: pack,
+            job: tid("a1b2c3"),
+            file: 1,
+            resume_at: None,
+        },
+    ];
+    let lines: Vec<Option<String>> = steps.iter().map(|s| step(s, "Playing")).collect();
+    assert_eq!(
+        lines,
+        [
+            Some("Finding sources of Harbor Lights S01E02"),
+            Some("Found 1 source"),
+            Some("Trying 1 of 1: a1b2c3 Harbor.Lights.S01.1080p.WEB.x264, 1080p h264, 9.0 GiB"),
+            None,
+            Some("Skipped a1b2c3: no peer sent its file list in 20s"),
+            Some("Skipped a1b2c3: none of its files is the video"),
+            Some("Skipped a1b2c3: its .mkv file needs ffmpeg, which is not installed"),
+            Some("Skipped a1b2c3: not enough space for Harbor.Lights.S01"),
+            Some("Skipped a1b2c3: no data arrived in 30s"),
+            Some("Skipped a1b2c3: it stalled"),
+            Some("Playing a1b2c3 Harbor.Lights.S01.1080p.WEB.x264, 1080p h264, 9.0 GiB"),
+        ]
+        .map(|line| line.map(String::from))
+    );
+}
