@@ -102,6 +102,8 @@ struct FakeState {
     delay: Duration,
     script: Vec<FakeSource>,
     recent: Vec<Release>,
+    /// How many searches ran.
+    searches: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +131,19 @@ impl Fake {
 
     pub fn scripted(catalog: Vec<Release>, mut script: Vec<FakeSource>, torrents: BTreeMap<String, Vec<u8>>) -> Self {
         script.sort_by_key(|s| s.after);
-        Self(Arc::new(Mutex::new(FakeState { catalog, torrents, delay: Duration::ZERO, script, recent: Vec::new() })))
+        Self(Arc::new(Mutex::new(FakeState {
+            catalog,
+            torrents,
+            delay: Duration::ZERO,
+            script,
+            recent: Vec::new(),
+            searches: 0,
+        })))
+    }
+
+    #[cfg(test)]
+    pub fn searches(&self) -> usize {
+        self.0.lock().unwrap().searches
     }
 
     #[cfg(test)]
@@ -143,7 +157,8 @@ impl Fake {
     }
 
     fn parts(&self) -> (Vec<Release>, Vec<FakeSource>, Duration) {
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        state.searches += 1;
         (state.catalog.clone(), state.script.clone(), state.delay)
     }
 

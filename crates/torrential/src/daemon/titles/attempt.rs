@@ -38,12 +38,11 @@ pub struct PlayTitle {
     pub playback: Option<Playback>,
 }
 
-/// Plays `ask` and reports each step, the last being `playing` or `failed`. Dropping the future
-/// stops the play, and the download under test is discarded if the play made it.
+/// Plays `ask` and reports each step, the last being `playing` or `failed`. A download here that
+/// holds the video plays first, before any search. Dropping the future stops the play, and the
+/// download under test is discarded if the play made it.
 pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) {
-    let started = Instant::now();
-    let timing = ctx.titles.timing;
-    let end = started + timing.budget;
+    let end = Instant::now() + ctx.titles.timing.budget;
     if let Some(id) = ask.replace {
         ctx.titles.failed(ReleaseId::Torrent(id));
     }
@@ -56,62 +55,48 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         title: title.details.card.clone(),
         episode: title.episode.clone(),
     });
-    let preferences = (ctx.web.preferences)();
-    let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
-    let rank_for = || ctx.machine.profile(preferences);
-    let mut result = match ctx.search.search(title.query(preferences), &rank_for).await {
-        Ok(result) => result,
-        Err(error) => return report(AttemptEvent::Failed { error, tried: Vec::new() }),
-    };
-    server::record(ctx, &mut result);
-    report(AttemptEvent::Searched { found: result.releases.len() as u32, sources: result.sources });
-
     let jobs = match ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await {
         Ok(jobs) => jobs,
         Err(error) => return report(AttemptEvent::Failed { error, tried: Vec::new() }),
     };
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
-    let linked = jobs.iter().filter_map(|job| holding(job, &title.video)).collect();
     let line = Line {
         here: &here,
         failed_lately: &|id| ctx.titles.failed_lately(id),
         replace: ask.replace,
         pin: ask.pin.as_ref(),
     };
-    let candidates = line.order(linked, result.releases);
-    let of = candidates.len() as u32;
-    let mut tried = Vec::new();
-    for (rank, release) in (1..).zip(candidates) {
+    let mut walk = Walk { ctx, title: &title, replace: ask.replace, end, tried: Vec::new() };
+    let held = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. }));
+    let held = held.filter_map(|j| holding(j, &title.video)).filter(|r| !(line.failed_lately)(&r.id)).collect();
+    if let Some(release) = line.order(held, Vec::new(), &[]).into_iter().next()
+        && walk.try_source(release, 1, &mut report).await
+    {
+        return;
+    }
+
+    let preferences = (ctx.web.preferences)();
+    let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
+    let rank_for = || ctx.machine.profile(preferences);
+    let mut result = match ctx.search.search(title.query(preferences), &rank_for).await {
+        Ok(result) => result,
+        Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
+    };
+    server::record(ctx, &mut result);
+    report(AttemptEvent::Searched { found: result.releases.len() as u32, sources: result.sources });
+    let linked = jobs.iter().filter_map(|job| holding(job, &title.video)).collect();
+    let candidates = line.order(linked, result.releases, &walk.tried);
+    let of = (walk.tried.len() + candidates.len()) as u32;
+    for release in candidates {
         if Instant::now() >= end {
             break;
         }
-        report(AttemptEvent::Trying { rank, of, release: release.clone() });
-        let mut trial = Trial { owner: &ctx.owner, undo: None };
-        match trial.run(ctx, &title, &release, end, &mut report).await {
-            Ok((job, file)) => {
-                trial.undo = None;
-                let id = job.id;
-                if let Err(error) = ctx.owner.ask(|reply| Command::Played { id, reply }).await {
-                    return report(AttemptEvent::Failed { error, tried });
-                }
-                let resume_at = resume_at(ctx, &title.video);
-                report(AttemptEvent::Playing { video: title.video.clone(), release, job: id, file, resume_at });
-                if let Some(old) = ask.replace.filter(|old| *old != id) {
-                    let _ = ctx.owner.ask(|reply| Command::Pause { refs: vec![old.to_hex()], reply }).await;
-                }
-                return;
-            }
-            Err(reason) => {
-                let reason = *reason;
-                trial.undo().await;
-                ctx.titles.failed(release.id);
-                report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
-                tried.push(Tried { release: release.id, reason });
-            }
+        if walk.try_source(release, of, &mut report).await {
+            return;
         }
     }
-    let error = failure(&title.name(), &tried, ask.pin.is_some(), ask.replace.is_some());
-    report(AttemptEvent::Failed { error, tried });
+    let error = failure(&title.name(), &walk.tried, ask.pin.is_some(), ask.replace.is_some());
+    report(AttemptEvent::Failed { error, tried: walk.tried });
 }
 
 /// Where the person stopped `video`, unless they finished it.
@@ -141,6 +126,51 @@ fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
     })
 }
 
+/// A title play's way through its sources.
+struct Walk<'a> {
+    ctx: &'a Ctx,
+    title: &'a Resolved,
+    replace: Option<TorrentId>,
+    end: Instant,
+    /// The sources that did not play, in the order they were tried.
+    tried: Vec<Tried>,
+}
+
+impl Walk<'_> {
+    /// Tries `release` as the next of `of` sources, and answers whether the play is over: it
+    /// plays, or the engine is going away. A source that does not play joins `tried`.
+    async fn try_source(&mut self, release: Release, of: u32, report: &mut (impl FnMut(AttemptEvent) + Send)) -> bool {
+        let ctx = self.ctx;
+        report(AttemptEvent::Trying { rank: self.tried.len() as u32 + 1, of, release: release.clone() });
+        let mut trial = Trial { owner: &ctx.owner, undo: None };
+        match trial.run(ctx, self.title, &release, self.end, report).await {
+            Ok((job, file)) => {
+                trial.undo = None;
+                let id = job.id;
+                if let Err(error) = ctx.owner.ask(|reply| Command::Played { id, reply }).await {
+                    report(AttemptEvent::Failed { error, tried: std::mem::take(&mut self.tried) });
+                    return true;
+                }
+                let video = self.title.video.clone();
+                let resume_at = resume_at(ctx, &video);
+                report(AttemptEvent::Playing { video, release, job: id, file, resume_at });
+                if let Some(old) = self.replace.filter(|old| *old != id) {
+                    let _ = ctx.owner.ask(|reply| Command::Pause { refs: vec![old.to_hex()], reply }).await;
+                }
+                true
+            }
+            Err(reason) => {
+                let reason = *reason;
+                trial.undo().await;
+                ctx.titles.failed(release.id);
+                report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
+                self.tried.push(Tried { release: release.id, reason });
+                false
+            }
+        }
+    }
+}
+
 /// What decides the order sources are tried in.
 struct Line<'a> {
     /// The downloads on this machine.
@@ -153,10 +183,10 @@ struct Line<'a> {
 impl Line<'_> {
     /// The releases to try, best first: downloads on this machine that hold the video, then the
     /// ranked releases, and last those that failed lately. Of the ranked ones only the top are
-    /// looked at, and only the first few are tried. The stalled download is never tried, and a
-    /// pinned release is the only one.
-    fn order(&self, linked: Vec<Release>, ranked: Vec<Release>) -> Vec<Release> {
-        let mut seen = HashSet::new();
+    /// looked at, and only the first few are tried, counting those `tried` already. The stalled
+    /// download and the tried ones are never tried again, and a pinned release is the only one.
+    fn order(&self, linked: Vec<Release>, ranked: Vec<Release>, tried: &[Tried]) -> Vec<Release> {
+        let mut seen: HashSet<ReleaseId> = tried.iter().map(|t| t.release).collect();
         let considered = ranked.into_iter().take(MOST_CONSIDERED);
         let mut line: Vec<Release> = linked
             .into_iter()
@@ -167,7 +197,7 @@ impl Line<'_> {
             .collect();
         let here = |r: &Release| matches!(r.id, ReleaseId::Torrent(id) if self.here.contains(&id));
         line.sort_by_key(|r| ((self.failed_lately)(&r.id), !here(r)));
-        line.truncate(MOST_TRIED);
+        line.truncate(MOST_TRIED.saturating_sub(tried.len()));
         line
     }
 }
@@ -437,9 +467,11 @@ mod tests {
                 replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
                 pin: pin.as_ref(),
             };
-            numbers(
-                line.order(linked.iter().map(|n| release(*n)).collect(), ranked.iter().map(|n| release(*n)).collect()),
-            )
+            numbers(line.order(
+                linked.iter().map(|n| release(*n)).collect(),
+                ranked.iter().map(|n| release(*n)).collect(),
+                &[],
+            ))
         };
         let many: Vec<u8> = (1..=20).collect();
         let late: Vec<u8> = [vec![2], (20..=40).collect()].concat();
@@ -456,6 +488,10 @@ mod tests {
         for (replace, pin, linked, ranked, expected) in table {
             assert_eq!(order(replace, pin, linked, ranked), expected, "linked {linked:?}, ranked {ranked:?}");
         }
+        let line = Line { here: &here, failed_lately: &failed_lately, replace: None, pin: None };
+        let tried = [Tried { release: release(1).id, reason: Skip::NoVideo }];
+        let ranked = many.iter().map(|n| release(*n)).collect();
+        assert_eq!(numbers(line.order(Vec::new(), ranked, &tried)), [3, 4, 5, 6, 7], "six in all, the tried one gone");
     }
 
     fn torrent(name: &str, files: &[(&str, u64)]) -> Metainfo {

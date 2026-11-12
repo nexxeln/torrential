@@ -409,6 +409,68 @@ async fn a_download_made_by_hand_is_tried_first_and_kept_when_it_does_not_start(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_that_holds_the_film_plays_before_any_search() {
+    let (h, night) = night();
+    h.play_for(&night[3], &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(
+        h.play_title("tt0063350", None, None).await,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "trying 1 of 1 night_of_the_living_dead",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 a4a4a4 file 0 at null",
+        ]
+    );
+    assert_eq!(h.search.searches(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_that_does_not_start_is_followed_by_the_search_and_never_tried_again() {
+    let (h, night) = night();
+    h.play_for(&night[2], &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(
+        h.play_title("tt0063350", None, None).await,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
+            "searched 4",
+            "trying 2 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
+            "check file_list",
+            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
+            "trying 3 of 4 Night.of.the.Living.Dead.1968.DVD9",
+            "check file_list",
+            r#"skipped a2a2a2 {"reason":"no_video"}"#,
+            "trying 4 of 4 night_of_the_living_dead",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 a4a4a4 file 0 at null",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
+    let (h, night) = night();
+    h.play_for(&night[2], &[0], Some("tt0063350")).await.unwrap();
+    h.until("it stops with no source", |jobs| jobs[0].status.name() == "error").await;
+    assert_eq!(
+        h.play_title("tt0063350", None, None).await[..3],
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 4",
+            "trying 1 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_paused_download_a_trial_resumes_is_paused_again_when_it_does_not_start() {
     let (h, night) = night();
     h.get(h.torrent_file(&night[2]), &[]).await.unwrap();
