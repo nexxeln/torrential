@@ -517,7 +517,7 @@ fn first_bytes(status: &JobStatus, video_bytes: u64, waited: Duration, within: D
 
 /// Why no source played `name`.
 fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error {
-    let every = |skip: fn(&Skip) -> bool| !tried.is_empty() && tried.iter().all(|t| skip(&t.reason));
+    let every = |skip: fn(&Skip) -> bool| tried.iter().all(|t| skip(&t.reason));
     if tried.is_empty() {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} was found"))
             .with_hint("search the torrents for it by name");

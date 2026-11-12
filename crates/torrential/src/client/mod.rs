@@ -223,10 +223,13 @@ fn get(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path, en
 /// files and folders take a torrent.
 fn get_title(engine: impl FnOnce() -> Result<Conn, Error>, args: GetArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
     let video = titles::video(&args.reference, args.episode.as_deref())?;
-    let torrent_only =
-        [(!args.files.is_empty(), "--files"), (args.dir.is_some(), "--dir"), (args.max_size.is_some(), "--max-size")];
-    let given = torrent_only.into_iter().chain([(args.dry_run, "--dry-run")]).find(|(given, _)| *given);
-    if let Some((_, flag)) = given {
+    let torrent_only = [
+        (!args.files.is_empty(), "--files"),
+        (args.dir.is_some(), "--dir"),
+        (args.max_size.is_some(), "--max-size"),
+        (args.dry_run, "--dry-run"),
+    ];
+    if let Some((_, flag)) = torrent_only.into_iter().find(|(given, _)| *given) {
         return Err(torrential_core::id::not_a_torrent(&video, flag));
     }
     let (exit, job) = titles::get(&mut engine()?, TitleRequest { video, source: args.source }, mode)?;

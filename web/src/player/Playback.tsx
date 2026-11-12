@@ -57,6 +57,12 @@ const DOUBLE_MS = 220;
 /** Scroll-wheel distance for one 5% step of volume. */
 const WHEEL_STEP = 60;
 const HINT_MS = 12000;
+/** What N and P say when nothing plays after or before, as `[after, before]`. */
+const ENDS = {
+  episode: ["This is the last episode", "This is the first episode"],
+  film: ["Nothing plays after this film", "Nothing plays before this film"],
+  torrent: ["This is the last video of the torrent", "This is the first video of the torrent"],
+} as const;
 
 /** A name for what plays, over the picture. */
 export interface Heading {
@@ -370,12 +376,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const goNext = next?.go ?? null;
   const goPrevious = previous?.go ?? null;
   const multiple = !titled && videos.length > 1;
-  const ends =
-    titled?.kind === "episode"
-      ? ["This is the last episode", "This is the first episode"]
-      : titled
-        ? ["Nothing plays after this film", "Nothing plays before this film"]
-        : ["This is the last video of the torrent", "This is the first video of the torrent"];
+  const ends = ENDS[titled?.kind ?? "torrent"];
 
   const run = useCallback(
     (action: Command) => {
@@ -400,7 +401,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           return toggleFullscreen();
         case "file": {
           const go = action.direction === 1 ? goNext : goPrevious;
-          return go ? go() : feedback.note(action.direction === 1 ? ends[0]! : ends[1]!);
+          return go ? go() : feedback.note(action.direction === 1 ? ends[0] : ends[1]);
         }
         case "subtitles":
           if (subtitles.toggle() === "none") {

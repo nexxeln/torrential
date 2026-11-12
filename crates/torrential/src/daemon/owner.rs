@@ -709,10 +709,8 @@ impl Owner {
         // A file already on disk is not the play's to delete, so a download over one is borrowed.
         let into = dir.clone().unwrap_or_else(|| self.config.default_dir.clone());
         let held = discard::held(&metainfo, &(0..count).map(|i| files.contains(&(i as u32))).collect::<Vec<_>>());
-        let lease = match held.iter().any(|p| into.join(p).symlink_metadata().is_ok()) {
-            true => Lease::Borrowed,
-            false => Lease::Owned,
-        };
+        let on_disk = held.iter().any(|p| into.join(p).symlink_metadata().is_ok());
+        let lease = if on_disk { Lease::Borrowed } else { Lease::Owned };
         let made = title.clone().map(|link| Linked { link: TitleLink { lease, ..link }, played: false });
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
         let id = self.get(get, made.filter(|_| created == Created::Yes))?.job.id;
