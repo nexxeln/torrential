@@ -15,7 +15,8 @@ pub(crate) struct Http {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum FetchError {
-    Timeout,
+    /// No answer came in the time the fetch waited.
+    Timeout(Duration),
     Status(u16),
     Connect(String),
     TooLarge(usize),
@@ -61,8 +62,10 @@ impl Http {
     }
 
     pub async fn fetch(&self, url: &Url, cap: usize, deadline: Instant, retry: Retry) -> Result<Vec<u8>, FetchError> {
-        let body =
-            timeout_at(deadline, self.fetch_by(url, cap, deadline, retry)).await.unwrap_or(Err(FetchError::Timeout))?;
+        let started = Instant::now();
+        let body = timeout_at(deadline, self.fetch_by(url, cap, deadline, retry, started))
+            .await
+            .unwrap_or_else(|_| Err(FetchError::Timeout(started.elapsed())))?;
         if let Some(recorded) = &self.recorded {
             recorded.lock().unwrap_or_else(|e| e.into_inner()).push((url.to_string(), body.clone()));
         }
@@ -76,32 +79,41 @@ impl Http {
             .unwrap_or_default()
     }
 
-    async fn fetch_by(&self, url: &Url, cap: usize, deadline: Instant, retry: Retry) -> Result<Vec<u8>, FetchError> {
+    async fn fetch_by(
+        &self,
+        url: &Url,
+        cap: usize,
+        deadline: Instant,
+        retry: Retry,
+        started: Instant,
+    ) -> Result<Vec<u8>, FetchError> {
         const RETRY_PAUSE: Duration = Duration::from_millis(200);
         const MIN_RETRY: Duration = Duration::from_millis(600);
         let left = || deadline.saturating_duration_since(Instant::now());
         let join_at = Instant::now() + left() * 3 / 5;
         let can_join = retry == Retry::Once && left() * 2 / 5 > MIN_RETRY;
-        let first = self.respond(url);
+        let first = self.respond(url, started);
         tokio::pin!(first);
         let (response, retried) = tokio::select! {
             response = &mut first => (response, false),
-            _ = tokio::time::sleep_until(join_at), if can_join => (first_ok(first, self.respond(url)).await, true),
+            _ = tokio::time::sleep_until(join_at), if can_join => {
+                (first_ok(first, self.respond(url, started)).await, true)
+            }
         };
         let response = match response {
             Err(FetchError::Status(status))
                 if status >= 500 && retry == Retry::Once && !retried && left() > MIN_RETRY =>
             {
                 tokio::time::sleep(RETRY_PAUSE).await;
-                self.respond(url).await
+                self.respond(url, started).await
             }
             other => other,
         }?;
-        read(response, cap).await
+        read(response, cap, started).await
     }
 
-    async fn respond(&self, url: &Url) -> Result<reqwest::Response, FetchError> {
-        let response = self.client.get(url.clone()).send().await.map_err(classify)?;
+    async fn respond(&self, url: &Url, started: Instant) -> Result<reqwest::Response, FetchError> {
+        let response = self.client.get(url.clone()).send().await.map_err(|e| classify(e, started))?;
         let status = response.status();
         if !status.is_success() {
             return Err(FetchError::Status(status.as_u16()));
@@ -110,12 +122,12 @@ impl Http {
     }
 }
 
-async fn read(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, FetchError> {
+async fn read(mut response: reqwest::Response, cap: usize, started: Instant) -> Result<Vec<u8>, FetchError> {
     if response.content_length().is_some_and(|len| len > cap as u64) {
         return Err(FetchError::TooLarge(cap));
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(classify)? {
+    while let Some(chunk) = response.chunk().await.map_err(|e| classify(e, started))? {
         if body.len() + chunk.len() > cap {
             return Err(FetchError::TooLarge(cap));
         }
@@ -132,9 +144,11 @@ async fn first_ok<T, E>(a: impl Future<Output = Result<T, E>>, b: impl Future<Ou
     }
 }
 
-fn classify(err: reqwest::Error) -> FetchError {
+/// `err` as a fetch error. A timeout, such as connecting taking longer than the client allows,
+/// says how long the fetch begun at `started` waited.
+fn classify(err: reqwest::Error, started: Instant) -> FetchError {
     if err.is_timeout() {
-        return FetchError::Timeout;
+        return FetchError::Timeout(started.elapsed());
     }
     let decode = err.is_decode();
     let err = err.without_url();
@@ -149,4 +163,22 @@ fn classify(err: reqwest::Error) -> FetchError {
     }
     let reason = parts.join(": ");
     if decode { FetchError::Decode(reason) } else { FetchError::Connect(reason) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_fetch_with_no_answer_says_how_long_it_waited() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/a.torrent", listener.local_addr().unwrap())).unwrap();
+        let held = tokio::spawn(async move { listener.accept().await });
+        let http = Http::new(false).unwrap();
+        let error = http.fetch(&url, 1 << 20, Instant::now() + Duration::from_millis(1200), Retry::Never).await;
+        let Err(FetchError::Timeout(waited)) = error else { panic!("no answer is a timeout, not {error:?}") };
+        assert!((1200..1500).contains(&waited.as_millis()), "{waited:?}");
+        assert_eq!(crate::fetch_reason(FetchError::Timeout(waited)), "no response in 1 second");
+        held.abort();
+    }
 }

@@ -174,7 +174,7 @@ impl Failure {
 impl From<FetchError> for Failure {
     fn from(e: FetchError) -> Self {
         match e {
-            FetchError::Timeout => Self::Timeout,
+            FetchError::Timeout(_) => Self::Timeout,
             FetchError::Status(status) => Self::Http(status),
             FetchError::Connect(reason) => Self::Connect(reason),
             FetchError::TooLarge(cap) => Self::BadResponse(format!("response larger than {cap} bytes")),

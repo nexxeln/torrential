@@ -256,11 +256,8 @@ impl Search {
         // A private tracker may count each request for a .torrent as a grab.
         let body = self.inner.http.fetch(&url, CAP, Instant::now() + WITHIN, Retry::Never).await;
         body.map_err(|e| {
-            Error::new(
-                ErrorCode::FetchFailed,
-                format!("could not fetch the .torrent file: {}", fetch_reason(e, WITHIN)),
-            )
-            .with_hint("check the network connection, or download by magnet link")
+            Error::new(ErrorCode::FetchFailed, format!("could not fetch the .torrent file: {}", fetch_reason(e)))
+                .with_hint("check the network connection, or download by magnet link")
         })
     }
 
@@ -343,9 +340,12 @@ impl Inner {
     }
 }
 
-fn fetch_reason(e: FetchError, within: Duration) -> String {
+fn fetch_reason(e: FetchError) -> String {
     match e {
-        FetchError::Timeout => format!("no response within {} seconds", within.as_secs()),
+        FetchError::Timeout(waited) => match waited.as_secs_f64().round() as u64 {
+            1 => "no response in 1 second".to_string(),
+            seconds => format!("no response in {seconds} seconds"),
+        },
         FetchError::Status(status) => format!("HTTP {status}"),
         FetchError::Connect(reason) | FetchError::Decode(reason) => text::truncate(&text::sanitize(&reason), 160),
         FetchError::TooLarge(cap) => format!("larger than {} MiB", cap >> 20),

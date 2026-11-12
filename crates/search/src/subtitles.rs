@@ -195,7 +195,7 @@ impl Online {
         let url = Url::parse(&subtitle.url).ok().filter(|url| matches!(url.scheme(), "https" | "http"));
         let url = url.ok_or_else(|| failed("its address is not a web address".into()))?;
         let fetched = self.http.get(&url, LARGEST_SUBTITLE, Instant::now() + FETCH_WITHIN).await;
-        fetched.map_err(|e| failed(crate::fetch_reason(e, FETCH_WITHIN)))
+        fetched.map_err(|e| failed(crate::fetch_reason(e)))
     }
 }
 

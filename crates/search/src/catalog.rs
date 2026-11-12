@@ -460,7 +460,7 @@ fn turned_off(why: &str) -> Error {
 }
 
 fn failed(what: &str, e: FetchError) -> Error {
-    Error::new(ErrorCode::FetchFailed, format!("cannot {what}: {}", crate::fetch_reason(e, LOOKUP_WITHIN)))
+    Error::new(ErrorCode::FetchFailed, format!("cannot {what}: {}", crate::fetch_reason(e)))
         .with_hint("try again in a moment")
 }
 
