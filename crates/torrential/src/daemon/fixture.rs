@@ -225,6 +225,7 @@ pub fn search(now: i64) -> search_port::Fake {
             info_url: archive.then(|| format!("https://archive.org/details/{}", t.name)),
             span: None,
             swarm: None,
+            failed: None,
         });
     }
     let script = vec![

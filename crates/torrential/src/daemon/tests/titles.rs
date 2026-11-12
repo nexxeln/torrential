@@ -36,6 +36,7 @@ pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) ->
         info_url: None,
         span: None,
         swarm: None,
+        failed: None,
     }
 }
 

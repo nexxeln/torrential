@@ -282,6 +282,26 @@ fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
 }
 
 #[test]
+fn sources_lists_a_release_that_failed_lately_last_and_says_why() {
+    let home = Home::new(&[("TORRENTIAL_TEST_DEAD", ARCHIVE), ("TORRENTIAL_TEST_TITLE_WAIT", "1s")]);
+    assert_eq!(home.run(&["play", "tt0063350", "--source", "4c1e9a", "--json"]).code, 7);
+    let doc = home.json(&["sources", "tt0063350", "--json"]);
+    let releases: Vec<String> = doc["result"]["releases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| format!("{} {}", &r["id"].as_str().unwrap()[..6], r["failed"]))
+        .collect();
+    assert_eq!(
+        releases,
+        ["b7f20d null", "e3a915 null", "09cd47 null", "7a0c3f null", r#"4c1e9a {"reason":"no_data","waited_s":1}"#]
+    );
+    let text = home.run(&["sources", "tt0063350"]);
+    let why = text.stdout.lines().find(|line| line.contains("failed lately"));
+    assert_eq!(why, Some("# 4c1e9a failed lately, so play tries it last: no data arrived in 1s"), "{}", text.stdout);
+}
+
+#[test]
 fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
     let home = Home::new(&[]);
     let run = home.run(&["play", "tt0063350"]);

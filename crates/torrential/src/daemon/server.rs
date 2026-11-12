@@ -303,10 +303,12 @@ pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Erro
     })
 }
 
-/// The releases of the film or episode `video` names, ranked for playing here as a play ranks them.
+/// The releases of the film or episode `video` names, in the order a play tries them.
 async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
     let title = ctx.titles.resolve(&video, super::owner::now()).await?;
-    let result = search(ctx, title.query((ctx.web.preferences)())).await?;
+    let mut result = search(ctx, title.query((ctx.web.preferences)())).await?;
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    result.releases = ctx.titles.line(&jobs, &title.video, result.releases);
     Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
 }
 

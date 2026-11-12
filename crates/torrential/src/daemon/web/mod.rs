@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, Target, TorrentId};
+use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, Release, SearchQuery, Target, TorrentId};
 
 use super::http::{Connection, Method, Request};
 use super::owner::Command;
@@ -278,13 +278,19 @@ async fn whole(
 
 async fn search(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     match search_query(conn.ctx, request) {
-        Ok(query) => results(conn, request, query).await,
+        Ok(query) => results(conn, request, query, |releases| releases).await,
         Err(error) => fail(conn, request, &error).await,
     }
 }
 
-/// Sends the results so far as a line of JSON each time a source answers, then the final results.
-async fn results(conn: &mut Connection<'_>, request: &Request, query: SearchQuery) -> io::Result<bool> {
+/// Sends the results so far as a line of JSON each time a source answers, then the final results,
+/// with the releases in the order `order` puts them.
+async fn results(
+    conn: &mut Connection<'_>,
+    request: &Request,
+    query: SearchQuery,
+    order: impl Fn(Vec<Release>) -> Vec<Release>,
+) -> io::Result<bool> {
     let ctx = conn.ctx;
     conn.begin(NDJSON, request).await?;
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
@@ -297,6 +303,7 @@ async fn results(conn: &mut Connection<'_>, request: &Request, query: SearchQuer
             biased;
             Some(Progress { mut result, pending }) = progress.recv() => {
                 server::record(ctx, &mut result);
+                result.releases = order(result.releases);
                 line(conn, &json!({ "type": "update", "result": result, "pending": pending })).await?;
             }
             result = &mut search => break result,
@@ -306,6 +313,7 @@ async fn results(conn: &mut Connection<'_>, request: &Request, query: SearchQuer
     let last = match result {
         Ok(mut result) => {
             server::record(ctx, &mut result);
+            result.releases = order(result.releases);
             json!({ "type": "done", "result": result })
         }
         Err(error) => json!({ "type": "error", "error": error }),

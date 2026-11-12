@@ -66,7 +66,7 @@ struct FieldSchema {
     help: &'static str,
 }
 
-const FIELDS: [FieldSchema; 7] = [
+const FIELDS: [FieldSchema; 8] = [
     FieldSchema {
         name: "progress.piece_map",
         help: "Where a download's data has arrived, in status, wait, and the TUI's watch stream: 64 characters, one \
@@ -94,6 +94,11 @@ const FIELDS: [FieldSchema; 7] = [
         name: "result.releases[].span",
         help: "In sources, what of the film or series a release holds: film, an episode such as s3e5, a season such \
                as s3, seasons such as s1-5, or complete",
+    },
+    FieldSchema {
+        name: "result.releases[].failed",
+        help: "In sources, why a release did not start when a play on this machine last tried it, in the last 6 \
+               hours, as in title.tried[].reason. Play tries such a release last",
     },
     FieldSchema {
         name: "title.tried[].reason",

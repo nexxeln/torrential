@@ -347,6 +347,7 @@ mod tests {
             info_url: None,
             span: Some(Span::Film),
             swarm: None,
+            failed: None,
         }
     }
 

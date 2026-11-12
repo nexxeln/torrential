@@ -1106,6 +1106,48 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
     assert_eq!((reply.job.id, streams, title.tried), (film.info_hash.id(), vec!["Night.1968.1080p.mkv"], vec![]));
 }
 
+/// The releases `GET /api/title/sources` lists for `video`, each with why it failed lately.
+async fn listed_sources(h: &Harness, video: &str) -> Vec<(String, Value)> {
+    let (status, _, body) = fetch(h, "GET", &format!("/api/title/sources?video={video}"), &[], "").await;
+    let done = lines(&body).pop().unwrap();
+    assert_eq!((status, &done["type"]), (200, &json!("done")));
+    let releases = done["result"]["releases"].as_array().unwrap().iter();
+    releases.map(|r| (r["name"].as_str().unwrap().to_string(), r["failed"].clone())).collect()
+}
+
+/// The releases a title play over HTTP tried, in order.
+async fn tried_by_play(h: &Harness, video: &str) -> Vec<String> {
+    let ask = json!({ "video": video }).to_string();
+    let (_, _, body) = fetch(h, "POST", "/api/title/play", &["Content-Type: application/json"], &ask).await;
+    let trying = lines(&body).into_iter().filter(|line| line["type"] == "trying");
+    trying.map(|line| line["release"]["name"].as_str().unwrap().to_string()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_tries_a_titles_sources_in_the_order_listed_and_the_list_then_puts_those_that_failed_last_with_why() {
+    use torrential_core::protocol::{Request, Response};
+    let (h, night) = titles::night();
+    let name = |n: usize| night[n].name.clone();
+    let fresh: Vec<(String, Value)> = (0..4).map(|n| (name(n), Value::Null)).collect();
+    assert_eq!(listed_sources(&h, "tt0063350").await, fresh);
+    assert_eq!(tried_by_play(&h, "tt0063350").await, (0..4).map(name).collect::<Vec<_>>());
+
+    let after = vec![
+        (name(3), Value::Null),
+        (name(0), json!({ "reason": "no_file_list", "waited_s": 1 })),
+        (name(1), json!({ "reason": "no_video" })),
+        (name(2), json!({ "reason": "no_data", "waited_s": 1 })),
+    ];
+    assert_eq!(listed_sources(&h, "tt0063350").await, after);
+    let video = "tt0063350".parse().unwrap();
+    let Response::Sources { sources } = h.ask(Request::Sources { video }).await else {
+        panic!("the socket answers sources with the releases")
+    };
+    let socket = sources.result.releases.iter().map(|r| (r.name.clone(), serde_json::to_value(&r.failed).unwrap()));
+    assert_eq!(socket.collect::<Vec<_>>(), after, "the command line lists the same order");
+    assert_eq!(tried_by_play(&h, "tt0063350").await, [name(3)], "the download that played plays again first");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_web_app_and_the_socket_read_the_same_title_page() {
     use torrential_core::protocol::{Request, Response};

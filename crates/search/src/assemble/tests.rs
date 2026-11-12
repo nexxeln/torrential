@@ -98,6 +98,7 @@ fn merges_one_torrent_listed_by_two_sources() {
             info_url: Some("https://thepiratebay.org/description.php?id=1".into()),
             span: None,
             swarm: None,
+            failed: None,
         }]
     );
     assert_eq!(result.total, 1);

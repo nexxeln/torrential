@@ -13,7 +13,7 @@ use torrential_core::{
 };
 
 use super::super::http::{Connection, Request};
-use super::super::owner::{Finish, now};
+use super::super::owner::{Command, Finish, now};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::{NDJSON, fail, line, number, required};
@@ -84,22 +84,26 @@ fn art_of(request: &Request) -> Result<(TitleId, ArtKind), Error> {
 }
 
 /// `GET /api/title/sources?video=[&playback=]`: the title's releases as `/api/search` streams
-/// them, ranked for playing here.
+/// them, in the order a play tries them.
 pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
-    let query = async {
+    let asked = async {
         let video: VideoRef = required(request, "video")?.parse()?;
         let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
         let title = ctx.titles.resolve(&video, now()).await?;
+        let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
         let preferences = (ctx.web.preferences)();
-        Ok::<_, Error>(title.query(Preferences { playback: playback.or(preferences.playback), ..preferences }))
+        let query = title.query(Preferences { playback: playback.or(preferences.playback), ..preferences });
+        Ok::<_, Error>((query, title.video, jobs))
     };
-    let query = tokio::select! {
-        query = query => query,
+    let asked = tokio::select! {
+        asked = asked => asked,
         gone = conn.gone() => return Err(gone),
     };
-    match query {
-        Ok(query) => super::results(conn, request, query).await,
+    match asked {
+        Ok((query, video, jobs)) => {
+            super::results(conn, request, query, |releases| ctx.titles.line(&jobs, &video, releases)).await
+        }
         Err(error) => fail(conn, request, &error).await,
     }
 }

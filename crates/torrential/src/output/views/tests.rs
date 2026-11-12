@@ -49,6 +49,7 @@ fn release(id: ReleaseId, name: &str) -> Release {
         info_url: None,
         span: None,
         swarm: None,
+        failed: None,
     }
 }
 

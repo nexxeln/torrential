@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Category, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Lease, Playback, Release, ReleaseId,
-    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Lease, Playback, Release, ReleaseId, SearchResult,
+    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
@@ -21,8 +21,6 @@ use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
 use super::Resolved;
 
-/// Ranked releases looked at. The rest rarely play better than these.
-const MOST_CONSIDERED: usize = 12;
 const MOST_TRIED: usize = 6;
 /// Sources after the one under test whose file lists are asked for early, so dead swarms in a row
 /// cost one wait.
@@ -80,7 +78,7 @@ impl Containers {
 pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) {
     let end = Instant::now() + ctx.titles.timing.budget;
     if let Some(id) = ask.replace {
-        ctx.titles.failed(ReleaseId::Torrent(id));
+        ctx.titles.failed(ReleaseId::Torrent(id), Skip::Stalled);
     }
     let title = match ctx.titles.resolve(&ask.video, super::super::owner::now()).await {
         Ok(title) => title,
@@ -96,16 +94,10 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         Err(error) => return report(AttemptEvent::Failed { error, tried: Vec::new() }),
     };
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
-    let line = Line {
-        here: &here,
-        failed_lately: &|id| ctx.titles.failed_lately(id),
-        replace: ask.replace,
-        pin: ask.pin.as_ref(),
-    };
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
-    let held = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. }));
-    let held = held.filter_map(|j| holding(j, &title.video)).filter(|r| !(line.failed_lately)(&r.id)).collect();
-    if let Some(release) = line.order(held, Vec::new(), &[]).into_iter().next()
+    let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
+    let held = ctx.titles.line(&healthy, &title.video, Vec::new());
+    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r))
         && walk.try_source(release, 1, &mut report).await
     {
         return;
@@ -123,10 +115,12 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         sources: Vec::new(),
         error: None,
     };
-    let linked: Vec<Release> = jobs.iter().filter_map(|job| holding(job, &title.video)).collect();
+    let line_up = |search: &Searching, tried: &[Tried]| {
+        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone()), tried)
+    };
     loop {
         let ran = search.started.elapsed();
-        let first = line.order(linked.clone(), search.releases.clone(), &walk.tried).into_iter().next();
+        let first = line_up(&search, &walk.tried).into_iter().next();
         if may_start(first.as_ref(), ran, search.over()) {
             break;
         }
@@ -143,7 +137,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     }
     report(AttemptEvent::Searched { found: search.releases.len() as u32, sources: search.sources.clone() });
     while Instant::now() < end {
-        let candidates = line.order(linked.clone(), search.releases.clone(), &walk.tried);
+        let candidates = line_up(&search, &walk.tried);
         let Some(release) = candidates.first().cloned() else {
             if search.over() {
                 break;
@@ -225,28 +219,6 @@ fn resume_at(ctx: &Ctx, video: &VideoRef) -> Option<f64> {
     watched.into_iter().find(|w| w.video == *video && !w.finished()).map(|w| w.position)
 }
 
-/// A download on this machine that a title play made for `video`'s title and that holds it, as a
-/// release to try.
-fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
-    let link = job.title.as_ref().filter(|link| link.title == video.title && link.span.covers(video.episode))?;
-    Some(Release {
-        id: ReleaseId::Torrent(job.id),
-        name: job.name.clone().unwrap_or_else(|| job.id.to_hex()),
-        size: job.progress.size,
-        seeders: None,
-        leechers: None,
-        published: None,
-        category: Some(Category::Video),
-        flags: BTreeSet::new(),
-        sources: Vec::new(),
-        magnet: None,
-        torrent_url: None,
-        info_url: None,
-        span: Some(link.span),
-        swarm: None,
-    })
-}
-
 /// A title play's way through its sources.
 struct Walk<'a> {
     ctx: &'a Ctx,
@@ -320,7 +292,7 @@ impl Walk<'_> {
             Err(reason) => {
                 let reason = *reason;
                 trial.undo().await;
-                ctx.titles.failed(release.id);
+                ctx.titles.failed(release.id, reason.clone());
                 report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
                 self.tried.push(Tried { release: release.id, reason });
                 false
@@ -329,35 +301,21 @@ impl Walk<'_> {
     }
 }
 
-/// What decides the order sources are tried in.
-struct Line<'a> {
-    /// The downloads on this machine.
-    here: &'a BTreeSet<TorrentId>,
-    failed_lately: &'a (dyn Fn(&ReleaseId) -> bool + Sync),
-    replace: Option<TorrentId>,
-    pin: Option<&'a ReleaseId>,
+impl PlayTitle {
+    /// Whether this play may try `release`: never the download it replaces, and only the pinned
+    /// release when one is.
+    fn may_try(&self, release: &Release) -> bool {
+        self.replace.is_none_or(|old| release.id != ReleaseId::Torrent(old))
+            && self.pin.is_none_or(|pin| release.id == pin)
+    }
 }
 
-impl Line<'_> {
-    /// The releases to try, best first: downloads on this machine that hold the video, then the
-    /// ranked releases, and last those that failed lately. Of the ranked ones only the top are
-    /// looked at, and only the first few are tried, counting those `tried` already. The stalled
-    /// download and the tried ones are never tried again, and a pinned release is the only one.
-    fn order(&self, linked: Vec<Release>, ranked: Vec<Release>, tried: &[Tried]) -> Vec<Release> {
-        let mut seen: HashSet<ReleaseId> = tried.iter().map(|t| t.release).collect();
-        let considered = ranked.into_iter().take(MOST_CONSIDERED);
-        let mut line: Vec<Release> = linked
-            .into_iter()
-            .chain(considered)
-            .filter(|r| seen.insert(r.id))
-            .filter(|r| self.replace.is_none_or(|old| r.id != ReleaseId::Torrent(old)))
-            .filter(|r| self.pin.is_none_or(|pin| r.id == *pin))
-            .collect();
-        let here = |r: &Release| matches!(r.id, ReleaseId::Torrent(id) if self.here.contains(&id));
-        line.sort_by_key(|r| ((self.failed_lately)(&r.id), !here(r)));
-        line.truncate(MOST_TRIED.saturating_sub(tried.len()));
-        line
-    }
+/// The sources `ask` tries next, in the order of its `line`: those it may try and has not
+/// `tried`, as many as it has tries left.
+fn next_up(ask: &PlayTitle, line: Vec<Release>, tried: &[Tried]) -> Vec<Release> {
+    let tried_ids: HashSet<ReleaseId> = tried.iter().map(|t| t.release).collect();
+    let next = line.into_iter().filter(|r| !tried_ids.contains(&r.id) && ask.may_try(r));
+    next.take(MOST_TRIED.saturating_sub(tried.len())).collect()
 }
 
 /// The source under test. Dropped before it plays, it puts back what it changed.
@@ -606,6 +564,7 @@ mod tests {
             info_url: None,
             span: None,
             swarm: None,
+            failed: None,
         }
     }
 
@@ -614,43 +573,30 @@ mod tests {
     }
 
     #[test]
-    fn sources_go_downloads_here_first_failures_last_and_at_most_six() {
-        let here: BTreeSet<TorrentId> = [3, 40].map(|n| TorrentId::from_bytes([n; 20])).into();
-        let failed: HashSet<ReleaseId> = [2, 40].map(|n| release(n).id).into();
-        let failed_lately = |id: &ReleaseId| failed.contains(id);
-        let order = |replace: Option<u8>, pin: Option<u8>, linked: &[u8], ranked: &[u8]| {
-            let pin = pin.map(|n| release(n).id);
-            let line = Line {
-                here: &here,
-                failed_lately: &failed_lately,
-                replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
-                pin: pin.as_ref(),
-            };
-            numbers(line.order(
-                linked.iter().map(|n| release(*n)).collect(),
-                ranked.iter().map(|n| release(*n)).collect(),
-                &[],
-            ))
+    fn a_play_tries_at_most_six_sources_never_the_one_it_replaces_and_with_a_pin_only_that() {
+        let ask = |replace: Option<u8>, pin: Option<u8>| PlayTitle {
+            video: "tt0063350".parse().unwrap(),
+            pin: pin.map(|n| release(n).id),
+            replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
+            playback: None,
+            containers: Containers::Browser,
+            finish: Finish::Stream,
         };
-        let many: Vec<u8> = (1..=20).collect();
-        let late: Vec<u8> = [vec![2], (20..=40).collect()].concat();
-        type Row<'a> = (Option<u8>, Option<u8>, &'a [u8], &'a [u8], &'a [u8]);
-        let table: [Row; 7] = [
-            (None, None, &[], &[1, 2, 3, 4], &[3, 1, 4, 2]),
-            (None, None, &[40], &[1, 2, 40], &[1, 40, 2]),
-            (None, None, &[], &many, &[3, 1, 4, 5, 6, 7]),
-            (None, None, &[], &late, &[20, 21, 22, 23, 24, 25]),
-            (Some(3), None, &[], &[1, 2, 3, 4], &[1, 4, 2]),
-            (None, Some(2), &[], &[1, 2, 3], &[2]),
-            (None, Some(30), &[], &many, &[]),
+        let line: Vec<Release> = (1..=12).map(release).collect();
+        type Row<'a> = (Option<u8>, Option<u8>, &'a [u8], &'a [u8]);
+        let table: [Row; 5] = [
+            (None, None, &[], &[1, 2, 3, 4, 5, 6]),
+            (None, None, &[1, 4], &[2, 3, 5, 6]),
+            (Some(2), None, &[], &[1, 3, 4, 5, 6, 7]),
+            (None, Some(9), &[], &[9]),
+            (None, Some(9), &[9], &[]),
         ];
-        for (replace, pin, linked, ranked, expected) in table {
-            assert_eq!(order(replace, pin, linked, ranked), expected, "linked {linked:?}, ranked {ranked:?}");
+        for (replace, pin, tried, expected) in table {
+            let tried: Vec<Tried> =
+                tried.iter().map(|n| Tried { release: release(*n).id, reason: Skip::NoVideo }).collect();
+            let next = numbers(next_up(&ask(replace, pin), line.clone(), &tried));
+            assert_eq!(next, expected, "replacing {replace:?}, pinned to {pin:?}, {} tried", tried.len());
         }
-        let line = Line { here: &here, failed_lately: &failed_lately, replace: None, pin: None };
-        let tried = [Tried { release: release(1).id, reason: Skip::NoVideo }];
-        let ranked = many.iter().map(|n| release(*n)).collect();
-        assert_eq!(numbers(line.order(Vec::new(), ranked, &tried)), [3, 4, 5, 6, 7], "six in all, the tried one gone");
     }
 
     #[test]

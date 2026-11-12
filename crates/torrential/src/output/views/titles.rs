@@ -223,6 +223,11 @@ pub fn sources(sources: &TitleSources, now: i64) -> Doc {
     if !failed.is_empty() {
         summary.push(failed.join(" · "));
     }
+    for (release, id) in result.releases.iter().zip(&ids) {
+        if let Some(why) = &release.failed {
+            summary.push(format!("{id} failed lately, so play tries it last: {}", skip(why)));
+        }
+    }
     summary.push(format!("ranked for {}", ranked_for(&result.query.profile)));
     let next = if result.releases.is_empty() {
         search_for(&name)

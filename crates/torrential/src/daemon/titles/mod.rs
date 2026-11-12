@@ -5,14 +5,15 @@ pub mod attempt;
 pub mod catalog_port;
 pub mod shelf;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use torrential_core::title::Wanted;
 use torrential_core::watching::next;
 use torrential_core::{
-    Category, EpisodeInfo, Error, ErrorCode, Kind, Preferences, Profile, ReleaseId, SearchQuery, TitleDetails, VideoRef,
+    Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Preferences, Profile, Release, ReleaseId, SearchQuery, Skip,
+    TitleDetails, TorrentId, VideoRef,
 };
 
 use catalog_port::{CatalogPort, label};
@@ -20,14 +21,17 @@ use shelf::Shelf;
 
 /// How long a release that failed stays at the back of the line.
 const FAILED_FOR: Duration = Duration::from_secs(6 * 60 * 60);
+/// Ranked releases a play looks at. The rest rarely play better than these.
+const MOST_CONSIDERED: usize = 12;
 
 /// What the engine knows about films and series, beside its downloads.
 pub struct Titles {
     pub catalog: Arc<dyn CatalogPort>,
     pub shelf: Shelf,
     pub timing: Timing,
-    /// When each release last failed to play. In memory, so a restart gives every one a chance.
-    failed: Mutex<HashMap<ReleaseId, Instant>>,
+    /// When each release last failed to play, and why. In memory, so a restart gives every one a
+    /// chance.
+    failed: Mutex<HashMap<ReleaseId, (Instant, Skip)>>,
 }
 
 /// Every deadline of a title play. Tests shrink them.
@@ -56,13 +60,28 @@ impl Titles {
         Self { catalog, shelf, timing, failed: Mutex::default() }
     }
 
-    fn failed(&self, release: ReleaseId) {
-        self.failed.lock().unwrap_or_else(PoisonError::into_inner).insert(release, Instant::now());
+    fn failed(&self, release: ReleaseId, why: Skip) {
+        self.failed.lock().unwrap_or_else(PoisonError::into_inner).insert(release, (Instant::now(), why));
     }
 
-    fn failed_lately(&self, release: &ReleaseId) -> bool {
+    /// `video`'s sources in the order a play tries them and a list of sources shows them: the
+    /// downloads in `jobs` that hold it, then the top of `ranked`. A download on this machine goes
+    /// ahead of a release that is not, and a release that failed lately goes last, with why.
+    /// Releases ranked below the top rarely play better, so neither shows them.
+    pub fn line(&self, jobs: &[Job], video: &VideoRef, ranked: Vec<Release>) -> Vec<Release> {
+        let here: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
         let failed = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
-        failed.get(release).is_some_and(|at| at.elapsed() < FAILED_FOR)
+        let failed_lately = |id: &ReleaseId| failed.get(id).filter(|(at, _)| at.elapsed() < FAILED_FOR);
+        let mut seen = HashSet::new();
+        let linked = jobs.iter().filter_map(|job| holding(job, video));
+        let mut line: Vec<Release> = linked
+            .chain(ranked.into_iter().take(MOST_CONSIDERED))
+            .filter(|release| seen.insert(release.id))
+            .map(|release| Release { failed: failed_lately(&release.id).map(|(_, why)| why.clone()), ..release })
+            .collect();
+        let is_here = |release: &Release| matches!(release.id, ReleaseId::Torrent(id) if here.contains(&id));
+        line.sort_by_key(|release| (release.failed.is_some(), !is_here(release)));
+        line
     }
 
     /// The film or episode `video` names, with how to find its releases. A series without an
@@ -125,6 +144,29 @@ impl Resolved {
     }
 }
 
+/// A download on this machine that a title play made for `video`'s title and that holds it, as a
+/// release to try.
+fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
+    let link = job.title.as_ref().filter(|link| link.title == video.title && link.span.covers(video.episode))?;
+    Some(Release {
+        id: ReleaseId::Torrent(job.id),
+        name: job.name.clone().unwrap_or_else(|| job.id.to_hex()),
+        size: job.progress.size,
+        seeders: None,
+        leechers: None,
+        published: None,
+        category: Some(Category::Video),
+        flags: BTreeSet::new(),
+        sources: Vec::new(),
+        magnet: None,
+        torrent_url: None,
+        info_url: None,
+        span: Some(link.span),
+        swarm: None,
+        failed: None,
+    })
+}
+
 /// The episode a series plays next, or its first aired one when the person has caught up.
 fn next_episode(details: &TitleDetails, watched: &[torrential_core::Watched], now: i64) -> Result<VideoRef, Error> {
     if let Some(next) = next(details, watched, now) {
@@ -158,7 +200,8 @@ fn aired(details: &TitleDetails, info: &EpisodeInfo, now: i64) -> Result<(), Err
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torrential_core::Watched;
+    use torrential_core::title::Span;
+    use torrential_core::{InfoHash, JobStatus, Lease, Progress, Selection, TitleLink, Watched};
 
     fn video(text: &str) -> VideoRef {
         text.parse().unwrap()
@@ -168,13 +211,73 @@ mod tests {
         titles.resolve(&video(text), 1_762_990_000).await.map(|r| r.name()).map_err(|e| (e.code, e.message))
     }
 
+    fn titles(dir: &tempfile::TempDir) -> Titles {
+        let path = dir.path().join("state.db");
+        drop(crate::daemon::store::Store::open(&path).unwrap());
+        Titles::new(Arc::new(catalog_port::Fake::default()), Shelf::open(&path).unwrap(), Timing::default())
+    }
+
+    #[test]
+    fn sources_go_downloads_here_first_then_the_top_twelve_and_those_that_failed_lately_last_with_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let titles = titles(&dir);
+        let release = |n: u8| Release {
+            id: ReleaseId::Torrent(TorrentId::from_bytes([n; 20])),
+            name: format!("release {n}"),
+            size: None,
+            seeders: None,
+            leechers: None,
+            published: None,
+            category: None,
+            flags: BTreeSet::new(),
+            sources: Vec::new(),
+            magnet: None,
+            torrent_url: None,
+            info_url: None,
+            span: None,
+            swarm: None,
+            failed: None,
+        };
+        let film =
+            TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: None, lease: Lease::Owned };
+        let job = |n: u8, title: Option<TitleLink>| Job {
+            id: TorrentId::from_bytes([n; 20]),
+            info_hash: InfoHash::V1([n; 20]),
+            name: Some(format!("release {n}")),
+            dir: "/downloads".into(),
+            path: None,
+            status: JobStatus::Queued,
+            progress: Progress::default(),
+            selection: Selection::All,
+            added_at: 0,
+            title,
+        };
+        titles.failed(release(2).id, Skip::NoVideo);
+        titles.failed(release(40).id, Skip::NoData { waited_s: 30 });
+        let jobs = [job(3, None), job(40, Some(film))];
+        let line = |jobs: &[Job], video: &str, ranked: &[u8]| -> Vec<(u8, Option<Skip>)> {
+            let ranked = ranked.iter().map(|n| release(*n)).collect();
+            let line = titles.line(jobs, &video.parse().unwrap(), ranked).into_iter();
+            line.map(|r| (r.name.trim_start_matches("release ").parse().unwrap(), r.failed)).collect()
+        };
+        let fine = |n: u8| (n, None);
+        assert_eq!(line(&[], "tt0063350", &[1, 2, 3]), [fine(1), fine(3), (2, Some(Skip::NoVideo))]);
+        assert_eq!(
+            line(&jobs, "tt0063350", &[1, 2, 3, 4]),
+            [fine(3), fine(1), fine(4), (40, Some(Skip::NoData { waited_s: 30 })), (2, Some(Skip::NoVideo))],
+            "a download here leads, and one that failed lately goes last even when it holds the film"
+        );
+        assert_eq!(line(&jobs, "tt0100258", &[1]), [fine(1)], "a download made for another title holds nothing");
+        let many: Vec<u8> = (1..=20).collect();
+        let top: Vec<(u8, Option<Skip>)> =
+            [1].into_iter().chain(3..=12).map(fine).chain([(2, Some(Skip::NoVideo))]).collect();
+        assert_eq!(line(&[], "tt0063350", &many), top);
+    }
+
     #[tokio::test]
     async fn a_series_plays_its_next_aired_episode_and_never_one_that_has_not_aired() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        drop(crate::daemon::store::Store::open(&path).unwrap());
-        let catalog = Arc::new(catalog_port::Fake::default());
-        let titles = Titles::new(catalog, Shelf::open(&path).unwrap(), Timing::default());
+        let titles = titles(&dir);
         assert_eq!(resolve(&titles, "tt9999901").await, Ok("Harbor Lights S01E01".into()));
         assert_eq!(resolve(&titles, "tt0063350").await, Ok("Night of the Living Dead (1968)".into()));
         let finished = |text: &str, at| Watched {

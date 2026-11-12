@@ -315,6 +315,7 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
             info_url: info.map(|(.., url)| url.to_string()),
             span: None,
             swarm: None,
+            failed: None,
         },
         relevance,
         extra_words,

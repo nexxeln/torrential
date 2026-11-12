@@ -6,6 +6,7 @@ use crate::id::ReleaseId;
 use crate::profile::Profile;
 use crate::quality::Quality;
 use crate::title::{Span, Wanted};
+use crate::watching::Skip;
 
 /// A torrent offered by one or more search sources, merged by infohash. Its JSON
 /// also carries the [`Quality`] its name gives.
@@ -36,6 +37,10 @@ pub struct Release {
     /// How likely its swarm is to send data now. Only in a title's sources.
     #[serde(default)]
     pub swarm: Option<Swarm>,
+    /// Why it did not start when a play here last tried it, if that was lately. Only in a title's
+    /// sources, which put it last.
+    #[serde(default)]
+    pub failed: Option<Skip>,
 }
 
 impl Release {
@@ -65,6 +70,8 @@ impl Serialize for Release {
             span: Option<Span>,
             #[serde(skip_serializing_if = "Option::is_none")]
             swarm: Option<Swarm>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            failed: &'a Option<Skip>,
         }
         let Release {
             id,
@@ -81,6 +88,7 @@ impl Serialize for Release {
             info_url,
             span,
             swarm,
+            failed,
         } = self;
         Fields {
             id,
@@ -98,6 +106,7 @@ impl Serialize for Release {
             info_url,
             span: *span,
             swarm: *swarm,
+            failed,
         }
         .serialize(serializer)
     }
@@ -333,6 +342,7 @@ mod tests {
             info_url: None,
             span: None,
             swarm: None,
+            failed: None,
         }
     }
 
