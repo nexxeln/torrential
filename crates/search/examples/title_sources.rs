@@ -1,11 +1,13 @@
 //! Shows which releases a title's search keeps and which it drops, against the live sources.
 //! Run it to judge the matcher on real names: `cargo run --example title_sources tt0063350`.
+//! `--screen 1080p` or `--screen 2160p` and `--language en` rank as a machine with that screen
+//! and system language would.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use torrential_core::title::{Namesakes, Wanted, normalized};
-use torrential_core::{Category, SearchQuery, VideoRef};
+use torrential_core::{Category, Language, Machine, Os, Preferences, Profile, Screen, SearchQuery, VideoRef};
 use torrential_search::catalog::{Catalog, CatalogConfig};
 use torrential_search::{ResultCache, Search, SearchConfig};
 
@@ -14,10 +16,10 @@ const WITHIN_MS: u32 = 12_000;
 
 #[tokio::main]
 async fn main() {
-    let Some(video) = std::env::args().nth(1).and_then(|text| text.parse::<VideoRef>().ok()) else {
-        eprintln!("usage: title_sources <tt0063350 | tt1748166:1:2>");
+    let (video, profile) = arguments().unwrap_or_else(|| {
+        eprintln!("usage: title_sources <tt0063350 | tt1748166:1:2> [--screen 1080p|2160p] [--language en]");
         std::process::exit(2);
-    };
+    });
     let catalog = Catalog::new(&CatalogConfig { online: true, endpoint: None, cache_dir: None }).expect("a catalog");
     let details = catalog.title(&video.title).await.unwrap_or_else(|e| fail(&e.to_string()));
     let same = catalog.namesakes(&details.card).await.unwrap_or_default();
@@ -36,12 +38,14 @@ async fn main() {
         season_episodes: season.map(|s| s.episodes.len() as u32),
     };
     println!("{} ({:?}), {namesakes:?}, queries {:?}", wanted.name, wanted.year, wanted.queries());
+    println!("ranked for {}", profile.describe());
 
     let search = Search::new(&SearchConfig::default(), ResultCache::new()).expect("a search");
     let query = |text: String, wanted: Option<Wanted>| SearchQuery {
         category: Some(Category::Video),
         limit: MOST,
         timeout_ms: WITHIN_MS,
+        profile: profile.clone(),
         wanted,
         ..SearchQuery::new(text)
     };
@@ -71,6 +75,31 @@ async fn main() {
     println!("\ndropped {} that do not fit, whose name holds the title:", near.len());
     near.iter().for_each(|(_, name, seeders)| println!("  {seeders:?} seeds  {name}"));
     println!("\ndropped {} others", far.len());
+}
+
+/// The video, and a profile with the screen and language the flags name.
+fn arguments() -> Option<(VideoRef, Profile)> {
+    let mut video = None;
+    let mut profile = Profile::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--screen" => {
+                let screen = match args.next()?.as_str() {
+                    "1080p" => Screen::Tv,
+                    "2160p" => Screen::Tv4k,
+                    _ => return None,
+                };
+                profile.preferences = Preferences { screen: Some(screen), ..profile.preferences };
+            }
+            "--language" => {
+                let language = Some(Language::from_locale(&args.next()?)?);
+                profile.detected = Some(Machine { os: Os::of_host(), display: None, arch: None, language });
+            }
+            text => video = Some(text.parse::<VideoRef>().ok()?),
+        }
+    }
+    Some((video?, profile))
 }
 
 fn fail(why: &str) -> ! {
