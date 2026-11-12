@@ -1,10 +1,13 @@
-//! Films and series from Cinemeta, the catalog Stremio uses, read into the core catalog types.
+//! Films and series from Cinemeta, the catalog Stremio uses, and from IMDb's suggestions, read
+//! into the core catalog types. A search asks both, since IMDb finds what Cinemeta's search
+//! misses, such as short films. Details come from Cinemeta.
 //!
 //! Details and pictures are kept under the cache folder, so a title page opens from disk and a
-//! picture is fetched once. Picture addresses come only from Cinemeta's answers and never leave
-//! this module: callers name a picture by title ID and kind.
+//! picture is fetched once. Picture addresses come only from Cinemeta's and IMDb's answers and
+//! never leave this module: callers name a picture by title ID and kind.
 
 mod cinemeta;
+pub(crate) mod imdb;
 mod shelf;
 
 use std::collections::{HashMap, HashSet};
@@ -18,7 +21,7 @@ use torrential_core::title::normalized;
 use torrential_core::{ArtKind, Error, ErrorCode, Kind, TitleCard, TitleDetails, TitleId};
 use url::{Host, Origin, Url};
 
-use self::cinemeta::{Described, Listed};
+use self::cinemeta::Described;
 use self::shelf::Shelf;
 use crate::http::{FetchError, Http};
 
@@ -50,13 +53,15 @@ pub struct CatalogConfig {
     pub online: bool,
     /// A Cinemeta mirror. `None` is https://v3-cinemeta.strem.io.
     pub endpoint: Option<String>,
+    /// Where IMDb's suggestions are asked for. `None` is https://v3.sg.media-imdb.com.
+    pub imdb_endpoint: Option<String>,
     /// Where details and pictures are kept. `None` keeps them in memory.
     pub cache_dir: Option<PathBuf>,
 }
 
 impl Default for CatalogConfig {
     fn default() -> Self {
-        Self { online: true, endpoint: None, cache_dir: None }
+        Self { online: true, endpoint: None, imdb_endpoint: None, cache_dir: None }
     }
 }
 
@@ -122,12 +127,21 @@ impl Lack {
     }
 }
 
-/// Cinemeta, behind the core catalog types.
+/// One title of a search answer, with the poster address the search named.
+struct Listed {
+    card: TitleCard,
+    poster: Option<Url>,
+}
+
+/// Cinemeta and IMDb's suggestions, behind the core catalog types.
 pub struct Catalog {
     http: Http,
     /// Follows only redirects to an address a picture may come from.
     pictures: Http,
+    /// Where Cinemeta is asked.
     base: Url,
+    /// Where IMDb's suggestions are asked for.
+    imdb: Url,
     online: bool,
     shelf: Shelf,
     /// The kind and poster address of each title recent searches listed.
@@ -137,16 +151,18 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Fails with `usage` when the endpoint is not a URL.
+    /// Fails with `usage` when an endpoint is not a URL.
     pub fn new(config: &CatalogConfig) -> Result<Catalog, Error> {
-        let url = config.endpoint.as_deref().unwrap_or(BASE);
-        let slashed = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
-        let base = Url::parse(&slashed)
-            .map_err(|e| Error::new(ErrorCode::Usage, format!("the catalog endpoint {url} is not a URL: {e}")))?;
+        let base = |url: &str, name: &str| {
+            let slashed = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
+            Url::parse(&slashed)
+                .map_err(|e| Error::new(ErrorCode::Usage, format!("the {name} endpoint {url} is not a URL: {e}")))
+        };
         Ok(Catalog {
             http: Http::named(AGENT, false).map_err(no_client)?,
             pictures: picture_client(None)?,
-            base,
+            base: base(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?,
+            imdb: base(config.imdb_endpoint.as_deref().unwrap_or(imdb::BASE), "IMDb")?,
             online: config.online,
             shelf: Shelf::new(config.cache_dir.clone()),
             listed: Mutex::default(),
@@ -171,33 +187,43 @@ impl Catalog {
         Ok(self)
     }
 
-    /// Films and series named like `words`. Titles whose normalized name is the words come first,
-    /// then the rest, each group in Cinemeta's order with films and series in turn. So the first of
-    /// several same-named titles of a kind is the one Cinemeta lists first. Empty when turned off.
+    /// Films and series named like `words`: the films and series IMDb suggests, in IMDb's order,
+    /// then those Cinemeta lists that IMDb did not. Of Cinemeta's, titles whose normalized name is
+    /// the words come first, then the rest, each group in Cinemeta's order with films and series
+    /// in turn. Answers when IMDb or either of Cinemeta's listings does. Empty when turned off.
     pub async fn search(&self, words: &str) -> Result<Vec<TitleCard>, Error> {
         if !self.online || words.trim().is_empty() {
             return Ok(Vec::new());
         }
         let deadline = Instant::now() + LOOKUP_WITHIN;
-        let (films, series) =
-            tokio::join!(self.listing(Kind::Film, words, deadline), self.listing(Kind::Series, words, deadline));
-        if let (Err(e), Err(_)) = (&films, &series) {
-            return Err(failed("search Cinemeta", e.clone()));
+        let (suggested, films, series) = tokio::join!(
+            self.suggested(words, deadline),
+            self.listing(Kind::Film, words, deadline),
+            self.listing(Kind::Series, words, deadline)
+        );
+        if let (Err(e), Err(_), Err(_)) = (&suggested, &films, &series) {
+            return Err(failed("search IMDb or Cinemeta", e.clone()));
         }
-        Ok(ranked(words, films.unwrap_or_default(), series.unwrap_or_default()))
+        let listed = ranked(words, films.unwrap_or_default(), series.unwrap_or_default());
+        Ok(self.remember(merged(suggested.unwrap_or_default(), listed)))
     }
 
-    /// The titles of `card`'s kind under its normalized name, `card` among them, in the order
-    /// Cinemeta lists them. Whoever plays `card` tells from this whether another title shares its
-    /// name and which one Cinemeta lists first. Empty when turned off.
+    /// The titles of `card`'s kind under its normalized name, `card` among them, in the order a
+    /// search lists them, IMDb's first. Whoever plays `card` tells from this whether another title
+    /// shares its name and which one is listed first. Empty when turned off.
     pub async fn namesakes(&self, card: &TitleCard) -> Result<Vec<TitleCard>, Error> {
         if !self.online {
             return Ok(Vec::new());
         }
-        let listed = self.listing(card.kind, &card.name, Instant::now() + LOOKUP_WITHIN).await;
+        let deadline = Instant::now() + LOOKUP_WITHIN;
+        let (suggested, listed) =
+            tokio::join!(self.suggested(&card.name, deadline), self.listing(card.kind, &card.name, deadline));
+        if let (Err(e), Err(_)) = (&suggested, &listed) {
+            return Err(failed("search IMDb or Cinemeta", e.clone()));
+        }
         let name = normalized(&card.name);
-        let namesakes = listed.map_err(|e| failed("search Cinemeta", e))?.into_iter();
-        Ok(namesakes.filter(|other| other.kind == card.kind && normalized(&other.name) == name).collect())
+        let titles = self.remember(merged(suggested.unwrap_or_default(), listed.unwrap_or_default()));
+        Ok(titles.into_iter().filter(|other| other.kind == card.kind && normalized(&other.name) == name).collect())
     }
 
     /// From disk while fresh, a film for 30 days and a series for 1 day. A stale copy answers
@@ -248,14 +274,24 @@ impl Catalog {
         Err(error)
     }
 
-    /// Cinemeta's titles of `kind` for `words`, asked in lowercase so the same words make the same request.
-    async fn listing(&self, kind: Kind, words: &str, deadline: Instant) -> Result<Vec<TitleCard>, FetchError> {
-        let words = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    /// IMDb's films and series for `words`, in its order.
+    async fn suggested(&self, words: &str, deadline: Instant) -> Result<Vec<Listed>, FetchError> {
+        Ok(imdb::listed(imdb::suggestions(&self.http, &self.imdb, &asked(words), deadline).await?))
+    }
+
+    /// Cinemeta's titles of `kind` for `words`.
+    async fn listing(&self, kind: Kind, words: &str, deadline: Instant) -> Result<Vec<Listed>, FetchError> {
+        let words = asked(words);
         let query = utf8_percent_encode(&words, NON_ALPHANUMERIC);
         let path = format!("catalog/{}/top/search={query}.json", cinemeta::segment(kind));
         let url = self.base.join(&path).map_err(|e| FetchError::Connect(e.to_string()))?;
         let body = self.http.get(&url, LARGEST_LISTING, deadline).await?;
-        let listed = cinemeta::listing(&body, kind).map_err(|e| FetchError::Decode(e.to_string()))?;
+        cinemeta::listing(&body, kind).map_err(|e| FetchError::Decode(e.to_string()))
+    }
+
+    /// The cards of `listed`, remembering each title's kind and poster address so its details and
+    /// poster need no second search.
+    fn remember(&self, listed: Vec<Listed>) -> Vec<TitleCard> {
         let mut remembered = lock(&self.listed);
         if remembered.len() + listed.len() > LISTED_MOST {
             remembered.clear();
@@ -264,7 +300,7 @@ impl Catalog {
             remembered.insert(card.id.clone(), (card.kind, poster));
             card
         });
-        Ok(cards.collect())
+        cards.collect()
     }
 
     async fn described(&self, id: &TitleId) -> Result<Described, Error> {
@@ -337,15 +373,41 @@ impl Catalog {
     }
 }
 
+/// `words` as they are asked for: lowercase with single spaces, so the same words make the same
+/// request.
+fn asked(words: &str) -> String {
+    words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 /// Titles whose normalized name is `words` first, then the rest. Each group keeps Cinemeta's
 /// order, taking films and series in turn. A title listed twice stays where it first appears.
-fn ranked(words: &str, films: Vec<TitleCard>, series: Vec<TitleCard>) -> Vec<TitleCard> {
+fn ranked(words: &str, films: Vec<Listed>, series: Vec<Listed>) -> Vec<Listed> {
     let wanted = normalized(words);
-    let turns = (0..films.len().max(series.len())).flat_map(|i| [films.get(i), series.get(i)]).flatten();
+    let (mut films, mut series) = (films.into_iter(), series.into_iter());
+    let turns = std::iter::from_fn(|| match (films.next(), series.next()) {
+        (None, None) => None,
+        (film, show) => Some(film.into_iter().chain(show)),
+    });
     let mut seen = HashSet::new();
-    let mut ranked: Vec<TitleCard> = turns.filter(|card| seen.insert(card.id.clone())).cloned().collect();
-    ranked.sort_by_key(|card| normalized(&card.name) != wanted);
+    let mut ranked: Vec<Listed> = turns.flatten().filter(|listed| seen.insert(listed.card.id.clone())).collect();
+    ranked.sort_by_key(|listed| normalized(&listed.card.name) != wanted);
     ranked
+}
+
+/// IMDb's titles in IMDb's order, then Cinemeta's others in Cinemeta's. A title both list keeps
+/// IMDb's place and card, and Cinemeta's poster when IMDb names none.
+fn merged(imdb: Vec<Listed>, mut cinemeta: Vec<Listed>) -> Vec<Listed> {
+    let mut merged = Vec::with_capacity(imdb.len() + cinemeta.len());
+    for mut listed in imdb {
+        if let Some(at) = cinemeta.iter().position(|other| other.card.id == listed.card.id) {
+            listed.poster = listed.poster.or(cinemeta.remove(at).poster);
+        }
+        merged.push(listed);
+    }
+    merged.extend(cinemeta);
+    let mut seen = HashSet::new();
+    merged.retain(|listed| seen.insert(listed.card.id.clone()));
+    merged
 }
 
 fn may_fetch(url: &Url, plain: Option<&Origin>) -> bool {
@@ -409,21 +471,49 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    fn card(id: &str, kind: Kind, name: &str) -> TitleCard {
-        TitleCard { id: id.parse().unwrap(), kind, name: name.into(), year: None, rating: None }
+    fn listed(id: &str, kind: Kind, name: &str) -> Listed {
+        Listed {
+            card: TitleCard { id: id.parse().unwrap(), kind, name: name.into(), year: None, rating: None },
+            poster: None,
+        }
+    }
+
+    fn ids(listed: Vec<Listed>) -> Vec<String> {
+        listed.into_iter().map(|listed| listed.card.id.to_string()).collect()
     }
 
     #[test]
     fn exact_names_come_first_and_each_group_takes_films_and_series_in_turn() {
         let films = vec![
-            card("tt0000001", Kind::Film, "Dune: Part Two"),
-            card("tt0000002", Kind::Film, "Dune"),
-            card("tt0000003", Kind::Film, "Dune World"),
-            card("tt0000004", Kind::Film, "DUNE"),
+            listed("tt0000001", Kind::Film, "Dune: Part Two"),
+            listed("tt0000002", Kind::Film, "Dune"),
+            listed("tt0000003", Kind::Film, "Dune World"),
+            listed("tt0000004", Kind::Film, "DUNE"),
         ];
-        let series = vec![card("tt0000011", Kind::Series, "Dune"), card("tt0000002", Kind::Film, "Dune")];
-        let ids: Vec<String> = ranked(" dune", films, series).into_iter().map(|card| card.id.to_string()).collect();
-        assert_eq!(ids, ["tt0000011", "tt0000002", "tt0000004", "tt0000001", "tt0000003"]);
+        let series = vec![listed("tt0000011", Kind::Series, "Dune"), listed("tt0000002", Kind::Film, "Dune")];
+        assert_eq!(
+            ids(ranked(" dune", films, series)),
+            ["tt0000011", "tt0000002", "tt0000004", "tt0000001", "tt0000003"]
+        );
+    }
+
+    #[test]
+    fn imdbs_titles_lead_and_a_title_both_list_appears_once_with_imdbs_poster_first() {
+        let poster = |listed: Listed, url: &str| Listed { poster: Some(Url::parse(url).unwrap()), ..listed };
+        let imdb = vec![
+            poster(listed("tt0000002", Kind::Film, "Dune"), "https://imdb/2"),
+            listed("tt0000003", Kind::Film, "Dune World"),
+            listed("tt0000002", Kind::Film, "Dune"),
+        ];
+        let cinemeta = vec![
+            listed("tt0000001", Kind::Film, "Dune"),
+            poster(listed("tt0000003", Kind::Film, "Dune World"), "https://cinemeta/3"),
+            poster(listed("tt0000002", Kind::Film, "Dune"), "https://cinemeta/2"),
+        ];
+        let merged = merged(imdb, cinemeta);
+        let posters: Vec<Option<&str>> = merged.iter().map(|listed| listed.poster.as_ref().map(Url::as_str)).collect();
+        assert_eq!(posters, [Some("https://imdb/2"), Some("https://cinemeta/3"), None]);
+        assert_eq!(ids(merged), ["tt0000002", "tt0000003", "tt0000001"]);
     }
 
     #[test]
@@ -435,7 +525,7 @@ mod tests {
             [fetchable("http://127.0.0.1:8081/p"), fetchable("http://localhost:8080/p"), fetchable("ftp://x/p")],
             [false, false, false]
         );
-        let catalog = || Catalog::new(&CatalogConfig { online: true, endpoint: None, cache_dir: None }).unwrap();
+        let catalog = || Catalog::new(&CatalogConfig::default()).unwrap();
         let error = catalog().allow_plain_http_from("http://example.com:80").err().unwrap();
         assert_eq!(
             (error.code, error.message.as_str()),

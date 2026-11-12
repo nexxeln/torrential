@@ -20,7 +20,7 @@ async fn main() {
         eprintln!("usage: title_sources <tt0063350 | tt1748166:1:2> [--screen 1080p|2160p] [--language en]");
         std::process::exit(2);
     });
-    let catalog = Catalog::new(&CatalogConfig { online: true, endpoint: None, cache_dir: None }).expect("a catalog");
+    let catalog = Catalog::new(&CatalogConfig::default()).expect("a catalog");
     let details = catalog.title(&video.title).await.unwrap_or_else(|e| fail(&e.to_string()));
     let same = catalog.namesakes(&details.card).await.unwrap_or_default();
     let namesakes = match same.iter().position(|card| card.id == details.card.id) {

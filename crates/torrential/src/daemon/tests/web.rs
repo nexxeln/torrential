@@ -1062,7 +1062,7 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
 #[tokio::test(flavor = "multi_thread")]
 async fn with_title_lookups_off_title_search_is_empty_and_torrent_search_still_works() {
     use torrential_search::catalog::CatalogConfig;
-    let off = CatalogConfig { online: false, endpoint: None, cache_dir: None };
+    let off = CatalogConfig { online: false, endpoint: None, imdb_endpoint: None, cache_dir: None };
     let h = Harness::with_titles(std::sync::Arc::new(super::super::titles::catalog_port::Live::new(&off).unwrap()));
     assert_eq!(get(&h, "/api/titles?q=night").await, (200, json!({ "titles": [] })));
     assert_eq!(

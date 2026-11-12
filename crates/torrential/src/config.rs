@@ -340,8 +340,12 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         })
         .transpose()?;
     let subtitles = SubtitleConfig { online: file.subtitles.online.unwrap_or(true), ..SubtitleConfig::default() };
-    let catalog =
-        CatalogConfig { online: file.catalog.online.unwrap_or(true), endpoint: file.catalog.endpoint, cache_dir: None };
+    let catalog = CatalogConfig {
+        online: file.catalog.online.unwrap_or(true),
+        endpoint: file.catalog.endpoint,
+        imdb_endpoint: None,
+        cache_dir: None,
+    };
     let updates = file.updates.unwrap_or_default();
     Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog })
 }

@@ -9,6 +9,7 @@ use torrential_core::title::Episode;
 use torrential_core::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetails, TitleId};
 use url::Url;
 
+use super::Listed;
 use crate::dates;
 
 /// The path segment Cinemeta names a kind by.
@@ -21,12 +22,6 @@ pub fn segment(kind: Kind) -> &'static str {
 
 fn kind(segment: &str) -> Option<Kind> {
     [Kind::Film, Kind::Series].into_iter().find(|kind| self::segment(*kind) == segment)
-}
-
-/// One title of a search answer, with the poster address the search named.
-pub struct Listed {
-    pub card: TitleCard,
-    pub poster: Option<Url>,
 }
 
 /// A title's details, with the address of each picture Cinemeta named for it.
