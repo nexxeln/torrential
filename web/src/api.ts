@@ -60,6 +60,10 @@ export interface Release {
   info_url: string | null;
   /** What of a title the release holds. Only in a title's sources. */
   span?: Span;
+  /** How likely its swarm is to send data now. Only in a title's sources. */
+  swarm?: Swarm;
+  /** Why it did not start when Play last tried it, in the last 6 hours. Only in a title's sources, which list it last. */
+  failed?: Skip;
 }
 
 export type SourceReport = { source: string; elapsed_ms: number } & (
@@ -303,6 +307,13 @@ export type Kind = "film" | "series";
 export type Span = string;
 /** What the browser decodes, from MediaSource.isTypeSupported. */
 export type Playback = "h264" | "hevc" | "hevc-hdr";
+/**
+ * How likely a release's swarm is to send data now: `strong` is 20 or more seeders or a lawful catalog that does not
+ * count them, `fair` 5 to 19, `weak` 1 to 4, and `unknown` uncounted, or 0 in a lawful catalog.
+ */
+export type Swarm = "strong" | "fair" | "weak" | "unknown";
+/** A country whose code release names carry, as `US` in `The.Office.US.S02E01`. */
+export type Country = "US" | "UK" | "AU" | "CA" | "NZ" | "IE";
 
 export interface TitleCard {
   /** An IMDb ID such as `tt0063350`. */
@@ -361,6 +372,8 @@ export interface TitlePage extends TitleCard {
   genres: string[];
   runtime_min: number | null;
   cast: string[];
+  /** The countries the title is from, of those whose codes release names carry. */
+  countries: Country[];
   /** Which pictures artUrl can serve. */
   art: { poster: boolean; background: boolean; logo: boolean };
   /** Empty for a film. */

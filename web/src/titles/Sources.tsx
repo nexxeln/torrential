@@ -6,6 +6,7 @@ import { playback } from "../player/plan";
 import { playPath } from "../router";
 import { ResultRow } from "../search/ResultRow";
 import { type SearchState, useSearchStream } from "../search/useSearch";
+import { skipReason } from "./words";
 
 function describe(state: SearchState, what: string): string {
   switch (state.kind) {
@@ -81,6 +82,7 @@ export function Sources({ video, label, kind, open: opened }: Props) {
                   onCopy={() => {}}
                   href={playPath(video, release.id)}
                   pick={at === 0}
+                  failed={release.failed && skipReason(release.failed, kind === "film" ? "film" : "series")}
                 />
               ))}
             </ol>

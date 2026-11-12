@@ -33,12 +33,14 @@ interface Props {
   href?: string;
   /** The release a title's Play tries first. */
   pick?: boolean;
+  /** Why the release did not start when Play last tried it, as a sentence. */
+  failed?: string;
 }
 
 const ROW =
   "grid w-full grid-cols-1 items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 text-left hover:bg-white/5 data-selected:bg-white/8 sm:grid-cols-[minmax(0,1fr)_auto]";
 
-export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pick }: Props) {
+export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pick, failed }: Props) {
   const row = useRef<HTMLLIElement>(null);
   useEffect(() => {
     if (selected) row.current?.scrollIntoView({ block: "nearest" });
@@ -59,6 +61,7 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pi
               Pick
             </Chip>
           )}
+          {failed && <Chip title={failed}>Did not start earlier</Chip>}
           {quality.resolution && <Chip>{RESOLUTIONS[quality.resolution]}</Chip>}
           {quality.codec && <Chip>{CODECS[quality.codec]}</Chip>}
           {quality.hdr && <Chip>HDR</Chip>}
