@@ -100,7 +100,7 @@ function RecoveryNotice({ recovery, switched, onRetry }: { recovery: Recovery; s
     notice = (
       <>
         <p className="py-1.5">No other source plays right now. Still waiting on this one.</p>
-        <Button variant="quiet" className="px-2 py-1" onClick={onRetry}>
+        <Button variant="quiet" size="small" onClick={onRetry}>
           Look again
         </Button>
       </>

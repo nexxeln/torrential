@@ -3,7 +3,7 @@ import { Fragment, type ReactNode, useEffect } from "react";
 import { artUrl, type Next, setSaved, type TitlePage as Title } from "../api";
 import { count, list, minutes, sentence } from "../lib/format";
 import { Link, navigate, playPath, titlePath } from "../router";
-import { Button } from "../ui/Button";
+import { Button, buttonClass } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Spinner } from "../ui/Spinner";
 import { Episodes, seasonOrder } from "./Episodes";
@@ -78,7 +78,7 @@ function SaveButton({ page, onChange }: { page: Title; onChange: (page: Title) =
     );
   };
   return (
-    <Button aria-pressed={page.saved} onClick={toggle} className="px-4 py-2.5 text-base sm:py-2 sm:text-sm">
+    <Button size="large" aria-pressed={page.saved} onClick={toggle}>
       <BookmarkIcon aria-hidden="true" className={`size-4 ${page.saved ? "fill-action" : "fill-soft"}`} />
       {page.saved ? "Saved" : "Save"}
     </Button>
@@ -169,10 +169,7 @@ function Details({ page, season, sources, onChange }: { page: Title; season: num
         {page.cast.length > 0 && <p className="text-sm text-pretty text-pencil">Starring {list(page.cast)}</p>}
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {primary ? (
-            <Link
-              href={playPath(primary.video)}
-              className="inline-flex items-center gap-2 rounded-lg bg-ink px-4 py-2.5 text-base font-medium text-paper hover:bg-white sm:py-2 sm:text-sm"
-            >
+            <Link href={playPath(primary.video)} className={buttonClass({ variant: "primary", size: "large" })}>
               <PlayIcon aria-hidden="true" className="size-4 fill-paper" />
               {primary.label}
               {primary.left && <span className="font-normal text-paper/65 tabular-nums">{primary.left}</span>}

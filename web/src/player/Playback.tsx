@@ -620,7 +620,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
                 Resumed from {clock(memory.start)}
                 <Button
                   variant="quiet"
-                  className="px-2 py-0.5"
+                  size="small"
                   onClick={() => {
                     memory.forget();
                     setResumeNotice(false);
