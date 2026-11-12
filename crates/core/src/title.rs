@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, ErrorCode};
+use crate::quality::Quality;
 
 /// A film, or with `episode` one episode of a series.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -308,6 +309,43 @@ impl Wanted {
             (None, Some(year)) => vec![format!("{name} {year}"), name.clone()],
             (None, None) => vec![name.clone()],
         }
+    }
+
+    /// How many words `release` has beyond this title's own. Numbers and codes such as `5.1`
+    /// and `60FPS` are not words, nor are the tags a title ends at or `Quality` reads, the words
+    /// of a season or an episode, or the group after a final dash. A plain release has none. An
+    /// alternate version names itself, as `Night Of The Living Dead (1968) Synthwave Horror Cut`
+    /// does in three words.
+    pub fn other_words(&self, release: &str) -> usize {
+        const SPANS: [&str; 5] = ["season", "seasons", "episode", "complete", "series"];
+        let own = normalized(&self.name);
+        let own: Vec<&str> = own.split(' ').collect();
+        let name = stem(release);
+        let name = match name.rsplit_once('-') {
+            Some((before, group)) if !group.is_empty() && group.chars().all(char::is_alphanumeric) => before,
+            _ => name,
+        };
+        let words: Vec<String> = name
+            .split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '\'' | '’')))
+            .map(str::to_lowercase)
+            .filter(|token| !is_tag(token))
+            .flat_map(|token| token.split('-').map(normalized).filter(|word| !word.is_empty()).collect::<Vec<_>>())
+            .collect();
+        // `Quality` reads `Full HD` and `H 264` from two words that say nothing alone.
+        let pairs = |other: &str, pair: String| Quality::parse(&pair) != Quality::parse(other);
+        let tag = |i: usize, word: &str| {
+            is_tag(word)
+                || Quality::parse(word) != Quality::default()
+                || i > 0 && pairs(&words[i - 1], format!("{} {word}", words[i - 1]))
+                || words.get(i + 1).is_some_and(|next| pairs(next, format!("{word} {next}")))
+        };
+        let other = |(i, word): &(usize, &String)| {
+            !(word.bytes().any(|b| b.is_ascii_digit())
+                || own.contains(&word.as_str())
+                || SPANS.contains(&word.as_str())
+                || tag(*i, word))
+        };
+        words.iter().enumerate().filter(other).count()
     }
 }
 
@@ -854,6 +892,35 @@ mod tests {
         ];
         let wanted = episode_of("Sousou no Frieren", 2023, Namesakes::None, 1, 5);
         assert_eq!(fits(&wanted, &releases), expect(&releases, &[Some("s1e5"), Some("s1e5"), None, None]));
+    }
+
+    #[test]
+    fn a_release_counts_the_words_beyond_its_title() {
+        let night = film_named("Night of the Living Dead", 1968, Namesakes::Leading);
+        let cases = [
+            ("Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP", 0),
+            ("Night of the Living Dead (1968) 1080p BRRip x264 -YTS", 0),
+            ("Night of the Living Dead 1968 1080p MAX WEB-DL DDP2 0 H 264-GPRS", 1),
+            ("Night of the Living Dead (1968) 4K UHD Blu-ray Remux", 0),
+            ("Night Of The Living Dead ( 1968) English FULL HD", 1),
+            ("Night Of The Living Dead (1968) Colorized", 1),
+            ("Night of the Living Dead (1968) [colorised, 4k, 60FPS]", 1),
+            ("Night Of The Living Dead 1968 Svengoolie", 1),
+            ("Night Of The Living Dead (1968) Synthwave Horror Cut", 3),
+            ("Night Of The Living Dead ( 1968) Doblada Al Español FULL HD", 3),
+            ("Night of the Living Dead (1968) Super 8 Transfer Lukassen Transfer", 4),
+        ];
+        let counted = cases.map(|(release, _)| (release, night.other_words(release)));
+        assert_eq!(counted, cases);
+        let pioneer = episode_of("Pioneer One", 2010, Namesakes::None, 1, 1);
+        let cases = [
+            ("Pioneer.One.S01E01.720p.x264-VODO", 0),
+            ("Pioneer One Season One Complete XviD", 0),
+            ("Pioneer One S01E01 720p x264 VODO", 1),
+        ];
+        assert_eq!(cases.map(|(release, _)| (release, pioneer.other_words(release))), cases);
+        let greys = episode_of("Grey's Anatomy", 2005, Namesakes::None, 12, 1);
+        assert_eq!(greys.other_words("Grey's Anatomy Season Twelve 720p"), 1);
     }
 
     #[test]

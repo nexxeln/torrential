@@ -147,6 +147,8 @@ struct TitleFit {
     undated: bool,
     /// The bitrate is in the usual band for its resolution, or unknown.
     in_band: bool,
+    /// Words in the name beyond the title, its year, and tags, as an alternate version has.
+    other_words: usize,
 }
 
 /// How likely a swarm is to send data now. Lower plays first.
@@ -208,6 +210,7 @@ struct PlayRank {
     swarm: Swarm,
     undated: bool,
     standing: Reverse<u8>,
+    other_words: usize,
     span: u8,
     closeness: u8,
     off_band: bool,
@@ -400,12 +403,13 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
         swarm,
         undated: wanted.namesakes == Namesakes::Leading && reading.year.is_none(),
         in_band: bitrate.is_none_or(|mbps| band(c.quality.resolution).contains(&mbps)),
+        other_words: wanted.other_words(&c.release.name),
     });
     Some(c)
 }
 
 /// In a title's search the play order leads: not a cam, fits, swarm, names the year, standing,
-/// span, screen, bitrate, and seeders. The chain after it orders every search.
+/// a plain name, span, screen, bitrate, and seeders. The chain after it orders every search.
 fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
     let fits = |c: &Candidate| profile.fits(c.release.size, c.quality);
     let is_video = |c: &Candidate| c.release.category == Some(Category::Video) || c.quality.resolution.is_some();
@@ -418,6 +422,7 @@ fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
             swarm: t.swarm,
             undated: t.undated,
             standing: Reverse(standing(c)),
+            other_words: t.other_words,
             span: breadth(c.release.span),
             closeness: profile.closeness(c.resolution),
             off_band: !t.in_band,

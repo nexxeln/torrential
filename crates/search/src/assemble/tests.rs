@@ -1013,6 +1013,34 @@ fn a_trailer_is_not_the_film() {
 }
 
 #[test]
+fn a_plainly_named_release_plays_before_an_alternate_version() {
+    let flesh = "Night of the Living Dead (1968) - The Flesh Harvest 4k re-sound design (2024)";
+    let runs = [fresh(
+        &archive(),
+        vec![
+            video(0x88, flesh, None, 15 * GB),
+            video(0x89, "Night of the Living Dead (1968) [colorised, 4k, 60FPS]", None, 6_900_000_000),
+            video(0x8a, "Night Of The Living Dead (1968) Synthwave Horror Cut", None, 1_900_000_000),
+            video(0x8b, "Night Of The Living Dead 1968 Svengoolie", None, 2_700_000_000),
+            video(0x8c, "Night Of The Living Dead (1968) Colorized", None, 1_200_000_000),
+            video(0x64, "Night of the Living Dead (1968)", None, 1_200_000_000),
+        ],
+    )];
+    let screen = preferring(Preferences { screen: Some(Screen::Tv), ..Preferences::default() });
+    assert_eq!(
+        played(&night(Namesakes::Leading, 1968), screen, &runs),
+        [
+            "Night of the Living Dead (1968)",
+            "Night of the Living Dead (1968) [colorised, 4k, 60FPS]",
+            "Night Of The Living Dead (1968) Colorized",
+            "Night Of The Living Dead 1968 Svengoolie",
+            "Night Of The Living Dead (1968) Synthwave Horror Cut",
+            flesh,
+        ]
+    );
+}
+
+#[test]
 fn a_release_too_small_for_the_runtime_is_dropped_as_a_fake() {
     let fake = video(0x6a, "Night.of.the.Living.Dead.1968.1080p.WEB-DL.x264", Some(900), 150_000_000);
     let runs = [fresh(&knaben(), vec![fake, bluray()])];
