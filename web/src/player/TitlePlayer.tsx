@@ -150,14 +150,13 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     () => ({ title: name, detail: episode ? `${episodeCode(episode)} · ${episodeName(episode)}` : year ? String(year) : null }),
     [name, episode, year],
   );
-  const kind = episode || page?.kind === "series" ? "episode" : "film";
+  const kind = playing.includes(":") || page?.kind === "series" ? "episode" : "film";
 
   useEffect(() => {
     document.title = name ? `${name}${episode ? ` ${episodeCode(episode)}` : ""} · torrential` : "torrential";
     return () => void (document.title = "torrential");
   }, [name, episode]);
 
-  // A source that stalls for good is replaced by the engine's next one, from the same time.
   const [recovery, dispatch] = useReducer(recover, WATCHING);
   const [swapped, setSwapped] = useState<Current | null>(null);
   const [switched, setSwitched] = useState(false);

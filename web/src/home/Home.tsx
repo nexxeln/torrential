@@ -132,7 +132,8 @@ function Shelf() {
     return () => stop.abort();
   }, [live]);
 
-  if (state.kind === "loading") return null;
+  // The header says when the engine is not running.
+  if (state.kind === "loading" || (state.kind === "failed" && state.error.code === "engine_unreachable")) return null;
   if (state.kind === "failed") {
     return (
       <p className="max-w-[60ch] text-base text-pretty text-pencil sm:text-sm">

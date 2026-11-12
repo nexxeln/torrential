@@ -55,11 +55,14 @@ export function list(names: string[]): string {
   return new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(names);
 }
 
-/** The engine writes messages for a terminal: lower case, no period. On a page they read as sentences. */
+/**
+ * The engine writes messages for a terminal: lower case, no period. On a page they read as sentences.
+ * A message that starts with an ID, such as `tt0063350` or an infohash, keeps it as written.
+ */
 export function sentence(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
-  const capital = trimmed[0]!.toUpperCase() + trimmed.slice(1);
+  const capital = /^\S*\d/.test(trimmed) ? trimmed : trimmed[0]!.toUpperCase() + trimmed.slice(1);
   return /[.!?…]$/.test(capital) ? capital : `${capital}.`;
 }
 

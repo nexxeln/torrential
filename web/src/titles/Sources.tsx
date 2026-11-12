@@ -36,12 +36,18 @@ interface Props {
 /** The releases Play would try, listed only when opened. Each plays that release and no other. */
 export function Sources({ video, label, kind, open: opened }: Props) {
   const [open, setOpen] = useState(opened);
-  const section = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (opened) section.current?.scrollIntoView({ block: "start" });
-  }, [opened]);
   const state = useSearchStream(open ? video : null, (signal) => sources(video, playback(), signal));
   const result = state.kind === "searching" || state.kind === "done" ? state.result : null;
+
+  // A link to the list scrolls to it once the first sources make the page long enough to.
+  const section = useRef<HTMLElement>(null);
+  const scrolled = useRef(!opened);
+  const arrived = (result?.releases.length ?? 0) > 0;
+  useEffect(() => {
+    if (scrolled.current || !arrived) return;
+    scrolled.current = true;
+    section.current?.scrollIntoView({ block: "start" });
+  }, [arrived]);
 
   return (
     <section ref={section} aria-labelledby="sources-title" className="flex scroll-mt-4 flex-col gap-2">
