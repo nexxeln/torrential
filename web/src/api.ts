@@ -20,7 +20,7 @@
 //
 // Films and series, by IMDb ID:
 //
-//   GET  /api/titles?q=                                    { titles: TitleCard[] }
+//   GET  /api/titles?q=                                    TitleSearch
 //   GET  /api/title?id=                                    TitlePage
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
 //   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
@@ -315,6 +315,12 @@ export interface TitleCard {
   rating: number | null;
 }
 
+export interface TitleSearch {
+  titles: TitleCard[];
+  /** Title lookups are turned off in config.yaml, so `titles` is empty. */
+  offline?: boolean;
+}
+
 export interface EpisodeInfo {
   season: number;
   episode: number;
@@ -581,10 +587,8 @@ export function watchJobs(onEvent: (event: JobEvent) => void, onConnection?: (co
   return () => source.close();
 }
 
-export function titles(query: string, signal?: AbortSignal): Promise<TitleCard[]> {
-  return fetch(`/api/titles?${new URLSearchParams({ q: query })}`, { signal })
-    .then(json<{ titles: TitleCard[] }>)
-    .then((body) => body.titles);
+export function titles(query: string, signal?: AbortSignal): Promise<TitleSearch> {
+  return fetch(`/api/titles?${new URLSearchParams({ q: query })}`, { signal }).then(json<TitleSearch>);
 }
 
 export function title(id: string, signal?: AbortSignal): Promise<TitlePage> {

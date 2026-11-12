@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { type ApiError, artUrl, asApiError, type ContinueItem, type Home as HomeData, home } from "../api";
 import { count, minutes, sentence } from "../lib/format";
 import { useJobs } from "../lib/jobs";
@@ -15,13 +15,13 @@ function describe(state: TitlesState): string {
   switch (state.kind) {
     case "idle":
     case "failed":
+    case "offline":
       return "";
     case "searching":
       return "Searching";
-    case "done": {
+    case "found": {
       const films = state.titles.filter((card) => card.kind === "film").length;
       const shows = state.titles.length - films;
-      if (state.titles.length === 0) return "";
       return [films ? count(films, "film") : null, shows ? count(shows, "show") : null].filter(Boolean).join(" and ");
     }
   }
@@ -36,32 +36,49 @@ function TorrentsLink({ query }: { query: string }) {
   );
 }
 
+/** A sentence in place of results, dimmed while the next answer is on its way. */
+function Note({ query, stale, children }: { query: string; stale: boolean; children: ReactNode }) {
+  return (
+    <div aria-busy={stale} className="flex max-w-[60ch] flex-col gap-3 aria-busy:opacity-50">
+      {children}
+      <TorrentsLink query={query} />
+    </div>
+  );
+}
+
 function Results({ query, state, onLeaveTop, grid }: { query: string; state: TitlesState; onLeaveTop: () => void; grid: RefObject<HTMLOListElement | null> }) {
-  if (state.kind === "failed") {
+  // The previous answer stays, dimmed, until this one arrives, so the page does not jump.
+  const answer = state.kind === "searching" ? state.before : state.kind === "idle" ? null : state;
+  const stale = state.kind === "searching";
+  if (!answer) return null;
+  if (answer.kind === "failed") {
     return (
-      <div role="alert" className="flex max-w-[60ch] flex-col gap-3">
-        <div className="flex flex-col gap-1">
+      <Note query={query} stale={stale}>
+        <div role="alert" className="flex flex-col gap-1">
           <p className="text-base font-medium text-ink sm:text-sm">The search failed</p>
-          <p className="text-base text-pretty text-soft sm:text-sm">{sentence(state.error.message)}</p>
-          {state.error.hint && <p className="text-base text-pretty text-pencil sm:text-sm">{sentence(state.error.hint)}</p>}
+          <p className="text-base text-pretty text-soft sm:text-sm">{sentence(answer.error.message)}</p>
+          {answer.error.hint && <p className="text-base text-pretty text-pencil sm:text-sm">{sentence(answer.error.hint)}</p>}
         </div>
-        <TorrentsLink query={query} />
-      </div>
+      </Note>
     );
   }
-  const shown = state.kind === "searching" || state.kind === "done" ? state.titles : null;
-  if (state.kind === "done" && state.titles.length === 0) {
+  if (answer.kind === "offline") {
     return (
-      <div className="flex max-w-[60ch] flex-col gap-3">
-        <p className="text-base text-pretty text-soft sm:text-sm">The catalog lists no film or show called “{query}”.</p>
-        <TorrentsLink query={query} />
-      </div>
+      <Note query={query} stale={stale}>
+        <p className="text-base text-pretty text-soft sm:text-sm">Title lookups are turned off in config.yaml.</p>
+      </Note>
     );
   }
-  if (!shown?.length) return null;
+  if (answer.titles.length === 0) {
+    return (
+      <Note query={query} stale={stale}>
+        <p className="text-base text-pretty text-soft sm:text-sm">The catalog lists no film or show called “{query}”.</p>
+      </Note>
+    );
+  }
   return (
     <div className="flex flex-col gap-8 pt-2">
-      <TitleGrid list={grid} titles={shown} label="Films and shows" stale={state.kind === "searching"} onLeaveTop={onLeaveTop} />
+      <TitleGrid list={grid} titles={answer.titles} label="Films and shows" stale={stale} onLeaveTop={onLeaveTop} />
       <div className="flex flex-col gap-4">
         <TorrentsLink query={query} />
         <p className="text-sm text-pencil max-sm:hidden">
@@ -109,15 +126,21 @@ function ContinueCard({ item }: { item: ContinueItem }) {
 
 type HomeState = { kind: "loading" } | { kind: "ready"; home: HomeData } | { kind: "failed"; error: ApiError };
 
+/** The shelf as it last was in this visit, shown at once on the way back while the engine is asked again. */
+let lastShelf: HomeData | null = null;
+
 /** What there is to pick up again, and the titles saved for later. */
 function Shelf() {
-  const [state, setState] = useState<HomeState>({ kind: "loading" });
+  const [state, setState] = useState<HomeState>(() => (lastShelf ? { kind: "ready", home: lastShelf } : { kind: "loading" }));
   // Asks again when the engine comes back.
   const live = useJobs().link === "live";
   useEffect(() => {
     const stop = new AbortController();
     home(stop.signal).then(
-      (found) => setState({ kind: "ready", home: found }),
+      (found) => {
+        lastShelf = found;
+        setState({ kind: "ready", home: found });
+      },
       (thrown) => !stop.signal.aborted && setState({ kind: "failed", error: asApiError(thrown) }),
     );
     return () => stop.abort();
@@ -178,7 +201,7 @@ export function Home({ query }: { query: string }) {
 
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (search.keyDown(event)) return;
-    const first = state.kind === "done" ? state.titles[0] : undefined;
+    const first = state.kind === "found" ? state.titles[0] : undefined;
     if (event.key === "ArrowDown" && grid.current) {
       event.preventDefault();
       grid.current.querySelector("a")?.focus();
