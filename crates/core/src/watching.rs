@@ -125,9 +125,11 @@ pub struct TitleLink {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lease {
-    /// A title play created the download. Its files go if it never played.
+    /// A title play created the download, and nothing else has used it or changed its selection.
+    /// Its files go if that play gives it up before it plays.
     Owned,
-    /// The download existed before the play, so a play never deletes it.
+    /// A file of it was on disk before the play, or a `get` or another play has used it. Nothing
+    /// deletes its files.
     Borrowed,
 }
 
