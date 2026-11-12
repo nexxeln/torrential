@@ -366,6 +366,41 @@ async fn a_films_details_read_as_cinemeta_describes_it() {
 }
 
 #[tokio::test]
+async fn an_unknown_title_is_not_found_at_once_however_cinemeta_says_so() {
+    let nameless = br#"{"meta":{"id":"tt99999999","type":"movie","behaviorHints":{"hasScheduledVideos":false}}}"#;
+    let server = Server::start(|_| {
+        vec![
+            ("/meta/series/tt99999999.json", ok(b"{}".to_vec())),
+            ("/meta/movie/tt99999999.json", ok(nameless.to_vec())),
+            ("/meta/series/tt99999998.json", ok(br#"{"meta":{}}"#.to_vec())),
+            ("/meta/movie/tt99999998.json", ok(br#"{"meta":null}"#.to_vec())),
+        ]
+    })
+    .await;
+    let catalog = server.catalog(true, None);
+    for unknown in ["tt9999999999", "tt99999999", "tt99999998"] {
+        let started = std::time::Instant::now();
+        let error = catalog.title(&id(unknown)).await.unwrap_err();
+        assert_eq!(
+            (error.code, error.message),
+            (ErrorCode::NotFound, format!("Cinemeta has no film or series {unknown}"))
+        );
+        assert!(started.elapsed() < Duration::from_secs(1), "{unknown} took {:?}", started.elapsed());
+    }
+    assert_eq!(
+        server.asked(),
+        [
+            "/meta/series/tt9999999999.json",
+            "/meta/movie/tt9999999999.json",
+            "/meta/series/tt99999999.json",
+            "/meta/movie/tt99999999.json",
+            "/meta/series/tt99999998.json",
+            "/meta/movie/tt99999998.json",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_series_details_list_its_seasons_with_specials_last() {
     let server = Server::recorded().await;
     let series = server.catalog(true, None).title(&id(BREAKING_BAD)).await.unwrap();

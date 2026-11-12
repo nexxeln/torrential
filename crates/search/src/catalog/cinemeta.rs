@@ -94,7 +94,7 @@ struct Meta {
 
 #[derive(Deserialize)]
 struct Answer {
-    meta: Option<Meta>,
+    meta: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -136,9 +136,10 @@ pub fn listing(body: &[u8], kind: Kind) -> Result<Vec<Listed>, serde_json::Error
 }
 
 /// The title `id` as a details answer describes it. `None` when the answer names no such title, as
-/// Cinemeta's `{}` for a film asked for as a series.
+/// Cinemeta's `{}` for a film asked for as a series, or a meta with no ID or no name for an unknown ID.
 pub fn described(body: &[u8], id: &TitleId) -> Result<Option<Described>, serde_json::Error> {
-    let Some(meta) = serde_json::from_slice::<Answer>(body)?.meta else { return Ok(None) };
+    let meta = serde_json::from_slice::<Answer>(body)?.meta;
+    let Some(meta) = meta.and_then(|meta| Meta::deserialize(meta).ok()) else { return Ok(None) };
     let Some(kind) = meta.kind.as_deref().and_then(kind) else { return Ok(None) };
     let Some(card) = meta.card(kind).filter(|card| card.id == *id) else { return Ok(None) };
     let videos = meta.videos.unwrap_or_default().into_iter().filter_map(|video| Video::deserialize(video).ok());
