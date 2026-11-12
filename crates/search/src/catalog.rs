@@ -36,6 +36,10 @@ const LARGEST_PICTURE: usize = 5 << 20;
 const PICTURES_BUDGET: u64 = 256 << 20;
 const MISS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 const REDIRECTS: usize = 5;
+/// The hosts the catalogs' pictures are on: Cinemeta's under metahub.space, IMDb's under
+/// media-amazon.com, and image.tmdb.org, where Cinemeta's episode pictures redirect. A host
+/// matches an entry that it is or ends with after a dot. Checked live on 2026-11-13.
+const PICTURE_HOSTS: &[&str] = &["metahub.space", "media-amazon.com", "image.tmdb.org"];
 /// Titles remembered from searches. Past this many the memory starts over.
 const LISTED_MOST: usize = 4096;
 
@@ -103,7 +107,7 @@ impl ImageFormat {
 enum Lack {
     Unnamed,
     Status(u16),
-    NotHttps,
+    Elsewhere,
     NotImage,
     TooLarge,
 }
@@ -119,7 +123,7 @@ impl Lack {
         let message = match self {
             Lack::Unnamed => format!("Cinemeta names no {what} for {id}"),
             Lack::Status(status) => format!("the {what} for {id} is gone: HTTP {status}"),
-            Lack::NotHttps => format!("the {what} for {id} is not at an https address"),
+            Lack::Elsewhere => format!("the {what} for {id} is on a host pictures are not fetched from"),
             Lack::NotImage => format!("the {what} for {id} is not a JPEG, PNG, or WebP picture"),
             Lack::TooLarge => format!("the {what} for {id} is larger than {} MiB", LARGEST_PICTURE >> 20),
         };
@@ -138,14 +142,58 @@ pub struct Catalog {
     http: Http,
     /// Follows only redirects to an address a picture may come from.
     pictures: Http,
+    picture_from: PictureFrom,
     cinemeta: Url,
     imdb: Url,
     online: bool,
     shelf: Shelf,
     /// The kind and poster address of each title recent searches listed.
     listed: Mutex<HashMap<TitleId, (Kind, Option<Url>)>>,
-    /// A plain HTTP origin pictures may also come from, for tests against a local server.
+}
+
+/// Where a picture may be fetched from. Each redirect is checked again.
+#[derive(Clone)]
+struct PictureFrom {
+    /// The host of a Cinemeta mirror the person set in config.yaml.
+    mirror: Option<String>,
+    /// A plain HTTP loopback origin, for tests against a local server.
     plain: Option<Origin>,
+}
+
+impl PictureFrom {
+    /// An `https` address on port 443 with no user name, whose host is a name under
+    /// [`PICTURE_HOSTS`] or the mirror's, or an address on the plain origin.
+    fn allows(&self, url: &Url) -> bool {
+        if self.plain.as_ref().is_some_and(|origin| url.origin() == *origin) {
+            return true;
+        }
+        let Some(Host::Domain(host)) = url.host() else { return false };
+        let known = PICTURE_HOSTS
+            .iter()
+            .any(|known| host == *known || host.strip_suffix(known).is_some_and(|head| head.ends_with('.')));
+        let trusted = known || self.mirror.as_deref() == Some(host);
+        trusted
+            && url.scheme() == "https"
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+    }
+
+    /// A client for pictures. A redirect to an address a picture may not come from stops, and
+    /// its answer then reads as a picture elsewhere.
+    fn client(&self) -> Result<Http, Error> {
+        let from = self.clone();
+        let policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= REDIRECTS {
+                attempt.error("too many redirects")
+            } else if from.allows(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        });
+        Http::redirecting(AGENT, false, policy).map_err(no_client)
+    }
 }
 
 impl Catalog {
@@ -156,20 +204,26 @@ impl Catalog {
             Url::parse(&slashed)
                 .map_err(|e| Error::new(ErrorCode::Usage, format!("the {name} endpoint {url} is not a URL: {e}")))
         };
+        let cinemeta = base(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?;
+        let mirror = match cinemeta.host() {
+            Some(Host::Domain(host)) if config.endpoint.is_some() => Some(host.to_string()),
+            _ => None,
+        };
+        let picture_from = PictureFrom { mirror, plain: None };
         Ok(Catalog {
             http: Http::named(AGENT, false).map_err(no_client)?,
-            pictures: picture_client(None)?,
-            cinemeta: base(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?,
+            pictures: picture_from.client()?,
+            picture_from,
+            cinemeta,
             imdb: base(config.imdb_endpoint.as_deref().unwrap_or(imdb::BASE), "IMDb")?,
             online: config.online,
             shelf: Shelf::new(config.cache_dir.clone()),
             listed: Mutex::default(),
-            plain: None,
         })
     }
 
     /// Lets pictures also come over plain HTTP from `origin`, which must be a loopback address
-    /// such as a test's local server. Every other picture address must be `https`.
+    /// such as a test's local server.
     #[doc(hidden)]
     pub fn allow_plain_http_from(mut self, origin: &str) -> Result<Catalog, Error> {
         let loopback = |url: &Url| match url.host() {
@@ -180,8 +234,8 @@ impl Catalog {
         let url = Url::parse(origin).ok().filter(|url| url.scheme() == "http" && loopback(url));
         let url =
             url.ok_or_else(|| Error::new(ErrorCode::Usage, format!("{origin} is not a loopback HTTP address")))?;
-        self.pictures = picture_client(Some(url.origin()))?;
-        self.plain = Some(url.origin());
+        self.picture_from.plain = Some(url.origin());
+        self.pictures = self.picture_from.client()?;
         Ok(self)
     }
 
@@ -236,7 +290,8 @@ impl Catalog {
     }
 
     /// A picture Cinemeta named for this title, fetched once and kept. Only from an `https`
-    /// address, at most 5 MiB, and only bytes that start like JPEG, PNG, or WebP.
+    /// address on a host the catalogs keep pictures on, at most 5 MiB, and only bytes that start
+    /// like JPEG, PNG, or WebP.
     pub async fn art(&self, id: &TitleId, kind: ArtKind) -> Result<Picture, Error> {
         let name = picture_name(id, kind);
         if let Some(kept) = self.shelf.get(&name).await
@@ -256,7 +311,7 @@ impl Catalog {
         }
         let lack = match self.address(id, kind).await? {
             None => Lack::Unnamed,
-            Some(url) if !may_fetch(&url, self.plain.as_ref()) => Lack::NotHttps,
+            Some(url) if !self.picture_from.allows(&url) => Lack::Elsewhere,
             Some(url) => match self.pictures.get(&url, LARGEST_PICTURE, Instant::now() + LOOKUP_WITHIN).await {
                 Ok(bytes) => match ImageFormat::of(&bytes) {
                     Some(format) => {
@@ -267,7 +322,7 @@ impl Catalog {
                     None => Lack::NotImage,
                 },
                 Err(FetchError::TooLarge(_)) => Lack::TooLarge,
-                Err(FetchError::Status(status)) if (300..400).contains(&status) => Lack::NotHttps,
+                Err(FetchError::Status(status)) if (300..400).contains(&status) => Lack::Elsewhere,
                 Err(FetchError::Status(status)) if (400..500).contains(&status) => Lack::Status(status),
                 Err(e) => return Err(failed(&format!("fetch a picture for {id}"), e)),
             },
@@ -413,25 +468,6 @@ fn merged(imdb: Vec<Listed>, mut cinemeta: Vec<Listed>) -> Vec<Listed> {
     merged
 }
 
-fn may_fetch(url: &Url, plain: Option<&Origin>) -> bool {
-    url.scheme() == "https" || plain.is_some_and(|origin| url.origin() == *origin)
-}
-
-/// A client for pictures. A redirect to an address a picture may not come from stops, and its
-/// answer then reads as a failed fetch.
-fn picture_client(plain: Option<Origin>) -> Result<Http, Error> {
-    let policy = reqwest::redirect::Policy::custom(move |attempt| {
-        if attempt.previous().len() >= REDIRECTS {
-            attempt.error("too many redirects")
-        } else if may_fetch(attempt.url(), plain.as_ref()) {
-            attempt.follow()
-        } else {
-            attempt.stop()
-        }
-    });
-    Http::redirecting(AGENT, false, policy).map_err(no_client)
-}
-
 fn details_name(id: &TitleId) -> String {
     format!("{}/{id}.json", shelf::TITLES)
 }
@@ -520,20 +556,48 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_comes_from_https_or_the_one_plain_origin_allowed() {
-        let local = Url::parse("http://127.0.0.1:8080/").unwrap().origin();
-        let fetchable = |url: &str| may_fetch(&Url::parse(url).unwrap(), Some(&local));
-        assert_eq!([fetchable("https://images.metahub.space/p"), fetchable("http://127.0.0.1:8080/p")], [true, true]);
-        assert_eq!(
-            [fetchable("http://127.0.0.1:8081/p"), fetchable("http://localhost:8080/p"), fetchable("ftp://x/p")],
-            [false, false, false]
-        );
-        let catalog = || Catalog::new(&CatalogConfig::default()).unwrap();
-        let error = catalog().allow_plain_http_from("http://example.com:80").err().unwrap();
+    fn a_picture_comes_only_from_a_picture_host_the_mirror_or_the_one_plain_origin_allowed() {
+        let config = CatalogConfig { endpoint: Some("https://cinemeta.mirror.example".into()), ..Default::default() };
+        let catalog = Catalog::new(&config).unwrap().allow_plain_http_from("http://127.0.0.1:8080").unwrap();
+        let fetchable = |url: &str| catalog.picture_from.allows(&Url::parse(url).unwrap());
+        let allowed = [
+            "https://images.metahub.space/poster/small/tt0063350/img",
+            "https://episodes.metahub.space/tt0903747/1/1/w780.jpg",
+            "https://image.tmdb.org/t/p/w780/x.jpg",
+            "https://m.media-amazon.com/images/M/x.jpg",
+            "https://images.metahub.space:443/p",
+            "https://cinemeta.mirror.example/poster.jpg",
+            "http://127.0.0.1:8080/p",
+        ];
+        assert_eq!(allowed.map(fetchable), [true; 7]);
+        let refused = [
+            "http://images.metahub.space/p",
+            "https://images.metahub.space:8443/p",
+            "https://someone@images.metahub.space/p",
+            "https://someone:secret@m.media-amazon.com/p",
+            "https://evilmetahub.space/p",
+            "https://images.metahub.space.example.com/p",
+            "https://api.tmdb.org/p",
+            "https://example.com/p",
+            "https://localhost/p",
+            "https://127.0.0.1/p",
+            "https://[::1]/p",
+            "https://10.0.0.1/p",
+            "http://cinemeta.mirror.example/p",
+            "http://127.0.0.1:8081/p",
+            "http://localhost:8080/p",
+            "ftp://images.metahub.space/p",
+        ];
+        assert_eq!(refused.map(fetchable), [false; 16]);
+        let error =
+            Catalog::new(&CatalogConfig::default()).unwrap().allow_plain_http_from("http://example.com:80").err();
+        let error = error.unwrap();
         assert_eq!(
             (error.code, error.message.as_str()),
             (ErrorCode::Usage, "http://example.com:80 is not a loopback HTTP address")
         );
-        assert!(catalog().allow_plain_http_from("http://[::1]:9").is_ok());
+        let unset = Catalog::new(&CatalogConfig::default()).unwrap();
+        assert!(!unset.picture_from.allows(&Url::parse("https://v3-cinemeta.strem.io/p").unwrap()));
+        assert!(unset.allow_plain_http_from("http://[::1]:9").is_ok());
     }
 }

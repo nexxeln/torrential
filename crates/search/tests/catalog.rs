@@ -3,6 +3,7 @@
 //! answers point at the same server, Amazon's under `/amazon/`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -579,14 +580,91 @@ async fn a_picture_not_at_an_https_address_is_refused() {
     let error = strict.art(&id(SINTEL), ArtKind::Poster).await.unwrap_err();
     assert_eq!(
         (error.code, error.message.as_str()),
-        (ErrorCode::NotFound, "the poster for tt1727587 is not at an https address")
+        (ErrorCode::NotFound, "the poster for tt1727587 is on a host pictures are not fetched from")
     );
     assert!(server.asked().iter().all(|path| path.starts_with("/meta/")), "{:?}", server.asked());
 
     let local = server.catalog(true, None);
     assert_eq!(local.art(&id(SINTEL), ArtKind::Poster).await.unwrap().format, ImageFormat::Jpeg);
     let error = local.art(&id(SINTEL), ArtKind::Background).await.unwrap_err();
-    assert_eq!(error.message, "the background for tt1727587 is not at an https address");
+    assert_eq!(error.message, "the background for tt1727587 is on a host pictures are not fetched from");
     let posters = server.asked().into_iter().filter(|path| path == SINTEL_POSTER).count();
     assert_eq!(posters, 1, "a redirect to another plain HTTP origin is not followed");
+}
+
+/// A local port that counts the connections made to it and closes each at once.
+async fn counting() -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    (port, connections)
+}
+
+/// Sintel's recorded details, with each picture address under `images` moved to `to`.
+fn sintel_pictures_at(base: &str, to: impl Fn(&str) -> String) -> Vec<(&'static str, Reply)> {
+    let moved = |path: &str| {
+        let text = String::from_utf8(fixture(path)).unwrap();
+        let mut text = text.replace("https://images.metahub.space", &format!("{base}/images"));
+        for kind in ["poster", "background", "logo"] {
+            text = text.replace(&format!("{base}/images/{kind}/"), &to(kind));
+        }
+        ok(text.into_bytes())
+    };
+    vec![
+        ("/meta/movie/tt1727587.json", moved("cinemeta/meta-movie-tt1727587.json")),
+        ("/meta/series/tt1727587.json", moved("cinemeta/meta-series-tt1727587.json")),
+    ]
+}
+
+#[tokio::test]
+async fn a_picture_on_a_host_the_catalogs_do_not_use_is_refused_and_never_asked_for() {
+    let (port, connections) = counting().await;
+    let server = Server::start(|base| {
+        sintel_pictures_at(base, |kind| match kind {
+            "poster" => format!("https://localhost:{port}/poster/"),
+            "background" => format!("https://127.0.0.1:{port}/background/"),
+            _ => format!("{base}/images/logo/"),
+        })
+    })
+    .await;
+    let catalog = server.catalog(true, None);
+    let refused = async |kind| {
+        let error = catalog.art(&id(SINTEL), kind).await.unwrap_err();
+        (error.code, error.message)
+    };
+    assert_eq!(
+        refused(ArtKind::Poster).await,
+        (ErrorCode::NotFound, "the poster for tt1727587 is on a host pictures are not fetched from".into())
+    );
+    assert_eq!(
+        refused(ArtKind::Background).await,
+        (ErrorCode::NotFound, "the background for tt1727587 is on a host pictures are not fetched from".into())
+    );
+    assert_eq!(connections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_redirect_from_a_picture_host_to_another_host_is_not_followed() {
+    let (port, connections) = counting().await;
+    let server = Server::start(|base| {
+        let mut routes = sintel_pictures_at(base, |kind| format!("{base}/images/{kind}/"));
+        let away = format!("https://localhost:{port}/logo.png");
+        routes.push(("/images/logo/", Reply { status: 302, body: Vec::new(), location: Some(away) }));
+        routes
+    })
+    .await;
+    let error = server.catalog(true, None).art(&id(SINTEL), ArtKind::Logo).await.unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::NotFound, "the logo for tt1727587 is on a host pictures are not fetched from")
+    );
+    assert_eq!(server.asked().last().map(String::as_str), Some("/images/logo/medium/tt1727587/img"));
+    assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
