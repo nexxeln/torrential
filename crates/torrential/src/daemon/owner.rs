@@ -377,7 +377,7 @@ impl Owner {
                 let _ = reply.send(self.resolve_any(&prefix, &results, command));
             }
             Command::Get { get, reply } => {
-                let _ = reply.send(self.get(*get, None));
+                let _ = reply.send(self.get_by_hand(*get));
             }
             Command::Play { play, reply } => {
                 let _ = reply.send(self.play(*play));
@@ -541,6 +541,36 @@ impl Owner {
         }
     }
 
+    /// `get` as a person runs it. A download a title play made is theirs from then on: its lease
+    /// ends, and the plays testing it leave it on the list.
+    fn get_by_hand(&mut self, get: GetCommand) -> Result<GetReply, Error> {
+        let dry_run = get.dry_run;
+        let mut reply = self.get(get, None)?;
+        if !dry_run {
+            let id = reply.job.id;
+            self.borrow(id)?;
+            if let Some(test) = self.under_test.get_mut(&id)
+                && matches!(test.before, Before::Absent)
+            {
+                test.before = Before::Kept;
+            }
+            reply.job = self.jobs[&id].view();
+        }
+        Ok(reply)
+    }
+
+    /// Ends a download's lease, once someone other than the play that made it has used it or its
+    /// selection has changed. Nothing deletes its files after that. Memory goes first, for it
+    /// is what a discard reads.
+    fn borrow(&mut self, id: TorrentId) -> Result<(), Error> {
+        match self.jobs.get_mut(&id).and_then(|job| job.record.title.as_mut()) {
+            Some(linked) if linked.link.lease == Lease::Owned => linked.link.lease = Lease::Borrowed,
+            _ => return Ok(()),
+        }
+        self.publish(id);
+        self.store.borrow(id)
+    }
+
     /// `title` links a download this creates to the title it is for.
     fn get(&mut self, get: GetCommand, title: Option<Linked>) -> Result<GetReply, Error> {
         let GetCommand { source, dir, files, max_size, setup_max_size, dry_run } = get;
@@ -657,6 +687,7 @@ impl Owner {
                     previous_selection: previous,
                 });
             }
+            self.borrow(id)?;
             self.store.set_selection(id, &selection)?;
             self.jobs.get_mut(&id).expect("found above").record.selection = selection;
             self.publish(id);
@@ -682,10 +713,13 @@ impl Owner {
                 previous_selection: previous,
             });
         }
+        let new_cap = cap != job.record.cap;
+        let reopen = too_large || recheck || (previous.is_some() && matches!(job.record.intent, Intent::Done { .. }));
         if previous.is_some() {
+            self.borrow(id)?;
             self.store.set_selection(id, &selection)?;
         }
-        if cap != job.record.cap {
+        if new_cap {
             self.store.set_cap(id, cap)?;
         }
         if recheck {
@@ -693,7 +727,6 @@ impl Owner {
             // engine would skip them.
             self.store.record_check(id, None, 0, None, &vec![0; metainfo.files.len()])?;
         }
-        let reopen = too_large || recheck || (previous.is_some() && matches!(job.record.intent, Intent::Done { .. }));
         if reopen {
             self.store.set_intent(id, &Intent::Running)?;
         }
@@ -795,15 +828,25 @@ impl Owner {
         let made = title.as_ref().map(|play| Linked { link: TitleLink { lease, ..play.link.clone() }, played: false });
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
         let id = self.get(get, made.filter(|_| matches!(before, Before::Absent)))?.job.id;
-        match &title {
+        match (&title, &self.jobs[&id].record.title) {
             // A download played by hand is being watched, so no title play discards it.
-            None => self.played(id)?,
-            Some(play) if self.jobs[&id].record.title.is_none() => {
+            (None, _) => {
+                self.borrow(id)?;
+                self.played(id)?;
+            }
+            (Some(play), None) => {
                 let link = TitleLink { lease: Lease::Borrowed, ..play.link.clone() };
                 self.store.link(id, &link, now())?;
                 self.jobs.get_mut(&id).expect("the play has it").record.title = Some(Linked { link, played: false });
             }
-            Some(_) => {}
+            (Some(_), Some(_)) if matches!(before, Before::Absent) => {}
+            // Only a play of the same title shares the lease of the play that made the download,
+            // and only while that one still tests it.
+            (Some(play), Some(linked)) => {
+                if !self.under_test.contains_key(&id) || linked.link.title != play.link.title {
+                    self.borrow(id)?;
+                }
+            }
         }
         let job = &self.jobs[&id];
         if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {

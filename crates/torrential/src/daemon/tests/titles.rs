@@ -221,6 +221,8 @@ async fn a_title_play_links_the_download_it_makes_and_borrows_one_that_existed()
     assert_eq!((link.title.as_str(), link.lease), ("tt0063350", Lease::Owned));
     let (job, _) = h.play_for(&mine, &[0], Some("tt0063350")).await.unwrap();
     assert_eq!(job.title.unwrap().lease, Lease::Borrowed);
+    let (job, _) = h.play_for(&made, &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(job.title.unwrap().lease, Lease::Owned, "a play of the same title shares the test");
     let over = torrent(69, "over", &[("over.mp4", GIB), ("other.srt", 10)]);
     write(&h.downloads().join("over/over.mp4"));
     let (job, _) = h.play_for(&over, &[0], Some("tt0063350")).await.unwrap();
@@ -302,6 +304,99 @@ async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
         ],
         "only the file of the download the play made over nothing is deleted"
     );
+}
+
+fn pack() -> FakeTorrentFile {
+    torrent(84, "Harbor.Lights.S01", &[("Harbor.Lights.S01E01.mp4", GIB), ("Harbor.Lights.S01E02.mp4", GIB)])
+}
+
+const PACK: [&str; 3] =
+    ["Harbor.Lights.S01", "Harbor.Lights.S01/Harbor.Lights.S01E01.mp4", "Harbor.Lights.S01/Harbor.Lights.S01E02.mp4"];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_play_that_selects_a_file_the_person_had_ends_the_lease_and_the_file_stays() {
+    let h = Harness::new();
+    let (pack, downloads) = (pack(), h.downloads());
+    std::fs::create_dir_all(downloads.join(PACK[0])).unwrap();
+    std::fs::write(downloads.join(PACK[2]), b"the person's own copy").unwrap();
+    let (job, creator) = h.play_for(&pack, &[0], Some("tt9999901")).await.unwrap();
+    assert_eq!(job.title.unwrap().lease, Lease::Owned, "the first episode was not on disk");
+    let (job, second) = h.play_for(&pack, &[1], Some("tt9999901")).await.unwrap();
+    assert_eq!(job.title.unwrap().lease, Lease::Borrowed);
+    h.until("it runs", |jobs| jobs[0].status.name() == "downloading").await;
+    write(&downloads.join(PACK[1]));
+
+    h.give_up(creator).await;
+    h.settled().await;
+    assert_eq!(std::fs::read(downloads.join(PACK[2])).unwrap(), b"the person's own copy");
+    assert_eq!((h.states().await, tree(&downloads)), (vec!["downloading"], PACK.map(String::from).to_vec()));
+
+    h.give_up(second).await;
+    h.settled().await;
+    assert_eq!(std::fs::read(downloads.join(PACK[2])).unwrap(), b"the person's own copy");
+    assert_eq!(
+        (h.states().await, tree(&downloads)),
+        (Vec::new(), PACK.map(String::from).to_vec()),
+        "the plays made the download, so it leaves the list, and every file stays"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_get_by_hand_makes_a_download_under_test_the_persons_and_no_file_is_deleted() {
+    for patterns in [&["*"][..], &[]] {
+        let h = Harness::new();
+        let (pack, downloads) = (pack(), h.downloads());
+        let (job, creator) = h.play_for(&pack, &[0], Some("tt9999901")).await.unwrap();
+        assert_eq!(job.title.unwrap().lease, Lease::Owned);
+        let got = h.get(h.torrent_file(&pack), patterns).await.unwrap();
+        assert_eq!(got.job.title.unwrap().lease, Lease::Borrowed, "getting {patterns:?}");
+        h.until("it runs", |jobs| jobs[0].status.name() == "downloading").await;
+        write(&downloads.join(PACK[1]));
+        write(&downloads.join(PACK[2]));
+        h.give_up(creator).await;
+        h.settled().await;
+        assert_eq!(
+            (h.states().await, tree(&downloads)),
+            (vec!["downloading"], PACK.map(String::from).to_vec()),
+            "getting {patterns:?}"
+        );
+        let h = h.crash_and_restart().await;
+        assert_eq!(h.status().await[0].title.as_ref().map(|link| link.lease), Some(Lease::Borrowed));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_of_another_title_ends_the_lease_and_holds_the_download_until_it_gives_up_too() {
+    let h = Harness::new();
+    let film = torrent(85, "film", &[("film.mp4", GIB)]);
+    let (_, creator) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    let (job, other) = h.play_for(&film, &[0], Some("tt0100258")).await.unwrap();
+    let link = job.title.unwrap();
+    assert_eq!((link.title.as_str(), link.lease), ("tt0063350", Lease::Borrowed), "the link stays, the lease ends");
+    h.until("it runs", |jobs| jobs[0].status.name() == "downloading").await;
+    write(&h.downloads().join("film/film.mp4"));
+    let on_disk = vec!["film".to_string(), "film/film.mp4".to_string()];
+    h.give_up(creator).await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], on_disk.clone()));
+    h.give_up(other).await;
+    h.settled().await;
+    assert_eq!((h.states().await, tree(&h.downloads())), (Vec::new(), on_disk));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_left_under_test_when_the_engine_stopped_is_never_discarded() {
+    let h = Harness::new();
+    let film = torrent(86, "film", &[("film.mp4", GIB)]);
+    h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    write(&h.downloads().join("film/film.mp4"));
+    let h = h.crash_and_restart().await;
+    let (job, later) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    assert_eq!(job.title.unwrap().lease, Lease::Borrowed, "the play that made it is gone");
+    h.give_up(later).await;
+    h.settled().await;
+    assert_eq!(h.status().await.len(), 1);
+    assert_eq!(tree(&h.downloads()), ["film", "film/film.mp4"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -437,7 +532,8 @@ async fn a_download_played_by_hand_is_never_discarded() {
     let h = Harness::new();
     let film = torrent(77, "film", &[("film.mp4", GIB)]);
     let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
-    h.play(super::magnet(&film), &[0]).await.unwrap();
+    let played = h.play(super::magnet(&film), &[0]).await.unwrap();
+    assert_eq!(played.job.title.unwrap().lease, Lease::Borrowed);
     write(&h.downloads().join("film/film.mp4"));
     h.give_up(hold).await;
     h.settled().await;

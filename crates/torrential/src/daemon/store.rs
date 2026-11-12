@@ -445,6 +445,11 @@ impl Store {
         self.write(|tx| insert_link(tx, id, link, now))
     }
 
+    /// Ends a download's lease, once someone other than the play that made it has used it.
+    pub fn borrow(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("UPDATE job_titles SET lease = 'borrowed' WHERE job = ?1", [id.to_hex()]).map(drop))
+    }
+
     pub fn played(&mut self, id: TorrentId) -> Result<(), Error> {
         self.write(|tx| tx.execute("UPDATE job_titles SET played = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
     }
@@ -728,15 +733,21 @@ mod tests {
         drop(store);
         let mut store = Store::open(&path).unwrap();
         let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
-        assert_eq!(titles, [Some(owned), Some(Linked { link: link(Lease::Borrowed), played: true })]);
+        assert_eq!(titles, [Some(owned.clone()), Some(Linked { link: link(Lease::Borrowed), played: true })]);
+
+        store.insert(&JobRecord { title: Some(owned), ..record(5) }, None, 100).unwrap();
+        store.borrow(TorrentId::from_bytes([5; 20])).unwrap();
+        let leases: Vec<Option<Lease>> =
+            store.jobs().unwrap().into_iter().map(|j| j.record.title.map(|linked| linked.link.lease)).collect();
+        assert_eq!(leases, [Some(Lease::Owned), Some(Lease::Borrowed), Some(Lease::Borrowed)]);
 
         store.discard(TorrentId::from_bytes([1; 20]), 120).unwrap();
         let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
-        assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
+        assert_eq!(left, [TorrentId::from_bytes([3; 20]), TorrentId::from_bytes([5; 20])]);
         let count = |table: &str| -> i64 {
             store.conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
         };
-        assert_eq!((count("job_titles"), count("tombstones")), (1, 0));
+        assert_eq!((count("job_titles"), count("tombstones")), (2, 0));
     }
 
     #[test]
