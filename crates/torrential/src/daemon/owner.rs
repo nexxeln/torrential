@@ -858,17 +858,16 @@ impl Owner {
         Ok((self.jobs[&id].view(), metainfo))
     }
 
-    /// Marks a download as having played. Every test of it is over, and it stays as it is.
+    /// Marks a download as having played. Every test of it is over, and it stays as it is. The
+    /// plays keep their holds until that is on record, so one whose record fails can still give
+    /// the download up.
     fn played(&mut self, id: TorrentId) -> Result<(), Error> {
-        let job = self.jobs.get(&id).ok_or_else(|| no_download(&id.to_hex()))?;
-        self.under_test.remove(&id);
-        if job.record.title.as_ref().is_none_or(|linked| linked.played) {
-            return Ok(());
-        }
-        self.store.played(id)?;
-        if let Some(linked) = &mut self.jobs.get_mut(&id).expect("found above").record.title {
+        let job = self.jobs.get_mut(&id).ok_or_else(|| no_download(&id.to_hex()))?;
+        if let Some(linked) = job.record.title.as_mut().filter(|linked| !linked.played) {
+            self.store.played(id)?;
             linked.played = true;
         }
+        self.under_test.remove(&id);
         Ok(())
     }
 

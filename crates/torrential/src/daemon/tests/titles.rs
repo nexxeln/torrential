@@ -814,6 +814,58 @@ async fn a_download_played_by_hand_stays_as_it_is_when_the_play_testing_it_gives
     assert_eq!(h.states().await, ["downloading"]);
 }
 
+impl Harness {
+    /// Keeps every write to the engine's state from landing until the answer is dropped, as
+    /// another process holding the database does.
+    fn lock_state(&self) -> rusqlite::Connection {
+        let other = rusqlite::Connection::open(self.dir.path().join("state.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        other
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_whose_playing_cannot_be_recorded_keeps_its_hold_and_can_still_give_the_source_up() {
+    let h = Harness::new();
+    let film = torrent(96, "film", &[("film.mp4", GIB)]);
+    let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
+    let locked = h.lock_state();
+    let id = film.info_hash.id();
+    let recorded = h.running.ctx.owner.ask(|reply| Command::Played { id, reply }).await;
+    assert_eq!(recorded.map_err(|e| e.code), Err(ErrorCode::StateCorrupt));
+    drop(locked);
+    h.give_up(hold).await;
+    h.until("the trial leaves the list", |jobs| jobs.is_empty()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trial_whose_pause_cannot_be_recorded_is_put_back_at_the_next_release_or_when_the_engine_stops() {
+    let film = torrent(97, "film", &[("film.mp4", GIB)]);
+    let given_up_while_locked = || async {
+        let h = Harness::new();
+        let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+        h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
+        let locked = h.lock_state();
+        h.give_up(hold).await;
+        drop(locked);
+        h.settled().await;
+        assert_eq!(h.states().await, ["downloading"], "the pause did not land, so the trial still runs");
+        h
+    };
+
+    let h = given_up_while_locked().await;
+    h.give_up(Hold::fresh()).await;
+    h.until("the trial leaves the list", |jobs| jobs.is_empty()).await;
+
+    let h = given_up_while_locked().await;
+    let (reply, stopped) = tokio::sync::oneshot::channel();
+    h.running.ctx.owner.tell(Command::Shutdown { reply });
+    stopped.await.unwrap();
+    let h = h.restart_after(|| ()).await;
+    assert_eq!(h.states().await, Vec::<&str>::new());
+}
+
 /// A trial given up while the engine has yet to say it stopped writing, so what the trial is
 /// owed still waits.
 async fn stopped_before_it_was_put_back(written: Option<&[u8]>) -> (Harness, PathBuf) {
