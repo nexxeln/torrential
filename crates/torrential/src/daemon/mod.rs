@@ -1,5 +1,6 @@
 pub mod admission;
 pub mod book;
+mod discard;
 pub mod engine_port;
 pub mod files;
 mod fixture;

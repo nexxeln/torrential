@@ -349,6 +349,7 @@ pub fn seed(store: &mut Store, downloads: &Path, now: i64) -> Result<(), Error> 
             verified: landing.verified,
             piece_map: landing.piece_map,
             files_verified: Some(landing.files),
+            title: None,
         };
         store.insert(&record, Some(&seed.torrent.bytes()), added_at)?;
         let resume = arrived.to_string();

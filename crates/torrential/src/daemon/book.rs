@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Progress, Selection, TorrentId};
+use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Progress, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
 use super::engine_port::{Metainfo, Stats};
@@ -84,6 +84,14 @@ pub struct JobRecord {
     pub verified: u64,
     pub piece_map: Option<PieceMap>,
     pub files_verified: Option<Vec<u64>>,
+    pub title: Option<Linked>,
+}
+
+/// The title a download was made for, and whether it ever reached playing.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Linked {
+    pub link: TitleLink,
+    pub played: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -220,7 +228,7 @@ impl JobEntry {
             },
             selection: self.record.selection.clone(),
             added_at: self.record.added_at,
-            title: None,
+            title: self.record.title.as_ref().map(|linked| linked.link.clone()),
         }
     }
 }
@@ -306,6 +314,7 @@ mod tests {
             verified: 0,
             piece_map: None,
             files_verified: None,
+            title: None,
         };
         JobEntry::new(record, None, observed)
     }

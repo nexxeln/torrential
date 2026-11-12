@@ -5,10 +5,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::protocol::{Change, GetOutcome, GetReply};
-use torrential_core::{Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TorrentId};
+use torrential_core::{
+    Error, ErrorCode, HexPrefix, InfoHash, Job, Lease, PieceMap, Release, Selection, Target, TitleLink, TorrentId,
+};
 
 use super::admission::{self, Cap, Disk};
-use super::book::{self, Intent, JobEntry, JobRecord, Observed, Phase, Verify};
+use super::book::{self, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
+use super::discard;
 use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
 };
@@ -16,7 +19,7 @@ use super::files;
 use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
-use super::store::{Store, Tombstone};
+use super::store::{Discard, Store, Tombstone};
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -105,6 +108,15 @@ pub struct PlayCommand {
     /// Indexes into the torrent's file list.
     pub files: Vec<u32>,
     pub setup_max_size: Option<u64>,
+    /// The title the play is for. The owner sets its lease from whether it creates the download.
+    pub title: Option<TitleLink>,
+}
+
+/// Whether a play created its download or joined one that existed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Created {
+    Yes,
+    No,
 }
 
 /// A selected file of a download, for the HTTP server.
@@ -122,7 +134,9 @@ pub struct StreamFile {
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
-    Play { play: Box<PlayCommand>, reply: Reply<(Job, Arc<Metainfo>)> },
+    Play { play: Box<PlayCommand>, reply: Reply<(Job, Arc<Metainfo>, Created)> },
+    Played { id: TorrentId, reply: Reply<()> },
+    Discard { id: TorrentId, reply: Reply<()> },
     Metadata { target: MetaTarget, deadline: Instant, reply: Reply<FilesInfo> },
     Cache { metainfo: Metainfo },
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
@@ -171,6 +185,8 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
+    /// Discarded downloads whose files go once the engine removes them.
+    discarding: BTreeMap<TorrentId, Discard>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
     stopping: Option<Stopping>,
@@ -224,6 +240,7 @@ impl Owner {
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
+            discarding: BTreeMap::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
@@ -238,6 +255,9 @@ impl Owner {
             keep_until: None,
             resume_saved_at: Instant::now(),
         };
+        for left in owner.store.discards()? {
+            owner.finish_discard(left);
+        }
         owner.schedule();
         Ok(owner)
     }
@@ -272,10 +292,16 @@ impl Owner {
                 let _ = reply.send(self.resolve_any(&prefix, &results, command));
             }
             Command::Get { get, reply } => {
-                let _ = reply.send(self.get(*get));
+                let _ = reply.send(self.get(*get, None));
             }
             Command::Play { play, reply } => {
                 let _ = reply.send(self.play(*play));
+            }
+            Command::Played { id, reply } => {
+                let _ = reply.send(self.played(id));
+            }
+            Command::Discard { id, reply } => {
+                let _ = reply.send(self.discard(id));
             }
             Command::Metadata { target, deadline, reply } => self.metadata(target, deadline, reply),
             Command::Cache { metainfo } => {
@@ -429,7 +455,8 @@ impl Owner {
         }
     }
 
-    fn get(&mut self, get: GetCommand) -> Result<GetReply, Error> {
+    /// `title` links a download this creates to the title it is for.
+    fn get(&mut self, get: GetCommand, title: Option<Linked>) -> Result<GetReply, Error> {
         let GetCommand { source, dir, files, max_size, setup_max_size, dry_run } = get;
         if !files.is_empty() {
             super::files::compile(&files)?;
@@ -477,6 +504,7 @@ impl Owner {
             verified: 0,
             piece_map: None,
             files_verified: None,
+            title,
         };
         if dry_run {
             let job = JobEntry::new(record, metainfo, Observed::Absent).view();
@@ -621,14 +649,15 @@ impl Owner {
         })
     }
 
-    fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>), Error> {
-        let PlayCommand { source, dir, files, setup_max_size } = play;
+    fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>, Created), Error> {
+        let PlayCommand { source, dir, files, setup_max_size, title } = play;
         let id = match &source {
             Source::Download(id) if self.jobs.contains_key(id) => *id,
             Source::Download(id) => return Err(no_download(&id.to_hex())),
             Source::Magnet(m) => self.find_job(&m.info_hash).unwrap_or(m.info_hash.id()),
             Source::Torrent { metainfo, .. } => self.find_job(&metainfo.info_hash).unwrap_or(metainfo.info_hash.id()),
         };
+        let created = if self.jobs.contains_key(&id) { Created::No } else { Created::Yes };
         let job = self.jobs.get(&id);
         let metainfo = job.and_then(|j| j.metainfo.clone()).or_else(|| match &source {
             Source::Torrent { metainfo, .. } => Some(Arc::new(metainfo.clone())),
@@ -666,7 +695,18 @@ impl Owner {
             }
         }
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
-        let id = self.get(get)?.job.id;
+        let owned = title.clone().map(|link| Linked { link: TitleLink { lease: Lease::Owned, ..link }, played: false });
+        let id = self.get(get, owned.filter(|_| created == Created::Yes))?.job.id;
+        match (created, title) {
+            (Created::No, Some(link)) if self.jobs[&id].record.title.is_none() => {
+                let link = TitleLink { lease: Lease::Borrowed, ..link };
+                self.store.link(id, &link, now())?;
+                self.jobs.get_mut(&id).expect("the play has it").record.title = Some(Linked { link, played: false });
+            }
+            // A download played by hand is being watched, so a title play never discards it.
+            (_, None) => self.played(id)?,
+            _ => {}
+        }
         let job = &self.jobs[&id];
         if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
             self.resume(&[id.to_hex()], false)?;
@@ -676,7 +716,91 @@ impl Owner {
             self.engine.send(EngineCommand::Stream(id));
         }
         self.schedule();
-        Ok((self.jobs[&id].view(), metainfo))
+        self.publish(id);
+        Ok((self.jobs[&id].view(), metainfo, created))
+    }
+
+    /// Marks a download as having played, so it is never discarded.
+    fn played(&mut self, id: TorrentId) -> Result<(), Error> {
+        let job = self.jobs.get(&id).ok_or_else(|| no_download(&id.to_hex()))?;
+        if job.record.title.as_ref().is_none_or(|linked| linked.played) {
+            return Ok(());
+        }
+        self.store.played(id)?;
+        if let Some(linked) = &mut self.jobs.get_mut(&id).expect("found above").record.title {
+            linked.played = true;
+        }
+        Ok(())
+    }
+
+    /// Removes a download a title play gave up on, and deletes the files it wrote once the engine
+    /// lets go of them. Refuses unless the download is linked to a title, a title play created it,
+    /// it is not finished, and it never played. Deletes only files the download selected, below
+    /// its folder, that no other download holds.
+    fn discard(&mut self, id: TorrentId) -> Result<(), Error> {
+        let job = self.jobs.get(&id).ok_or_else(|| no_download(&id.to_hex()))?;
+        let short = id.to_hex()[..6].to_string();
+        let refuse = |why: &str| {
+            Error::new(ErrorCode::JobConflict, format!("{short} {why}, so its files stay"))
+                .with_hint(format!("run torrential rm {short} to remove it and keep its files"))
+        };
+        let finished = matches!(job.record.intent, Intent::Done { .. })
+            || matches!(job.observed, Observed::InEngine(Phase::Finishing { .. }));
+        match &job.record.title {
+            None => return Err(refuse("was not made by playing a title")),
+            Some(linked) if linked.link.lease == Lease::Borrowed => {
+                return Err(refuse("was on this machine before a title play used it"));
+            }
+            Some(_) if finished => return Err(refuse("is finished")),
+            Some(linked) if linked.played => return Err(refuse("has played")),
+            Some(_) => {}
+        }
+        let held = match (job.metainfo.as_deref(), job.wanted()) {
+            (Some(metainfo), Some(wanted)) => discard::held(metainfo, &wanted),
+            _ => Vec::new(),
+        };
+        let dir = job.record.dir.clone();
+        let paths = self.unclaimed(Some(id), &dir, held);
+        let discarded = Discard { id, dir, paths };
+        self.store.discard(&discarded, now())?;
+        let job = self.jobs.remove(&id).expect("found above");
+        self.streamed.remove(&id);
+        for pause in &mut self.pauses {
+            pause.waiting.remove(&id);
+        }
+        let _ = self.updates.send(Update::Removed(id));
+        if job.observed.in_engine() {
+            self.engine.send(EngineCommand::Remove(id));
+            self.draining.insert(id);
+            self.discarding.insert(id, discarded);
+        } else {
+            self.finish_discard(discarded);
+        }
+        self.finish_pauses();
+        self.schedule();
+        Ok(())
+    }
+
+    /// Deletes what a discarded download left, now that no torrent in the engine writes there.
+    fn finish_discard(&mut self, discarded: Discard) {
+        let paths = self.unclaimed(None, &discarded.dir, discarded.paths);
+        discard::delete(&discarded.dir, &paths);
+        let _ = self.store.discarded(discarded.id);
+    }
+
+    /// The paths in `dir` that no download but `except` holds.
+    fn unclaimed(&self, except: Option<TorrentId>, dir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let held: BTreeSet<String> = self
+            .jobs
+            .values()
+            .filter(|job| Some(job.id()) != except)
+            .filter_map(|job| {
+                let held = discard::held(job.metainfo.as_deref()?, &job.wanted()?);
+                Some(held.into_iter().map(|p| claim_key(&job.record.dir.join(p))).collect::<Vec<_>>())
+            })
+            .flatten()
+            .collect();
+        paths.into_iter().filter(|p| !held.contains(&claim_key(&dir.join(p)))).collect()
     }
 
     fn current_plan(&self, job: &JobEntry) -> Option<torrential_core::protocol::DownloadPlan> {
@@ -1032,6 +1156,9 @@ impl Owner {
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
+                if let Some(discarded) = self.discarding.remove(&id) {
+                    self.finish_discard(discarded);
+                }
             }
         }
         self.finish_stop_if_done();

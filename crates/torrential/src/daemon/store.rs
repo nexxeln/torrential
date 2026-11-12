@@ -2,10 +2,10 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TorrentId};
+use torrential_core::{Error, ErrorCode, InfoHash, Lease, PieceMap, Release, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
-use super::book::{Intent, JobRecord};
+use super::book::{Intent, JobRecord, Linked};
 use super::search_port::SavedLink;
 
 const MIGRATIONS: &[&str] = &[
@@ -106,6 +106,15 @@ pub const RESULTS_SECS: i64 = 7 * 86_400;
 pub const METAINFO_SECS: i64 = RESULTS_SECS;
 pub const METAINFO_BYTES: i64 = 64 << 20;
 
+/// The files a discarded download left, relative to its folder, which the owner deletes once
+/// the engine lets go of them.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Discard {
+    pub id: TorrentId,
+    pub dir: PathBuf,
+    pub paths: Vec<PathBuf>,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct StoredJob {
     pub record: JobRecord,
@@ -191,8 +200,10 @@ impl Store {
             .conn
             .prepare(
                 "SELECT j.id, j.info_hash, j.name, j.dir, j.selection, j.max_size, j.magnet, j.intent, j.finished_at, \
-                 j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup FROM jobs j \
+                 j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup, \
+                 t.title, t.span, t.release, t.lease, t.played FROM jobs j \
                  LEFT JOIN metainfo m ON m.id = j.id \
+                 LEFT JOIN job_titles t ON t.job = j.id \
                  ORDER BY j.added_at",
             )
             .map_err(|e| self.fail(e))?;
@@ -215,6 +226,13 @@ impl Store {
                     r.get::<_, Option<String>>(13)?,
                     r.get::<_, Option<Vec<u8>>>(14)?,
                     r.get::<_, bool>(15)?,
+                    (
+                        r.get::<_, Option<String>>(16)?,
+                        r.get::<_, Option<String>>(17)?,
+                        r.get::<_, Option<String>>(18)?,
+                        r.get::<_, Option<String>>(19)?,
+                        r.get::<_, Option<bool>>(20)?,
+                    ),
                 ))
             })
             .map_err(|e| self.fail(e))?;
@@ -237,6 +255,7 @@ impl Store {
                 files_verified,
                 bytes,
                 from_setup,
+                title,
             ) = row.map_err(|e| self.fail(e))?;
             let bad = |what: &str| corrupt(&self.path, &format!("job {id} has an unreadable {what}"));
             let intent = match (intent.as_str(), finished_at, error) {
@@ -264,6 +283,7 @@ impl Store {
                     .map(|f| serde_json::from_str(&f))
                     .transpose()
                     .map_err(|_| bad("file progress"))?,
+                title: linked(title).map_err(|_| bad("title link"))?,
             };
             jobs.push(StoredJob { record, metainfo: bytes });
         }
@@ -298,6 +318,9 @@ impl Store {
             insert_aliases(tx, record.id, &record.info_hash)?;
             if let Some(bytes) = metainfo {
                 upsert_metainfo(tx, record.id, bytes, now)?;
+            }
+            if let Some(linked) = &record.title {
+                insert_link(tx, record.id, &linked.link, now)?;
             }
             tx.execute("DELETE FROM tombstones WHERE id = ?1", [record.id.to_hex()])?;
             Ok(())
@@ -432,6 +455,54 @@ impl Store {
         })
     }
 
+    /// Links a download that already existed to the title a play joined it for.
+    pub fn link(&mut self, id: TorrentId, link: &TitleLink, now: i64) -> Result<(), Error> {
+        self.write(|tx| insert_link(tx, id, link, now))
+    }
+
+    pub fn played(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("UPDATE job_titles SET played = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
+    }
+
+    /// Removes a download and records the files it left, in one transaction, so a crash before
+    /// they are deleted leaves the record to finish from.
+    pub fn discard(&mut self, discard: &Discard, now: i64) -> Result<(), Error> {
+        let paths: Vec<String> = discard.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        self.write(|tx| {
+            let id = discard.id.to_hex();
+            tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
+            tx.execute(
+                "INSERT OR REPLACE INTO discards (job, dir, paths, discarded_at) VALUES (?1, ?2, ?3, ?4)",
+                params![id, discard.dir.as_os_str().as_bytes(), json(&paths), now],
+            )?;
+            evict_metainfo(tx, now)
+        })
+    }
+
+    pub fn discards(&self) -> Result<Vec<Discard>, Error> {
+        let mut stmt = self.conn.prepare("SELECT job, dir, paths FROM discards").map_err(|e| self.fail(e))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| self.fail(e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, dir, paths) = row.map_err(|e| self.fail(e))?;
+            let bad = || corrupt(&self.path, &format!("the discarded download {id} is unreadable"));
+            let paths: Vec<String> = serde_json::from_str(&paths).map_err(|_| bad())?;
+            out.push(Discard {
+                id: id.parse().map_err(|_| bad())?,
+                dir: PathBuf::from(std::ffi::OsString::from_vec(dir)),
+                paths: paths.into_iter().map(PathBuf::from).collect(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Forgets a discard whose files are gone.
+    pub fn discarded(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("DELETE FROM discards WHERE job = ?1", [id.to_hex()]).map(drop))
+    }
+
     pub fn remove_duplicate(&mut self, id: TorrentId) -> Result<(), Error> {
         self.write(|tx| tx.execute("DELETE FROM jobs WHERE id = ?1", [id.to_hex()]).map(drop))
     }
@@ -543,6 +614,40 @@ fn intent_columns(intent: &Intent) -> (&'static str, Option<i64>, Option<String>
     }
 }
 
+fn insert_link(tx: &Transaction, id: TorrentId, link: &TitleLink, now: i64) -> rusqlite::Result<()> {
+    let lease = match link.lease {
+        Lease::Owned => "owned",
+        Lease::Borrowed => "borrowed",
+    };
+    tx.execute(
+        "INSERT OR REPLACE INTO job_titles (job, title, span, release, lease, played, linked_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        params![
+            id.to_hex(),
+            link.title.as_str(),
+            link.span.to_string(),
+            link.release.as_ref().map(|r| r.to_ref()),
+            lease,
+            now
+        ],
+    )
+    .map(drop)
+}
+
+type LinkColumns = (Option<String>, Option<String>, Option<String>, Option<String>, Option<bool>);
+
+fn linked(columns: LinkColumns) -> Result<Option<Linked>, ()> {
+    let (Some(title), Some(span), release, Some(lease), Some(played)) = columns else { return Ok(None) };
+    let lease = match lease.as_str() {
+        "owned" => Lease::Owned,
+        "borrowed" => Lease::Borrowed,
+        _ => return Err(()),
+    };
+    let release = release.map(|r| serde_json::from_value(serde_json::Value::String(r))).transpose().map_err(drop)?;
+    let link = TitleLink { title: title.parse().map_err(drop)?, span: span.parse().map_err(drop)?, release, lease };
+    Ok(Some(Linked { link, played }))
+}
+
 fn alias_keys(info_hash: &InfoHash) -> Vec<String> {
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     [info_hash.v1().map(|h| hex(&h)), info_hash.v2().map(|h| hex(&h))].into_iter().flatten().collect()
@@ -601,6 +706,7 @@ fn save_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use torrential_core::ReleaseId;
 
     fn record(n: u8) -> JobRecord {
         JobRecord {
@@ -616,6 +722,7 @@ mod tests {
             verified: 0,
             piece_map: None,
             files_verified: None,
+            title: None,
         }
     }
 
@@ -645,6 +752,41 @@ mod tests {
         let saved = JobRecord { verified: 9, piece_map: Some(map), files_verified: Some(vec![4, 5]), ..record(5) };
         assert_eq!(jobs[2].record, saved);
         assert_eq!(store.resume(TorrentId::from_bytes([3; 20])).unwrap().as_deref(), Some(&b"resume"[..]));
+    }
+
+    #[test]
+    fn a_title_link_keeps_its_lease_and_whether_it_played_and_goes_with_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        let link = |lease| TitleLink {
+            title: "tt9999901".parse().unwrap(),
+            span: "s1".parse().unwrap(),
+            release: Some(ReleaseId::Torrent(TorrentId::from_bytes([1; 20]))),
+            lease,
+        };
+        let owned = Linked { link: link(Lease::Owned), played: false };
+        store.insert(&JobRecord { title: Some(owned.clone()), ..record(1) }, None, 100).unwrap();
+        store.insert(&record(3), None, 100).unwrap();
+        store.link(TorrentId::from_bytes([3; 20]), &link(Lease::Borrowed), 110).unwrap();
+        store.played(TorrentId::from_bytes([3; 20])).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
+        assert_eq!(titles, [Some(owned), Some(Linked { link: link(Lease::Borrowed), played: true })]);
+
+        let discard = Discard {
+            id: TorrentId::from_bytes([1; 20]),
+            dir: PathBuf::from("/dl"),
+            paths: vec![PathBuf::from("Harbor Lights S01/e1.mkv"), PathBuf::from(".0101.parts")],
+        };
+        store.discard(&discard, 120).unwrap();
+        let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
+        assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
+        let links: i64 = store.conn.query_row("SELECT count(*) FROM job_titles", [], |r| r.get(0)).unwrap();
+        assert_eq!((links, store.discards().unwrap()), (1, vec![discard]));
+        store.discarded(TorrentId::from_bytes([1; 20])).unwrap();
+        assert_eq!(store.discards().unwrap(), []);
     }
 
     #[test]
