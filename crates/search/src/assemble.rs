@@ -173,14 +173,15 @@ impl Swarm {
 /// Below this many Mbit/s a release is a fake or a broken file.
 const FAKE_MBPS: f64 = 0.25;
 
-/// The Mbit/s an encode at each resolution usually has. A remux runs above it.
+/// The Mbit/s at each resolution that looks right and streams comfortably. A small encode of a
+/// popular release sits low in it, and a remux runs above it.
 fn band(resolution: Option<Resolution>) -> RangeInclusive<f64> {
     match resolution {
-        Some(Resolution::Sd) => 0.5..=4.0,
-        Some(Resolution::P720) => 1.5..=10.0,
-        Some(Resolution::P1080) => 3.0..=25.0,
-        Some(Resolution::P2160) => 10.0..=80.0,
-        None => 0.5..=25.0,
+        Some(Resolution::Sd) => 0.3..=4.0,
+        Some(Resolution::P720) => 0.6..=8.0,
+        Some(Resolution::P1080) => 1.0..=16.0,
+        Some(Resolution::P2160) => 3.0..=40.0,
+        None => 0.3..=16.0,
     }
 }
 

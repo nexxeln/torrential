@@ -932,6 +932,33 @@ fn a_remux_ranks_after_an_encode_in_its_band() {
     );
 }
 
+fn friday() -> Wanted {
+    Wanted {
+        name: "His Girl Friday".into(),
+        year: Some(1940),
+        episode: None,
+        namesakes: Namesakes::None,
+        runtime: Some(std::time::Duration::from_secs(92 * 60)),
+        season_episodes: None,
+    }
+}
+
+#[test]
+fn a_small_encode_that_streams_comfortably_is_in_band() {
+    let criterion = "His Girl Friday (1940) Criterion + Extras (1080p BluRay x265 HEVC 10bit AAC 1.0";
+    let runs = [fresh(
+        &knaben(),
+        vec![
+            video(0x80, criterion, Some(31), 5_600_000_000),
+            video(0x81, "His Girl Friday (1940) 1080p BRRip x264 -YTS", Some(54), 1_500_000_000),
+        ],
+    )];
+    assert_eq!(
+        played(&friday(), Profile::default(), &runs),
+        ["His Girl Friday (1940) 1080p BRRip x264 -YTS", criterion]
+    );
+}
+
 #[test]
 fn a_release_too_small_for_the_runtime_is_dropped_as_a_fake() {
     let fake = video(0x6a, "Night.of.the.Living.Dead.1968.1080p.WEB-DL.x264", Some(900), 150_000_000);
