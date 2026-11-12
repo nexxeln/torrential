@@ -45,7 +45,6 @@ pub struct PlayTitle {
     pub replace: Option<TorrentId>,
     /// What the caller's player decodes, in place of the preference in config.yaml.
     pub playback: Option<Playback>,
-    /// What the caller's player opens.
     pub containers: Containers,
     pub finish: Finish,
 }

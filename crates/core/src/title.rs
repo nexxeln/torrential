@@ -342,9 +342,8 @@ impl Wanted {
     /// How many words `release` has beyond this title's own. Numbers and codes such as `5.1`
     /// and `60FPS` are not words, nor are the tags a title ends at or `Quality` reads, the words
     /// of a season or an episode, the codes of the countries the title is from, or the group
-    /// after a final dash. A plain release has none. An
-    /// alternate version names itself, as `Night Of The Living Dead (1968) Synthwave Horror Cut`
-    /// does in three words.
+    /// after a final dash. A plain release has none. An alternate version names itself, as
+    /// `Night Of The Living Dead (1968) Synthwave Horror Cut` does in three words.
     pub fn other_words(&self, release: &str) -> usize {
         const SPANS: [&str; 5] = ["season", "seasons", "episode", "complete", "series"];
         // Tags that `TAGS` leaves out because titles use them, as Charlotte's Web does. The

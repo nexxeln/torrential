@@ -103,7 +103,6 @@ struct FakeState {
     delay: Duration,
     script: Vec<FakeSource>,
     recent: Vec<Release>,
-    /// How many searches ran.
     searches: usize,
 }
 

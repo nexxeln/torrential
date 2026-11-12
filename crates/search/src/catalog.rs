@@ -138,9 +138,7 @@ pub struct Catalog {
     http: Http,
     /// Follows only redirects to an address a picture may come from.
     pictures: Http,
-    /// Where Cinemeta is asked.
-    base: Url,
-    /// Where IMDb's suggestions are asked for.
+    cinemeta: Url,
     imdb: Url,
     online: bool,
     shelf: Shelf,
@@ -161,7 +159,7 @@ impl Catalog {
         Ok(Catalog {
             http: Http::named(AGENT, false).map_err(no_client)?,
             pictures: picture_client(None)?,
-            base: base(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?,
+            cinemeta: base(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?,
             imdb: base(config.imdb_endpoint.as_deref().unwrap_or(imdb::BASE), "IMDb")?,
             online: config.online,
             shelf: Shelf::new(config.cache_dir.clone()),
@@ -289,7 +287,7 @@ impl Catalog {
         let words = asked(words);
         let query = utf8_percent_encode(&words, NON_ALPHANUMERIC);
         let path = format!("catalog/{}/top/search={query}.json", cinemeta::segment(kind));
-        let url = self.base.join(&path).map_err(|e| FetchError::Connect(e.to_string()))?;
+        let url = self.cinemeta.join(&path).map_err(|e| FetchError::Connect(e.to_string()))?;
         let body = self.http.get(&url, LARGEST_LISTING, deadline).await?;
         cinemeta::listing(&body, kind).map_err(|e| FetchError::Decode(e.to_string()))
     }
@@ -346,7 +344,7 @@ impl Catalog {
         let deadline = Instant::now() + LOOKUP_WITHIN;
         for kind in kinds {
             let path = format!("meta/{}/{id}.json", cinemeta::segment(kind));
-            let url = self.base.join(&path).map_err(|e| FetchError::Connect(e.to_string()))?;
+            let url = self.cinemeta.join(&path).map_err(|e| FetchError::Connect(e.to_string()))?;
             let body = match self.http.get(&url, LARGEST_DETAILS, deadline).await {
                 Err(FetchError::Status(404)) => continue,
                 body => body?,
