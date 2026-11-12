@@ -181,17 +181,33 @@ pub struct Position {
 /// `POST /api/watched`: where a film or episode stopped. The player sends it every few seconds.
 pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
     let Position { video, position, duration, release } = request;
-    if !position.is_finite() || position < 0.0 {
-        return Err(Error::new(ErrorCode::Usage, format!("position {position} is not a time in the video")));
-    }
-    if duration.is_some_and(|d| !d.is_finite() || d <= 0.0) {
-        return Err(Error::new(ErrorCode::Usage, "duration is not a length of time"));
-    }
+    check_times(position, duration)?;
     let now = now();
     watchable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
     let watched = Watched { video, position, duration, release, at: now };
     ctx.titles.shelf.watch(&watched)?;
     Ok(json!({ "watched": watched }))
+}
+
+/// No video runs longer, in seconds.
+const LONGEST: f64 = 1_000.0 * 3_600.0;
+
+/// Fails with `usage` unless a video can stop at `position` and run for `duration`: both are
+/// finite, neither is negative or over 1,000 hours, and the position is not past the duration.
+fn check_times(position: f64, duration: Option<f64>) -> Result<(), Error> {
+    let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
+    if !(0.0..=LONGEST).contains(&position) {
+        return usage(format!("position {position} is not a time in a video"));
+    }
+    match duration {
+        Some(length) if !(length > 0.0 && length <= LONGEST) => {
+            usage(format!("duration {length} is not the length of a video"))
+        }
+        Some(length) if position > length => {
+            usage(format!("position {position} is past the end of a video {length} seconds long"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Fails with `usage` unless `episode` names the film `details` describes, or an aired episode it

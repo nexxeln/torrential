@@ -164,8 +164,9 @@ pub fn resuming(at: Duration) -> String {
     format!("Resuming at {}", format::clock(at))
 }
 
+/// A stored time as a clock. A value no clock can show reads as unknown.
 fn clock(seconds: f64) -> String {
-    format::clock(Duration::from_secs_f64(seconds.max(0.0)))
+    Duration::try_from_secs_f64(seconds).map_or_else(|_| UNKNOWN.to_string(), format::clock)
 }
 
 fn stopped(watched: &Watched) -> String {
@@ -303,4 +304,26 @@ pub fn get_title(reply: &GetReply, name: &str) -> Doc {
         fields.insert(0, ("title", Cell::new(name)));
     }
     doc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn where_a_video_stopped_reads_as_a_clock_and_a_stored_time_no_clock_can_show_as_unknown() {
+        let at = |position: f64, duration: Option<f64>| {
+            stopped(&Watched { video: "tt0063350".parse().unwrap(), position, duration, release: None, at: 0 })
+        };
+        assert_eq!(at(1834.2, Some(5760.0)), "stopped at 30:34 of 1:36:00");
+        assert_eq!(at(5750.0, Some(5760.0)), "finished");
+        assert_eq!(at(59.9, None), "stopped at 0:59");
+        for unshowable in [1e30, f64::INFINITY, f64::NAN, -5.0] {
+            assert_eq!(at(unshowable, None), "stopped at ?", "{unshowable}");
+        }
+        for unshowable in [1e30, f64::NAN, -5.0] {
+            assert_eq!(at(60.0, Some(unshowable)), "stopped at 1:00 of ?", "{unshowable}");
+        }
+        assert_eq!(at(60.0, Some(f64::INFINITY)), "finished");
+    }
 }

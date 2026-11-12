@@ -995,6 +995,49 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_position_or_duration_no_video_can_have_is_refused_and_nothing_is_saved() {
+    let h = Harness::new();
+    let watch = |position: f64, duration: Value| {
+        let body = json!({ "video": "tt0063350", "position": position, "duration": duration });
+        let h = &h;
+        async move {
+            let answer = post(h, "/api/watched", body).await;
+            let (status, code, message) = error(&answer);
+            (status, code.to_string(), message.to_string())
+        }
+    };
+    let usage = |message: &str| (400, "usage".to_string(), message.to_string());
+    let refused = [
+        watch(-1.0, json!(null)).await,
+        watch(3_600_001.0, json!(null)).await,
+        watch(1e30, json!(null)).await,
+        watch(60.0, json!(-5.0)).await,
+        watch(60.0, json!(0.0)).await,
+        watch(60.0, json!(3_600_001.0)).await,
+        watch(60.0, json!(1e30)).await,
+        watch(700.5, json!(600.0)).await,
+    ];
+    assert_eq!(
+        refused,
+        [
+            usage("position -1 is not a time in a video"),
+            usage("position 3600001 is not a time in a video"),
+            usage("position 1000000000000000000000000000000 is not a time in a video"),
+            usage("duration -5 is not the length of a video"),
+            usage("duration 0 is not the length of a video"),
+            usage("duration 3600001 is not the length of a video"),
+            usage("duration 1000000000000000000000000000000 is not the length of a video"),
+            usage("position 700.5 is past the end of a video 600 seconds long"),
+        ]
+    );
+    assert_eq!(get(&h, "/api/title?id=tt0063350").await.1["watched"], json!([]));
+
+    assert_eq!(watch(3_600_000.0, json!(3_600_000.0)).await.0, 200, "1,000 hours is the longest");
+    assert_eq!(watch(600.0, json!(600.0)).await.0, 200);
+    assert_eq!(watch(0.0, json!(null)).await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_position_is_saved_only_for_a_film_or_an_aired_episode_the_catalog_lists() {
     let h = Harness::new();
     let mut answers = Vec::new();
