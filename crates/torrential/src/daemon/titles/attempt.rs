@@ -1,7 +1,7 @@
 //! One play of a title: find its sources, try them one at a time best first, move past each that
 //! will not start, clean up after it, and play the first that works.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,11 +10,12 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Category, Check, Error, ErrorCode, Job, JobStatus, Lease, Playback, Release, ReleaseId, SearchResult,
-    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Category, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Lease, Playback, Release, ReleaseId,
+    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
+use super::super::magnet::{self, Magnet};
 use super::super::owner::{Command, Created, MetaTarget, Origin, PlayCommand, Source};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
@@ -23,6 +24,12 @@ use super::Resolved;
 /// Ranked releases looked at. The rest rarely play better than these.
 const MOST_CONSIDERED: usize = 12;
 const MOST_TRIED: usize = 6;
+/// Sources after the one under test whose file lists are asked for early, so dead swarms in a row
+/// cost one wait.
+const LOOK_AHEAD: usize = 2;
+/// How long the owner may take to answer with a file list it already has. A source whose file
+/// list was asked for early waits at least this long, however long ago that was.
+const ANSWER_WITHIN: Duration = Duration::from_millis(100);
 /// How often a trial looks for the first bytes of its video.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
 /// What the browser plays without ffmpeg remuxing it.
@@ -46,7 +53,7 @@ pub struct PlayTitle {
 /// holds the video plays first, before any search. Otherwise sources are tried once the search
 /// so far holds one that could lead, while slower indexes go on answering, and each next source
 /// is the best of what has been found by then. Dropping the future stops the play, and the
-/// download under test is discarded if the play made it.
+/// source under test is put back as it was.
 pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) {
     let end = Instant::now() + ctx.titles.timing.budget;
     if let Some(id) = ask.replace {
@@ -72,7 +79,8 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         replace: ask.replace,
         pin: ask.pin.as_ref(),
     };
-    let mut walk = Walk { ctx, title: &title, replace: ask.replace, end, tried: Vec::new() };
+    let mut walk =
+        Walk { ctx, title: &title, here: &here, replace: ask.replace, end, tried: Vec::new(), asked: HashMap::new() };
     let held = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. }));
     let held = held.filter_map(|j| holding(j, &title.video)).filter(|r| !(line.failed_lately)(&r.id)).collect();
     if let Some(release) = line.order(held, Vec::new(), &[]).into_iter().next()
@@ -122,6 +130,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
             continue;
         };
         let of = (walk.tried.len() + candidates.len()) as u32;
+        walk.look_ahead(&candidates[1..]);
         let trial = walk.try_source(release, of, &mut report);
         tokio::pin!(trial);
         let over = loop {
@@ -220,20 +229,57 @@ fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
 struct Walk<'a> {
     ctx: &'a Ctx,
     title: &'a Resolved,
+    /// The downloads on this machine.
+    here: &'a BTreeSet<TorrentId>,
     replace: Option<TorrentId>,
     end: Instant,
     /// The sources that did not play, in the order they were tried.
     tried: Vec<Tried>,
+    /// When the play first asked for each source's file list.
+    asked: HashMap<ReleaseId, Instant>,
 }
 
 impl Walk<'_> {
+    /// Asks peers for the file lists of the first of `next` while another source is under test.
+    /// The owner keeps what arrives and drops each probe once nobody waits for it, so a probe
+    /// never downloads.
+    fn look_ahead(&mut self, next: &[Release]) {
+        for release in next.iter().take(LOOK_AHEAD) {
+            if self.asked.contains_key(&release.id) {
+                continue;
+            }
+            let Some(magnet) = self.magnet_for(release) else { continue };
+            let now = Instant::now();
+            self.asked.insert(release.id, now);
+            let (reply, _) = oneshot::channel();
+            let deadline = now + self.ctx.titles.timing.file_list;
+            self.ctx.owner.tell(Command::Metadata { target: MetaTarget::Magnet(magnet), deadline, reply });
+        }
+    }
+
+    /// The magnet a trial of `release` asks peers for its file list with. `None` for a download
+    /// here, and for a release with a .torrent file.
+    fn magnet_for(&self, release: &Release) -> Option<Magnet> {
+        if matches!(release.id, ReleaseId::Torrent(id) if self.here.contains(&id))
+            || !matches!(self.ctx.search.torrent_url(release), Ok(None))
+        {
+            return None;
+        }
+        match (&release.magnet, release.id) {
+            (Some(uri), _) => magnet::parse(uri).ok(),
+            (None, ReleaseId::Torrent(id)) => Some(magnet::from_hash(InfoHash::V1(*id.as_bytes()))),
+            (None, ReleaseId::Locator(_)) => None,
+        }
+    }
+
     /// Tries `release` as the next of `of` sources, and answers whether the play is over: it
     /// plays, or the engine is going away. A source that does not play joins `tried`.
     async fn try_source(&mut self, release: Release, of: u32, report: &mut (impl FnMut(AttemptEvent) + Send)) -> bool {
         let ctx = self.ctx;
         report(AttemptEvent::Trying { rank: self.tried.len() as u32 + 1, of, release: release.clone() });
+        let asked = *self.asked.entry(release.id).or_insert_with(Instant::now);
         let mut trial = Trial { owner: &ctx.owner, undo: None };
-        match trial.run(ctx, self.title, &release, self.end, report).await {
+        match trial.run(ctx, self.title, &release, asked, self.end, report).await {
             Ok((job, file)) => {
                 trial.undo = None;
                 let id = job.id;
@@ -307,19 +353,20 @@ enum Undo {
 }
 
 impl Trial<'_> {
-    /// Checks `release` step by step and answers the download and the file that play.
+    /// Checks `release` step by step and answers the download and the file that play. Its file
+    /// list has been on its way since `asked`.
     async fn run(
         &mut self,
         ctx: &Ctx,
         title: &Resolved,
         release: &Release,
+        asked: Instant,
         end: Instant,
         report: &mut (impl FnMut(AttemptEvent) + Send),
     ) -> Result<(Job, u32), Box<Skip>> {
         let timing = ctx.titles.timing;
         report(AttemptEvent::Check { check: Check::FileList });
-        let asked = Instant::now();
-        let deadline = end.min(asked + timing.file_list);
+        let deadline = end.min(asked + timing.file_list).max(Instant::now() + ANSWER_WITHIN);
         let (source, metainfo) = match tokio::time::timeout_at(deadline.into(), files(ctx, release, deadline)).await {
             Ok(Ok(found)) => found,
             Ok(Err(error)) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),

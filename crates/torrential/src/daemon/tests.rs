@@ -39,7 +39,8 @@ struct Harness {
     outside: Outside,
 }
 
-/// What the web app's API reaches outside the engine, which a test sets.
+/// What the web app's API reaches outside the engine, and how long a title play waits, which a
+/// test sets.
 #[derive(Clone)]
 struct Outside {
     /// Where the engine finds ffmpeg and ffprobe. Nowhere, until a test says.
@@ -47,6 +48,7 @@ struct Outside {
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     catalog_online: bool,
+    timing: Timing,
 }
 
 impl Default for Outside {
@@ -56,6 +58,7 @@ impl Default for Outside {
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             catalog_online: true,
+            timing: TIMING,
         }
     }
 }
@@ -83,8 +86,11 @@ impl Harness {
     }
 
     fn with_search(search: search_port::Fake) -> Self {
+        Self::with_outside(search, Outside::default())
+    }
+
+    fn with_outside(search: search_port::Fake, outside: Outside) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let outside = Outside::default();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
         let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
@@ -151,7 +157,7 @@ impl Harness {
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, store, ports, config(dir.path()), TIMING, "0.1.0".into(), 0).unwrap()
+        start(&handle, store, ports, config(dir.path()), outside.timing, "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {

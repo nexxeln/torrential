@@ -13,8 +13,9 @@ use super::super::engine_port::FakeTorrentFile;
 use super::super::owner::{Command, Created, Origin, PlayCommand, Source};
 use super::super::search_port::{self, FakeSource};
 use super::super::store::{Discard, Store};
+use super::super::titles::Timing;
 use super::super::titles::attempt::{self, PlayTitle};
-use super::{Harness, MIB, prefix, torrent};
+use super::{Harness, MIB, Outside, TIMING, prefix, torrent};
 
 /// A search result for a test torrent, listed by `source`.
 pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) -> Release {
@@ -501,6 +502,44 @@ async fn a_play_starts_on_a_lawful_catalog_at_once_and_does_not_wait_for_a_slow_
         ]
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(4), "it took {:?}", started.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_dead_swarms_in_a_row_cost_one_wait_for_a_file_list() {
+    let name = |n: u8, screen: &str| (n, format!("Night.of.the.Living.Dead.1968.{screen}.WEB.x264"));
+    let night = [name(0xd1, "480p"), name(0xd2, "576p"), name(0xd3, "720p"), name(0xd4, "1080p")]
+        .map(|(n, name)| torrent(n, &name, &[("Night.1968.mp4", GIB)]));
+    let catalog = night.iter().map(|t| listed(t, "knaben", Some(40))).collect();
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let file_list = std::time::Duration::from_secs(1);
+    let h = Harness::with_outside(search, Outside { timing: Timing { file_list, ..TIMING }, ..Outside::default() });
+    h.swarm.publish(night[3].clone());
+    h.swarm.set_rate(GIB);
+    let started = std::time::Instant::now();
+    let steps = h.play_title("tt0063350", None, None).await;
+    let took = started.elapsed();
+    assert_eq!(
+        steps,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 4",
+            "trying 1 of 4 Night.of.the.Living.Dead.1968.480p.WEB.x264",
+            "check file_list",
+            r#"skipped d1d1d1 {"reason":"no_file_list","waited_s":1}"#,
+            "trying 2 of 4 Night.of.the.Living.Dead.1968.576p.WEB.x264",
+            "check file_list",
+            r#"skipped d2d2d2 {"reason":"no_file_list","waited_s":1}"#,
+            "trying 3 of 4 Night.of.the.Living.Dead.1968.720p.WEB.x264",
+            "check file_list",
+            r#"skipped d3d3d3 {"reason":"no_file_list","waited_s":1}"#,
+            "trying 4 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 d4d4d4 file 0 at null",
+        ]
+    );
+    assert!(took < 2 * file_list, "the play took {took:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
