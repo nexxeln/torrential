@@ -870,17 +870,18 @@ fn a_release_known_to_have_no_seeders_is_dropped_outside_a_lawful_catalog() {
 }
 
 #[test]
-fn archive_org_without_seeders_counts_as_a_fair_swarm() {
-    let lawful = video(0x64, "Night of the Living Dead (1968)", None, 500_000_000);
-    let fair = video(0x65, "Night Of The Living Dead 1968 720p BRRip x264", Some(12), 1_200_000_000);
-    let runs = [fresh(&archive(), vec![lawful]), fresh(&knaben(), vec![dvdrip(), fair, bluray()])];
+fn archive_org_without_seeders_counts_as_a_strong_swarm() {
+    let lawful = video(0x64, "Night of the Living Dead (1968)", None, 1_200_000_000);
+    let dead = video(0x6c, "Night Of The Living Dead ( 1968)", Some(0), 800_000_000);
+    let yts = video(0x65, "Night of the Living Dead (1968) 1080p BRRip x264 -YTS", Some(232), 1_600_000_000);
+    let runs = [fresh(&archive(), vec![dead, lawful]), fresh(&knaben(), vec![dvdrip(), yts])];
     assert_eq!(
         played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
         [
-            "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
             "Night of the Living Dead (1968)",
-            "Night Of The Living Dead 1968 720p BRRip x264",
+            "Night of the Living Dead (1968) 1080p BRRip x264 -YTS",
             "Night of the Living Dead 1968 DVDRip XviD",
+            "Night Of The Living Dead ( 1968)",
         ]
     );
 }
@@ -978,17 +979,17 @@ fn an_episode_ranks_before_its_season_pack() {
 #[test]
 fn a_remake_with_another_year_is_absent() {
     let remake = video(0x68, "Night of the Living Dead (1990) 1080p BluRay", Some(500), 9 * GB);
-    let fair = video(0x65, "Night Of The Living Dead 1968 720p BRRip x264", Some(12), 1_200_000_000);
+    let dated = video(0x65, "Night Of The Living Dead 1968 720p BRRip x264-x0r", Some(22), 1_700_000_000);
     let yearless = video(0x6b, "night_of_the_living_dead", None, 1_100_000_000);
-    let runs = [fresh(&archive(), vec![yearless]), fresh(&knaben(), vec![remake, fair])];
+    let runs = [fresh(&archive(), vec![yearless]), fresh(&knaben(), vec![remake, dated])];
     assert_eq!(
         played(&night(Namesakes::Leading, 1968), Profile::default(), &runs),
-        ["Night Of The Living Dead 1968 720p BRRip x264", "night_of_the_living_dead"],
+        ["Night Of The Living Dead 1968 720p BRRip x264-x0r", "night_of_the_living_dead"],
         "beside a namesake, a release that names the year leads a lawful one that does not"
     );
     assert_eq!(
         played(&night(Namesakes::None, 1968), Profile::default(), &runs),
-        ["night_of_the_living_dead", "Night Of The Living Dead 1968 720p BRRip x264"],
+        ["night_of_the_living_dead", "Night Of The Living Dead 1968 720p BRRip x264-x0r"],
         "without one, the lawful source leads"
     );
     assert_eq!(

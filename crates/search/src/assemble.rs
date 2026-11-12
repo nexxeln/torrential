@@ -157,12 +157,12 @@ enum Swarm {
 }
 
 impl Swarm {
-    /// `None` for a swarm known to have no seeder outside a lawful catalog, which serves its
-    /// files from web seeds.
+    /// `None` for a swarm known to have no seeder outside a lawful catalog. A lawful catalog that
+    /// does not count seeders serves its files from web seeds over HTTP, as dependable as any swarm.
     fn of(seeders: Option<u32>, lawful: bool) -> Option<Swarm> {
         match (seeders, lawful) {
-            (Some(20..), _) => Some(Swarm::Strong),
-            (Some(5..=19), _) | (None, true) => Some(Swarm::Fair),
+            (Some(20..), _) | (None, true) => Some(Swarm::Strong),
+            (Some(5..=19), _) => Some(Swarm::Fair),
             (Some(1..=4), _) => Some(Swarm::Weak),
             (Some(0), true) | (None, false) => Some(Swarm::Unknown),
             (Some(0), false) => None,
