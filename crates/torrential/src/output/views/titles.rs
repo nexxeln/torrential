@@ -1,6 +1,8 @@
 //! What the title commands print: films and series, one title, its sources, and the steps of a
 //! title play.
 
+use std::time::Duration;
+
 use torrential_core::protocol::{GetReply, TitlePage, TitleSources};
 use torrential_core::text::sanitize;
 use torrential_core::title::Episode;
@@ -157,8 +159,13 @@ fn episodes(page: &TitlePage) -> Body {
     Body::Table { header: vec!["EPISODE", "AIRED", "WATCHED", "NAME"], rows }
 }
 
+/// The line before a player starts partway into a video.
+pub fn resuming(at: Duration) -> String {
+    format!("Resuming at {}", format::clock(at))
+}
+
 fn clock(seconds: f64) -> String {
-    format::clock(std::time::Duration::from_secs_f64(seconds.max(0.0)))
+    format::clock(Duration::from_secs_f64(seconds.max(0.0)))
 }
 
 fn stopped(watched: &Watched) -> String {

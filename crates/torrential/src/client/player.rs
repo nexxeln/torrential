@@ -1,6 +1,7 @@
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use torrential_core::{Error, ErrorCode};
 
@@ -51,6 +52,9 @@ pub struct Launch<'a> {
     /// An ISO 639 code for the subtitles to show first.
     pub language: Option<&'a str>,
     pub title: &'a str,
+    /// Where to start, as a person resumes a video. Players get whole seconds, since VLC may read
+    /// a fraction in the system's locale.
+    pub start: Option<Duration>,
 }
 
 impl Player {
@@ -147,11 +151,13 @@ fn command(player: &Player, launch: &Launch) -> (PathBuf, Vec<String>) {
             }
             args.extend(launch.language.map(|code| format!("--mpv-slang={code}")));
             args.push(format!("--mpv-force-media-title={}", launch.title));
+            args.extend(launch.start.map(|at| format!("--mpv-start={}", at.as_secs())));
         }
         Kind::Mpv => {
             args.extend(launch.subtitles.iter().map(|url| format!("--sub-file={url}")));
             args.extend(launch.language.map(|code| format!("--slang={code}")));
             args.push(format!("--force-media-title={}", launch.title));
+            args.extend(launch.start.map(|at| format!("--start={}", at.as_secs())));
         }
         Kind::Vlc => {
             // --sub-file reads its value as a local path, while each input slave may be a URL.
@@ -160,6 +166,7 @@ fn command(player: &Player, launch: &Launch) -> (PathBuf, Vec<String>) {
             }
             args.extend(launch.language.map(|code| format!("--sub-language={code}")));
             args.push(format!("--meta-title={}", launch.title));
+            args.extend(launch.start.map(|at| format!("--start-time={}", at.as_secs())));
         }
         Kind::Opener | Kind::Program => {}
     }
@@ -177,7 +184,8 @@ mod tests {
 
     fn argv(kind: Kind, program: &str, subtitles: Vec<&str>, language: Option<&str>) -> Vec<String> {
         let player = Player { kind, program: program.into() };
-        let launch = Launch { video: VIDEO, subtitles, language, title: "Night of the Living Dead (1968)" };
+        let launch =
+            Launch { video: VIDEO, subtitles, language, title: "Night of the Living Dead (1968)", start: None };
         let (program, args) = command(&player, &launch);
         [program.display().to_string()].into_iter().chain(args).collect()
     }
@@ -232,6 +240,31 @@ mod tests {
                 "--sub-language=fr",
                 "--meta-title=Night of the Living Dead (1968)",
                 VIDEO,
+            ]
+        );
+    }
+
+    #[test]
+    fn each_known_player_starts_at_the_whole_second_a_person_stopped() {
+        let started = |kind, program: &str| {
+            let player = Player { kind, program: program.into() };
+            let start = Some(Duration::from_secs_f64(200.9));
+            command(&player, &Launch { video: VIDEO, subtitles: vec![], language: None, title: "Night", start }).1
+        };
+        assert_eq!(
+            [
+                started(Kind::Iina, "/Applications/IINA.app/Contents/MacOS/iina-cli"),
+                started(Kind::Mpv, "/opt/homebrew/bin/mpv"),
+                started(Kind::Vlc, "/Applications/VLC.app/Contents/MacOS/VLC"),
+                started(Kind::Opener, "/usr/bin/xdg-open"),
+                started(Kind::Program, "/usr/local/bin/play"),
+            ],
+            [
+                vec!["--no-stdin", "--mpv-force-media-title=Night", "--mpv-start=200", VIDEO],
+                vec!["--force-media-title=Night", "--start=200", VIDEO],
+                vec!["--meta-title=Night", "--start-time=200", VIDEO],
+                vec![VIDEO],
+                vec![VIDEO],
             ]
         );
     }

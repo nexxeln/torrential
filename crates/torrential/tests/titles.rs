@@ -359,6 +359,52 @@ fn play_json_is_todays_play_document_with_the_title_and_opens_nothing() {
     assert!(!home.path("argv").exists(), "no player opened");
 }
 
+/// The player port in the first stream URL of a `play --json` document.
+fn player_port(doc: &Value) -> u16 {
+    let url = doc["streams"][0]["url"].as_str().unwrap();
+    let after = url.strip_prefix("http://127.0.0.1:").unwrap();
+    after[..after.find('/').unwrap()].parse().unwrap()
+}
+
+/// Posts `body` as JSON to the engine's web app, as its player does, and answers the status line.
+fn post_to_web(port: u16, path: &str, body: &str) -> String {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let length = body.len();
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {length}\r\nConnection: close\r\n\r\n{body}"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    answer.lines().next().unwrap_or_default().to_string()
+}
+
+#[test]
+fn play_starts_the_player_where_the_person_stopped() {
+    let home = Home::new(&[]);
+    let first = home.json(&["play", "tt0063350", "--json"]);
+    assert_eq!(first["title"]["resume_at"], Value::Null);
+    let saved = r#"{"video": "tt0063350", "position": 200.5, "duration": 5760.0}"#;
+    assert_eq!(post_to_web(player_port(&first), "/api/watched", saved), "HTTP/1.1 200 OK");
+    assert_eq!(home.json(&["play", "tt0063350", "--json"])["title"]["resume_at"], json!(200.5));
+
+    let run = home.run(&["play", "tt0063350"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.stderr.lines().last(), Some("Resuming at 3:20"), "{}", run.stderr);
+    let argv = home.path("argv");
+    eventually("the player starts", Duration::from_secs(10), || argv.exists());
+    assert_eq!(
+        portless(&std::fs::read_to_string(&argv).unwrap()),
+        format!(
+            "--sub-file=http://127.0.0.1:PORT/{ARCHIVE}/3/night_of_the_living_dead.srt\n--slang=en\n\
+             --force-media-title=Night of the Living Dead (1968)\n--start=200\n\
+             http://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n"
+        )
+    );
+}
+
 #[test]
 fn source_plays_only_the_release_it_names() {
     let home = Home::new(&[]);

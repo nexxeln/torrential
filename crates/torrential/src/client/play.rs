@@ -130,6 +130,9 @@ fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, c
         return Ok(emit(mode, &doc, &Typed { kind: "play", body: &playing }));
     }
     let player = player(config, paths, env, &playing.reply.streams[0].url)?;
+    if let Some(at) = resume_at(&playing) {
+        anstream::eprintln!("{}", views::resuming(at));
+    }
     if mode == Mode::Plain {
         open(&player, &playing, env)?;
         let summary = vec![format!("playing in {} · the download continues", player.name())];
@@ -162,8 +165,13 @@ pub fn player(config: &Config, paths: &Paths, env: &Env, url: &str) -> Result<Pl
     }
 }
 
+/// Where a title play resumes the video, unless it starts from the beginning.
+fn resume_at(playing: &Playing) -> Option<Duration> {
+    Duration::try_from_secs_f64(playing.title.as_ref()?.resume_at?).ok()
+}
+
 /// Opens the video and its subtitles in `player`, titled with the release name, showing subtitles in
-/// the system language first.
+/// the system language first, and starting where a title play resumes.
 pub fn open(player: &Player, playing: &Playing, env: &Env) -> Result<(), Error> {
     let [video, subtitles @ ..] = playing.reply.streams.as_slice() else {
         return Err(Error::internal("the engine streams no file to play"));
@@ -174,6 +182,7 @@ pub fn open(player: &Player, playing: &Playing, env: &Env) -> Result<(), Error> 
         subtitles: subtitles.iter().map(|s| s.url.as_str()).collect(),
         language: language.as_ref().map(|l| l.code()),
         title: &sanitize(&playing.name),
+        start: resume_at(playing),
     })
 }
 
