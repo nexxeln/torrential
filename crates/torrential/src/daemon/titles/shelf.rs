@@ -35,16 +35,14 @@ impl Shelf {
         sql_error(&self.path, e)
     }
 
-    /// Saves where a film or episode stopped. Saving the same video again replaces its row, and
-    /// a save that names no release keeps the one saved before.
+    /// Saves where a film or episode stopped. Saving the same video again replaces its row with
+    /// one after every other, and a save that names no release keeps the one saved before.
     pub fn watch(&self, watched: &Watched) -> Result<(), Error> {
         let Watched { video, position, duration, release, at } = watched;
         self.conn()
             .execute(
-                "INSERT INTO watched (video, title, position, duration, release, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT (video) DO UPDATE SET position = excluded.position, duration = excluded.duration, \
-                 release = coalesce(excluded.release, release), updated_at = excluded.updated_at",
+                "INSERT OR REPLACE INTO watched (video, title, position, duration, release, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, coalesce(?5, (SELECT release FROM watched WHERE video = ?1)), ?6)",
                 params![
                     video.to_string(),
                     video.title.as_str(),
@@ -58,9 +56,8 @@ impl Shelf {
             .map_err(|e| self.fail(e))
     }
 
-    /// Every film or episode of `title` with a position, the most recently watched last. Two
-    /// saved in the same second keep the order they were first saved in, so the later one counts
-    /// as the latest.
+    /// Every film or episode of `title` with a position, the most recently watched last. Of two
+    /// saved in the same second, the one saved last counts as the latest.
     pub fn watched(&self, title: &TitleId) -> Result<Vec<Watched>, Error> {
         let sql = format!("{WATCHED} WHERE title = ?1 ORDER BY updated_at, rowid");
         self.read(&sql, params![title.as_str()])
@@ -201,6 +198,21 @@ mod tests {
         assert_eq!(rows(series.clone()), [("tt9999901:1:1".into(), 120.5, 20), ("tt9999901:1:2".into(), 30.0, 30)]);
         assert_eq!((series[0].duration, series[0].release.as_ref()), (Some(2640.0), Some(&release)));
         assert_eq!(rows(shelf.watched(&"tt0100258".parse().unwrap()).unwrap()), []);
+    }
+
+    #[test]
+    fn of_two_videos_saved_in_the_same_second_the_one_saved_last_is_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = shelf(&dir);
+        shelf.watch(&at("tt9999901:1:1", 60.0, None, 10)).unwrap();
+        shelf.watch(&at("tt9999901:1:2", 30.0, None, 10)).unwrap();
+        shelf.watch(&at("tt9999901:1:2", 90.0, None, 20)).unwrap();
+        shelf.watch(&at("tt9999901:1:1", 75.0, None, 20)).unwrap();
+        assert_eq!(
+            rows(shelf.watched(&"tt9999901".parse().unwrap()).unwrap()),
+            [("tt9999901:1:2".into(), 90.0, 20), ("tt9999901:1:1".into(), 75.0, 20)]
+        );
+        assert_eq!(rows(shelf.recent(1).unwrap()), [("tt9999901:1:1".into(), 75.0, 20)]);
     }
 
     #[test]
