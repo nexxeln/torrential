@@ -56,6 +56,41 @@ CREATE TABLE results (
     "ALTER TABLE jobs ADD COLUMN files_verified TEXT;",
     "ALTER TABLE jobs ADD COLUMN max_size_from_setup INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE results ADD COLUMN link TEXT;",
+    r#"
+CREATE TABLE job_titles (
+    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    span TEXT NOT NULL,
+    release TEXT,
+    lease TEXT NOT NULL CHECK (lease IN ('owned', 'borrowed')),
+    played INTEGER NOT NULL DEFAULT 0 CHECK (played IN (0, 1)),
+    linked_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX job_titles_by_title ON job_titles(title);
+CREATE TABLE watched (
+    video TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    position REAL NOT NULL CHECK (position >= 0),
+    duration REAL CHECK (duration IS NULL OR duration > 0),
+    release TEXT,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX watched_by_title ON watched(title, updated_at);
+CREATE TABLE library (
+    title TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('film', 'series')),
+    name TEXT NOT NULL,
+    year INTEGER,
+    rating REAL,
+    saved_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE discards (
+    job TEXT PRIMARY KEY,
+    dir BLOB NOT NULL,
+    paths TEXT NOT NULL,
+    discarded_at INTEGER NOT NULL
+) STRICT;
+"#,
 ];
 
 #[derive(Clone, PartialEq, Debug)]
@@ -136,6 +171,11 @@ impl Store {
 
     fn fail(&self, e: rusqlite::Error) -> Error {
         sql_error(&self.path, e)
+    }
+
+    /// The database file, which the shelf opens a second connection to.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn write<T>(&mut self, f: impl FnOnce(&Transaction) -> rusqlite::Result<T>) -> Result<T, Error> {
@@ -469,7 +509,7 @@ impl Store {
     }
 }
 
-fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
+pub(super) fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
     use rusqlite::ErrorCode as Sql;
     match e.sqlite_error_code() {
         Some(Sql::DatabaseCorrupt | Sql::NotADatabase) => corrupt(path, &e.to_string()),

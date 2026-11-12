@@ -166,6 +166,7 @@ pub fn start(
         .map_err(|e| Error::internal(format!("cannot listen for players on 127.0.0.1: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
+    let shelf = titles::shelf::Shelf::open(store.path())?;
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
     let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, config)?;
@@ -180,7 +181,7 @@ pub fn start(
         version,
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
-        titles: titles::Titles { catalog: ports.catalog },
+        titles: titles::Titles { catalog: ports.catalog, shelf },
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })
