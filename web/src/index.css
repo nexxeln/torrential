@@ -1,0 +1,130 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "InterVariable";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("../node_modules/inter-ui/variable/InterVariable.woff2") format("woff2");
+}
+
+/* The palette of the terminal UI (crates/tui/src/theme.rs), so both read as one product. */
+@theme {
+  --font-sans: "InterVariable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans--font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+
+  --color-paper: #14120f;
+  --color-raised: #1d1a16;
+  --color-ink: #f0e9dc;
+  --color-soft: #bdb5a6;
+  --color-pencil: #837c70;
+  --color-rule: #3b3730;
+  --color-action: #a6c79a;
+  --color-error: #e2806e;
+
+  --animate-appear: appear 160ms ease-out;
+  --animate-page: page 140ms ease-out;
+  --animate-bezel: bezel 500ms ease-out forwards;
+  --animate-pop: pop 180ms ease-out;
+  --animate-countdown: countdown linear forwards;
+
+  @keyframes appear {
+    from {
+      opacity: 0;
+      translate: 0 4px;
+    }
+  }
+
+  @keyframes page {
+    from {
+      opacity: 0;
+      translate: var(--page-from, 8px) 0;
+    }
+  }
+
+  @keyframes bezel {
+    from {
+      opacity: 1;
+      scale: 0.85;
+    }
+    to {
+      opacity: 0;
+      scale: 1.2;
+    }
+  }
+
+  @keyframes pop {
+    from {
+      opacity: 0;
+      scale: 0.96;
+    }
+  }
+
+  @keyframes countdown {
+    from {
+      scale: 0 1;
+    }
+  }
+}
+
+@layer base {
+  html {
+    background-color: var(--color-paper);
+    color: var(--color-soft);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-action);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-action) 35%, transparent);
+  }
+}
+
+/* Subtitles with a hard edge, for bright or busy pictures. */
+@utility text-outlined {
+  text-shadow:
+    -0.06em -0.06em 0 #000,
+    0.06em -0.06em 0 #000,
+    -0.06em 0.06em 0 #000,
+    0.06em 0.06em 0 #000,
+    0 -0.08em 0 #000,
+    0 0.08em 0 #000,
+    -0.08em 0 0 #000,
+    0.08em 0 0 #000;
+}
+
+/* A range input drawn as a thin bar filled up to --level, with a round thumb. */
+@utility slider {
+  appearance: none;
+  height: --spacing(1);
+  border-radius: calc(infinity * 1px);
+  background: linear-gradient(to right, var(--color-ink) var(--level, 0%), rgb(255 255 255 / 0.25) var(--level, 0%));
+  cursor: pointer;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: --spacing(3);
+    height: --spacing(3);
+    border-radius: calc(infinity * 1px);
+    background: var(--color-ink);
+  }
+
+  &::-moz-range-thumb {
+    width: --spacing(3);
+    height: --spacing(3);
+    border: 0;
+    border-radius: calc(infinity * 1px);
+    background: var(--color-ink);
+  }
+}
+
+/* Text that stays readable over any frame of video. */
+@utility text-over-video {
+  text-shadow:
+    0 0 2px rgb(0 0 0 / 0.9),
+    0 1px 4px rgb(0 0 0 / 0.8),
+    0 0 12px rgb(0 0 0 / 0.5);
+}

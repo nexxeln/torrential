@@ -4,3 +4,5 @@
 .DS_Store
 /dist
 /.amp/portals/*
+/web/node_modules
+/web/dist
