@@ -59,12 +59,13 @@ pub fn around(files: &[TorrentFile], video: u32) -> Option<Playable> {
 }
 
 /// The file of `episode` in a pack, plus the subtitle files that belong with it: the largest
-/// video, not a sample, whose own name, folder, or torrent reads as that episode.
+/// video, not a sample, whose own name, folder, or torrent reads as that episode. A file of
+/// several episodes, as `S01E01E02`, is only its first, since the second starts partway in.
 pub fn episode(files: &[TorrentFile], torrent: &str, episode: Episode) -> Option<Playable> {
     let video = files
         .iter()
         .filter(|f| kind(&f.path) == Some(Kind::Video) && !is_sample(&f.path))
-        .filter(|f| title::episodes(&f.path, torrent).contains(&episode))
+        .filter(|f| title::episode(&f.path, torrent) == Some(episode))
         .max_by_key(|f| f.size)?;
     around(files, video.index)
 }
@@ -224,21 +225,22 @@ mod tests {
         assert_eq!(chosen(9), None);
     }
 
+    fn listed(listing: &[(&str, u64)]) -> Vec<TorrentFile> {
+        (0..)
+            .zip(listing)
+            .map(|(index, &(path, size))| TorrentFile {
+                index,
+                path: path.into(),
+                size,
+                selected: false,
+                verified: 0,
+                risk: None,
+            })
+            .collect()
+    }
+
     #[test]
     fn an_episode_is_the_file_in_the_pack_that_holds_it() {
-        let listed = |listing: &[(&str, u64)]| -> Vec<TorrentFile> {
-            (0..)
-                .zip(listing)
-                .map(|(index, &(path, size))| TorrentFile {
-                    index,
-                    path: path.into(),
-                    size,
-                    selected: false,
-                    verified: 0,
-                    risk: None,
-                })
-                .collect()
-        };
         let season = listed(&[
             ("Show.S01E01.mkv", 1_000_000_000),
             ("Show.S01E02.mkv", 2_000_000_000),
@@ -256,7 +258,7 @@ mod tests {
         assert_eq!(found(&season, pack, 1, 1), Some((0, vec![2, 4])));
         assert_eq!(found(&season, pack, 1, 2), Some((1, vec![3])));
         assert_eq!(found(&season, pack, 1, 3), None, "only a sample holds it");
-        assert_eq!(found(&season, pack, 1, 5), Some((6, vec![2, 3, 4])));
+        assert_eq!(found(&season, pack, 1, 4), Some((6, vec![2, 3, 4])));
         assert_eq!(found(&season, pack, 2, 1), None);
 
         let series = listed(&[
@@ -268,6 +270,13 @@ mod tests {
         assert_eq!(found(&series, "Show Name Complete", 1, 1), Some((0, vec![])));
         let single = listed(&[("bb305.mkv", 700_000_000), ("bb305.srt", 30_000)]);
         assert_eq!(found(&single, "Breaking.Bad.S03E05.720p.HDTV.x264-IMMERSE", 3, 5), Some((0, vec![1])));
+    }
+
+    #[test]
+    fn a_file_of_several_episodes_plays_only_as_the_first_of_them() {
+        let files = listed(&[("Show.S01E01E02.mkv", 2_000_000_000), ("Show.S01E03-E04.mkv", 2_000_000_000)]);
+        let found = |number| episode(&files, "Show.S01.1080p.WEB", Episode { season: 1, episode: number });
+        assert_eq!([1, 2, 3, 4].map(|number| found(number).map(|p| p.video)), [Some(0), None, Some(1), None]);
     }
 
     #[test]

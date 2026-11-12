@@ -252,13 +252,10 @@ fn bracketed_country(release: &str) -> Option<Country> {
     bracketed.find_map(|inside| Country::of_code(inside.trim()))
 }
 
-/// Every episode a file in a torrent holds, as `read` reads it: none for a film, and several for
-/// a file such as `S01E01E02`.
-pub fn episodes(path: &str, torrent: &str) -> Vec<Episode> {
-    let Some(first) = read(path, torrent).into_iter().find_map(|title| title.episode) else { return Vec::new() };
-    let file = Reading::of(stem(path.rsplit('/').next().unwrap_or_default()));
-    let last = file.episode.filter(|&(start, _)| start == first.episode).map_or(first.episode, |(_, last)| last);
-    (first.episode..=last).map(|episode| Episode { season: first.season, episode }).collect()
+/// The episode a file in a torrent plays from its start, as `read` reads it: none for a film, and
+/// the first for a file of several such as `S01E01E02`.
+pub fn episode(path: &str, torrent: &str) -> Option<Episode> {
+    read(path, torrent).into_iter().find_map(|title| title.episode)
 }
 
 /// Whether other titles of the same kind share the wanted one's name, as Dune 1984 and Dune 2021
@@ -784,11 +781,11 @@ mod tests {
         assert_eq!(spans("Show.S01E01-E02.720p"), [reading("Show", None, "s1e1"), reading("Show", None, "s1e2")]);
         assert_eq!(spans("Show.S01E01-02.720p"), [reading("Show", None, "s1e1"), reading("Show", None, "s1e2")]);
         assert_eq!(spans("Show.S01E02-GRP"), [reading("Show", None, "s1e2")]);
-        let held = |path, torrent| episodes(path, torrent).iter().map(|e| (e.season, e.episode)).collect::<Vec<_>>();
-        assert_eq!(held("Show.S01E01E02.1080p.mkv", ""), [(1, 1), (1, 2)]);
-        assert_eq!(held("Season 2/E07 - The One.mkv", "Show Name (2019)"), [(2, 7)]);
-        assert_eq!(held("video.mkv", "Show.Name.S01E02.720p.HDTV"), [(1, 2)]);
-        assert_eq!(held("Movie.2024.1080p.mkv", ""), []);
+        let held = |path, torrent| super::episode(path, torrent).map(|e| (e.season, e.episode));
+        assert_eq!(held("Show.S01E01E02.1080p.mkv", ""), Some((1, 1)));
+        assert_eq!(held("Season 2/E07 - The One.mkv", "Show Name (2019)"), Some((2, 7)));
+        assert_eq!(held("video.mkv", "Show.Name.S01E02.720p.HDTV"), Some((1, 2)));
+        assert_eq!(held("Movie.2024.1080p.mkv", ""), None);
     }
 
     fn film_named(name: &str, year: u16, namesakes: Namesakes) -> Wanted {
