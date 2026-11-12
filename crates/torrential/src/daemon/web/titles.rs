@@ -27,7 +27,7 @@ const CONTINUE_MOST: usize = 20;
 /// config.yaml it finds none, and says it is offline.
 pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     let words = required(request, "q")?;
-    if !ctx.titles.online {
+    if !ctx.titles.catalog.online() {
         return Ok(json!({ "titles": [], "offline": true }));
     }
     Ok(json!({ "titles": ctx.titles.catalog.search(words.trim()).await? }))

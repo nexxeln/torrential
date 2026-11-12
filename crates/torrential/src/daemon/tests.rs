@@ -47,7 +47,6 @@ struct Outside {
     tools: Arc<Mutex<Tools>>,
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
-    catalog_online: bool,
     timing: Timing,
 }
 
@@ -57,7 +56,6 @@ impl Default for Outside {
             tools: Arc::default(),
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
-            catalog_online: true,
             timing: TIMING,
         }
     }
@@ -96,9 +94,9 @@ impl Harness {
         Self { dir, running, swarm, disk, search, outside }
     }
 
-    fn with_titles(catalog: Arc<dyn CatalogPort>, catalog_online: bool) -> Self {
+    fn with_titles(catalog: Arc<dyn CatalogPort>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let outside = Outside { catalog, catalog_online, ..Outside::default() };
+        let outside = Outside { catalog, ..Outside::default() };
         let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
         let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
@@ -153,7 +151,6 @@ impl Harness {
             }),
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
-            catalog_online: outside.catalog_online,
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();

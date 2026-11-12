@@ -1070,7 +1070,7 @@ async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_wo
     use torrential_search::catalog::CatalogConfig;
     let off = CatalogConfig { online: false, endpoint: None, imdb_endpoint: None, cache_dir: None };
     let catalog = std::sync::Arc::new(super::super::titles::catalog_port::Live::new(&off).unwrap());
-    let h = Harness::with_titles(catalog, off.online);
+    let h = Harness::with_titles(catalog);
     assert_eq!(get(&h, "/api/titles?q=night").await, (200, json!({ "titles": [], "offline": true })));
     assert_eq!(
         error(&get(&h, "/api/title?id=tt0063350").await),

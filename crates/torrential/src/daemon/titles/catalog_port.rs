@@ -13,6 +13,9 @@ use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat, Picture};
 use super::super::search_port::BoxFuture;
 
 pub trait CatalogPort: Send + Sync {
+    /// False when config.yaml turns title lookups off. The catalog then answers only from what it
+    /// keeps on this machine.
+    fn online(&self) -> bool;
     /// Films and series named like `words`, exact names first. Empty when lookups are off.
     fn search<'a>(&'a self, words: &'a str) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>>;
     fn title<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Result<TitleDetails, Error>>;
@@ -91,6 +94,10 @@ impl Live {
 }
 
 impl CatalogPort for Live {
+    fn online(&self) -> bool {
+        self.0.online()
+    }
+
     fn search<'a>(&'a self, words: &'a str) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>> {
         Box::pin(self.0.search(words))
     }
@@ -217,6 +224,10 @@ impl Fake {
 }
 
 impl CatalogPort for Fake {
+    fn online(&self) -> bool {
+        true
+    }
+
     fn search<'a>(&'a self, words: &'a str) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>> {
         let words = normalized(words);
         let named = |t: &&TitleDetails| !words.is_empty() && normalized(&t.card.name).contains(&words);

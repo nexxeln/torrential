@@ -61,8 +61,6 @@ pub struct Ports {
     pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
-    /// False when config.yaml turns title lookups off.
-    pub catalog_online: bool,
 }
 
 impl Ports {
@@ -107,7 +105,6 @@ impl Ports {
                 tools,
                 subtitles,
                 catalog,
-                catalog_online: settings.catalog.online,
             });
         }
         let network = match env.var("TORRENTIAL_TEST_NETWORK") {
@@ -131,7 +128,6 @@ impl Ports {
             tools,
             subtitles,
             catalog,
-            catalog_online: settings.catalog.online,
         })
     }
 }
@@ -192,7 +188,7 @@ pub fn start(
         version,
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
-        titles: titles::Titles::new(ports.catalog, ports.catalog_online, shelf, timing),
+        titles: titles::Titles::new(ports.catalog, shelf, timing),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })

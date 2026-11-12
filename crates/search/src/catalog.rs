@@ -187,6 +187,11 @@ impl Catalog {
         Ok(self)
     }
 
+    /// False when title lookups are off, and the catalog answers only from what it keeps.
+    pub fn online(&self) -> bool {
+        self.online
+    }
+
     /// Films and series named like `words`: the films and series IMDb suggests, in IMDb's order,
     /// then those Cinemeta lists that IMDb did not. Of Cinemeta's, titles whose normalized name is
     /// the words come first, then the rest, each group in Cinemeta's order with films and series
