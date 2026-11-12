@@ -7,6 +7,7 @@ pub mod media;
 mod online;
 mod play;
 mod thumbnail;
+mod titles;
 mod watch;
 
 use std::collections::{HashMap, VecDeque};
@@ -110,6 +111,9 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
         (Method::Get, "events") => return watch::events(conn, request).await,
         (Method::Get, "stream") => return watch::stream(conn, request).await,
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
+        (Method::Get, "title/sources") => return titles::sources(conn, request).await,
+        (Method::Post, "title/play") => return titles::play(conn, request).await,
+        (Method::Get, "title/art") => return titles::art(conn, request).await,
         _ => {}
     }
     let ctx = conn.ctx;
@@ -133,6 +137,11 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Err
     let owner = &ctx.owner;
     match (request.method, route) {
         (Method::Post, "play") => value(play::play(ctx, body(request)?).await?),
+        (Method::Get, "titles") => titles::search(ctx, request).await,
+        (Method::Get, "title") => titles::page(ctx, request).await,
+        (Method::Post, "watched") => titles::watched(ctx, body(request)?).await,
+        (Method::Post, "library") => titles::library(ctx, body(request)?).await,
+        (Method::Get, "home") => titles::home(ctx).await,
         (Method::Get, "media") => {
             let (id, file) = file_of(request)?;
             value(&*watch::media(ctx, id, file).await?)
@@ -218,6 +227,10 @@ fn target(reference: &str) -> Result<Target, Error> {
             Err(Error::new(ErrorCode::InvalidRef, "the web app cannot open a .torrent file by its path")
                 .with_hint("use the torrent's magnet link, or run torrential get with the file"))
         }
+        Target::Title(video) => {
+            Err(Error::new(ErrorCode::InvalidRef, format!("{video} is a film or a series, not a torrent"))
+                .with_hint("play a film or a series with POST /api/title/play"))
+        }
         target => Ok(target),
     }
 }
@@ -263,13 +276,16 @@ async fn whole(
     }
 }
 
-/// Sends the results so far as a line of JSON each time a source answers, then the final results.
 async fn search(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+    match search_query(conn.ctx, request) {
+        Ok(query) => results(conn, request, query).await,
+        Err(error) => fail(conn, request, &error).await,
+    }
+}
+
+/// Sends the results so far as a line of JSON each time a source answers, then the final results.
+async fn results(conn: &mut Connection<'_>, request: &Request, query: SearchQuery) -> io::Result<bool> {
     let ctx = conn.ctx;
-    let query = match search_query(ctx, request) {
-        Ok(query) => query,
-        Err(error) => return fail(conn, request, &error).await,
-    };
     conn.begin(NDJSON, request).await?;
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
     let preferences = query.profile.preferences;
@@ -340,6 +356,15 @@ mod tests {
         assert!(matches!(target("magnet:?xt=urn:btih:9b5212").unwrap(), Target::Magnet(_)));
         assert!(matches!(target("https://example.org/a.torrent").unwrap(), Target::TorrentUrl(_)));
         assert_eq!(target("film").unwrap_err().code, ErrorCode::InvalidRef);
+        let title = target("tt0063350").unwrap_err();
+        assert_eq!(
+            (title.code, title.message, title.hint),
+            (
+                ErrorCode::InvalidRef,
+                "tt0063350 is a film or a series, not a torrent".into(),
+                Some("play a film or a series with POST /api/title/play".into())
+            )
+        );
     }
 
     #[test]

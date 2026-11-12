@@ -88,6 +88,14 @@ impl Harness {
         Self { dir, running, swarm, disk, search, outside }
     }
 
+    fn with_titles(catalog: Arc<dyn CatalogPort>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = Outside { catalog, ..Outside::default() };
+        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
+        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        Self { dir, running, swarm, disk, search, outside }
+    }
+
     fn with_engine(engine: impl FnOnce(&std::path::Path) -> Box<dyn EnginePort>, parse: ParseTorrent) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let outside = Outside::default();

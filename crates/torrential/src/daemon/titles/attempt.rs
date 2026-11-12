@@ -102,9 +102,10 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
                 return;
             }
             Err(reason) => {
+                let reason = *reason;
                 trial.discard().await;
-                ctx.titles.failed(release.id.clone());
-                report(AttemptEvent::Skipped { release: release.id.clone(), reason: reason.clone() });
+                ctx.titles.failed(release.id);
+                report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
                 tried.push(Tried { release: release.id, reason });
             }
         }
@@ -144,7 +145,7 @@ fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
 struct Line<'a> {
     /// The downloads on this machine.
     here: &'a BTreeSet<TorrentId>,
-    failed_lately: &'a dyn Fn(&ReleaseId) -> bool,
+    failed_lately: &'a (dyn Fn(&ReleaseId) -> bool + Sync),
     replace: Option<TorrentId>,
     pin: Option<&'a ReleaseId>,
 }
@@ -160,7 +161,7 @@ impl Line<'_> {
         let mut line: Vec<Release> = linked
             .into_iter()
             .chain(considered)
-            .filter(|r| seen.insert(r.id.clone()))
+            .filter(|r| seen.insert(r.id))
             .filter(|r| self.replace.is_none_or(|old| r.id != ReleaseId::Torrent(old)))
             .filter(|r| self.pin.is_none_or(|pin| r.id == *pin))
             .collect();
@@ -187,27 +188,23 @@ impl Trial<'_> {
         release: &Release,
         end: Instant,
         report: &mut (impl FnMut(AttemptEvent) + Send),
-    ) -> Result<(Job, u32), Skip> {
+    ) -> Result<(Job, u32), Box<Skip>> {
         let timing = ctx.titles.timing;
         report(AttemptEvent::Check { check: Check::FileList });
         let asked = Instant::now();
         let deadline = end.min(asked + timing.file_list);
         let (source, metainfo) = match tokio::time::timeout_at(deadline.into(), files(ctx, release, deadline)).await {
             Ok(Ok(found)) => found,
-            Ok(Err(error)) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }),
-            _ => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }),
+            Ok(Err(error)) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),
+            _ => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
         };
         let remux = (ctx.web.tools)().ffmpeg.is_some();
         let playable = video_of(&metainfo, title.video.episode, remux)?;
 
         report(AttemptEvent::Check { check: Check::Start });
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));
-        let link = TitleLink {
-            title: title.video.title.clone(),
-            span,
-            release: Some(release.id.clone()),
-            lease: Lease::Borrowed,
-        };
+        let link =
+            TitleLink { title: title.video.title.clone(), span, release: Some(release.id), lease: Lease::Borrowed };
         let play = PlayCommand {
             source,
             dir: None,
@@ -234,12 +231,15 @@ impl Trial<'_> {
             let id = job.id;
             let now = match ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await {
                 Ok(mut jobs) if !jobs.is_empty() => jobs.remove(0),
-                Ok(_) => return Err(Skip::Failed { error: Error::new(ErrorCode::NotFound, "the download is gone") }),
-                Err(error) => return Err(Skip::Failed { error }),
+                Ok(_) => {
+                    let error = Error::new(ErrorCode::NotFound, "the download is gone");
+                    return Err(Skip::Failed { error }.into());
+                }
+                Err(error) => return Err(Skip::Failed { error }.into()),
             };
             let bytes = ctx.engine.file_progress(id).await.ok().and_then(|f| f.get(playable.video as usize).copied());
             if let Some(outcome) = first_bytes(&now.status, bytes.unwrap_or(0), begun.elapsed(), within) {
-                return outcome.map(|()| (now, playable.video));
+                return outcome.map(|()| (now, playable.video)).map_err(Box::new);
             }
         }
     }
@@ -302,7 +302,7 @@ fn seconds(elapsed: Duration) -> u32 {
 }
 
 /// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays.
-fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Result<Playable, Skip> {
+fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Result<Playable, Box<Skip>> {
     let listing: Vec<TorrentFile> = (0..)
         .zip(&metainfo.files)
         .map(|(index, f)| TorrentFile {
@@ -324,7 +324,7 @@ fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Resul
         Ok(playable)
     } else {
         let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
-        Err(Skip::Unplayable { container })
+        Err(Skip::Unplayable { container }.into())
     }
 }
 
@@ -419,7 +419,8 @@ mod tests {
         };
         let many: Vec<u8> = (1..=20).collect();
         let late: Vec<u8> = [vec![2], (20..=40).collect()].concat();
-        let table: [(Option<u8>, Option<u8>, &[u8], &[u8], &[u8]); 7] = [
+        type Row<'a> = (Option<u8>, Option<u8>, &'a [u8], &'a [u8], &'a [u8]);
+        let table: [Row; 7] = [
             (None, None, &[], &[1, 2, 3, 4], &[3, 1, 4, 2]),
             (None, None, &[40], &[1, 2, 40], &[1, 40, 2]),
             (None, None, &[], &many, &[3, 1, 4, 5, 6, 7]),
@@ -452,9 +453,9 @@ mod tests {
             (read(&film, None, false), Ok((0, vec![1]))),
             (read(&pack, episode(1, 2), false), Ok((1, vec![2]))),
             (read(&pack, episode(1, 1), true), Ok((0, vec![2]))),
-            (read(&pack, episode(1, 1), false), Err(Skip::Unplayable { container: "mkv".into() })),
-            (read(&pack, episode(1, 3), true), Err(Skip::NoVideo)),
-            (read(&disc, None, true), Err(Skip::NoVideo)),
+            (read(&pack, episode(1, 1), false), Err(Box::new(Skip::Unplayable { container: "mkv".into() }))),
+            (read(&pack, episode(1, 3), true), Err(Box::new(Skip::NoVideo))),
+            (read(&disc, None, true), Err(Box::new(Skip::NoVideo))),
         ];
         for (n, (got, expected)) in table.into_iter().enumerate() {
             assert_eq!(got, expected, "row {n}");

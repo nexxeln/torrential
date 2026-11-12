@@ -1,0 +1,258 @@
+//! Films and series for the web app: finding one, its page, its pictures, its sources, playing
+//! it, where the person stopped, and what they saved.
+
+use std::io;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use torrential_core::watching::next;
+use torrential_core::{
+    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Job, Next, Playback, Preferences, ReleaseId, TitleCard,
+    TitleDetails, TitleId, TorrentId, VideoRef, Watched,
+};
+
+use super::super::http::{Connection, Request};
+use super::super::owner::{Command, now};
+use super::super::server::Ctx;
+use super::super::titles::attempt::{self, PlayTitle};
+use super::{NDJSON, fail, line, number, required};
+
+/// How long a browser keeps a picture. A title's pictures rarely change.
+const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
+/// Titles listed under Continue on the home page.
+const CONTINUE_MOST: usize = 20;
+
+/// `GET /api/titles?q=`: films and series named like the words.
+pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
+    let words = required(request, "q")?;
+    Ok(json!({ "titles": ctx.titles.catalog.search(words.trim()).await? }))
+}
+
+/// One title as the catalog describes it, with what this engine knows of it.
+#[derive(Serialize)]
+struct Page {
+    #[serde(flatten)]
+    details: TitleDetails,
+    saved: bool,
+    watched: Vec<Watched>,
+    next: Option<Next>,
+    /// The downloads made by playing this title.
+    downloads: Vec<Job>,
+}
+
+/// `GET /api/title?id=`.
+pub async fn page(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
+    let id: TitleId = required(request, "id")?.parse()?;
+    let details = ctx.titles.catalog.title(&id).await?;
+    let watched = ctx.titles.shelf.watched(&id)?;
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    let page = Page {
+        next: next(&details, &watched, now()),
+        saved: ctx.titles.shelf.is_saved(&id)?,
+        downloads: jobs.into_iter().filter(|job| job.title.as_ref().is_some_and(|link| link.title == id)).collect(),
+        watched,
+        details,
+    };
+    super::value(page)
+}
+
+/// `GET /api/title/art?id=&kind=[&season=&episode=]`: a picture, which the browser keeps.
+pub async fn art(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+    let ctx = conn.ctx;
+    let (id, kind) = match art_of(request) {
+        Ok(asked) => asked,
+        Err(error) => return fail(conn, request, &error).await,
+    };
+    let picture = tokio::select! {
+        picture = ctx.titles.catalog.art(&id, kind) => picture,
+        gone = conn.gone() => return Err(gone),
+    };
+    match picture {
+        Ok(picture) => conn.send("200 OK", picture.format.mime(), ART_CACHE, &picture.bytes, request).await,
+        // A missing picture, a failed fetch, and lookups turned off all leave the page to draw a plain card.
+        Err(error) => conn.json("404 Not Found", &json!({ "error": error }), request).await,
+    }
+}
+
+fn art_of(request: &Request) -> Result<(TitleId, ArtKind), Error> {
+    let id = required(request, "id")?.parse()?;
+    let kind = match required(request, "kind")?.as_str() {
+        "poster" => ArtKind::Poster,
+        "background" => ArtKind::Background,
+        "logo" => ArtKind::Logo,
+        "thumbnail" => {
+            let numbered = |name| {
+                number(request, name)?
+                    .ok_or_else(|| Error::new(ErrorCode::Usage, format!("a thumbnail needs the {name} parameter")))
+            };
+            ArtKind::Thumbnail(torrential_core::title::Episode {
+                season: numbered("season")?,
+                episode: numbered("episode")?,
+            })
+        }
+        other => {
+            return Err(Error::new(
+                ErrorCode::Usage,
+                format!("{other} is not a kind of picture: use poster, background, logo, or thumbnail"),
+            ));
+        }
+    };
+    Ok((id, kind))
+}
+
+/// `GET /api/title/sources?video=[&playback=]`: the title's releases as `/api/search` streams
+/// them, ranked for playing here.
+pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+    let ctx = conn.ctx;
+    let query = async {
+        let video: VideoRef = required(request, "video")?.parse()?;
+        let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
+        let title = ctx.titles.resolve(&video, now()).await?;
+        let preferences = (ctx.web.preferences)();
+        Ok::<_, Error>(title.query(Preferences { playback: playback.or(preferences.playback), ..preferences }))
+    };
+    let query = tokio::select! {
+        query = query => query,
+        gone = conn.gone() => return Err(gone),
+    };
+    match query {
+        Ok(query) => super::results(conn, request, query).await,
+        Err(error) => fail(conn, request, &error).await,
+    }
+}
+
+fn playback(text: &str) -> Result<Playback, Error> {
+    serde_json::from_value(Value::String(text.to_string()))
+        .map_err(|_| Error::new(ErrorCode::Usage, format!("{text} is not a playback: use h264, hevc, or hevc-hdr")))
+}
+
+#[derive(Deserialize)]
+struct Play {
+    /// `tt0063350`, `tt0903747:3:5`, or a series for its next episode.
+    video: VideoRef,
+    playback: Option<Playback>,
+    /// Play only this release.
+    source: Option<ReleaseId>,
+    /// The download that stalled.
+    replace: Option<TorrentId>,
+}
+
+/// `POST /api/title/play`: a line of JSON for each step of the play, the last being `playing` or
+/// `failed`. Closing the connection stops the play and discards the source under test.
+pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+    let ctx = conn.ctx;
+    let ask = match super::body::<Play>(request) {
+        Ok(Play { video, playback, source, replace }) => PlayTitle { video, pin: source, replace, playback },
+        Err(error) => return fail(conn, request, &error).await,
+    };
+    conn.begin(NDJSON, request).await?;
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let attempt = attempt::run(ctx, ask, move |event| {
+        let _ = events_tx.send(event);
+    });
+    tokio::pin!(attempt);
+    loop {
+        tokio::select! {
+            biased;
+            Some(event) = events.recv() => line(conn, &step(ctx, event).await).await?,
+            () = &mut attempt => break,
+            gone = conn.gone() => return Err(gone),
+        }
+    }
+    while let Ok(event) = events.try_recv() {
+        line(conn, &step(ctx, event).await).await?;
+    }
+    conn.end().await
+}
+
+/// A step as the web app reads it. The player gets where the video is served in place of the
+/// download and file that play.
+async fn step(ctx: &Ctx, event: AttemptEvent) -> Value {
+    let AttemptEvent::Playing { video, release, job, file, resume_at } = event else {
+        return serde_json::to_value(event).expect("steps serialize");
+    };
+    match super::play::playing_file(ctx, job, file).await {
+        Ok(play) => {
+            json!({ "type": "playing", "video": video, "release": release, "play": play, "resume_at": resume_at })
+        }
+        Err(error) => json!({ "type": "failed", "error": error, "tried": [] }),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Position {
+    video: VideoRef,
+    /// Seconds.
+    position: f64,
+    duration: Option<f64>,
+    release: Option<ReleaseId>,
+}
+
+/// `POST /api/watched`: where a film or episode stopped. The player sends it every few seconds.
+pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
+    let Position { video, position, duration, release } = request;
+    if !position.is_finite() || position < 0.0 {
+        return Err(Error::new(ErrorCode::Usage, format!("position {position} is not a time in the video")));
+    }
+    if duration.is_some_and(|d| !d.is_finite() || d <= 0.0) {
+        return Err(Error::new(ErrorCode::Usage, "duration is not a length of time"));
+    }
+    let watched = Watched { video, position, duration, release, at: now() };
+    ctx.titles.shelf.watch(&watched)?;
+    Ok(json!({ "watched": watched }))
+}
+
+#[derive(Deserialize)]
+pub struct Library {
+    title: TitleId,
+    saved: bool,
+}
+
+/// `POST /api/library`: saves a title, or takes it out.
+pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
+    if request.saved {
+        let details = ctx.titles.catalog.title(&request.title).await?;
+        ctx.titles.shelf.save(&details.card, now())?;
+    } else {
+        ctx.titles.shelf.unsave(&request.title)?;
+    }
+    Ok(json!({ "saved": request.saved }))
+}
+
+/// A film or episode to go on with.
+#[derive(Serialize)]
+struct Continue {
+    title: TitleCard,
+    video: VideoRef,
+    episode: Option<EpisodeInfo>,
+    /// `None` when the video has not been started, as the episode after a finished one.
+    resume_at: Option<f64>,
+    duration: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct Home {
+    /// The most recently watched first.
+    #[serde(rename = "continue")]
+    going_on: Vec<Continue>,
+    saved: Vec<TitleCard>,
+}
+
+/// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.
+/// A finished film, and a series the person has caught up with, are left out.
+pub async fn home(ctx: &Ctx) -> Result<Value, Error> {
+    let now = now();
+    let mut going_on = Vec::new();
+    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
+        let Ok(details) = ctx.titles.catalog.title(&recent.video.title).await else { continue };
+        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
+        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
+        let episode = video
+            .episode
+            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
+        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
+        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
+    }
+    super::value(Home { going_on, saved: ctx.titles.shelf.saved()? })
+}

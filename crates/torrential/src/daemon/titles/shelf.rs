@@ -58,9 +58,11 @@ impl Shelf {
             .map_err(|e| self.fail(e))
     }
 
-    /// Every film or episode of `title` with a position, the most recently watched first.
+    /// Every film or episode of `title` with a position, the most recently watched last. Two
+    /// saved in the same second keep the order they were first saved in, so the later one counts
+    /// as the latest.
     pub fn watched(&self, title: &TitleId) -> Result<Vec<Watched>, Error> {
-        let sql = format!("{WATCHED} WHERE title = ?1 ORDER BY updated_at DESC, rowid DESC");
+        let sql = format!("{WATCHED} WHERE title = ?1 ORDER BY updated_at, rowid");
         self.read(&sql, params![title.as_str()])
     }
 
@@ -84,20 +86,25 @@ impl Shelf {
         Error::new(ErrorCode::StateCorrupt, format!("{} has an unreadable {what}", self.path.display()))
     }
 
-    /// Saves `card` in the library, or takes it out, and answers whether it is saved now.
-    pub fn save(&self, card: &TitleCard, saved: bool, now: i64) -> Result<bool, Error> {
-        let conn = self.conn();
-        let changed = if saved {
-            conn.execute(
+    /// Saves `card` in the library, keeping when it was first saved, so the library lists the
+    /// title even when the catalog cannot be reached.
+    pub fn save(&self, card: &TitleCard, now: i64) -> Result<(), Error> {
+        self.conn()
+            .execute(
                 "INSERT INTO library (title, kind, name, year, rating, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT (title) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
                  year = excluded.year, rating = excluded.rating",
                 params![card.id.as_str(), kind_text(card.kind), card.name, card.year, card.rating, now],
             )
-        } else {
-            conn.execute("DELETE FROM library WHERE title = ?1", [card.id.as_str()])
-        };
-        changed.map(|_| saved).map_err(|e| self.fail(e))
+            .map(drop)
+            .map_err(|e| self.fail(e))
+    }
+
+    pub fn unsave(&self, title: &TitleId) -> Result<(), Error> {
+        self.conn()
+            .execute("DELETE FROM library WHERE title = ?1", [title.as_str()])
+            .map(drop)
+            .map_err(|e| self.fail(e))
     }
 
     pub fn is_saved(&self, title: &TitleId) -> Result<bool, Error> {
@@ -185,14 +192,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shelf = shelf(&dir);
         let release: ReleaseId = serde_json::from_str("\"9b521219bc48550140a666f74a29048ed78e933b\"").unwrap();
-        shelf.watch(&Watched { release: Some(release.clone()), ..at("tt9999901:1:1", 60.0, None, 10) }).unwrap();
+        shelf.watch(&Watched { release: Some(release), ..at("tt9999901:1:1", 60.0, None, 10) }).unwrap();
         shelf.watch(&at("tt9999901:1:1", 120.5, Some(2640.0), 20)).unwrap();
         shelf.watch(&at("tt9999901:1:2", 30.0, Some(2640.0), 30)).unwrap();
         shelf.watch(&at("tt0063350", 5.0, None, 40)).unwrap();
 
         let series = shelf.watched(&"tt9999901".parse().unwrap()).unwrap();
-        assert_eq!(rows(series.clone()), [("tt9999901:1:2".into(), 30.0, 30), ("tt9999901:1:1".into(), 120.5, 20)]);
-        assert_eq!((series[1].duration, series[1].release.as_ref()), (Some(2640.0), Some(&release)));
+        assert_eq!(rows(series.clone()), [("tt9999901:1:1".into(), 120.5, 20), ("tt9999901:1:2".into(), 30.0, 30)]);
+        assert_eq!((series[0].duration, series[0].release.as_ref()), (Some(2640.0), Some(&release)));
         assert_eq!(rows(shelf.watched(&"tt0100258".parse().unwrap()).unwrap()), []);
     }
 
@@ -224,13 +231,13 @@ mod tests {
         };
         let night = card("tt0063350", Kind::Film, "Night of the Living Dead", Some(1968), Some(7.8));
         let harbor = card("tt9999901", Kind::Series, "Harbor Lights", Some(2019), None);
-        assert_eq!(shelf.save(&night, true, 10), Ok(true));
-        assert_eq!(shelf.save(&harbor, true, 20), Ok(true));
-        assert_eq!(shelf.save(&night, true, 30), Ok(true));
+        shelf.save(&night, 10).unwrap();
+        shelf.save(&harbor, 20).unwrap();
+        shelf.save(&night, 30).unwrap();
         assert_eq!(shelf.saved().unwrap(), [harbor.clone(), night.clone()]);
         assert_eq!(shelf.is_saved(&night.id), Ok(true));
-        assert_eq!(shelf.save(&night, false, 40), Ok(false));
-        assert_eq!(shelf.save(&night, false, 50), Ok(false));
+        shelf.unsave(&night.id).unwrap();
+        shelf.unsave(&night.id).unwrap();
         assert_eq!((shelf.saved().unwrap(), shelf.is_saved(&night.id)), (vec![harbor], Ok(false)));
 
         drop(shelf);
