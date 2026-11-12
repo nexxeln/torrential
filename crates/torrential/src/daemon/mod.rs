@@ -59,6 +59,7 @@ pub struct Ports {
     /// Where ffmpeg and ffprobe are now.
     pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
+    pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
 }
 
 impl Ports {
@@ -75,6 +76,16 @@ impl Ports {
             } else {
                 Arc::new(subtitle_port::Live::new(&settings.subtitles)?)
             };
+        let catalog: Arc<dyn titles::catalog_port::CatalogPort> =
+            if fake(env) && env.var("TORRENTIAL_TEST_CATALOG") != Some("live") {
+                Arc::new(titles::catalog_port::Fake::default())
+            } else {
+                let config = torrential_search::catalog::CatalogConfig {
+                    cache_dir: Some(paths.cache.join("catalog")),
+                    ..settings.catalog.clone()
+                };
+                Arc::new(titles::catalog_port::Live::new(&config)?)
+            };
         if fake(env) {
             let rate =
                 env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
@@ -87,6 +98,7 @@ impl Ports {
                 preferences,
                 tools,
                 subtitles,
+                catalog,
             });
         }
         let network = match env.var("TORRENTIAL_TEST_NETWORK") {
@@ -109,6 +121,7 @@ impl Ports {
             preferences,
             tools,
             subtitles,
+            catalog,
         })
     }
 }
@@ -167,6 +180,7 @@ pub fn start(
         version,
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
+        titles: titles::Titles { catalog: ports.catalog },
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })

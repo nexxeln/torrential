@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_saphyr::{Localizer, Location, SnippetMode, Spanned, UserMessageFormatter};
 use torrential_core::units::{parse_size, size_text};
 use torrential_core::{Error, ErrorCode, Playback, Preferences, Screen};
+use torrential_search::catalog::CatalogConfig;
 use torrential_search::subtitles::SubtitleConfig;
 use torrential_search::{SearchConfig, TorznabConfig};
 
@@ -24,6 +25,7 @@ pub struct Config {
     pub updates: Policy,
     pub player: Option<Choice>,
     pub subtitles: SubtitleConfig,
+    pub catalog: CatalogConfig,
 }
 
 #[derive(Deserialize, Default)]
@@ -35,6 +37,7 @@ struct File {
     updates: Option<Policy>,
     player: Option<Spanned<String>>,
     subtitles: Subtitles,
+    catalog: Catalog,
 }
 
 #[derive(Deserialize, Default)]
@@ -62,6 +65,15 @@ struct Overrides {
 struct Subtitles {
     /// False stops the web player from looking for subtitles online.
     online: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct Catalog {
+    /// False keeps title lookups and their pictures off the network.
+    online: Option<bool>,
+    /// A Cinemeta mirror.
+    endpoint: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -102,6 +114,9 @@ impl Config {
         };
         config.search.endpoints = test_endpoints(env, "TORRENTIAL_TEST_ENDPOINTS")?;
         config.subtitles.endpoints = test_endpoints(env, "TORRENTIAL_TEST_SUBTITLE_ENDPOINTS")?;
+        if let Some(endpoint) = env.var("TORRENTIAL_TEST_CATALOG_ENDPOINT") {
+            config.catalog.endpoint = Some(endpoint.to_string());
+        }
         Ok(config)
     }
 
@@ -325,8 +340,10 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         })
         .transpose()?;
     let subtitles = SubtitleConfig { online: file.subtitles.online.unwrap_or(true), ..SubtitleConfig::default() };
+    let catalog =
+        CatalogConfig { online: file.catalog.online.unwrap_or(true), endpoint: file.catalog.endpoint, cache_dir: None };
     let updates = file.updates.unwrap_or_default();
-    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles })
+    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog })
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -639,6 +656,29 @@ sources:
         assert!(error.message.starts_with("$TORRENTIAL_HOME/config/config.yaml line 2: "), "{}", error.message);
         let error = load("subtitles:\n  offline: true\n").unwrap_err();
         assert!(error.message.contains("unknown field `offline`"), "{}", error.message);
+    }
+
+    #[test]
+    fn title_lookups_are_on_unless_the_file_turns_them_off_and_may_use_a_mirror() {
+        let catalog = |text: &str| {
+            let config = parse(text, &env()).unwrap().catalog;
+            (config.online, config.endpoint, config.cache_dir)
+        };
+        assert_eq!(catalog(""), (true, None, None));
+        assert_eq!(catalog("catalog:\n  online: false\n"), (false, None, None));
+        assert_eq!(
+            catalog("catalog:\n  endpoint: https://cinemeta.example.org\n"),
+            (true, Some("https://cinemeta.example.org".into()), None)
+        );
+        let error = load("catalog:\n  offline: true\n").unwrap_err();
+        assert!(error.message.contains("unknown field `offline`"), "{}", error.message);
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().display().to_string();
+        let test = "http://127.0.0.1:9/";
+        let env = Env::from_pairs([("TORRENTIAL_HOME", home.as_str()), ("TORRENTIAL_TEST_CATALOG_ENDPOINT", test)]);
+        let paths = Paths::resolve(&env, 501, None).unwrap();
+        assert_eq!(Config::load(&paths, &env).unwrap().catalog.endpoint.as_deref(), Some(test));
     }
 
     #[test]

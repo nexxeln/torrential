@@ -54,6 +54,12 @@ pub struct CatalogConfig {
     pub cache_dir: Option<PathBuf>,
 }
 
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        Self { online: true, endpoint: None, cache_dir: None }
+    }
+}
+
 /// A picture of a title, as bytes a browser shows.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Picture {

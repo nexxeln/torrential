@@ -15,6 +15,7 @@ use super::engine_port::{
 use super::owner::OwnerConfig;
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
+use super::titles::catalog_port::{self, CatalogPort};
 use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
 
@@ -33,11 +34,22 @@ struct Harness {
 }
 
 /// What the web app's API reaches outside the engine, which a test sets.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Outside {
     /// Where the engine finds ffmpeg and ffprobe. Nowhere, until a test says.
     tools: Arc<Mutex<Tools>>,
     subtitles: super::subtitle_port::Fake,
+    catalog: Arc<dyn CatalogPort>,
+}
+
+impl Default for Outside {
+    fn default() -> Self {
+        Self {
+            tools: Arc::default(),
+            subtitles: super::subtitle_port::Fake::default(),
+            catalog: Arc::new(catalog_port::Fake::default()),
+        }
+    }
 }
 
 fn config(dir: &std::path::Path) -> OwnerConfig {
@@ -118,6 +130,7 @@ impl Harness {
                 move || tools.lock().unwrap().clone()
             }),
             subtitles: Arc::new(outside.subtitles.clone()),
+            catalog: outside.catalog.clone(),
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         start(&tokio::runtime::Handle::current(), store, ports, config(dir.path()), "0.1.0".into(), 0).unwrap()

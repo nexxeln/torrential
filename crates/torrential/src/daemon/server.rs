@@ -57,6 +57,7 @@ pub struct Ctx {
     /// Where `http` serves downloads to players, and the web app.
     pub http_port: u16,
     pub web: super::web::State,
+    pub titles: super::titles::Titles,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
