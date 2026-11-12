@@ -440,7 +440,8 @@ impl Reading {
 }
 
 /// The name's words. Dots and underscores separate them, `[...]` is dropped, and `(...)` is
-/// dropped unless it holds a year. Also whether the name starts with a `[Group]`.
+/// dropped but for the first year in it, as in `(Howard Hawks, 1940)`. Also whether the name
+/// starts with a `[Group]`.
 fn tokens(name: &str) -> (Vec<String>, bool) {
     let grouped = name.trim_start().starts_with('[');
     let mut spaced = String::new();
@@ -452,8 +453,11 @@ fn tokens(name: &str) -> (Vec<String>, bool) {
             ']' | ')' | '}' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    if c == ')' && year(held.trim()).is_some() {
-                        spaced.push_str(held.trim());
+                    let dated = held.split(|c: char| !c.is_alphanumeric()).find(|word| year(word).is_some());
+                    if c == ')'
+                        && let Some(dated) = dated
+                    {
+                        spaced.push_str(dated);
                     }
                     spaced.push(' ');
                     held.clear();
@@ -518,8 +522,12 @@ fn season_and_episode(token: &str) -> Option<(u32, u32, u32)> {
     (rest.is_empty() && token.len() >= 4).then_some((season?, episode?, episode?))
 }
 
-/// `s02`, `s01-s05`, `s01-05`, `season 2`, and `seasons 1-5` at `i`, as the first and last season.
+/// `s02`, `s01-s05`, `s01-05`, `season 2`, `season two`, and `seasons 1-5` at `i`, as the first
+/// and last season.
 fn seasons(tokens: &[String], i: usize) -> Option<(u32, u32)> {
+    const NUMBERS: [&str; 12] =
+        ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+    let spelled = |text: &str| NUMBERS.iter().zip(1..).find(|(number, _)| **number == text).map(|(_, n)| (n, n));
     let range = |text: &str, most: usize| match text.split_once('-') {
         Some((first, last)) => {
             let (first, last) = (digits(first, 1, most)?, digits(last.strip_prefix('s').unwrap_or(last), 1, most)?);
@@ -528,7 +536,7 @@ fn seasons(tokens: &[String], i: usize) -> Option<(u32, u32)> {
         None => digits(text, 1, most).map(|season| (season, season)),
     };
     match tokens[i].as_str() {
-        "season" | "seasons" => range(tokens.get(i + 1)?, 3),
+        "season" | "seasons" => tokens.get(i + 1).and_then(|next| range(next, 3).or_else(|| spelled(next))),
         token => range(token.strip_prefix('s')?, 2),
     }
 }
@@ -583,6 +591,9 @@ mod tests {
             ("Film/Some_Film_(2015)_720p.avi", "Film", film("Some Film", Some(2015))),
             ("big_buck_bunny_1080p_h264.mov", "big_buck_bunny_1080p_h264.mov", film("big buck bunny", None)),
             ("Sintel.mkv", "Sintel", film("Sintel", None)),
+            ("His Girl Friday (Comedy 1940) Cary Grant 720p HD", "", film("His Girl Friday", Some(1940))),
+            ("Sintel (2010 - x264 2k - AAC 5.1) En sub En Fr", "", film("Sintel", Some(2010))),
+            ("His Girl Friday (Howard Hawks, 1940)", "", film("His Girl Friday", Some(1940))),
         ];
         for (path, torrent, expected) in cases {
             assert_eq!(read(path, torrent).first(), Some(&expected), "{path} in {torrent}");
@@ -682,6 +693,8 @@ mod tests {
         );
         assert_eq!(spans("Breaking.Bad.The.Complete.Series.720p.BluRay"), [reading("Breaking Bad", None, "complete")]);
         assert_eq!(spans("Sherlock Complete 1080p"), [reading("Sherlock", None, "complete")]);
+        assert_eq!(spans("Pioneer One Season One Complete XviD"), [reading("Pioneer One", None, "s1")]);
+        assert_eq!(spans("Grey's Anatomy Season Twelve 720p"), [reading("Grey's Anatomy", None, "s12")]);
         assert_eq!(spans("Breaking.Bad.S03E05.720p.HDTV.x264-IMMERSE"), [reading("Breaking Bad", None, "s3e5")]);
         assert_eq!(
             spans("A Complete Unknown 2024 1080p WEB-DL"),
