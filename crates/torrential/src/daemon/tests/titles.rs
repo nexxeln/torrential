@@ -551,6 +551,74 @@ async fn a_get_by_hand_makes_a_download_under_test_the_persons() {
     }
 }
 
+/// What a download was before a title play tested it.
+#[derive(Clone, Copy, Debug)]
+enum Was {
+    Made,
+    Paused,
+    Stopped,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_a_person_names_in_a_command_during_a_trial_is_left_as_they_left_it() {
+    use Was::{Made, Paused, Stopped};
+    let cases = [
+        (Made, "get", "downloading"),
+        (Made, "pause", "paused"),
+        (Made, "resume", "downloading"),
+        (Made, "verify", "downloading"),
+        (Paused, "get", "downloading"),
+        (Paused, "pause", "paused"),
+        (Paused, "resume", "downloading"),
+        (Paused, "verify", "downloading"),
+        (Stopped, "get", "downloading"),
+        (Stopped, "resume", "downloading"),
+    ];
+    for (was, command, left) in cases {
+        let h = Harness::new();
+        let film = torrent(94, "film", &[("film.mp4", GIB)]);
+        let refs = vec![prefix(&film)];
+        match was {
+            Made => {}
+            Paused => {
+                h.get(h.torrent_file(&film), &[]).await.unwrap();
+                h.changes(Request::Pause { refs: refs.clone() }).await.unwrap();
+            }
+            Stopped => {
+                h.swarm.withhold(film.info_hash.id(), u32::MAX);
+                h.get(h.torrent_file(&film), &[]).await.unwrap();
+                h.until("it stops with no source", |jobs| jobs[0].status.name() == "error").await;
+                h.swarm.withhold(film.info_hash.id(), 0);
+            }
+        }
+        let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+        h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
+        let changed = match command {
+            "get" => h.get(h.torrent_file(&film), &[]).await.map(drop),
+            "pause" => h.changes(Request::Pause { refs }).await.map(drop),
+            "resume" => h.changes(Request::Resume { refs, all: false }).await.map(drop),
+            _ => h.changes(Request::Verify { reference: prefix(&film), repair: false }).await.map(drop),
+        };
+        assert_eq!(changed, Ok(()), "{command}");
+        h.give_up(hold).await;
+        h.settled().await;
+        h.until("a check ends", |jobs| jobs.iter().all(|j| j.status.name() != "checking")).await;
+        assert_eq!(h.states().await, [left], "{command} on a download that was {was:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_for_every_download_leaves_a_trial_to_the_play_testing_it() {
+    let h = Harness::new();
+    let film = torrent(95, "film", &[("film.mp4", GIB)]);
+    let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
+    h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
+    let resume = Request::Resume { refs: Vec::new(), all: true };
+    assert_eq!(h.changes(resume).await.unwrap(), Vec::<(String, String)>::new());
+    h.give_up(hold).await;
+    h.until("the trial leaves the list", |jobs| jobs.is_empty()).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_of_another_title_holds_the_download_until_it_gives_up_too() {
     let h = Harness::new();

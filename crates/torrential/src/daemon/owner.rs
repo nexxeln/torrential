@@ -404,14 +404,19 @@ impl Owner {
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
             }
-            Command::Pause { refs, reply } => self.pause(refs, reply),
+            Command::Pause { refs, reply } => {
+                self.adopt(&refs, "pause");
+                self.pause(refs, reply)
+            }
             Command::Resume { refs, all, reply } => {
+                self.adopt(&refs, "resume");
                 let _ = reply.send(self.resume(&refs, all));
             }
             Command::Remove { refs, reply } => {
                 let _ = reply.send(self.remove(&refs));
             }
             Command::Verify { reference, repair, reply } => {
+                self.adopt(std::slice::from_ref(&reference), "verify");
                 let _ = reply.send(self.verify(&reference, repair));
             }
             Command::Watch { refs, reply } => {
@@ -549,18 +554,27 @@ impl Owner {
         }
     }
 
-    /// `get` as a person runs it. A download a title play made is theirs from then on, and the
-    /// plays testing it leave it on the list.
+    /// `get` as a person runs it, which makes a download under test theirs.
     fn get_by_hand(&mut self, get: GetCommand) -> Result<GetReply, Error> {
         let dry_run = get.dry_run;
         let reply = self.get(get, None)?;
-        if !dry_run
-            && let Some(test) = self.under_test.get_mut(&reply.job.id)
-            && matches!(test.before, Before::Absent)
-        {
-            test.before = Before::Kept;
+        if !dry_run {
+            self.adopt(&[reply.job.id.to_hex()], "get");
         }
         Ok(reply)
+    }
+
+    /// Makes the downloads a person named in a command theirs. The plays testing one leave it as
+    /// the person has it, whatever it was before. A command for every download names none.
+    fn adopt(&mut self, refs: &[String], command: &'static str) {
+        if refs.is_empty() {
+            return;
+        }
+        for id in self.resolve_jobs(refs, command).unwrap_or_default() {
+            if let Some(test) = self.under_test.get_mut(&id) {
+                test.before = Before::Kept;
+            }
+        }
     }
 
     /// `title` links a download this creates to the title it is for.
