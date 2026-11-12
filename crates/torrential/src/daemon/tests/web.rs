@@ -1012,6 +1012,34 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_position_is_saved_only_for_a_film_or_an_aired_episode_the_catalog_lists() {
+    let h = Harness::new();
+    let mut answers = Vec::new();
+    for video in ["tt9999901:2:2", "tt9999901:2:3", "tt9999901:9:1", "tt9999901", "tt0063350:1:1"] {
+        let answer = post(&h, "/api/watched", json!({ "video": video, "position": 300.0, "duration": 2640.0 })).await;
+        let (status, code, message) = error(&answer);
+        answers.push((status, code.to_string(), message.to_string()));
+    }
+    let usage = |message: &str| (400, "usage".to_string(), message.to_string());
+    assert_eq!(
+        answers,
+        [
+            usage("Harbor Lights S02E02 has not aired yet"),
+            usage("Harbor Lights S02E03 has not aired yet"),
+            usage("S09E01 is not an episode of Harbor Lights"),
+            usage("Harbor Lights is a series, so name one of its episodes"),
+            usage("Night of the Living Dead is a film, so it has no S01E01"),
+        ]
+    );
+    let (_, page) = get(&h, "/api/title?id=tt9999901").await;
+    assert_eq!(
+        (&page["watched"], &page["next"]),
+        (&json!([]), &json!({ "video": "tt9999901:1:1", "resume_at": null }))
+    );
+    assert_eq!(post(&h, "/api/watched", json!({ "video": "tt9999901:2:1", "position": 300.0 })).await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_search() {
     let (h, _) = titles::night();
     let (_, found) = get(&h, "/api/titles?q=night%20of%20the%20living%20dead").await;

@@ -6,17 +6,20 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use torrential_core::title::Episode;
 use torrential_core::watching::next;
 use torrential_core::{
-    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Next, Playback, Preferences, ReleaseId, TitleCard, TitleId,
-    TorrentId, VideoRef, Watched,
+    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Kind, Next, Playback, Preferences, ReleaseId, TitleCard,
+    TitleDetails, TitleId, TorrentId, VideoRef, Watched,
 };
 
 use super::super::http::{Connection, Request};
 use super::super::owner::{Command, Finish, now};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
+use super::super::titles::catalog_port::label;
 use super::{NDJSON, fail, line, number, required};
+use crate::output::views::title_name;
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
 const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
@@ -68,10 +71,7 @@ fn art_of(request: &Request) -> Result<(TitleId, ArtKind), Error> {
                 number(request, name)?
                     .ok_or_else(|| Error::new(ErrorCode::Usage, format!("a thumbnail needs the {name} parameter")))
             };
-            ArtKind::Thumbnail(torrential_core::title::Episode {
-                season: numbered("season")?,
-                episode: numbered("episode")?,
-            })
+            ArtKind::Thumbnail(Episode { season: numbered("season")?, episode: numbered("episode")? })
         }
         other => {
             return Err(Error::new(
@@ -186,9 +186,29 @@ pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
     if duration.is_some_and(|d| !d.is_finite() || d <= 0.0) {
         return Err(Error::new(ErrorCode::Usage, "duration is not a length of time"));
     }
-    let watched = Watched { video, position, duration, release, at: now() };
+    let now = now();
+    watchable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
+    let watched = Watched { video, position, duration, release, at: now };
     ctx.titles.shelf.watch(&watched)?;
     Ok(json!({ "watched": watched }))
+}
+
+/// Fails with `usage` unless `episode` names the film `details` describes, or an aired episode it
+/// lists.
+fn watchable(details: &TitleDetails, episode: Option<Episode>, now: i64) -> Result<(), Error> {
+    let card = &details.card;
+    let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
+    let e = match (card.kind, episode) {
+        (Kind::Film, None) => return Ok(()),
+        (Kind::Film, Some(e)) => return usage(format!("{} is a film, so it has no {}", card.name, label(e))),
+        (Kind::Series, None) => return usage(format!("{} is a series, so name one of its episodes", card.name)),
+        (Kind::Series, Some(e)) => e,
+    };
+    match details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e) {
+        None => usage(format!("{} is not an episode of {}", label(e), card.name)),
+        Some(info) if info.aired.is_some_and(|aired| aired <= now) => Ok(()),
+        Some(_) => usage(format!("{} has not aired yet", title_name(card, Some(e)))),
+    }
 }
 
 #[derive(Deserialize)]

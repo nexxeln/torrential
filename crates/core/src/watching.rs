@@ -72,7 +72,8 @@ pub struct Next {
 
 /// What of a title to play: an unfinished film or episode to resume, or else the first aired
 /// episode after the one finished last that is not finished too. `None` when the film is
-/// finished or the series is caught up. Specials, in season 0, never come next.
+/// finished or the series is caught up. Specials, in season 0, never come next. An episode the
+/// catalog does not list, or that has not aired, counts as never watched.
 pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Next> {
     let title = &details.card.id;
     let resume = |w: &Watched| Next { video: w.video.clone(), resume_at: Some(w.position) };
@@ -86,19 +87,21 @@ pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Nex
             None => Some(Next { video: film, resume_at: None }),
         };
     }
-    let latest = watched.iter().filter(|w| w.video.title == *title && w.video.episode.is_some()).max_by_key(|w| w.at);
-    if let Some(w) = latest.filter(|w| !w.finished()) {
-        return Some(resume(w));
-    }
     let mut aired: Vec<Episode> = details
         .seasons
         .iter()
-        .filter(|season| season.number > 0)
         .flat_map(|season| &season.episodes)
         .filter(|e| e.aired.is_some_and(|aired| aired <= now))
         .map(|e| e.episode)
         .collect();
     aired.sort();
+    let listed =
+        |w: &&Watched| w.video.title == *title && w.video.episode.is_some_and(|e| aired.binary_search(&e).is_ok());
+    let latest = watched.iter().filter(listed).max_by_key(|w| w.at);
+    if let Some(w) = latest.filter(|w| !w.finished()) {
+        return Some(resume(w));
+    }
+    aired.retain(|e| e.season > 0);
     let last = latest.and_then(|w| w.video.episode);
     let from = last.and_then(|last| aired.iter().position(|e| *e == last)).map_or(0, |i| i + 1);
     aired[from..].iter().map(|e| at(Some(*e))).find_map(|video| match entry(&video) {
@@ -301,13 +304,19 @@ mod tests {
         assert_eq!(next(&[watched("tt0063350", 5750.0, Some(5760.0), 10)]), None);
     }
 
-    #[test]
-    fn a_series_goes_on_from_the_episode_finished_last() {
+    /// Breaking Bad with one special, two episodes in season 1, and in season 2 one aired, one
+    /// to air tomorrow, and one with no date.
+    fn breaking_bad() -> TitleDetails {
         let aired = Some(NOW - 86_400);
-        let series = details(
+        details(
             card("tt0903747", Kind::Series, "Breaking Bad", 2008),
             vec![season(0, &[aired]), season(1, &[aired, aired]), season(2, &[aired, Some(NOW + 86_400), None])],
-        );
+        )
+    }
+
+    #[test]
+    fn a_series_goes_on_from_the_episode_finished_last() {
+        let series = breaking_bad();
         let next = |watched: &[Watched]| next(&series, watched, NOW).map(|n| (n.video.to_string(), n.resume_at));
         let done = |text: &str, at: i64| watched(text, 2810.0, Some(2820.0), at);
         assert_eq!(next(&[]), Some(("tt0903747:1:1".into(), None)));
@@ -329,6 +338,23 @@ mod tests {
             "an older unfinished episode before the last one stays behind"
         );
         assert_eq!(next(&[watched("tt0063350", 10.0, None, 99)]), Some(("tt0903747:1:1".into(), None)));
+    }
+
+    #[test]
+    fn an_episode_the_catalog_does_not_list_or_that_has_not_aired_is_never_resumed() {
+        let series = breaking_bad();
+        let next = |watched: &[Watched]| next(&series, watched, NOW).map(|n| (n.video.to_string(), n.resume_at));
+        let done = watched("tt0903747:1:1", 2810.0, Some(2820.0), 10);
+        let started = ["tt0903747:2:2", "tt0903747:2:3", "tt0903747:9:1"];
+        let read = started.map(|video| next(&[done.clone(), watched(video, 300.0, Some(2820.0), 20)]));
+        assert_eq!(
+            read,
+            [
+                Some(("tt0903747:1:2".into(), None)),
+                Some(("tt0903747:1:2".into(), None)),
+                Some(("tt0903747:1:2".into(), None))
+            ]
+        );
     }
 
     fn release() -> Release {
