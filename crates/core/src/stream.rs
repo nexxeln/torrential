@@ -106,7 +106,8 @@ fn kind(path: &str) -> Option<Kind> {
     }
 }
 
-fn is_sample(path: &str) -> bool {
+/// Whether the file at `path` is a sample clip, by its own name or a folder's.
+pub fn is_sample(path: &str) -> bool {
     path.split('/').any(|part| part.to_ascii_lowercase().starts_with("sample"))
 }
 

@@ -301,7 +301,8 @@ fn seconds(elapsed: Duration) -> u32 {
     elapsed.as_secs_f64().round() as u32
 }
 
-/// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays.
+/// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays. A
+/// torrent that holds only sample clips holds no video.
 fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Result<Playable, Box<Skip>> {
     let listing: Vec<TorrentFile> = (0..)
         .zip(&metainfo.files)
@@ -318,7 +319,7 @@ fn video_of(metainfo: &Metainfo, episode: Option<Episode>, remux: bool) -> Resul
         Some(episode) => stream::episode(&listing, &sanitize(&metainfo.name), episode),
         None => stream::pick(&listing),
     };
-    let playable = playable.ok_or(Skip::NoVideo)?;
+    let playable = playable.filter(|p| !stream::is_sample(&listing[p.video as usize].path)).ok_or(Skip::NoVideo)?;
     let path = &listing[playable.video as usize].path;
     if container_plays(path, remux) {
         Ok(playable)
@@ -440,13 +441,14 @@ mod tests {
     }
 
     #[test]
-    fn the_video_is_the_film_or_the_episode_and_plays_without_ffmpeg_only_in_a_browser_container() {
+    fn the_video_is_the_film_or_the_episode_never_a_sample_and_plays_without_ffmpeg_only_in_a_browser_container() {
         let film = torrent("Night", &[("Night.mp4", 900), ("Night.en.srt", 9), ("Sample.mp4", 99)]);
         let pack = torrent(
             "Harbor.Lights.S01.1080p",
             &[("Harbor.Lights.S01E01.mkv", 900), ("Harbor.Lights.S01E02.mp4", 900), ("Harbor.Lights.S01E02.srt", 9)],
         );
         let disc = torrent("Night DVD", &[("NIGHT.iso", 900), ("readme.txt", 9)]);
+        let samples = torrent("Night", &[("Sample/Night.sample.mp4", 90), ("sample-night.mkv", 80)]);
         let episode = |season, episode| Some(Episode { season, episode });
         let read = |m: &Metainfo, e, remux| video_of(m, e, remux).map(|p| (p.video, p.subtitles));
         let table = [
@@ -456,6 +458,7 @@ mod tests {
             (read(&pack, episode(1, 1), false), Err(Box::new(Skip::Unplayable { container: "mkv".into() }))),
             (read(&pack, episode(1, 3), true), Err(Box::new(Skip::NoVideo))),
             (read(&disc, None, true), Err(Box::new(Skip::NoVideo))),
+            (read(&samples, None, true), Err(Box::new(Skip::NoVideo))),
         ];
         for (n, (got, expected)) in table.into_iter().enumerate() {
             assert_eq!(got, expected, "row {n}");
