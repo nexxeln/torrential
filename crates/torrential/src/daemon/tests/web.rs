@@ -1066,6 +1066,42 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_web_app_and_the_socket_read_the_same_title_page() {
+    use torrential_core::protocol::{Request, Response};
+    let h = Harness::new();
+    post(&h, "/api/watched", json!({ "video": "tt0063350", "position": 60.0, "duration": 5760.0 })).await;
+    let (status, page) = get(&h, "/api/title?id=tt0063350").await;
+    let Response::Title { title } = h.ask(Request::Title { id: "tt0063350".parse().unwrap() }).await else {
+        panic!("the socket answers a title with its page")
+    };
+    assert_eq!((status, &page), (200, &serde_json::to_value(&title).unwrap()));
+    let mut page = page;
+    let at = page["watched"][0].as_object_mut().unwrap().remove("at");
+    assert!(at.is_some_and(|at| at.is_i64()));
+    assert_eq!(
+        page,
+        json!({
+            "id": "tt0063350",
+            "kind": "film",
+            "name": "Night of the Living Dead",
+            "year": 1968,
+            "rating": 7.8,
+            "synopsis": "Strangers shelter in a farmhouse while the dead walk outside.",
+            "genres": ["Horror", "Thriller"],
+            "runtime_min": 96,
+            "cast": ["Duane Jones", "Judith O'Dea", "Karl Hardman"],
+            "countries": ["US"],
+            "art": { "poster": true, "background": true, "logo": true },
+            "seasons": [],
+            "saved": false,
+            "watched": [{ "video": "tt0063350", "position": 60.0, "duration": 5760.0, "finished": false }],
+            "next": { "video": "tt0063350", "resume_at": 60.0 },
+            "downloads": []
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_works() {
     use torrential_search::catalog::CatalogConfig;
     let off = CatalogConfig { online: false, endpoint: None, imdb_endpoint: None, cache_dir: None };

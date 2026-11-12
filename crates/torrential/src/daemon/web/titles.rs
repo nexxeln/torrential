@@ -8,13 +8,13 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use torrential_core::watching::next;
 use torrential_core::{
-    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Job, Next, Playback, Preferences, ReleaseId, TitleCard,
-    TitleDetails, TitleId, TorrentId, VideoRef, Watched,
+    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Next, Playback, Preferences, ReleaseId, TitleCard, TitleId,
+    TorrentId, VideoRef, Watched,
 };
 
 use super::super::http::{Connection, Request};
-use super::super::owner::{Command, now};
-use super::super::server::Ctx;
+use super::super::owner::now;
+use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, PlayTitle};
 use super::{NDJSON, fail, line, number, required};
 
@@ -33,32 +33,10 @@ pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     Ok(json!({ "titles": ctx.titles.catalog.search(words.trim()).await? }))
 }
 
-/// One title as the catalog describes it, with what this engine knows of it.
-#[derive(Serialize)]
-struct Page {
-    #[serde(flatten)]
-    details: TitleDetails,
-    saved: bool,
-    watched: Vec<Watched>,
-    next: Option<Next>,
-    /// The downloads made by playing this title.
-    downloads: Vec<Job>,
-}
-
 /// `GET /api/title?id=`.
 pub async fn page(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     let id: TitleId = required(request, "id")?.parse()?;
-    let details = ctx.titles.catalog.title(&id).await?;
-    let watched = ctx.titles.shelf.watched(&id)?;
-    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-    let page = Page {
-        next: next(&details, &watched, now()),
-        saved: ctx.titles.shelf.is_saved(&id)?,
-        downloads: jobs.into_iter().filter(|job| job.title.as_ref().is_some_and(|link| link.title == id)).collect(),
-        watched,
-        details,
-    };
-    super::value(page)
+    super::value(server::title_page(ctx, id).await?)
 }
 
 /// `GET /api/title/art?id=&kind=[&season=&episode=]`: a picture, which the browser keeps.

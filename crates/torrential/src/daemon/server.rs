@@ -288,8 +288,8 @@ fn streams(ctx: &Ctx, id: TorrentId, metainfo: &Metainfo, files: Vec<u32>) -> Ve
 }
 
 /// One title as the catalog describes it, with where the person stopped, what plays next, and
-/// the downloads made by playing it.
-async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Error> {
+/// the downloads made by playing it. The socket's `title` and `GET /api/title` both answer with it.
+pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Error> {
     let details = ctx.titles.catalog.title(&id).await?;
     let watched = ctx.titles.shelf.watched(&id)?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
