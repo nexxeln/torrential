@@ -108,9 +108,9 @@ pub(super) fn step(line: &Value) -> String {
 }
 
 impl Harness {
-    /// Plays `files` of `torrent` from its file, by hand or as a title play tests a source for
-    /// `title`, and answers the hold that play has on the download.
-    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Hold), Error> {
+    /// The command that plays `files` of `torrent` from its file, by hand or as a title play
+    /// tests a source for `title`, and the hold that play has on the download.
+    fn play_command(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> (PlayCommand, Hold) {
         let hold = Hold::fresh();
         let link = |title: &str| TitleLink {
             title: title.parse().unwrap(),
@@ -126,6 +126,11 @@ impl Harness {
             title: title.map(|title| TitlePlay { link: link(title), hold }),
             finish: Finish::Stream,
         };
+        (play, hold)
+    }
+
+    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Hold), Error> {
+        let (play, hold) = self.play_command(t, files, title);
         let (job, _) = self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
         Ok((job, hold))
     }
@@ -397,6 +402,25 @@ async fn a_download_left_under_test_when_the_engine_stopped_is_never_discarded()
     h.settled().await;
     assert_eq!(h.status().await.len(), 1);
     assert_eq!(tree(&h.downloads()), ["film", "film/film.mp4"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_whose_answer_cannot_be_delivered_gives_its_source_up_at_once() {
+    let h = Harness::new();
+    let made = torrent(87, "made", &[("made.mp4", GIB)]);
+    let mine = torrent(88, "mine", &[("mine.mp4", GIB)]);
+    h.get(h.torrent_file(&mine), &[]).await.unwrap();
+    let pause = Request::Pause { refs: vec![prefix(&mine)] };
+    assert_eq!(h.changes(pause).await.unwrap(), [(prefix(&mine), "paused".into())]);
+    for t in [&made, &mine] {
+        let (play, _) = h.play_command(t, &[0], Some("tt0063350"));
+        let (reply, gone) = tokio::sync::oneshot::channel();
+        drop(gone);
+        h.running.ctx.owner.tell(Command::Play { play: Box::new(play), reply });
+    }
+    let states: Vec<(String, &str)> =
+        h.status().await.iter().map(|j| (j.name.clone().unwrap(), j.status.name())).collect();
+    assert_eq!(states, [("mine".to_string(), "paused")], "the download the play made is gone, the other paused again");
 }
 
 #[tokio::test(flavor = "multi_thread")]

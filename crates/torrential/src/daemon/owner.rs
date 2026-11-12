@@ -380,7 +380,13 @@ impl Owner {
                 let _ = reply.send(self.get_by_hand(*get));
             }
             Command::Play { play, reply } => {
-                let _ = reply.send(self.play(*play));
+                let hold = play.title.as_ref().map(|title| title.hold);
+                // A play that is gone cannot give its source up, so the owner does.
+                if reply.send(self.play(*play)).is_err()
+                    && let Some(hold) = hold
+                {
+                    self.release(hold);
+                }
             }
             Command::Played { id, reply } => {
                 let _ = reply.send(self.played(id));
