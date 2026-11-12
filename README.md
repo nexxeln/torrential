@@ -1,9 +1,9 @@
 <h1 align="center">torrential</h1>
 
-<p align="center">Search and download torrents from your terminal, or ask your coding agent to.</p>
+<p align="center">Search torrents and watch them while they download, from your browser, your terminal, or your coding agent.</p>
 
 <p align="center">
-  <img src="docs/tui.gif" alt="The terminal UI searches for Big Buck Bunny, picks one file, and downloads it while the gauge fills" width="800">
+  <img src="docs/web-player.png" alt="Sintel playing in the browser while it downloads, with its chapters and the downloaded parts marked on the seek bar" width="800">
 </p>
 
 ## Install
@@ -12,11 +12,12 @@
 curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh | sh
 ```
 
-This puts one file at `~/.local/bin/torrential`. It runs on macOS 14 or later on Apple silicon, and on 64-bit Linux on Intel, AMD, or ARM.
+This puts one file at `~/.local/bin/torrential`. It runs on macOS 14 or later on Apple silicon, and on 64-bit Linux.
 
-### Build from source
+<details>
+<summary>Build from source</summary>
 
-On other machines, build it with Rust and Nix, with flakes turned on:
+With Rust and Nix, with flakes turned on:
 
 ```sh
 git clone --recursive https://github.com/nexxeln/torrential
@@ -24,105 +25,67 @@ cd torrential
 nix develop -c cargo install --path crates/torrential
 ```
 
-## Use it
+</details>
 
-Run `torrential` with no arguments to open the terminal UI. Search, pick the files you want, and watch the download fill in as its pieces arrive.
+## In your browser
+
+```sh
+torrential web
+```
+
+Search, pick a result, and it plays while it downloads. Jump anywhere and torrential fetches that part first. Subtitles come from the file, or are found online when it has none, and you can shift them when they are out of sync.
 
 <p align="center">
-  <img src="docs/search.png" alt="Search results for Night of the Living Dead, ranked for this Mac" width="49%">
-  <img src="docs/files.png" alt="Picking the files to download from a result" width="49%">
+  <img src="docs/web-search.png" alt="Search results for Sintel in the web app, ranked for this Mac" width="800">
+</p>
+
+Browsers cannot read every format. Install [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`) and torrential converts MKV files and surround sound as you watch.
+
+## In your terminal
+
+Run `torrential` to open the terminal UI:
+
+<p align="center">
+  <img src="docs/tui.gif" alt="The terminal UI searches for Big Buck Bunny, picks one file, and downloads it while the gauge fills" width="800">
 </p>
 
 Or run the commands yourself:
 
-<p align="center">
-  <img src="docs/cli.gif" alt="torrential search finds Big Buck Bunny on archive.org, then get downloads one of its files" width="800">
-</p>
-
 ```sh
-torrential search big buck bunny            # each result starts with a short ID
-torrential files fd69b2 --files '*.mp4'     # preview which files a glob picks
-torrential get fd69b2 --files '*h264.mp4'   # download only the files you want
-torrential wait fd69b2                      # follow a download until it is done
-torrential play fd69b2                      # watch it while it downloads
-torrential status                           # list your downloads
-torrential pause fd69b2                     # pause a download
-torrential resume fd69b2                    # continue it, or retry a failed one
-torrential rm fd69b2                        # stop tracking it, and keep its files
+torrential search big buck bunny         # each result starts with a short ID
+torrential get fd69b2 --files '*.mp4'    # download only the files you want
+torrential play fd69b2                   # watch in IINA, mpv, or VLC while it downloads
+torrential status                        # list your downloads
 ```
 
-An ID is the start of the torrent's infohash, or `u` and a digest for a result that only links a `.torrent` file. Any unique prefix of 4 or more characters works. `get` also takes a magnet link, a full infohash, or a `.torrent` file or URL.
-
-Removing a torrent keeps its files. Add the same torrent again with the same download folder to continue: torrential checks the existing data and downloads only missing or damaged pieces in the files you select. You can pick a different set of files each time.
-
-On a terminal, `get` shows progress until the download is done. Downloads run in a background engine, so they keep going after you press Ctrl-C or close the terminal.
-
-Every command takes `--json` for scripts, and `torrential schema` describes the commands, their flags, and their errors.
-
-## Watch while it downloads
-
-```sh
-torrential play night of the living dead
-```
-
-`play` picks the release, its video, and its subtitles, then opens IINA, mpv, or VLC. Pieces download in the order you watch, and seeking fetches the part you jump to. If your connection is slower than the video, torrential counts down to the moment playback can start without pausing, and Enter starts it at once. Set `player:` in `config.yaml` to choose a player. In the terminal UI, press `P` on a result or a download.
-
-## Ranked for your machine
-
-torrential reads your screen, CPU, and language, and ranks releases to fit them: 1080p on a laptop, arm64 builds on Apple silicon, and your language first. `torrential setup` shows what it found. If you watch on another screen, say so once:
-
-```sh
-torrential setup --screen tv-4k
-```
-
-In the terminal UI, press `S` to change it.
-
-<p align="center">
-  <img src="docs/ranking.png" alt="The ranking panel shows what torrential detected and lets you override it" width="800">
-</p>
+`torrential --help` lists the rest. Every command takes `--json`.
 
 ## With your agent
-
-Install the skill that teaches agents to use torrential:
 
 ```sh
 torrential skill install
 ```
 
-It installs the skill for Claude Code, and for Codex, Gemini CLI, Cursor, and other agents that read `~/.agents/skills`. Then ask for what you want in plain words. Here is what a fresh Claude Code session ran for this request:
-
-```text
-> Download the public-domain film Night of the Living Dead (1968) for me.
-> I only want one MP4 of the movie, not the big remux or Blu-ray files.
-
-$ torrential search night of the living dead 1968 --source archive.org --category video
-$ torrential files c85f98
-$ torrential get c85f98 --files "Night of the Living Dead (1968).mp4" --dry-run
-$ torrential get c85f98 --files 'Night of the Living Dead (1968).mp4'
-$ torrential wait c85f98
-# still running after 100s · eta 1m
-$ torrential wait c85f98
-# done after 70s · path …/night-of-the-living-dead-1968_202110
-```
-
-It chose the public-domain original over the 55 GiB remux, picked one 1.8 GiB MP4 out of five files, and checked back with `wait` instead of `sleep`. The download does not depend on the agent, so a later session can check on it with `torrential status`.
-
-Agent sandboxes block the connections BitTorrent needs. torrential checks for a sandbox before it starts, and its error tells the agent what to do about it.
+This teaches Claude Code, Codex, Gemini CLI, Cursor, and other agents to use torrential. Then ask in plain words, such as "download the public-domain film Night of the Living Dead, one MP4 only". Downloads run in a background engine, so they continue after the agent's session ends.
 
 ## Settings
 
-torrential reads `~/.config/torrential/config.yaml`. Downloads go to a `torrential` folder in your Downloads folder unless you set another:
+Results are ranked for your screen, CPU, and language. `torrential setup` shows what it found and lets you change it.
+
+Everything else is in `~/.config/torrential/config.yaml`:
 
 ```yaml
 downloads:
-  dir: ~/Downloads/torrents
+  dir: ~/Downloads/torrents   # default: a torrential folder in Downloads
+player: mpv                   # for torrential play: iina, mpv, vlc, or a path
+subtitles:
+  online: false               # do not look for subtitles online
+updates: auto                 # install new versions by itself, or off
 ```
-
-torrential looks for a new version once a day, says when one is out, and `torrential update` installs it. Set `updates: auto` to install new versions in the background, or `updates: off` to stop looking.
 
 ## It never seeds
 
-torrential never uploads a piece, and a download stops as soon as it finishes. Among equally good matches it puts lawful sources such as archive.org and official Linux torrents first, and you should download only what you have the right to.
+torrential never uploads a piece, and a download stops as soon as it finishes. It puts lawful sources such as archive.org first among equal matches. Download only what you have the right to.
 
 ## License
 
