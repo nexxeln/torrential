@@ -324,6 +324,14 @@ pub struct SelectedPieces {
     pub verified: u32,
 }
 
+/// The pieces under a run of a file's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenPieces {
+    pub pieces: u32,
+    /// Those that passed their hash check and are in the file on disk.
+    pub written: u32,
+}
+
 /// The selected pieces that have not passed their hash check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MissingPieces {

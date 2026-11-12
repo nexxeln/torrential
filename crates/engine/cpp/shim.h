@@ -65,6 +65,8 @@ class Session {
   StatusRecord status(rust::Slice<const std::uint8_t> id) const;
   rust::Vec<PieceCounts> piece_slices(rust::Slice<const std::uint8_t> id, std::uint32_t slices) const;
   MissingCounts missing_pieces(rust::Slice<const std::uint8_t> id) const;
+  rust::Vec<PieceCounts> written_pieces(rust::Slice<const std::uint8_t> id, std::uint32_t file,
+                                        std::uint64_t offset, std::uint64_t length, std::uint32_t runs) const;
   bool want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
                   std::uint64_t length);
   void download_in_order(rust::Slice<const std::uint8_t> id);

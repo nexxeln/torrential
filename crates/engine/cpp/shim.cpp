@@ -556,6 +556,61 @@ bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file,
   return written;
 }
 
+rust::Vec<PieceCounts> Session::written_pieces(rust::Slice<const std::uint8_t> id, std::uint32_t file,
+                                               std::uint64_t offset, std::uint64_t length,
+                                               std::uint32_t runs) const {
+  lt::torrent_handle const h = find_with_metadata(id);
+  auto const ti = h.torrent_file();
+  lt::file_storage const& fs = ti->layout();
+  lt::file_index_t const f(static_cast<int>(file));
+  if (file >= static_cast<std::uint32_t>(fs.num_files()) || fs.pad_file_at(f)) {
+    fail(FailureKind::InvalidInput, "file index " + std::to_string(file) + " is out of range for " +
+                                        std::to_string(fs.num_files()) + " files");
+  }
+  auto const size = static_cast<std::uint64_t>(fs.file_size(f));
+  if (length == 0 || offset >= size) {
+    fail(FailureKind::InvalidInput, "byte range " + std::to_string(offset) + "+" + std::to_string(length) +
+                                        " is outside the " + std::to_string(size) + "-byte file");
+  }
+  std::uint64_t const span = length > size - offset ? size - offset : length;
+  lt::torrent_status const st = h.status(lt::torrent_handle::query_pieces);
+  // A seed can report no bitfield at all.
+  bool const seed = st.pieces.empty() && st.is_seeding;
+  // As in want_range: a piece still in the download queue can have blocks
+  // waiting in the write cache, so the file does not hold its bytes yet.
+  std::vector<lt::partial_piece_info> const writing = h.get_download_queue();
+  auto const written = [&](int p) {
+    if (seed) return true;
+    if (p >= st.pieces.size() || !st.pieces.get_bit(lt::piece_index_t(p))) return false;
+    return std::none_of(writing.begin(), writing.end(), [p](lt::partial_piece_info const& q) {
+      return static_cast<int>(q.piece_index) == p;
+    });
+  };
+  auto const piece_at = [&](std::uint64_t byte) {
+    return static_cast<int>(fs.map_file(f, static_cast<std::int64_t>(byte), 0).piece);
+  };
+  rust::Vec<PieceCounts> out;
+  out.reserve(runs);
+  // Neighboring runs share the piece their border falls in, so its answer is kept.
+  int known = -1;
+  bool known_written = false;
+  for (std::uint64_t r = 0; r < runs; ++r) {
+    std::uint64_t const begin = offset + r * span / runs;
+    std::uint64_t const end = std::max(begin + 1, offset + (r + 1) * span / runs);
+    PieceCounts c{};
+    for (int p = piece_at(begin), last = piece_at(end - 1); p <= last; ++p) {
+      if (p != known) {
+        known = p;
+        known_written = written(p);
+      }
+      ++c.selected;
+      if (known_written) ++c.verified;
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
 void Session::download_in_order(rust::Slice<const std::uint8_t> id) {
   find(id).set_flags(lt::torrent_flags::sequential_download);
 }

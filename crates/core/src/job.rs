@@ -143,7 +143,13 @@ impl Slice {
         Self::Wanted(Eighths(eighths))
     }
 
-    fn symbol(self) -> char {
+    /// Every selected piece of the run has arrived.
+    pub fn is_complete(self) -> bool {
+        self == Self::Wanted(Eighths(8))
+    }
+
+    /// The character for this slice in a piece map: `0` to `8`, or `-`.
+    pub fn symbol(self) -> char {
         match self {
             Self::Unwanted => '-',
             Self::Wanted(Eighths(n)) => char::from(b'0' + n),

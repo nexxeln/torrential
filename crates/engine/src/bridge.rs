@@ -227,6 +227,14 @@ pub(crate) mod ffi {
         fn piece_slices(self: &Session, id: &[u8], slices: u32) -> Result<Vec<PieceCounts>>;
         fn missing_pieces(self: &Session, id: &[u8]) -> Result<MissingCounts>;
         fn want_range(self: Pin<&mut Session>, id: &[u8], file: u32, offset: u64, length: u64) -> Result<bool>;
+        fn written_pieces(
+            self: &Session,
+            id: &[u8],
+            file: u32,
+            offset: u64,
+            length: u64,
+            runs: u32,
+        ) -> Result<Vec<PieceCounts>>;
         fn download_in_order(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn post_session_stats(self: Pin<&mut Session>) -> Result<()>;
         fn save_state(self: &Session) -> Result<Vec<u8>>;

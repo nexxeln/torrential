@@ -18,7 +18,7 @@ pub use identity::{InfoHash, InfoHashV1, InfoHashV2, TorrentId};
 pub use session::Session;
 pub use torrent::{
     AddTorrent, Added, FileEntry, FileIndex, FilePriority, FileProgress, FileSelection, Magnet, Metainfo,
-    MissingPieces, Progress, ResumeData, SelectedPieces, TorrentSource, TorrentState, TorrentStatus,
+    MissingPieces, Progress, ResumeData, SelectedPieces, TorrentSource, TorrentState, TorrentStatus, WrittenPieces,
 };
 
 /// The version of the linked libtorrent, such as `2.1.2.0`.

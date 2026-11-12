@@ -8,6 +8,7 @@ use crate::error::{EngineError, ErrorKind};
 use crate::identity::TorrentId;
 use crate::torrent::{
     AddTorrent, Added, FileEntry, FileIndex, FilePriority, Metainfo, MissingPieces, SelectedPieces, TorrentStatus,
+    WrittenPieces,
 };
 
 /// One libtorrent session, which serves every torrent.
@@ -189,6 +190,23 @@ impl Session {
     ) -> Result<bool, EngineError> {
         let r = self.native.pin_mut().want_range(id.as_bytes(), file.get(), offset, length);
         r.map_err(|e| with_id(e, id))
+    }
+
+    /// Needs metadata. Cuts `length` bytes of `file` from `offset` into `runs` runs of equal length,
+    /// in order, and counts the pieces under each run and how many of them are verified and
+    /// written, so reading them from the file returns the torrent's bytes. With fewer pieces than
+    /// runs, a piece counts in every run it covers. Unlike `want_range`, this asks peers for nothing.
+    pub fn written_pieces(
+        &self,
+        id: TorrentId,
+        file: FileIndex,
+        offset: u64,
+        length: u64,
+        runs: u32,
+    ) -> Result<Vec<WrittenPieces>, EngineError> {
+        let counts = self.native.written_pieces(id.as_bytes(), file.get(), offset, length, runs);
+        let counts = counts.map_err(|e| with_id(e, id))?;
+        Ok(counts.into_iter().map(|c| WrittenPieces { pieces: c.selected, written: c.verified }).collect())
     }
 
     /// Picks pieces in file order instead of rarest first, for a torrent read while it downloads.
