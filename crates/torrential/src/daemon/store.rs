@@ -445,22 +445,8 @@ impl Store {
         self.write(|tx| insert_link(tx, id, link, now))
     }
 
-    /// Ends a download's lease, once someone other than the play that made it has used it.
-    pub fn borrow(&mut self, id: TorrentId) -> Result<(), Error> {
-        self.write(|tx| tx.execute("UPDATE job_titles SET lease = 'borrowed' WHERE job = ?1", [id.to_hex()]).map(drop))
-    }
-
     pub fn played(&mut self, id: TorrentId) -> Result<(), Error> {
         self.write(|tx| tx.execute("UPDATE job_titles SET played = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
-    }
-
-    /// Removes a download a title play gave up on. It leaves no tombstone, for the person never
-    /// had it.
-    pub fn discard(&mut self, id: TorrentId, now: i64) -> Result<(), Error> {
-        self.write(|tx| {
-            tx.execute("DELETE FROM jobs WHERE id = ?1", [id.to_hex()])?;
-            evict_metainfo(tx, now)
-        })
     }
 
     pub fn remove_duplicate(&mut self, id: TorrentId) -> Result<(), Error> {
@@ -735,19 +721,12 @@ mod tests {
         let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
         assert_eq!(titles, [Some(owned.clone()), Some(Linked { link: link(Lease::Borrowed), played: true })]);
 
-        store.insert(&JobRecord { title: Some(owned), ..record(5) }, None, 100).unwrap();
-        store.borrow(TorrentId::from_bytes([5; 20])).unwrap();
-        let leases: Vec<Option<Lease>> =
-            store.jobs().unwrap().into_iter().map(|j| j.record.title.map(|linked| linked.link.lease)).collect();
-        assert_eq!(leases, [Some(Lease::Owned), Some(Lease::Borrowed), Some(Lease::Borrowed)]);
-
-        store.discard(TorrentId::from_bytes([1; 20]), 120).unwrap();
+        let gone = Tombstone { id: TorrentId::from_bytes([1; 20]), name: None, path: None, removed_at: 120 };
+        store.remove(&gone).unwrap();
         let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
-        assert_eq!(left, [TorrentId::from_bytes([3; 20]), TorrentId::from_bytes([5; 20])]);
-        let count = |table: &str| -> i64 {
-            store.conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
-        };
-        assert_eq!((count("job_titles"), count("tombstones")), (2, 0));
+        assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
+        let links: i64 = store.conn.query_row("SELECT count(*) FROM job_titles", [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 1);
     }
 
     #[test]

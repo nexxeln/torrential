@@ -126,7 +126,7 @@ struct Play {
 }
 
 /// `POST /api/title/play`: a line of JSON for each step of the play, the last being `playing` or
-/// `failed`. Closing the connection stops the play and discards the source under test.
+/// `failed`. Closing the connection stops the play and gives up the source under test.
 pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
     let ask = match super::body::<Play>(request) {

@@ -404,7 +404,7 @@ async fn play_title(
 }
 
 /// A title play over the socket: a frame for each step, then the reply. The play stops, and the
-/// source under test is discarded, if the client goes away first.
+/// source under test is given up, if the client goes away first.
 async fn title_frames(
     ctx: &Ctx,
     request: TitleRequest,

@@ -7,12 +7,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::protocol::{Change, GetOutcome, GetReply};
 use torrential_core::{
-    Error, ErrorCode, HexPrefix, InfoHash, Job, Lease, PieceMap, Release, Selection, Target, TitleLink, TorrentId,
+    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleLink, TorrentId,
 };
 
 use super::admission::{self, Cap, Disk};
 use super::book::{self, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
-use super::discard;
 use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
 };
@@ -116,7 +115,7 @@ pub struct PlayCommand {
 
 /// A title play's test of one source.
 pub struct TitlePlay {
-    /// The title it is for. The owner sets the lease from whether the play makes the download.
+    /// The title it is for.
     pub link: TitleLink,
     pub hold: Hold,
 }
@@ -196,15 +195,10 @@ struct PendingPause {
     reply: Reply<Vec<Change>>,
 }
 
-/// The files a discarded download left, relative to its folder.
-struct Discard {
-    dir: PathBuf,
-    paths: Vec<PathBuf>,
-}
-
-/// A download title plays are testing.
+/// A download title plays are testing, or one the last of them gave up and that is not yet put
+/// back.
 struct UnderTest {
-    /// The plays testing it.
+    /// The plays testing it. Empty once the last has given up.
     holds: BTreeSet<Hold>,
     before: Before,
 }
@@ -220,35 +214,47 @@ enum Before {
     Kept,
 }
 
-/// What the last title play to give up on a download does to it.
+/// What a download no title play tests any more is still owed.
 enum PutBack {
     Nothing,
+    /// Nothing until the engine has stopped writing it, which shows what it left on disk.
+    Wait,
     Pause,
     Fail(Error),
-    /// Takes it off the list and keeps its files.
+    /// Takes it off the list. Nothing of it is on disk.
     Remove,
-    /// Takes it off the list and deletes the files it wrote.
-    Discard,
+}
+
+/// What a download has on disk.
+enum OnDisk {
+    /// The engine may still write it.
+    Unsettled,
+    Nothing,
+    Something,
 }
 
 impl Before {
-    /// How to put `job` back as it was. A download the play made goes, but its files go with it
-    /// only while the play owns them, and never once it is finished or has played. A download
-    /// that was here stays, paused or stopped again if the play resumed it.
-    fn put_back(self, job: &JobEntry) -> PutBack {
+    /// How to put `job` back as it was. No file is ever deleted. A download that was here stays,
+    /// paused or stopped again if the play resumed it. A download the play made stays once it
+    /// is finished or has played. Otherwise it is stopped, and it leaves the list only when
+    /// nothing of it is on disk, so no file is left without a download to show for it.
+    fn put_back(&self, job: &JobEntry, on_disk: impl FnOnce() -> OnDisk) -> PutBack {
         let finished = matches!(job.record.intent, Intent::Done { .. })
             || matches!(job.observed, Observed::InEngine(Phase::Finishing { .. }));
         let running = job.record.intent == Intent::Running;
         match self {
             Before::Kept => PutBack::Nothing,
             Before::Paused if running => PutBack::Pause,
-            Before::Failed(error) if running => PutBack::Fail(error),
+            Before::Failed(error) if running => PutBack::Fail(error.clone()),
             Before::Paused | Before::Failed(_) => PutBack::Nothing,
-            Before::Absent => match job.record.title.as_ref().map(|linked| (linked.link.lease, linked.played)) {
-                _ if finished => PutBack::Nothing,
-                Some((Lease::Owned, false)) => PutBack::Discard,
-                Some((Lease::Borrowed, false)) => PutBack::Remove,
-                Some((_, true)) | None => PutBack::Nothing,
+            Before::Absent if finished || job.record.title.as_ref().is_none_or(|linked| linked.played) => {
+                PutBack::Nothing
+            }
+            Before::Absent => match (on_disk(), running) {
+                (OnDisk::Nothing, _) => PutBack::Remove,
+                (OnDisk::Unsettled | OnDisk::Something, true) => PutBack::Pause,
+                (OnDisk::Unsettled, false) => PutBack::Wait,
+                (OnDisk::Something, false) => PutBack::Nothing,
             },
         }
     }
@@ -268,12 +274,9 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
-    /// The downloads title plays are testing. Only in memory: after a restart no play is
-    /// running, so nothing is under test and nothing is discarded.
+    /// The downloads title plays are testing or have yet to put back. Only in memory: after a
+    /// restart no play is running, so nothing is under test and every download stays as it is.
     under_test: BTreeMap<TorrentId, UnderTest>,
-    /// Discarded downloads whose files go once the engine removes them. Only in memory, so an
-    /// engine that stops before then leaves the files on disk, and nothing deletes them later.
-    discarding: BTreeMap<TorrentId, Discard>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
     stopping: Option<Stopping>,
@@ -328,7 +331,6 @@ impl Owner {
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
             under_test: BTreeMap::new(),
-            discarding: BTreeMap::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
@@ -547,34 +549,18 @@ impl Owner {
         }
     }
 
-    /// `get` as a person runs it. A download a title play made is theirs from then on: its lease
-    /// ends, and the plays testing it leave it on the list.
+    /// `get` as a person runs it. A download a title play made is theirs from then on, and the
+    /// plays testing it leave it on the list.
     fn get_by_hand(&mut self, get: GetCommand) -> Result<GetReply, Error> {
         let dry_run = get.dry_run;
-        let mut reply = self.get(get, None)?;
-        if !dry_run {
-            let id = reply.job.id;
-            self.borrow(id)?;
-            if let Some(test) = self.under_test.get_mut(&id)
-                && matches!(test.before, Before::Absent)
-            {
-                test.before = Before::Kept;
-            }
-            reply.job = self.jobs[&id].view();
+        let reply = self.get(get, None)?;
+        if !dry_run
+            && let Some(test) = self.under_test.get_mut(&reply.job.id)
+            && matches!(test.before, Before::Absent)
+        {
+            test.before = Before::Kept;
         }
         Ok(reply)
-    }
-
-    /// Ends a download's lease, once someone other than the play that made it has used it or its
-    /// selection has changed. Nothing deletes its files after that. Memory goes first, for it
-    /// is what a discard reads.
-    fn borrow(&mut self, id: TorrentId) -> Result<(), Error> {
-        match self.jobs.get_mut(&id).and_then(|job| job.record.title.as_mut()) {
-            Some(linked) if linked.link.lease == Lease::Owned => linked.link.lease = Lease::Borrowed,
-            _ => return Ok(()),
-        }
-        self.publish(id);
-        self.store.borrow(id)
     }
 
     /// `title` links a download this creates to the title it is for.
@@ -693,7 +679,6 @@ impl Owner {
                     previous_selection: previous,
                 });
             }
-            self.borrow(id)?;
             self.store.set_selection(id, &selection)?;
             self.jobs.get_mut(&id).expect("found above").record.selection = selection;
             self.publish(id);
@@ -722,7 +707,6 @@ impl Owner {
         let new_cap = cap != job.record.cap;
         let reopen = too_large || recheck || (previous.is_some() && matches!(job.record.intent, Intent::Done { .. }));
         if previous.is_some() {
-            self.borrow(id)?;
             self.store.set_selection(id, &selection)?;
         }
         if new_cap {
@@ -824,38 +808,18 @@ impl Owner {
                 patterns.push(pattern);
             }
         }
-        // A file already on disk is not the play's to delete, so a download over one is borrowed.
-        // The files are those its patterns select, which a discard deletes, and they can be more
-        // than the play asked for.
-        let into = dir.clone().unwrap_or_else(|| self.config.default_dir.clone());
-        let selected = super::files::wanted(&metainfo, &Selection::Patterns(patterns.clone()));
-        let on_disk = |held: Vec<PathBuf>| held.iter().any(|p| into.join(p).symlink_metadata().is_ok());
-        let lease = match selected.map(|wanted| on_disk(discard::held(&metainfo, &wanted))) {
-            Ok(false) => Lease::Owned,
-            Ok(true) | Err(_) => Lease::Borrowed,
-        };
-        let made = title.as_ref().map(|play| Linked { link: TitleLink { lease, ..play.link.clone() }, played: false });
+        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false });
         let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
         let id = self.get(get, made.filter(|_| matches!(before, Before::Absent)))?.job.id;
         match (&title, &self.jobs[&id].record.title) {
-            // A download played by hand is being watched, so no title play discards it.
-            (None, _) => {
-                self.borrow(id)?;
-                self.played(id)?;
-            }
+            // A download played by hand is being watched, so no title play puts it back.
+            (None, _) => self.played(id)?,
             (Some(play), None) => {
-                let link = TitleLink { lease: Lease::Borrowed, ..play.link.clone() };
+                let link = play.link.clone();
                 self.store.link(id, &link, now())?;
                 self.jobs.get_mut(&id).expect("the play has it").record.title = Some(Linked { link, played: false });
             }
-            (Some(_), Some(_)) if matches!(before, Before::Absent) => {}
-            // Only a play of the same title shares the lease of the play that made the download,
-            // and only while that one still tests it.
-            (Some(play), Some(linked)) => {
-                if !self.under_test.contains_key(&id) || linked.link.title != play.link.title {
-                    self.borrow(id)?;
-                }
-            }
+            (Some(_), Some(_)) => {}
         }
         let job = &self.jobs[&id];
         if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
@@ -876,7 +840,7 @@ impl Owner {
         Ok((self.jobs[&id].view(), metainfo))
     }
 
-    /// Marks a download as having played. Every test of it is over, and it is never discarded.
+    /// Marks a download as having played. Every test of it is over, and it stays as it is.
     fn played(&mut self, id: TorrentId) -> Result<(), Error> {
         let job = self.jobs.get(&id).ok_or_else(|| no_download(&id.to_hex()))?;
         self.under_test.remove(&id);
@@ -891,83 +855,67 @@ impl Owner {
     }
 
     /// Ends a title play's test of a download that did not play. While another play still tests
-    /// the download, nothing changes. The last play to give up puts the download back as the
-    /// first found it.
+    /// the download, nothing changes. The last play to give up puts the download back.
     fn release(&mut self, hold: Hold) {
-        let held = self.under_test.iter().filter(|(_, test)| test.holds.contains(&hold));
-        let held: Vec<TorrentId> = held.map(|(id, _)| *id).collect();
-        for id in held {
-            let test = self.under_test.get_mut(&id).expect("found above");
+        for test in self.under_test.values_mut() {
             test.holds.remove(&hold);
-            if !test.holds.is_empty() {
-                continue;
-            }
-            let before = self.under_test.remove(&id).expect("found above").before;
-            let Some(job) = self.jobs.get(&id) else { continue };
-            match before.put_back(job) {
-                PutBack::Nothing => {}
-                PutBack::Pause => self.pause(vec![id.to_hex()], oneshot::channel().0),
-                PutBack::Fail(error) => self.fail(id, error),
-                PutBack::Remove => {
-                    let _ = self.remove(&[id.to_hex()]);
-                }
-                PutBack::Discard => self.discard(id),
-            }
         }
+        self.put_back_all();
         self.schedule();
     }
 
-    /// Removes a download and deletes the files it wrote once the engine lets go of them: only
-    /// files the download selected, below its folder, that no other download holds. Only
-    /// `PutBack::Discard` leads here.
-    fn discard(&mut self, id: TorrentId) {
-        let Some(job) = self.jobs.get(&id) else { return };
-        let held = match (job.metainfo.as_deref(), job.wanted()) {
-            (Some(metainfo), Some(wanted)) => discard::held(metainfo, &wanted),
-            _ => Vec::new(),
+    /// Tries again whatever is still owed to the downloads no play tests.
+    fn put_back_all(&mut self) {
+        let ids: Vec<TorrentId> = self.under_test.keys().copied().collect();
+        for id in ids {
+            self.put_back(id);
+        }
+    }
+
+    /// Does what `id` is owed once no play tests it. What fails or has to wait for the engine
+    /// stays owed, and is tried again when the engine lets go of the download, at the next
+    /// release, and when the engine stops.
+    fn put_back(&mut self, id: TorrentId) {
+        let owed = |owner: &Self| {
+            let test = owner.under_test.get(&id).filter(|test| test.holds.is_empty())?;
+            let job = owner.jobs.get(&id);
+            Some(job.map_or(PutBack::Nothing, |job| test.before.put_back(job, || owner.on_disk(job))))
         };
-        let dir = job.record.dir.clone();
-        let paths = self.unclaimed(Some(id), &dir, held);
-        let discarded = Discard { dir, paths };
-        if let Err(error) = self.store.discard(id, now()) {
-            super::log(&format!("{id} stays, for it could not be removed: {}", error.message));
-            return;
+        match owed(self) {
+            None | Some(PutBack::Nothing | PutBack::Wait) => {}
+            Some(PutBack::Pause) => self.pause(vec![id.to_hex()], oneshot::channel().0),
+            Some(PutBack::Fail(error)) => self.fail(id, error),
+            Some(PutBack::Remove) => {
+                if let Err(error) = self.remove(&[id.to_hex()]) {
+                    super::log(&format!("{id} stays, for it could not be removed: {}", error.message));
+                }
+            }
         }
-        let job = self.jobs.remove(&id).expect("found above");
-        self.streamed.remove(&id);
-        for pause in &mut self.pauses {
-            pause.waiting.remove(&id);
+        if matches!(owed(self), Some(PutBack::Nothing)) {
+            self.under_test.remove(&id);
         }
-        let _ = self.updates.send(Update::Removed(id));
-        if job.observed.in_engine() {
-            self.engine.send(EngineCommand::Remove(id));
-            self.draining.insert(id);
-            self.discarding.insert(id, discarded);
-        } else {
-            self.finish_discard(discarded);
-        }
-        self.finish_pauses();
     }
 
-    /// Deletes what a discarded download left, now that no torrent in the engine writes there.
-    fn finish_discard(&mut self, discarded: Discard) {
-        let paths = self.unclaimed(None, &discarded.dir, discarded.paths);
-        discard::delete(&discarded.dir, &paths);
-    }
-
-    /// The paths in `dir` that no download but `except` holds.
-    fn unclaimed(&self, except: Option<TorrentId>, dir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
-        let held: BTreeSet<String> = self
-            .jobs
-            .values()
-            .filter(|job| Some(job.id()) != except)
-            .filter_map(|job| {
-                let held = discard::held(job.metainfo.as_deref()?, &job.wanted()?);
-                Some(held.into_iter().map(|p| claim_key(&job.record.dir.join(p))).collect::<Vec<_>>())
-            })
-            .flatten()
-            .collect();
-        paths.into_iter().filter(|p| !held.contains(&claim_key(&dir.join(p)))).collect()
+    /// What `job` has on disk: bytes the engine verified, or anything at all where the download
+    /// writes, whoever put it there. Nothing is known to be there only once the engine has
+    /// stopped writing.
+    fn on_disk(&self, job: &JobEntry) -> OnDisk {
+        if job.verified() > 0 {
+            return OnDisk::Something;
+        }
+        let settled = match job.observed {
+            Observed::InEngine(phase) => phase == Phase::Paused,
+            Observed::Absent | Observed::Parked => !self.draining.contains(&job.id()),
+        };
+        if !settled {
+            return OnDisk::Unsettled;
+        }
+        let Some(metainfo) = job.metainfo.as_deref() else { return OnDisk::Nothing };
+        let wanted = job.wanted().unwrap_or_else(|| vec![false; metainfo.files.len()]);
+        match admission::taken(&files::footprint(metainfo, &job.record.dir, &wanted)) {
+            None => OnDisk::Nothing,
+            Some(_) => OnDisk::Something,
+        }
     }
 
     fn current_plan(&self, job: &JobEntry) -> Option<torrential_core::protocol::DownloadPlan> {
@@ -1179,6 +1127,9 @@ impl Owner {
                     self.pauses.iter_mut().for_each(|p| {
                         p.waiting.remove(&id);
                     });
+                    if let Some(stopping) = &mut self.stopping {
+                        stopping.waiting.remove(&id);
+                    }
                     self.tombstones.retain(|t| t.id != id);
                     self.tombstones.push(tomb);
                     let _ = self.updates.send(Update::Removed(id));
@@ -1324,9 +1275,7 @@ impl Owner {
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
-                if let Some(discarded) = self.discarding.remove(&id) {
-                    self.finish_discard(discarded);
-                }
+                self.put_back(id);
             }
         }
         self.finish_stop_if_done();
@@ -1483,6 +1432,7 @@ impl Owner {
         }
         self.finish_pauses();
         self.publish(id);
+        self.put_back(id);
     }
 
     fn finish_pauses(&mut self) {
@@ -1772,6 +1722,7 @@ impl Owner {
             stopping.replies.extend(reply);
             return;
         }
+        self.put_back_all();
         let mut waiting = BTreeSet::new();
         for job in self.jobs.values_mut() {
             let id = job.record.id;

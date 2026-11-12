@@ -845,21 +845,10 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
     let (status, headers) = page.head().await;
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
-    let third = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
     let mut steps = Vec::new();
     let mut playing = Value::Null;
     while let Some(line) = page.line().await {
         steps.push(titles::step(&line));
-        if steps.ends_with(&[
-            "trying 3 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264".into(),
-            "check file_list".into(),
-            "check start".into(),
-            "check first_bytes".into(),
-        ]) {
-            write(&third.join("Night.1968.1080p.mp4"));
-            write(&third.join("Night.1968.1080p.srt"));
-            write(&h.downloads().join(format!(".{}.parts", "a3".repeat(20))));
-        }
         if line["type"] == "playing" {
             playing = line;
         }
@@ -906,19 +895,15 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
         ])
     );
 
-    let (_, jobs) = get(&h, "/api/jobs").await;
-    let listed: Vec<Value> = jobs["jobs"].as_array().unwrap().iter().map(|j| json!([j["id"], j["title"]])).collect();
-    assert_eq!(listed, [json!([id, { "title": "tt0063350", "span": "film", "release": id, "lease": "owned" }])]);
-    let mut left: Vec<String> =
-        std::fs::read_dir(h.downloads()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
-    left.sort();
-    assert_eq!(left, Vec::<String>::new(), "the third's files and its parts file are gone");
     let tried: Vec<_> = night[..3].iter().map(|t| t.info_hash.id()).collect();
     assert!(gone_from_the_engine(&h, &tried).await, "no file list probe or trial is left in the engine");
+    let (_, jobs) = get(&h, "/api/jobs").await;
+    let listed: Vec<Value> = jobs["jobs"].as_array().unwrap().iter().map(|j| json!([j["id"], j["title"]])).collect();
+    assert_eq!(listed, [json!([id, { "title": "tt0063350", "span": "film", "release": id, "lease": "borrowed" }])]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn closing_the_connection_while_a_source_sends_nothing_discards_its_download() {
+async fn closing_the_connection_while_a_source_sends_nothing_pauses_its_download_and_keeps_what_it_wrote() {
     let (h, night) = titles::night();
     let third = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
     let body = json!({ "video": "tt0063350", "source": night[2].info_hash.id().to_hex() }).to_string();
@@ -933,12 +918,10 @@ async fn closing_the_connection_while_a_source_sends_nothing_discards_its_downlo
     write(&third.join("Night.1968.1080p.mp4"));
     assert_eq!(h.status().await.len(), 1, "the trial's download runs");
     drop(page);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !(h.status().await.is_empty() && !third.exists()) {
-        assert!(Instant::now() < deadline, "the trial was never discarded");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(gone_from_the_engine(&h, &[night[2].info_hash.id()]).await);
+    h.until("the trial is paused", |jobs| jobs[0].status.name() == "paused").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.states().await, ["paused"]);
+    assert_eq!(std::fs::read(third.join("Night.1968.1080p.mp4")).unwrap(), b"payload");
 }
 
 #[tokio::test(flavor = "multi_thread")]

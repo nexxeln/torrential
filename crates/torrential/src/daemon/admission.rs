@@ -209,6 +209,16 @@ pub fn claimed(destination: &Path, owner: TorrentId, name: &str, paths: &[PathBu
     .with_hint(hint)
 }
 
+/// The first of `paths` that is not free, with the error when the disk could not say. Only a
+/// path the disk answers is not there is free: one it cannot read may hold a file.
+pub fn taken(paths: &[PathBuf]) -> Option<(&Path, Option<std::io::Error>)> {
+    paths.iter().find_map(|path| match path.symlink_metadata() {
+        Ok(_) => Some((path.as_path(), None)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some((path.as_path(), Some(e))),
+    })
+}
+
 pub fn check_disk(space: Space, needed: u64, others_remaining: u64) -> Result<(), Error> {
     let keep = reserve(space.total);
     let required = needed + others_remaining + keep;

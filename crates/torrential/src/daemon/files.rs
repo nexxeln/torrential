@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use torrential_core::text::sanitize;
-use torrential_core::{Error, ErrorCode, FileRisk, Selection};
+use torrential_core::{Error, ErrorCode, FileRisk, InfoHash, Selection};
 
 use super::engine_port::{MetaFile, Metainfo};
 
@@ -47,6 +47,27 @@ pub fn relative(metainfo: &Metainfo, file: &MetaFile) -> PathBuf {
     if metainfo.single_file { PathBuf::from(&metainfo.name) } else { Path::new(&metainfo.name).join(&file.path) }
 }
 
+/// Every path a download writes below `dir`: the torrent's folder or single file, each selected
+/// file, and the parts file where libtorrent keeps pieces a selected file shares with one that
+/// is not selected.
+pub fn footprint(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {
+    let mut paths = vec![dir.join(&metainfo.name)];
+    paths.extend(targets(metainfo, dir, wanted));
+    paths.push(dir.join(parts_file(&metainfo.info_hash)));
+    paths
+}
+
+/// libtorrent names the parts file after the torrent's v2 hash cut to 20 bytes, or after its v1
+/// hash when it has no v2 one, and keeps it in the download folder.
+fn parts_file(hash: &InfoHash) -> String {
+    let best = match hash {
+        InfoHash::V1(v1) => &v1[..],
+        InfoHash::V2(v2) | InfoHash::Hybrid { v2, .. } => &v2[..20],
+    };
+    let hex: String = best.iter().map(|b| format!("{b:02x}")).collect();
+    format!(".{hex}.parts")
+}
+
 const EXECUTABLE: [&str; 25] = [
     "exe", "msi", "bat", "cmd", "com", "scr", "pif", "ps1", "vbs", "vbe", "js", "jse", "wsf", "hta", "jar", "sh",
     "command", "app", "dmg", "pkg", "apk", "lnk", "cpl", "run", "reg",
@@ -71,7 +92,6 @@ pub fn risks(metainfo: &Metainfo) -> Vec<Option<FileRisk>> {
 mod tests {
     use super::*;
     use crate::daemon::engine_port::FakeTorrentFile;
-    use torrential_core::InfoHash;
 
     fn film() -> Metainfo {
         FakeTorrentFile {
@@ -126,6 +146,26 @@ mod tests {
         let mut tools = film();
         tools.files.retain(|f| f.path.ends_with(".exe"));
         assert_eq!(risks(&tools), [None]);
+    }
+
+    #[test]
+    fn a_download_writes_its_folder_its_selected_files_and_the_parts_file_named_by_its_best_hash() {
+        let torrent = |info_hash, name: &str, files: &[&str]| {
+            let files = files.iter().map(|path| (path.to_string(), 1_000)).collect();
+            FakeTorrentFile { info_hash, name: name.into(), files }.metainfo().unwrap()
+        };
+        let dir = Path::new("/d");
+        let pack = torrent(InfoHash::V1([0xab; 20]), "Pack", &["a.mkv", "extras/b.mkv", "c.nfo"]);
+        assert_eq!(
+            footprint(&pack, dir, &[true, true, false]),
+            ["/d/Pack", "/d/Pack/a.mkv", "/d/Pack/extras/b.mkv", "/d/.abababababababababababababababababababab.parts"]
+                .map(PathBuf::from)
+        );
+        let single = torrent(InfoHash::Hybrid { v1: [0x11; 20], v2: [0x22; 32] }, "film.mp4", &["film.mp4"]);
+        let parts = format!("/d/.{}.parts", "22".repeat(20));
+        assert_eq!(footprint(&single, dir, &[true]), ["/d/film.mp4", "/d/film.mp4", parts.as_str()].map(PathBuf::from));
+        let v2 = torrent(InfoHash::V2([0x33; 32]), "Two", &["x.mp4"]);
+        assert_eq!(footprint(&v2, dir, &[false])[1], PathBuf::from(format!("/d/.{}.parts", "33".repeat(20))));
     }
 
     #[test]

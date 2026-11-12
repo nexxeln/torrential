@@ -252,7 +252,7 @@ fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
     );
     assert_eq!(doc["reply"]["job"]["title"]["title"], "tt0063350");
     assert_eq!(doc["next"], "torrential wait b7f20d");
-    assert!(!home.downloads().contains(&ARCHIVE[..6].to_string()), "the dead release was discarded");
+    assert!(!home.downloads().contains(&ARCHIVE[..6].to_string()), "the dead release left the list");
 }
 
 #[test]

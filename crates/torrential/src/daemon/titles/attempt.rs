@@ -401,7 +401,7 @@ impl Trial<'_> {
         }
     }
 
-    /// Gives the source up, and waits until the owner has put its download back.
+    /// Gives the source up, and waits until the owner has started to put its download back.
     async fn give_up(&mut self) {
         if let Some(hold) = self.hold.take() {
             let _ = self.owner.ask(|reply| Command::Release { hold, reply }).await;
