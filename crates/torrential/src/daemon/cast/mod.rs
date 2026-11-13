@@ -28,6 +28,7 @@ use super::titles::attempt::{self, Containers, PlayTitle};
 use super::web::{play, watch as web_watch};
 use crate::output::views::title_name;
 pub use ssdp::Find;
+use ssdp::Heard;
 use upnp::{Failed, Renderer, Service};
 
 /// A search this recent answers a request for the TVs without searching again.
@@ -146,8 +147,10 @@ impl Dlna {
 
 impl Casts {
     pub fn new(ctx: Weak<Ctx>, find: Find) -> Self {
+        // A redirect could lead anywhere, and a TV has no use for one.
         let http = reqwest::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
             .build()
             .expect("a plain HTTP client builds");
@@ -182,14 +185,14 @@ impl Casts {
             state.tvs.values().map(|k| (k.location.clone(), k.renderer.clone())).collect()
         };
         let mut found = tokio::task::JoinSet::new();
-        for location in answers.into_values() {
-            let (http, known) = (self.http.clone(), known.get(&location).cloned());
+        for heard in answers.into_values() {
+            let (http, known) = (self.http.clone(), known.get(heard.location.as_str()).cloned());
             found.spawn(async move {
                 let renderer = match known {
                     Some(renderer) => Some(renderer),
-                    None => renderer(&http, &location).await.map(Arc::new),
+                    None => renderer(&http, &heard).await.map(Arc::new),
                 };
-                renderer.map(|renderer| (location, renderer))
+                renderer.map(|renderer| (heard.location.to_string(), renderer))
             });
         }
         let mut seen = Vec::new();
@@ -362,12 +365,14 @@ fn names_tv(wanted: &str, id: &str, name: &str) -> bool {
     !wanted.is_empty() && (id == wanted || name.to_lowercase().contains(&wanted.to_lowercase()))
 }
 
-/// The renderer whose description is at `location`, with what its ConnectionManager says it
-/// plays. `None` for a device that is not one, or does not answer.
-async fn renderer(http: &reqwest::Client, location: &str) -> Option<Renderer> {
-    let url = url::Url::parse(location).ok()?;
-    let answer = http.get(url.clone()).timeout(DESCRIBE_WITHIN).send().await.ok()?;
-    let description = upnp::describe(&answer.text().await.ok()?, &url)?;
+/// The renderer that answered a search, with what its ConnectionManager says it plays. `None` for
+/// a device that is not one, or does not answer.
+async fn renderer(http: &reqwest::Client, heard: &Heard) -> Option<Renderer> {
+    let answer = http.get(heard.location.clone()).timeout(DESCRIBE_WITHIN).send().await.ok()?;
+    if !answer.status().is_success() {
+        return None;
+    }
+    let description = upnp::describe(&answer.text().await.ok()?, &heard.location, heard.from)?;
     let sink = match &description.connection {
         Some(connection) => upnp::call(http, connection, "GetProtocolInfo", &[], &description.name)
             .await
@@ -377,7 +382,7 @@ async fn renderer(http: &reqwest::Client, location: &str) -> Option<Renderer> {
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    Some(Renderer::new(description, url.host_str()?.to_string(), sink))
+    Some(Renderer::new(description, heard.from.to_string(), sink))
 }
 
 /// What a cast found to play.

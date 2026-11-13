@@ -7,6 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
+use url::{Host, Url};
 
 /// Where UPnP devices listen for searches.
 pub const GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900);
@@ -27,10 +28,19 @@ pub enum Find {
     At(SocketAddr),
 }
 
-/// A device that answered: where its description is, by the USN it gave.
-pub type Answers = BTreeMap<String, String>;
+/// A device that answered a search: where its description is, and the address it answered from.
+/// Every request for the device goes to that address.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Heard {
+    pub location: Url,
+    pub from: Ipv4Addr,
+}
 
-/// Searches for media renderers and returns the answers by USN, each with its LOCATION.
+/// The devices that answered, by the USN each gave.
+pub type Answers = BTreeMap<String, Heard>;
+
+/// Searches for media renderers from `sources`, this machine's addresses on the home network, and
+/// returns the answers by USN.
 pub async fn search(find: Find, sources: &[Ipv4Addr]) -> io::Result<Answers> {
     let (sockets, to) = match find {
         Find::Multicast => {
@@ -51,13 +61,17 @@ pub async fn search(find: Find, sources: &[Ipv4Addr]) -> io::Result<Answers> {
     }
     let mut answers = Answers::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(MX + 1);
+    let link_local = sources.iter().any(Ipv4Addr::is_link_local);
     let mut tasks = tokio::task::JoinSet::new();
     for socket in sockets {
         tasks.spawn(async move {
             let mut heard = Vec::new();
             let mut buf = vec![0; 8 * 1024];
-            while let Ok(Ok((length, _))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
-                heard.extend(answer(&String::from_utf8_lossy(&buf[..length])));
+            while let Ok(Ok((length, from))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
+                let SocketAddr::V4(from) = from else { continue };
+                if neighbour(*from.ip(), link_local) {
+                    heard.extend(answer(&String::from_utf8_lossy(&buf[..length]), *from.ip()));
+                }
             }
             heard
         });
@@ -87,8 +101,21 @@ fn request(to: SocketAddr) -> String {
     )
 }
 
-/// The USN and LOCATION of an answer to a search for media renderers. Anything else is `None`.
-fn answer(datagram: &str) -> Option<(String, String)> {
+/// Whether a device at `ip` can be one on the home network: not this machine's loopback, and
+/// link-local only when this machine has a link-local address too.
+fn neighbour(ip: Ipv4Addr, link_local: bool) -> bool {
+    !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast())
+        && (link_local || !ip.is_link_local())
+}
+
+/// Whether `url` is plain HTTP to `ip`, the one place a device's requests may go.
+pub fn at(url: &Url, ip: Ipv4Addr) -> bool {
+    url.scheme() == "http" && url.host() == Some(Host::Ipv4(ip))
+}
+
+/// The USN and where the description is of an answer from `from` to a search for media
+/// renderers. An answer whose LOCATION is on another address is `None`, as is anything else.
+fn answer(datagram: &str, from: Ipv4Addr) -> Option<(String, Heard)> {
     let mut lines = datagram.split("\r\n").flat_map(|line| line.split('\n'));
     let status = lines.next()?;
     if !status.starts_with("HTTP/1.1 200") && !status.starts_with("HTTP/1.0 200") {
@@ -100,12 +127,12 @@ fn answer(datagram: &str) -> Option<(String, String)> {
             headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
-    let location = headers.get("location").filter(|l| l.starts_with("http://"))?;
+    let location = Url::parse(headers.get("location")?).ok().filter(|location| at(location, from))?;
     if headers.get("st").is_some_and(|st| !st.eq_ignore_ascii_case(RENDERER)) {
         return None;
     }
-    let usn = headers.get("usn").cloned().unwrap_or_else(|| location.clone());
-    Some((usn, location.clone()))
+    let usn = headers.get("usn").cloned().unwrap_or_else(|| location.to_string());
+    Some((usn, Heard { location, from }))
 }
 
 #[cfg(test)]
@@ -128,18 +155,40 @@ mod tests {
                   LOCATION: http://192.168.1.40:1876/\r\nSERVER: Linux/4.4 UPnP/1.0 LGE WebOS TV/Version 0.9\r\n\
                   ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\
                   USN: uuid:6a3e0b2c::urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
+        let tv = Ipv4Addr::new(192, 168, 1, 40);
+        let heard = |location: &str, from| Heard { location: Url::parse(location).unwrap(), from };
         assert_eq!(
-            answer(lg),
+            answer(lg, tv),
             Some((
                 "uuid:6a3e0b2c::urn:schemas-upnp-org:device:MediaRenderer:1".into(),
-                "http://192.168.1.40:1876/".into()
+                heard("http://192.168.1.40:1876/", tv)
             ))
         );
+        let nas = Ipv4Addr::new(10, 0, 0, 9);
         let bare = "HTTP/1.1 200 OK\nlocation: http://10.0.0.9/desc.xml\n\n";
-        assert_eq!(answer(bare), Some(("http://10.0.0.9/desc.xml".into(), "http://10.0.0.9/desc.xml".into())));
-        assert_eq!(answer("NOTIFY * HTTP/1.1\r\nLOCATION: http://10.0.0.9/\r\n\r\n"), None, "not an answer");
+        assert_eq!(
+            answer(bare, nas),
+            Some(("http://10.0.0.9/desc.xml".into(), heard("http://10.0.0.9/desc.xml", nas)))
+        );
+        assert_eq!(answer("NOTIFY * HTTP/1.1\r\nLOCATION: http://10.0.0.9/\r\n\r\n", nas), None, "not an answer");
         let router = "HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.1/\r\nST: upnp:rootdevice\r\n\r\n";
-        assert_eq!(answer(router), None, "a device that is not a renderer");
-        assert_eq!(answer("HTTP/1.1 200 OK\r\nLOCATION: https://10.0.0.9/\r\n\r\n"), None);
+        assert_eq!(answer(router, Ipv4Addr::new(10, 0, 0, 1)), None, "a device that is not a renderer");
+        assert_eq!(answer("HTTP/1.1 200 OK\r\nLOCATION: https://10.0.0.9/\r\n\r\n", nas), None);
+        assert_eq!(answer(lg, Ipv4Addr::new(192, 168, 1, 66)), None, "a description on another address");
+        let loopback = "HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1:47919/\r\n\r\n";
+        assert_eq!(answer(loopback, nas), None);
+        let named = "HTTP/1.1 200 OK\r\nLOCATION: http://localhost:47919/\r\n\r\n";
+        assert_eq!(answer(named, nas), None, "a name could lead anywhere");
+    }
+
+    #[test]
+    fn answers_count_only_from_devices_that_can_be_on_the_home_network() {
+        assert!(neighbour(Ipv4Addr::new(192, 168, 1, 40), false));
+        assert!(!neighbour(Ipv4Addr::LOCALHOST, false));
+        assert!(!neighbour(Ipv4Addr::new(127, 0, 0, 2), true));
+        assert!(!neighbour(Ipv4Addr::UNSPECIFIED, true));
+        assert!(!neighbour(Ipv4Addr::BROADCAST, true));
+        assert!(!neighbour(Ipv4Addr::new(169, 254, 7, 7), false), "link-local, when this machine has a router");
+        assert!(neighbour(Ipv4Addr::new(169, 254, 7, 7), true), "link-local, when this machine has none either");
     }
 }

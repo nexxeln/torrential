@@ -1,11 +1,13 @@
 //! A media renderer: what its device description says, what its ConnectionManager says it plays,
 //! and the SOAP actions that drive its AVTransport and RenderingControl services.
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use torrential_core::{Container, Error, ErrorCode, Playback, Plays, Tv};
 use url::Url;
 
+use super::ssdp::at;
 use super::xml;
 
 /// How long a TV may take to answer one request. A TV that is off answers none.
@@ -46,16 +48,17 @@ pub struct Description {
     pub connection: Option<Service>,
 }
 
-/// Reads a device description fetched from `location`. `None` for a device with no AVTransport,
-/// which cannot play what it is sent.
-pub fn describe(xml_text: &str, location: &Url) -> Option<Description> {
+/// Reads a device description fetched from the device at `from`. A service that takes actions
+/// anywhere else is left out, and a device left with no AVTransport is `None`, since it cannot
+/// play what it is sent.
+pub fn describe(xml_text: &str, location: &Url, from: Ipv4Addr) -> Option<Description> {
     let base =
         xml::text(xml_text, "URLBase").and_then(|base| Url::parse(&base).ok()).unwrap_or_else(|| location.clone());
     let services: Vec<Service> = xml::all(xml_text, "service")
         .into_iter()
         .filter_map(|service| {
             let kind = xml::text(service, "serviceType")?;
-            let control = base.join(&xml::text(service, "controlURL")?).ok()?;
+            let control = base.join(&xml::text(service, "controlURL")?).ok().filter(|url| at(url, from))?;
             Some(Service { kind, control })
         })
         .collect();
@@ -272,10 +275,12 @@ mod tests {
   </device>
 </root>"#;
 
+    const TV: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 40);
+
     #[test]
     fn a_description_gives_the_name_and_where_each_service_takes_actions() {
         let location = Url::parse("http://192.168.1.40:1876/desc.xml").unwrap();
-        let described = describe(LG, &location).unwrap();
+        let described = describe(LG, &location, TV).unwrap();
         assert_eq!(described.udn, "uuid:6a3e0b2c-0000-1000-8000-a823fe2b1c10");
         assert_eq!(described.name, "[LG] webOS TV OLED55C1");
         assert_eq!(described.transport.kind, "urn:schemas-upnp-org:service:AVTransport:1");
@@ -285,7 +290,21 @@ mod tests {
         let connection = described.connection.unwrap();
         assert_eq!(connection.control.as_str(), "http://192.168.1.40:1876/ConnectionManager/d2f9/control.xml");
         let speaker = LG.replace("AVTransport", "ContentDirectory");
-        assert_eq!(describe(&speaker, &location), None, "a device with no AVTransport plays nothing it is sent");
+        assert_eq!(describe(&speaker, &location, TV), None, "a device with no AVTransport plays nothing it is sent");
+    }
+
+    #[test]
+    fn a_service_that_takes_actions_on_another_address_is_left_out() {
+        let location = Url::parse("http://192.168.1.40:1876/desc.xml").unwrap();
+        let elsewhere =
+            LG.replace("http://192.168.1.40:1876/RenderingControl", "http://127.0.0.1:47919/RenderingControl");
+        let described = describe(&elsewhere, &location, TV).unwrap();
+        assert_eq!(described.rendering, None);
+        assert!(described.connection.is_some());
+        let based = LG.replace("<device>", "<URLBase>http://192.168.1.1/</URLBase><device>");
+        assert_eq!(describe(&based, &location, TV), None, "every relative control URL is on the router now");
+        let named = LG.replace("/AVTransport/d2f9", "http://tv.local:1876/AVTransport/d2f9");
+        assert_eq!(describe(&named, &location, TV), None);
     }
 
     #[test]
@@ -304,7 +323,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&plays(&silent)).unwrap(), r#"["mkv","mp4"]"#, "a TV that says nothing");
         let only_avi = sink("http-get:*:video/avi:*");
         assert_eq!(serde_json::to_string(&plays(&only_avi)).unwrap(), r#"["avi"]"#);
-        let description = describe(LG, &Url::parse("http://192.168.1.40:1876/").unwrap()).unwrap();
+        let description = describe(LG, &Url::parse("http://192.168.1.40:1876/").unwrap(), TV).unwrap();
         let renderer = Renderer::new(description, "192.168.1.40".into(), tv);
         assert_eq!(renderer.mime(Container::Mkv), "video/x-mkv", "the TV's own spelling");
         assert_eq!(renderer.mime(Container::WebM), "video/webm");
@@ -317,7 +336,7 @@ mod tests {
              http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_HP_HD_AAC",
         );
         assert_eq!(serde_json::to_string(&plays(&tv)).unwrap(), r#"["mp4","ts"]"#);
-        let description = describe(LG, &Url::parse("http://192.168.1.40:1876/").unwrap()).unwrap();
+        let description = describe(LG, &Url::parse("http://192.168.1.40:1876/").unwrap(), TV).unwrap();
         let renderer = Renderer::new(description, "192.168.1.40".into(), tv);
         assert_eq!(renderer.mime(Container::Ts), "video/mpeg", "the TV's own spelling");
         assert_eq!(renderer.mime(Container::Mp4), "video/mp4");

@@ -1,8 +1,10 @@
 //! Play on TV against a fake TV on this machine's address on the home network: it answers SSDP
 //! searches and UPnP AV actions as a TV does, keeps each action it is sent, and fetches the video
-//! it is told to play with HEAD and Range requests, as a TV does.
+//! it is told to play with HEAD and Range requests, as a TV does. A lying device stands for
+//! anything else on the network that answers a search.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -42,11 +44,20 @@ struct Screen {
     fetches: Vec<String>,
     /// The bytes of the last range it fetched.
     fetched: Vec<u8>,
+    /// Each request's method and path, oldest first.
+    requests: Vec<String>,
+    /// Actions it answers with a UPnP fault.
+    faults: Vec<&'static str>,
+    /// Actions it hangs up on without an answer.
+    hang_up: Vec<&'static str>,
+    /// The next action of this name waits this long before the TV does it.
+    slow: Option<(&'static str, Duration)>,
 }
 
 #[derive(Clone)]
 struct FakeTv {
     ssdp: SocketAddr,
+    http: SocketAddr,
     screen: Arc<Mutex<Screen>>,
 }
 
@@ -59,7 +70,8 @@ impl FakeTv {
         let http = TcpListener::bind((ip, 0)).await.unwrap();
         let location = format!("http://{}/description.xml", http.local_addr().unwrap());
         let udp = UdpSocket::bind((ip, 0)).await.unwrap();
-        let tv = Self { ssdp: udp.local_addr().unwrap(), screen: Arc::new(Mutex::new(Screen::default())) };
+        let screen = Arc::new(Mutex::new(Screen::default()));
+        let tv = Self { ssdp: udp.local_addr().unwrap(), http: http.local_addr().unwrap(), screen };
         tv.screen.lock().unwrap().transport = "NO_MEDIA_PRESENT";
         tokio::spawn(async move {
             let mut buf = [0; 2048];
@@ -106,55 +118,84 @@ impl FakeTv {
     }
 }
 
-/// Answers one request to the fake TV's HTTP server.
-async fn answer(mut stream: TcpStream, screen: Arc<Mutex<Screen>>, sink: &'static str) {
+/// One HTTP request: its head and its body, or `None` for a connection that closed first.
+async fn request(stream: &mut TcpStream) -> Option<(String, String)> {
     let mut request = Vec::new();
     let mut buf = [0; 4096];
     let head_end = loop {
-        let Ok(read) = stream.read(&mut buf).await else { return };
-        if read == 0 {
-            return;
-        }
+        let read = stream.read(&mut buf).await.ok().filter(|read| *read > 0)?;
         request.extend_from_slice(&buf[..read]);
         if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
             break end + 4;
         }
     };
     let head = String::from_utf8_lossy(&request[..head_end]).to_string();
-    let header = |name: &str| {
-        head.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            key.eq_ignore_ascii_case(name).then(|| value.trim().to_string())
-        })
-    };
-    let length: usize = header("content-length").and_then(|l| l.parse().ok()).unwrap_or(0);
+    let length: usize = header(&head, "content-length").and_then(|l| l.parse().ok()).unwrap_or(0);
     while request.len() < head_end + length {
-        let Ok(read) = stream.read(&mut buf).await else { return };
-        if read == 0 {
-            return;
-        }
+        let read = stream.read(&mut buf).await.ok().filter(|read| *read > 0)?;
         request.extend_from_slice(&buf[..read]);
     }
-    let body = String::from_utf8_lossy(&request[head_end..]).to_string();
-    let reply = if head.starts_with("GET /description.xml") {
-        DESCRIPTION.to_string()
+    Some((head, String::from_utf8_lossy(&request[head_end..]).to_string()))
+}
+
+fn header(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim().to_string())
+    })
+}
+
+/// The method and path of a request's head.
+fn asked(head: &str) -> String {
+    head.split(' ').take(2).collect::<Vec<_>>().join(" ")
+}
+
+/// Answers one request to the fake TV's HTTP server.
+async fn answer(mut stream: TcpStream, screen: Arc<Mutex<Screen>>, sink: &'static str) {
+    let Some((head, body)) = request(&mut stream).await else { return };
+    screen.lock().unwrap().requests.push(asked(&head));
+    let (status, reply) = if head.starts_with("GET /description.xml") {
+        ("200 OK", description("Fake TV", "uuid:fake-tv", "", None))
     } else {
-        let action = header("soapaction").unwrap_or_default();
+        let action = header(&head, "soapaction").unwrap_or_default();
         let action = action.trim_matches('"').rsplit('#').next().unwrap_or_default().to_string();
-        let out = act(&screen, &action, &body, sink);
+        let slow = screen.lock().unwrap().slow.take_if(|(name, _)| *name == action).map(|(_, wait)| wait);
+        if let Some(wait) = slow {
+            tokio::time::sleep(wait).await;
+        }
+        let (fault, hang_up) = {
+            let shown = screen.lock().unwrap();
+            (shown.faults.contains(&action.as_str()), shown.hang_up.contains(&action.as_str()))
+        };
+        if hang_up {
+            screen.lock().unwrap().actions.push((action, body));
+            return;
+        }
+        let out = if fault { String::new() } else { act(&screen, &action, &body, sink) };
         screen.lock().unwrap().actions.push((action.clone(), body));
-        format!(
-            "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
-             <u:{action}Response xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">{out}</u:{action}Response>\
-             </s:Body></s:Envelope>"
-        )
+        if fault {
+            ("500 Internal Server Error", FAULT.to_string())
+        } else {
+            let reply = format!(
+                "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+                 <u:{action}Response xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">{out}</u:{action}Response>\
+                 </s:Body></s:Envelope>"
+            );
+            ("200 OK", reply)
+        }
     };
     let answer = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
         reply.len()
     );
     let _ = stream.write_all(answer.as_bytes()).await;
 }
+
+/// What a TV answers to an action it cannot do now.
+const FAULT: &str = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+    <s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>\
+    <UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>501</errorCode>\
+    <errorDescription>Action Failed</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
 
 /// Does what an action asks, and returns the arguments of its answer.
 fn act(screen: &Arc<Mutex<Screen>>, action: &str, body: &str, sink: &str) -> String {
@@ -171,7 +212,9 @@ fn act(screen: &Arc<Mutex<Screen>>, action: &str, body: &str, sink: &str) -> Str
         }
         "Play" => {
             shown.transport = "PLAYING";
-            tokio::spawn(fetch(shown.uri.clone(), screen.clone()));
+            if !shown.uri.is_empty() {
+                tokio::spawn(fetch(shown.uri.clone(), screen.clone()));
+            }
         }
         "Pause" => shown.transport = "PAUSED_PLAYBACK",
         "Stop" => shown.transport = "STOPPED",
@@ -260,19 +303,132 @@ async fn fetch_one(host: &str, path: &str, method: &str, range: Option<&str>) ->
     (line, answer[split + 4..].to_vec())
 }
 
-const DESCRIPTION: &str = r#"<?xml version="1.0"?>
-<root xmlns="urn:schemas-upnp-org:device-1-0">
+/// A renderer's device description. Its services take actions at `controls` followed by their
+/// paths, relative to `base` or to where the description is.
+fn description(name: &str, udn: &str, controls: &str, base: Option<&str>) -> String {
+    let base = base.map_or(String::new(), |base| format!("<URLBase>{base}</URLBase>"));
+    format!(
+        r#"<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">{base}
   <device>
     <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
-    <friendlyName>Fake TV</friendlyName>
-    <UDN>uuid:fake-tv</UDN>
+    <friendlyName>{name}</friendlyName>
+    <UDN>{udn}</UDN>
     <serviceList>
-      <service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/AVTransport/control</controlURL></service>
-      <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>/RenderingControl/control</controlURL></service>
-      <service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType><controlURL>/ConnectionManager/control</controlURL></service>
+      <service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>{controls}/AVTransport/control</controlURL></service>
+      <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>{controls}/RenderingControl/control</controlURL></service>
+      <service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType><controlURL>{controls}/ConnectionManager/control</controlURL></service>
     </serviceList>
   </device>
-</root>"#;
+</root>"#
+    )
+}
+
+const RENDERER: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
+/// Bytes in a description or an answer that never ends, as far as the engine is concerned.
+const HUGE: usize = 50 << 20;
+
+/// A device on the home network that lies to the engine. It answers each search with every
+/// LOCATION and USN `answers` gives for its HTTP address, and serves `/redirect.xml`,
+/// `/elsewhere.xml`, and `/based.xml`, which send the engine to `elsewhere`, `/huge.xml`, and
+/// `/d/{n}.xml`, a renderer of its own for each `n`. Every action gets a huge answer.
+struct Liar {
+    ssdp: SocketAddr,
+    count: Arc<Count>,
+}
+
+#[derive(Default)]
+struct Count {
+    /// Each request's method and path.
+    requests: Mutex<Vec<String>>,
+    open: AtomicUsize,
+    most_open: AtomicUsize,
+    /// The most bytes one answer got out before the engine hung up.
+    most_sent: AtomicUsize,
+}
+
+impl Liar {
+    async fn start(
+        ip: Ipv4Addr,
+        elsewhere: SocketAddr,
+        answers: impl FnOnce(SocketAddr) -> Vec<(String, String)>,
+    ) -> Self {
+        let http = TcpListener::bind((ip, 0)).await.unwrap();
+        let udp = UdpSocket::bind((ip, 0)).await.unwrap();
+        let answers = answers(http.local_addr().unwrap());
+        let liar = Self { ssdp: udp.local_addr().unwrap(), count: Arc::default() };
+        tokio::spawn(async move {
+            let mut buf = [0; 2048];
+            while let Ok((_, from)) = udp.recv_from(&mut buf).await {
+                for (location, usn) in &answers {
+                    let datagram = format!(
+                        "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: {location}\r\nST: {RENDERER}\r\nUSN: {usn}\r\n\r\n"
+                    );
+                    let _ = udp.send_to(datagram.as_bytes(), from).await;
+                }
+            }
+        });
+        let count = liar.count.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = http.accept().await {
+                tokio::spawn(lie(stream, count.clone(), elsewhere));
+            }
+        });
+        liar
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.count.requests.lock().unwrap().clone()
+    }
+}
+
+async fn lie(mut stream: TcpStream, count: Arc<Count>, elsewhere: SocketAddr) {
+    let open = count.open.fetch_add(1, Ordering::SeqCst) + 1;
+    count.most_open.fetch_max(open, Ordering::SeqCst);
+    if let Some((head, _)) = request(&mut stream).await {
+        let asked = asked(&head);
+        count.requests.lock().unwrap().push(asked.clone());
+        let other = format!("http://{elsewhere}");
+        let (status, location, body, padding) = match asked.as_str() {
+            "GET /redirect.xml" => ("302 Found", format!("Location: {other}/description.xml\r\n"), String::new(), 0),
+            "GET /elsewhere.xml" => {
+                ("200 OK", String::new(), description("Elsewhere", "uuid:elsewhere", &other, None), 0)
+            }
+            "GET /based.xml" => ("200 OK", String::new(), description("Based", "uuid:based", "", Some(&other)), 0),
+            "GET /huge.xml" => ("200 OK", String::new(), description("Huge", "uuid:huge", "", None), HUGE),
+            flood if flood.starts_with("GET /d/") => {
+                let n = flood.trim_start_matches("GET /d/").trim_end_matches(".xml");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                ("200 OK", String::new(), description(&format!("Flood {n}"), &format!("uuid:flood-{n}"), "", None), 0)
+            }
+            action if action.starts_with("POST ") => {
+                let answer = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
+                    <s:Body><u:GetProtocolInfoResponse xmlns:u=\"urn:schemas-upnp-org:service:ConnectionManager:1\">\
+                    <Source></Source><Sink>http-get:*:video/avi:*</Sink></u:GetProtocolInfoResponse></s:Body></s:Envelope>";
+                ("200 OK", String::new(), answer.to_string(), HUGE)
+            }
+            _ => ("404 Not Found", String::new(), String::new(), 0),
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\n{location}Connection: close\r\n\r\n",
+            body.len() + padding
+        );
+        let mut sent = 0;
+        if stream.write_all(head.as_bytes()).await.is_ok() && stream.write_all(body.as_bytes()).await.is_ok() {
+            sent = body.len();
+            let spaces = vec![b' '; 64 * 1024];
+            while sent < body.len() + padding {
+                let part = spaces.len().min(body.len() + padding - sent);
+                if stream.write_all(&spaces[..part]).await.is_err() {
+                    break;
+                }
+                sent += part;
+            }
+        }
+        count.most_sent.fetch_max(sent, Ordering::SeqCst);
+    }
+    count.open.fetch_sub(1, Ordering::SeqCst);
+}
 
 fn harness(tv: &FakeTv, search: search_port::Fake) -> Harness {
     Harness::with_outside(search, Outside { tvs: Find::At(tv.ssdp), ..Outside::default() })
@@ -486,4 +642,38 @@ async fn a_title_cast_passes_over_a_source_the_tv_cannot_play_and_plays_the_next
     tv.until("a fetch of the video", |screen| !screen.fetches.is_empty()).await;
     assert!(tv.screen.lock().unwrap().fetches[0].starts_with("HEAD whole -> 200 video/x-mkv"));
     control(&h, CastAction::Stop).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_sends_the_engine_to_loopback_or_another_host_is_never_followed_there() {
+    let Some(ip) = lan() else { return };
+    // A renderer on 127.0.0.1 stands for the engine's own loopback and for another host.
+    let bystander = FakeTv::start(Ipv4Addr::LOCALHOST, SINK).await;
+    let liar = Liar::start(ip, bystander.http, |at| {
+        let bystander = bystander.http;
+        vec![
+            (
+                format!("http://{bystander}/description.xml"),
+                "uuid:loopback::urn:schemas-upnp-org:device:MediaRenderer:1".into(),
+            ),
+            (format!("http://{at}/redirect.xml"), "uuid:redirect::urn:schemas-upnp-org:device:MediaRenderer:1".into()),
+            (
+                format!("http://{at}/elsewhere.xml"),
+                "uuid:elsewhere::urn:schemas-upnp-org:device:MediaRenderer:1".into(),
+            ),
+            (format!("http://{at}/based.xml"), "uuid:based::urn:schemas-upnp-org:device:MediaRenderer:1".into()),
+        ]
+    })
+    .await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(Vec::new()),
+        Outside { tvs: Find::At(liar.ssdp), ..Outside::default() },
+    );
+
+    let found = tvs(&h, true).await.tvs;
+    assert_eq!(found, [], "no renderer whose actions go to another address");
+    assert_eq!(bystander.screen.lock().unwrap().requests, Vec::<String>::new(), "nothing reached the other address");
+    let mut asked = liar.requests();
+    asked.sort();
+    assert_eq!(asked, ["GET /based.xml", "GET /elsewhere.xml", "GET /redirect.xml"]);
 }
