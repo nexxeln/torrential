@@ -70,6 +70,7 @@ class Session {
   bool want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
                   std::uint64_t length);
   void download_in_order(rust::Slice<const std::uint8_t> id);
+  void set_download_limit(rust::Slice<const std::uint8_t> id, std::uint32_t bytes_per_second);
   void post_session_stats();
   rust::Vec<std::uint8_t> save_state() const;
   std::uint16_t listen_port() const;

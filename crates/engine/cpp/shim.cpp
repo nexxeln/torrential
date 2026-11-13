@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -341,6 +342,9 @@ AddResult Session::add_torrent(AddParams const& p) {
   }
 
   atp.save_path = std::string(p.save_path);
+  // Resume data carries the download limit a torrent had when it was saved.
+  // A limit lasts only as long as the session that set it.
+  atp.download_limit = -1;
   atp.flags &= ~(lt::torrent_flags::auto_managed | lt::torrent_flags::duplicate_is_error |
                  lt::torrent_flags::paused | lt::torrent_flags::default_dont_download);
   if (p.paused) atp.flags |= lt::torrent_flags::paused;
@@ -626,6 +630,12 @@ rust::Vec<PieceCounts> Session::written_pieces(rust::Slice<const std::uint8_t> i
 
 void Session::download_in_order(rust::Slice<const std::uint8_t> id) {
   find(id).set_flags(lt::torrent_flags::sequential_download);
+}
+
+void Session::set_download_limit(rust::Slice<const std::uint8_t> id, std::uint32_t bytes_per_second) {
+  // libtorrent takes an int, and 0 lifts the limit.
+  std::uint32_t const most = std::numeric_limits<int>::max();
+  find(id).set_download_limit(static_cast<int>(std::min(bytes_per_second, most)));
 }
 
 void Session::post_session_stats() { session_.post_session_stats(); }
