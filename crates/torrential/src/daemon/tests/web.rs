@@ -1373,3 +1373,13 @@ async fn another_device_ranks_for_the_screen_it_reports_and_config_yaml_only_for
     play_from(&h, "192.168.1.20", json!({ "video": "tt0063350", "viewer": viewer })).await;
     assert_eq!(played_for(&h), on_phone);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tab_opened_before_an_update_ranks_for_what_it_decodes_on_this_macs_screen() {
+    let hevc = Preferences { playback: Some(Playback::Hevc), ..Preferences::default() };
+    let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: hevc, ..Outside::default() });
+    let mac = (json!({ "value": "1080p", "source": "detected" }), json!({ "value": "h264", "source": "viewer" }));
+    assert_eq!(listed_for(&h, "127.0.0.1", "/api/title/sources?video=tt0063350&playback=h264").await, mac);
+    play_from(&h, "127.0.0.1", json!({ "video": "tt0063350", "playback": "h264" })).await;
+    assert_eq!(played_for(&h), mac);
+}

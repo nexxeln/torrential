@@ -142,20 +142,21 @@ fn listed_for(request: &Request, here: bool) -> Result<Player, Error> {
         ((Some(width), Some(height), Some(scale)), Some(playback)) => {
             Some(Measured { width, height, scale, playback }.viewer()?)
         }
-        ((None, None, None), None) => None,
+        ((None, None, None), _) => None,
         _ => return Err(Error::new(ErrorCode::Usage, "a viewer needs all of width, height, scale, and playback")),
     };
-    Ok(player(viewer, here))
+    Ok(player(viewer, playback, here))
 }
 
 /// Who a web play or source listing ranks for. Every browser decodes what it reports. A browser
-/// on this machine shows this machine's display, so only another device's screen counts. A
-/// request that reports neither ranks as `torrential play` does.
-fn player(viewer: Option<Viewer>, here: bool) -> Player {
-    match viewer {
-        Some(viewer) if !here => Player::Device(viewer),
-        Some(Viewer { playback, .. }) => Player::Browser { playback },
-        None => Player::External,
+/// on this machine shows this machine's display, so only another device's screen counts. A tab
+/// opened before browsers reported their screen reports only what it decodes. A request that
+/// reports neither ranks as `torrential play` does.
+fn player(viewer: Option<Viewer>, playback: Option<Playback>, here: bool) -> Player {
+    match (viewer, playback) {
+        (Some(viewer), _) if !here => Player::Device(viewer),
+        (Some(Viewer { playback, .. }), _) | (None, Some(playback)) => Player::Browser { playback },
+        (None, None) => Player::External,
     }
 }
 
@@ -175,6 +176,8 @@ struct Play {
     video: VideoRef,
     /// The screen that pressed play and what its browser decodes.
     viewer: Option<Measured>,
+    /// What the browser decodes, from a tab opened before browsers reported their screen.
+    playback: Option<Playback>,
     /// Play only this release.
     source: Option<ReleaseId>,
     /// The download that stalled.
@@ -186,8 +189,8 @@ struct Play {
 pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
     let here = from_this_machine(conn);
-    let ask = super::body::<Play>(request).and_then(|Play { video, viewer, source, replace }| {
-        let player = player(viewer.map(Measured::viewer).transpose()?, here);
+    let ask = super::body::<Play>(request).and_then(|Play { video, viewer, playback, source, replace }| {
+        let player = player(viewer.map(Measured::viewer).transpose()?, playback, here);
         Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, finish: Finish::Stream })
     });
     let ask = match ask {
