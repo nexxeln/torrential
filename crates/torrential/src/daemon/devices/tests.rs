@@ -200,7 +200,7 @@ async fn a_grant_serves_its_one_path_until_it_is_dropped() {
         format!("/cast/{token}/Big%20Buck%20Bunny.mp4/"),
         format!("/cast/{token}/../Big%20Buck%20Bunny.mp4"),
         format!("/cast/{}/Big%20Buck%20Bunny.mp4", token.to_uppercase()),
-        format!("/cast/{}0/Big%20Buck%20Bunny.mp4", &token[..63]),
+        format!("/cast/{}{}/Big%20Buck%20Bunny.mp4", &token[..63], if token.ends_with('0') { '1' } else { '0' }),
         format!("/{}/2/Big%20Buck%20Bunny.mp4", film.to_hex()),
     ] {
         assert_eq!(home.devices.granted(&other), None, "{other}");
