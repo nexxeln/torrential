@@ -21,10 +21,12 @@ clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
 ctrlc = "3.5"
 dirs = "7"
 flate2 = "1"
+getrandom = "0.3"
 globset = "0.4"
 httparse = "1.10"
 indicatif = "0.18"
 libc = "0.2"
+qrcodegen = "1.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,3 +41,4 @@ url = "2.5"
 assert_cmd = "2.2"
 insta = { version = "1.49", features = ["json"] }
 tempfile = "3.27"
+tokio = { version = "1.53", features = ["test-util"] }

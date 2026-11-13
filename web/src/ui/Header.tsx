@@ -1,12 +1,14 @@
 import { isActive, useJobs } from "../lib/jobs";
+import { useOnMac } from "../lib/mac";
 import { Link } from "../router";
 
 /** The engine listens on loopback for the Mac it runs on. A phone or TV reaches it by the Mac's address on the home network. */
 const ON_MAC = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
 
 /** `current` is the page of the main navigation this one is, if any. */
-export function Header({ current }: { current: "search" | "downloads" | null }) {
+export function Header({ current }: { current: "search" | "downloads" | "devices" | null }) {
   const { jobs, link } = useJobs();
+  const onMac = useOnMac();
   const active = jobs.filter(isActive).length;
   const item =
     "rounded-lg px-2.5 py-1.5 text-sm font-medium text-soft hover:bg-white/5 hover:text-ink aria-[current=page]:text-ink pointer-coarse:py-3";
@@ -37,6 +39,11 @@ export function Header({ current }: { current: "search" | "downloads" | null }) 
           Downloads
           {active > 0 && <span className="text-action tabular-nums"> {active}</span>}
         </Link>
+        {onMac && (
+          <Link href="/devices" aria-current={current === "devices" ? "page" : undefined} className={item}>
+            Devices
+          </Link>
+        )}
       </nav>
     </header>
   );

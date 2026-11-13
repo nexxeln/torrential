@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { DevicesPage } from "./devices/DevicesPage";
 import { DownloadsPage } from "./downloads/DownloadsPage";
 import { Home } from "./home/Home";
 import "./index.css";
@@ -27,6 +28,8 @@ function App() {
       return <Player key={`${route.ref}:${route.file}`} target={route.ref} file={route.file} />;
     case "downloads":
       return <DownloadsPage />;
+    case "devices":
+      return <DevicesPage />;
     case "missing":
       return (
         <main className="mx-auto flex min-h-dvh max-w-4xl flex-col items-start justify-center gap-2 px-page">

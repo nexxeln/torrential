@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#14120f">
+<link rel="icon" href="data:,">
+<title>Pair with torrential</title>
+<style>
+  :root { color-scheme: dark; }
+  html { background: #14120f; color: #bdb5a6; font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+  main { width: 100%; max-width: 26rem; }
+  h1 { margin: 0 0 8px; font-size: 1.125rem; font-weight: 600; color: #f0e9dc; }
+  p { margin: 0; }
+  form { margin-top: 24px; display: flex; flex-direction: column; gap: 12px; }
+  label { font-size: 0.875rem; color: #837c70; }
+  input { font: inherit; font-size: 2rem; letter-spacing: 0.3em; text-align: center; color: #f0e9dc; background: #1d1a16; border: 1px solid #3b3730; border-radius: 12px; padding: 12px; width: 100%; box-sizing: border-box; }
+  button { font: inherit; font-weight: 500; color: #14120f; background: #a6c79a; border: 0; border-radius: 12px; padding: 14px; cursor: pointer; }
+  button[disabled] { opacity: 0.5; }
+  :focus-visible { outline: 2px solid #a6c79a; outline-offset: 2px; }
+  #status { min-height: 1.5em; font-size: 0.875rem; }
+  #status.error { color: #e2806e; }
+</style>
+</head>
+<body>
+<main>
+  <h1>torrential</h1>
+  <p>{{lead}}</p>
+  <form id="pair" novalidate>
+    <label for="code">Code</label>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" autofocus>
+    <button id="go" type="submit">Pair</button>
+    <p id="status" role="status"></p>
+  </form>
+</main>
+<script>
+(function () {
+  var form = document.getElementById("pair");
+  var input = document.getElementById("code");
+  var go = document.getElementById("go");
+  var status = document.getElementById("status");
+
+  function sentence(text) {
+    text = String(text).trim();
+    text = text.charAt(0).toUpperCase() + text.slice(1);
+    return /[.?]$/.test(text) ? text : text + ".";
+  }
+
+  function show(text, error) {
+    status.textContent = text;
+    status.className = error ? "error" : "";
+  }
+
+  function pair() {
+    var code = input.value.replace(/\D/g, "");
+    if (code.length !== 6) {
+      show("The code has six digits, so enter all six.", true);
+      input.focus();
+      return;
+    }
+    go.disabled = true;
+    show("Pairing", false);
+    // XMLHttpRequest, because some TV browsers have no fetch.
+    var request = new XMLHttpRequest();
+    request.open("POST", "/api/pair");
+    request.setRequestHeader("Content-Type", "application/json");
+    request.onload = function () {
+      if (request.status === 200) {
+        show("Paired", false);
+        location.replace("/");
+        return;
+      }
+      var message = "the Mac refused the code, so try again";
+      try {
+        message = JSON.parse(request.responseText).error.message;
+      } catch (e) {}
+      go.disabled = false;
+      show(sentence(message), true);
+      input.select();
+    };
+    request.onerror = function () {
+      go.disabled = false;
+      show("Cannot reach the Mac, so check that it is awake and on this network.", true);
+    };
+    request.send(JSON.stringify({ code: code }));
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    pair();
+  });
+
+  // The QR code on the Mac carries the code after #, which never reaches the server.
+  var linked = location.hash.replace(/\D/g, "");
+  if (linked.length === 6) {
+    history.replaceState(null, "", location.pathname);
+    input.value = linked;
+    pair();
+  }
+})();
+</script>
+</body>
+</html>

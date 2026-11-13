@@ -84,6 +84,15 @@ CREATE TABLE library (
     saved_at INTEGER NOT NULL
 ) STRICT;
 "#,
+    r#"
+CREATE TABLE devices (
+    id TEXT PRIMARY KEY,
+    token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+    name TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    seen_at INTEGER NOT NULL
+) STRICT;
+"#,
 ];
 
 #[derive(Clone, PartialEq, Debug)]
