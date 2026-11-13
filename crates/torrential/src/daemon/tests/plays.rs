@@ -593,3 +593,22 @@ async fn rm_delete_keeps_a_file_that_a_finished_download_the_engine_has_not_let_
     assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
     gate.open();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_on_a_play_again_notes_that_it_is_the_persons_when_the_first_get_could_not() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let mine = torrent(0x63, "mine", &[("mine.mp4", MIB)]);
+    h.play_web(&mine).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let database = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    let refuse =
+        "CREATE TRIGGER refuse BEFORE UPDATE OF by_hand ON plays BEGIN SELECT RAISE(ABORT, 'the disk is failing'); END";
+    database.execute_batch(refuse).unwrap();
+    assert!(h.get(Target::Prefix(prefix(&mine)), &[]).await.is_err());
+    database.execute_batch("DROP TRIGGER refuse").unwrap();
+
+    h.get(Target::Prefix(prefix(&mine)), &[]).await.unwrap();
+    let noted: bool = database.query_row("SELECT by_hand FROM plays", [], |row| row.get(0)).unwrap();
+    assert!(noted, "the next start finds the play the person's");
+}

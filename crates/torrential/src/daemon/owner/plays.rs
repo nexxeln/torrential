@@ -170,13 +170,11 @@ impl Owner {
 
     /// Makes a play the person's, as one they started by hand, so it never leaves the plays
     /// folder or stops by itself. It is theirs from now on even when that cannot be put on
-    /// record, until the engine stops.
+    /// record, until the engine stops. It is put on record each time, so a record that failed
+    /// before is made now.
     pub(super) fn keep_play(&mut self, id: TorrentId) -> Result<(), Error> {
         let Some(job) = self.jobs.get_mut(&id) else { return Ok(()) };
         let Home::Plays(play) = &mut job.record.home else { return Ok(()) };
-        if play.by_hand {
-            return Ok(());
-        }
         play.by_hand = true;
         self.store.by_hand(id).map_err(|error| {
             let message = format!(
