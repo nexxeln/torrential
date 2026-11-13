@@ -26,6 +26,7 @@ use plays::{Destination, Lease, Plays, Tending};
 
 pub mod deleter;
 pub mod plays;
+pub mod trash;
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -38,6 +39,8 @@ pub struct OwnerConfig {
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
     pub plays: Plays,
+    /// Where the files of a download in a folder the person chose go when they delete them.
+    pub trash: trash::Trash,
     /// How long a play leaving the plays folder waits before it goes: no time, except in a test
     /// that does something in between.
     pub deletion_pause: Duration,
@@ -325,7 +328,7 @@ impl Owner {
         config: OwnerConfig,
     ) -> Result<Self, Error> {
         // Opened first, for a plays folder other than the one used before changes what the plays are.
-        let deleter = Deleter::open(&config.plays.root, &mut store)?;
+        let deleter = Deleter::open(&config.plays.root, config.trash.clone(), &mut store)?;
         let mut jobs = BTreeMap::new();
         for stored in store.jobs()? {
             let metainfo = match &stored.metainfo {

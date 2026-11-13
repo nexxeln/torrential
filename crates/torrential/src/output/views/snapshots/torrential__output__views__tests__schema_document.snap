@@ -342,7 +342,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "rm",
-      "about": "Remove downloads from the list. A play's files go with it, and other files stay unless you add --delete",
+      "about": "Remove downloads from the list. A play's files go with it, and other files stay unless --delete moves them to the Trash",
       "arguments": [
         {
           "name": "ID",
@@ -354,7 +354,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--delete",
-          "help": "Delete the files of a download in your own folder too",
+          "help": "Move the files of a download in your own folder to the Trash too",
           "takes_value": false,
           "repeatable": false
         }

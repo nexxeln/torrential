@@ -73,7 +73,7 @@ pub enum Command {
     Pause(RefsArgs),
     /// Resume downloads, or retry failed ones
     Resume(ResumeArgs),
-    /// Remove downloads from the list. A play's files go with it, and other files stay unless you add --delete
+    /// Remove downloads from the list. A play's files go with it, and other files stay unless --delete moves them to the Trash
     #[command(after_help = "Examples:\n  torrential rm 9b5212\n  torrential rm 9b5212 --delete --json")]
     Rm(RmArgs),
     /// Re-hash the data on disk and report damaged pieces
@@ -291,7 +291,7 @@ pub struct RmArgs {
     /// Download IDs from torrential status
     #[arg(value_name = "ID", required = true, num_args = 1.., add = ArgValueCandidates::new(complete_download_ids))]
     pub references: Vec<String>,
-    /// Delete the files of a download in your own folder too
+    /// Move the files of a download in your own folder to the Trash too
     #[arg(long)]
     pub delete: bool,
 }

@@ -300,15 +300,18 @@ pub struct Change {
     pub result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
-    /// What `rm` deleted from disk.
+    /// What `rm` deleted from disk: a play's folder.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<PathBuf>,
+    /// What `rm --delete` moved to the Trash: the files of a download in a folder the person chose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trashed: Vec<PathBuf>,
     /// What `rm` was to delete and left.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<Kept>,
 }
 
-/// A file or folder `rm` was to delete and left, and why.
+/// A file or folder `rm` was to delete or move to the Trash and left, and why.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Kept {
     pub path: PathBuf,

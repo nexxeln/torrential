@@ -85,7 +85,7 @@ async fn get_and_a_play_by_hand_download_into_the_downloads_folder() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rm_deletes_a_plays_folder_and_the_files_of_a_download_in_the_persons_folder_only_when_asked() {
+async fn rm_deletes_a_plays_folder_and_trashes_the_files_of_a_download_in_the_persons_folder_only_when_asked() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
     let (film, iso) = (torrent(0xc1, "film", &[("film.mp4", MIB)]), torrent(0xc2, "iso", &[("disc.iso", MIB)]));
@@ -106,7 +106,8 @@ async fn rm_deletes_a_plays_folder_and_the_files_of_a_download_in_the_persons_fo
     h.get(h.torrent_file(&iso), &[]).await.unwrap();
     h.until("the disc is done again", |jobs| jobs[0].status.name() == "done").await;
     let removed = h.rm(vec![prefix(&iso)], true).await;
-    assert_eq!(serde_json::to_value(&removed[0]).unwrap()["deleted"], json!([disc]));
+    let json = serde_json::to_value(&removed[0]).unwrap();
+    assert_eq!((&json["deleted"], &json["trashed"]), (&json!(null), &json!([disc])));
     assert!(!h.downloads().join("iso").exists(), "the folder it leaves empty goes too");
 }
 
@@ -451,4 +452,59 @@ async fn a_new_play_on_a_full_disk_starts_once_older_plays_make_room() {
     h.play_web(&torrent(0xb2, "newer", &[("newer.mp4", 2 * GIB)])).await;
     assert_eq!(names(&h).await.last().map(String::as_str), Some("newer"));
     h.until("the older play has left", |jobs| jobs.len() == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_trash() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let set = torrent(0xc4, "set", &[("a.mkv", MIB), ("docs/b.txt", 2)]);
+    h.get(h.torrent_file(&set), &[]).await.unwrap();
+    let (a, b) = (h.downloads().join("set/a.mkv"), h.downloads().join("set/docs/b.txt"));
+    let film = written(&a, MIB);
+    written(&b, 2);
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+
+    let removed = h.rm(vec![prefix(&set)], true).await;
+    assert_eq!(removed[0].trashed, [a.clone(), b.clone()]);
+    let trash = h.dir.path().join("trash");
+    assert_eq!((a.exists(), b.exists(), h.downloads().join("set").exists()), (false, false, false));
+    assert_eq!(std::fs::read(trash.join("files/a.mkv")).unwrap(), film);
+    let info = std::fs::read_to_string(trash.join("info/b.txt.trashinfo")).unwrap();
+    let lines: Vec<&str> = info.lines().collect();
+    assert_eq!(lines[..2], ["[Trash Info]".to_string(), format!("Path={}", b.display())]);
+    let date = lines[2].strip_prefix("DeletionDate=").unwrap();
+    assert_eq!((date.len(), &date[4..5], &date[10..11]), (19, "-", "T"), "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_put_in_place_of_one_rm_delete_was_asked_for_stays_and_does_not_go_to_the_trash() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    let iso = torrent(0x42, "iso", &[("disc.iso", 4 * GIB), ("notes.txt", 2)]);
+    h.swarm.publish(iso.clone());
+    h.get_into(&iso, h.downloads()).await.unwrap();
+    let (disc, notes) = (h.downloads().join("iso/disc.iso"), h.downloads().join("iso/notes.txt"));
+    written(&disc, MIB);
+    written(&notes, 2);
+    h.until("it downloads", |jobs| jobs[0].status.name() == "downloading").await;
+    gate.close();
+    h.rm(vec![prefix(&iso)], true).await;
+    gate.until_held(1).await;
+
+    let theirs = h.downloads().join("theirs.iso");
+    std::fs::write(&theirs, "the person's own file").unwrap();
+    std::fs::rename(&theirs, &disc).unwrap();
+    gate.open();
+    let trash = h.dir.path().join("trash");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while notes.exists() {
+        assert!(std::time::Instant::now() < deadline, "the file not replaced goes");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&disc).unwrap(), "the person's own file");
+    assert_eq!((trash.join("files/notes.txt").exists(), trash.join("files/disc.iso").exists()), (true, false));
 }

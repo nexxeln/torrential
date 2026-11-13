@@ -7,6 +7,7 @@ import { Link, watchPath } from "../router";
 import { Button } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Meter } from "../ui/Meter";
+import { trashed } from "./trashed";
 
 const STATES: Record<Job["state"], string> = {
   queued: "Queued",
@@ -37,7 +38,7 @@ function facts(job: Job): string {
 
 type Action = "pause" | "resume" | "remove";
 
-function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void }) {
+function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiError) => void; onTrashed: (said: string) => void }) {
   const [busy, setBusy] = useState<Action | null>(null);
   // A download in the person's own folder asks what becomes of its files before it goes.
   const [asking, setAsking] = useState(false);
@@ -49,6 +50,7 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
     setBusy(action);
     setAsking(false);
     change(action, [job.id], deleteFiles)
+      .then(([removed]) => deleteFiles && removed && onTrashed(trashed(name.title, removed)))
       .catch((thrown) => onFailed(asApiError(thrown)))
       .finally(() => setBusy(null));
   };
@@ -79,7 +81,7 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
             <Button variant="quiet" disabled={busy !== null} onClick={() => act("remove")}>
               Keep files
             </Button>
-            <Button variant="quiet" disabled={busy !== null} onClick={() => act("remove", true)}>
+            <Button variant="quiet" disabled={busy !== null} title="Moves its files to the Trash." onClick={() => act("remove", true)}>
               Delete files
             </Button>
             <Button variant="quiet" disabled={busy !== null} onClick={() => setAsking(false)}>
@@ -107,7 +109,7 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
             <Button
               variant="quiet"
               disabled={busy !== null}
-              title={job.place === "plays" ? "Takes it off this list and deletes its files." : "Takes it off this list. Asks whether to delete its files."}
+              title={job.place === "plays" ? "Takes it off this list and deletes its files." : "Takes it off this list. Asks whether to move its files to the Trash."}
               onClick={() => (job.place === "plays" ? act("remove") : setAsking(true))}
             >
               Remove
@@ -122,6 +124,7 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
 export function DownloadsPage() {
   const { jobs, link } = useJobs();
   const [problem, setProblem] = useState<ApiError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     document.title = "Downloads · torrential";
   }, []);
@@ -140,10 +143,15 @@ export function DownloadsPage() {
             {problem.hint && <span className="text-pencil"> {sentence(problem.hint)}</span>}
           </p>
         )}
+        {notice && (
+          <p role="status" className="text-sm text-pretty text-pencil">
+            {notice}
+          </p>
+        )}
         {jobs.length > 0 ? (
           <ul role="list" className="divide-y divide-white/8">
             {jobs.map((job) => (
-              <Row key={job.id} job={job} onFailed={setProblem} />
+              <Row key={job.id} job={job} onFailed={setProblem} onTrashed={setNotice} />
             ))}
           </ul>
         ) : (

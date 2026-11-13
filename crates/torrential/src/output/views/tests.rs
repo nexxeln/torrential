@@ -542,9 +542,10 @@ fn pause_resume_rm_and_verify() {
             ChangeCommand::Remove,
             vec![
                 Change {
+                    trashed: vec![PathBuf::from("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso")],
                     kept: vec![Kept {
-                        path: "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso".into(),
-                        reason: "it is not a regular file".into(),
+                        path: "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso.sig".into(),
+                        reason: "another download uses it".into(),
                     }],
                     ..change(
                         ARCH,
@@ -565,6 +566,7 @@ fn pause_resume_rm_and_verify() {
                         ),
                     )
                 },
+                change("d4d4d4", "pioneer_one", "removed", Some("/Users/ada/Downloads/torrential/pioneer_one")),
             ],
         ),
         (ChangeCommand::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", "checking", None)]),

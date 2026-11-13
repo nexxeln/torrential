@@ -55,8 +55,9 @@ ID	RESULT	PATH
 9b5212	removed	/Users/ada/isos/archlinux-2026.10.01-x86_64.iso
 c32cdd	already_removed	/Users/ada/datasets/stackexchange
 6bc1af	removed	/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0/night_of_the_living_dead_dvd
-# files of 6bc1af were deleted, and files of 9b5212 were kept
-# kept /Users/ada/isos/archlinux-2026.10.01-x86_64.iso: it is not a regular file
+d4d4d4	removed	/Users/ada/Downloads/torrential/pioneer_one
+# files of 9b5212 were moved to the Trash, files of 6bc1af were deleted, and files of d4d4d4 were kept
+# kept /Users/ada/isos/archlinux-2026.10.01-x86_64.iso.sig: another download uses it
 
 --- json
 {
@@ -68,10 +69,13 @@ c32cdd	already_removed	/Users/ada/datasets/stackexchange
       "name": "archlinux-2026.10.01-x86_64.iso",
       "result": "removed",
       "path": "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso",
+      "trashed": [
+        "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"
+      ],
       "kept": [
         {
-          "path": "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso",
-          "reason": "it is not a regular file"
+          "path": "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso.sig",
+          "reason": "another download uses it"
         }
       ]
     },
@@ -89,6 +93,12 @@ c32cdd	already_removed	/Users/ada/datasets/stackexchange
       "deleted": [
         "/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0"
       ]
+    },
+    {
+      "id": "d4d4d40000000000000000000000000000000000",
+      "name": "pioneer_one",
+      "result": "removed",
+      "path": "/Users/ada/Downloads/torrential/pioneer_one"
     }
   ],
   "next": null

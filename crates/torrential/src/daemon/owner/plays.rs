@@ -269,6 +269,7 @@ impl Owner {
                         && let Some(change) = removal.changes.iter_mut().find(|change| change.id == id)
                     {
                         change.deleted.extend(done.deleted.iter().cloned());
+                        change.trashed.extend(done.trashed.iter().cloned());
                         let kept = done.kept.iter().map(|(path, why)| Kept { path: path.clone(), reason: why.clone() });
                         change.kept.extend(kept);
                     }
@@ -289,7 +290,7 @@ impl Owner {
                 let id = job.to_hex();
                 let Some(change) = removal.changes.iter_mut().find(|change| change.id == id) else { continue };
                 let Some(place) = self.tending.deleter.waiting_in(*job) else { continue };
-                let reason = "the engine still has it open, so it is deleted once the engine lets go";
+                let reason = "the engine still has it open, so it goes once the engine lets go";
                 change.kept.push(Kept { path: place.to_path_buf(), reason: reason.into() });
             }
             let _ = removal.reply.send(Ok(removal.changes));

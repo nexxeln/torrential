@@ -21,7 +21,7 @@ mod tests;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -144,6 +144,24 @@ fn test_peers(env: &Env) -> Result<Vec<std::net::SocketAddr>, Error> {
 
 fn fake(env: &Env) -> bool {
     env.var("TORRENTIAL_TEST_ENGINE") == Some("fake")
+}
+
+/// An engine a test started, with a fake engine or on the loopback network. Only it reads the
+/// settings that let a test reach into what the engine does.
+fn test_engine(env: &Env) -> bool {
+    env.var("TORRENTIAL_TEST_ENGINE").is_some() || env.var("TORRENTIAL_TEST_NETWORK").is_some()
+}
+
+/// Where the files of a download in a folder the person chose go when they delete them. A test
+/// engine never uses the person's Trash: `TORRENTIAL_TEST_TRASH` names its own, or it keeps one
+/// beside its state.
+fn trash(env: &Env, paths: &Paths) -> owner::trash::Trash {
+    if test_engine(env) {
+        let dir = env.var("TORRENTIAL_TEST_TRASH").map_or_else(|| paths.state.join("trash"), PathBuf::from);
+        return owner::trash::Trash::At(dir);
+    }
+    let home = || Path::new(env.var("HOME").unwrap_or("/")).join(".local/share");
+    owner::trash::Trash::system(&env.var("XDG_DATA_HOME").map_or_else(home, PathBuf::from))
 }
 
 pub struct Running {
@@ -279,6 +297,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
                 .and_then(torrential_core::units::parse_duration)
                 .unwrap_or(owner::plays::IDLE_AFTER),
         },
+        trash: trash(env, paths),
         deletion_pause: env
             .var("TORRENTIAL_TEST_DELETION_PAUSE")
             .and_then(torrential_core::units::parse_duration)

@@ -14,6 +14,7 @@ use super::engine_port::{
 };
 use super::owner::OwnerConfig;
 use super::owner::plays::{IDLE_AFTER, Plays};
+use super::owner::trash::Trash;
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -81,6 +82,7 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
         plays: Plays { root: dir.join("plays"), max: outside.plays_max, idle_after: outside.idle_after },
+        trash: Trash::At(dir.join("trash")),
         deletion_pause: Duration::ZERO,
     }
 }

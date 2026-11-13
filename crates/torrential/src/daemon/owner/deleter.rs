@@ -1,8 +1,8 @@
-//! The one place torrential deletes what a download wrote. A play's folder is deleted through
-//! the plays folder as the engine opened it when it started. The files of a download in a
-//! folder the person chose are deleted through the folders they are in, one folder at a time.
-//! Nothing here deletes by a path, so a link, or a folder put in place of another, cannot send
-//! a deletion anywhere else.
+//! The one place torrential takes away what a download wrote. A play's folder is deleted
+//! through the plays folder as the engine opened it when it started. The files of a download in
+//! a folder the person chose go to the Trash, and only while each is still the file it was when
+//! the person asked. Nothing here deletes by a path, so a link, or a folder put in place of
+//! another, cannot send a deletion anywhere else.
 
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
@@ -17,6 +17,7 @@ use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::log;
 use super::super::store::{Store, Tombstone};
+use super::trash::Trash;
 
 /// Which file or folder something is, whatever path reaches it. A folder moved away keeps its
 /// identity. A link, or another folder, put in its place has another.
@@ -111,8 +112,7 @@ impl Root {
 pub enum Doom {
     /// A play's folder, and everything in it.
     Play { dir: PathBuf, bytes: u64 },
-    /// The files a download wrote into a folder the person chose, as paths inside it, and the
-    /// folders below it that they leave empty.
+    /// The files a download wrote into a folder the person chose, as paths inside it.
     Files { dir: PathBuf, files: Vec<PathBuf> },
 }
 
@@ -120,8 +120,16 @@ pub enum Doom {
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Report {
     pub deleted: Vec<PathBuf>,
+    pub trashed: Vec<PathBuf>,
     /// What it left, and why.
     pub kept: Vec<(PathBuf, String)>,
+}
+
+/// A file as it was when the person asked to delete it: the folder it is in, and the file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Pin {
+    folder: Identity,
+    file: Identity,
 }
 
 /// What the downloads on the list, and those the engine has yet to let go of, write: every
@@ -193,9 +201,9 @@ enum What {
     /// A play's folder, on record from the download's removal on. `None` when the download's
     /// folder is not one directly in the plays folder.
     Play { key: Option<i64>, name: Option<PlayName>, dir: PathBuf, bytes: u64 },
-    /// Files in a folder the person chose. Only in memory, so a stop before they go leaves
-    /// whatever is at their names then alone.
-    Files { dir: PathBuf, files: Vec<PathBuf> },
+    /// Files in a folder the person chose, each as it was when they asked, or why it stays. Only
+    /// in memory, so a stop before they go leaves them where they are.
+    Files { dir: PathBuf, files: Vec<(PathBuf, Result<Pin, String>)> },
 }
 
 /// How a run of one deletion ended.
@@ -211,6 +219,7 @@ enum Outcome {
 /// and keeps what is not done on record until it is.
 pub struct Deleter {
     plays: Result<Root, String>,
+    trash: Trash,
     pending: Vec<Pending>,
 }
 
@@ -218,7 +227,7 @@ impl Deleter {
     /// Opens the plays folder at `plays` and picks up the deletions a stop cut short. When the
     /// folder there is not the one the engine used before, the plays it had are left as they
     /// are, as downloads in a folder the person chose.
-    pub fn open(plays: &Path, store: &mut Store) -> Result<Deleter, Error> {
+    pub fn open(plays: &Path, trash: Trash, store: &mut Store) -> Result<Deleter, Error> {
         let root = Root::open(plays);
         match &root {
             Ok(root) => match store.plays_folder()? {
@@ -244,7 +253,7 @@ impl Deleter {
                 Pending { job: recorded.job, what, ran: true, failed: None }
             })
             .collect();
-        Ok(Deleter { plays: root, pending })
+        Ok(Deleter { plays: root, trash, pending })
     }
 
     fn root(&self) -> Result<&Root, String> {
@@ -317,7 +326,7 @@ impl Deleter {
             }
             Some(Doom::Files { dir, files }) => {
                 store.remove(tombstone, None)?;
-                What::Files { dir, files }
+                What::Files { files: pin(&dir, files), dir }
             }
         };
         self.pending.push(Pending { job, what, ran: false, failed: None });
@@ -395,10 +404,10 @@ impl Deleter {
         match what {
             What::Play { name: None, dir, .. } => {
                 let why = "it is not a folder directly in the plays folder".to_string();
-                Outcome::Refused(Report { deleted: vec![], kept: vec![(dir.clone(), why)] })
+                Outcome::Refused(Report { kept: vec![(dir.clone(), why)], ..Report::default() })
             }
             What::Play { name: Some(name), dir, bytes, .. } => {
-                let kept = |why: String| Report { deleted: vec![], kept: vec![(dir.clone(), why)] };
+                let kept = |why: String| Report { kept: vec![(dir.clone(), why)], ..Report::default() };
                 let root = match self.root() {
                     Ok(root) => root,
                     Err(why) => return Outcome::Again(kept(why)),
@@ -426,7 +435,7 @@ impl Deleter {
                 drop(folder);
                 if left.why.is_none() && rustix::fs::unlinkat(&root.fd, name.as_str(), AtFlags::REMOVEDIR).is_ok() {
                     *bytes = 0;
-                    return Outcome::Done(Report { deleted: vec![dir.clone()], kept: vec![] });
+                    return Outcome::Done(Report { deleted: vec![dir.clone()], ..Report::default() });
                 }
                 *bytes = left.bytes;
                 let why = left.why.unwrap_or("it could not be deleted");
@@ -437,7 +446,7 @@ impl Deleter {
                 let in_use = match in_use {
                     Ok(in_use) => in_use,
                     Err(why) => {
-                        report.kept = files.iter().map(|file| (dir.join(file), why.to_string())).collect();
+                        report.kept = files.iter().map(|(file, _)| (dir.join(file), why.to_string())).collect();
                         return Outcome::Again(report);
                     }
                 };
@@ -447,12 +456,19 @@ impl Deleter {
                     Err(Errno::NOENT) => return Outcome::Done(report),
                     Err(e) => {
                         let why = format!("the download's folder cannot be opened: {}", io::Error::from(e));
-                        report.kept = files.iter().map(|file| (dir.join(file), why.clone())).collect();
+                        report.kept = files.iter().map(|(file, _)| (dir.join(file), why.clone())).collect();
                         return Outcome::Refused(report);
                     }
                 };
-                for file in files.iter() {
+                for (file, pinned) in files.iter() {
                     let path = dir.join(file);
+                    let pin = match pinned {
+                        Ok(pin) => pin,
+                        Err(why) => {
+                            report.kept.push((path, why.clone()));
+                            continue;
+                        }
+                    };
                     let (parent, last) = match open_parent(&folder, file) {
                         Ok(Some(found)) => found,
                         Ok(None) => continue,
@@ -461,34 +477,65 @@ impl Deleter {
                             continue;
                         }
                     };
+                    if !rustix::fs::fstat(&parent).is_ok_and(|stat| Identity::of(&stat) == pin.folder) {
+                        let why = "the folder it is in was moved or replaced after you asked to delete it";
+                        report.kept.push((path, why.into()));
+                        continue;
+                    }
                     match rustix::fs::statat(&parent, last, AtFlags::SYMLINK_NOFOLLOW) {
                         Err(Errno::NOENT) => continue,
-                        Err(e) => {
-                            report.kept.push((path, format!("it cannot be read: {}", io::Error::from(e))));
-                            continue;
-                        }
-                        Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile => {
-                            report.kept.push((path, "it is not a regular file".into()));
-                            continue;
+                        Err(e) => report.kept.push((path, format!("it cannot be read: {}", io::Error::from(e)))),
+                        Ok(stat) if Identity::of(&stat) != pin.file => {
+                            report.kept.push((path, "it was replaced after you asked to delete it".into()))
                         }
                         Ok(stat) if in_use.files.contains(&Identity::of(&stat)) => {
-                            report.kept.push((path, "another download uses it".into()));
-                            continue;
+                            report.kept.push((path, "another download uses it".into()))
                         }
-                        Ok(_) => {}
-                    }
-                    match rustix::fs::unlinkat(&parent, last, AtFlags::empty()) {
-                        Ok(()) => report.deleted.push(path),
-                        Err(e) => report.kept.push((path, format!("it could not be deleted: {}", io::Error::from(e)))),
+                        Ok(_) => match self.trash.put(&parent, last, &path) {
+                            Ok(()) => report.trashed.push(path),
+                            Err(why) => report.kept.push((path, why)),
+                        },
                     }
                 }
-                for file in files.iter() {
+                for (file, _) in files.iter() {
                     prune(&folder, file);
                 }
                 Outcome::Done(report)
             }
         }
     }
+}
+
+/// Each of `files` in `dir` as it is now, or why it stays. Files not there are left out.
+fn pin(dir: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Result<Pin, String>)> {
+    let folder = match rustix::fs::openat(CWD, dir, folder_flags(), Mode::empty()) {
+        Ok(folder) => folder,
+        Err(Errno::NOENT) => return vec![],
+        Err(e) => {
+            let why = format!("the download's folder cannot be opened: {}", io::Error::from(e));
+            return files.into_iter().map(|file| (file, Err(why.clone()))).collect();
+        }
+    };
+    let pinned = |file: &Path| -> Option<Result<Pin, String>> {
+        let (parent, last) = match open_parent(&folder, file) {
+            Ok(found) => found?,
+            Err(why) => return Some(Err(why.into())),
+        };
+        let unreadable = |e: Errno| Some(Err(format!("it cannot be read: {}", io::Error::from(e))));
+        let stat = match rustix::fs::statat(&parent, last, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(Errno::NOENT) => return None,
+            Err(e) => return unreadable(e),
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return Some(Err("it is not a regular file".into()));
+        }
+        match rustix::fs::fstat(&parent) {
+            Ok(folder) => Some(Ok(Pin { folder: Identity::of(&folder), file: Identity::of(&stat) })),
+            Err(e) => unreadable(e),
+        }
+    };
+    files.into_iter().filter_map(|file| Some((file.clone(), pinned(&file)?))).collect()
 }
 
 /// What deleting everything in a folder left.
@@ -603,6 +650,10 @@ mod tests {
         Place { _tmp: tmp, root, store }
     }
 
+    fn trash(root: &Path) -> Trash {
+        Trash::At(root.join("trash"))
+    }
+
     fn id(n: u8) -> TorrentId {
         TorrentId::from_bytes([n; 20])
     }
@@ -637,7 +688,7 @@ mod tests {
     #[test]
     fn a_play_folder_goes_and_a_link_inside_it_is_removed_without_touching_what_it_points_to() {
         let Place { root, store, .. } = &mut place();
-        let mut deleter = Deleter::open(&root.join("plays"), store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), store).unwrap();
         let outside = root.join("outside");
         write(&outside.join("films/keep.mp4"), "keep");
         write(&outside.join("keep.mp4"), "keep");
@@ -652,7 +703,7 @@ mod tests {
         assert_eq!(deleter.play_bytes(), 4);
         assert_eq!(
             run(&mut deleter, store, &InUse::default()),
-            [Report { deleted: vec![folder.clone()], kept: vec![] }]
+            [Report { deleted: vec![folder.clone()], ..Report::default() }]
         );
         assert!(!folder.exists());
         assert_eq!(std::fs::read_to_string(outside.join("keep.mp4")).unwrap(), "keep");
@@ -666,7 +717,7 @@ mod tests {
         write(&root.join("disk/plays/0101010101010101-0/film.mp4"), "film");
         std::fs::create_dir(root.join("data")).unwrap();
         symlink(root.join("disk/plays"), root.join("data/plays")).unwrap();
-        let mut deleter = Deleter::open(&root.join("data/plays"), store).unwrap();
+        let mut deleter = Deleter::open(&root.join("data/plays"), trash(root), store).unwrap();
         let why = format!(
             "torrential cannot use the plays folder {}: it is a link, and torrential deletes plays only in a folder of its own",
             root.join("data/plays").display()
@@ -675,14 +726,14 @@ mod tests {
 
         let dir = root.join("data/plays/0101010101010101-0");
         deleter.remove(store, &tomb(1), Some(Doom::Play { dir: dir.clone(), bytes: 4 })).unwrap();
-        let kept =
-            Report { deleted: vec![], kept: vec![(dir, "it is not a folder directly in the plays folder".into())] };
+        let why = "it is not a folder directly in the plays folder";
+        let kept = Report { kept: vec![(dir, why.into())], ..Report::default() };
         assert_eq!(run(&mut deleter, store, &InUse::default()), [kept]);
         assert_eq!(std::fs::read_to_string(root.join("disk/plays/0101010101010101-0/film.mp4")).unwrap(), "film");
     }
 
     #[test]
-    fn files_in_a_chosen_folder_go_but_links_and_what_another_download_uses_stay() {
+    fn files_in_a_chosen_folder_go_to_the_trash_but_links_and_what_another_download_uses_stay() {
         let Place { root, store, .. } = &mut place();
         let dir = root.join("Downloads");
         let outside = root.join("outside");
@@ -696,7 +747,7 @@ mod tests {
         symlink(outside.join("extras"), dir.join("Set/extras")).unwrap();
         let mut in_use = InUse::default();
         in_use.add(&root.join("Other"), &[dir.join("Set/shared.nfo")]).unwrap();
-        let mut deleter = Deleter::open(&root.join("plays"), store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), store).unwrap();
         let all = [
             "Set/a.mkv",
             "Set/docs/b.txt",
@@ -716,10 +767,9 @@ mod tests {
             ("../mine.txt", "its path leaves the download's folder"),
         ]
         .map(|(file, why)| (dir.join(file), why.to_string()));
-        assert_eq!(
-            reports,
-            [Report { deleted: vec![dir.join("Set/a.mkv"), dir.join("Set/docs/b.txt")], kept: kept.to_vec() }]
-        );
+        let trashed = vec![dir.join("Set/a.mkv"), dir.join("Set/docs/b.txt")];
+        assert_eq!(reports, [Report { trashed, kept: kept.to_vec(), ..Report::default() }]);
+        assert_eq!(std::fs::read_to_string(root.join("trash/files/b.txt")).unwrap(), "b");
         assert!(!dir.join("Set/docs").exists(), "a folder it left empty goes");
         assert!(dir.join("Set").exists(), "a folder with something left in it stays");
         assert_eq!(std::fs::read_to_string(outside.join("c.srt")).unwrap(), "keep");

@@ -175,8 +175,12 @@ export interface Change {
   id: string;
   name: string | null;
   result: string;
-  /** What a remove deleted from disk. */
+  /** What a remove deleted from disk: a play's folder. */
   deleted?: string[];
+  /** What a remove with `delete` moved to the Trash: the files of a download in a folder the person chose. */
+  trashed?: string[];
+  /** What a remove was to delete or move to the Trash and left, and why. */
+  kept?: { path: string; reason: string }[];
 }
 
 /** A file the engine serves while it downloads. */
@@ -592,7 +596,7 @@ export function files(ref: string, signal?: AbortSignal): Promise<FileListing> {
   return fetch(`/api/files?ref=${encodeURIComponent(ref)}`, { signal }).then(json<FileListing>);
 }
 
-/** With `remove`, `deleteFiles` deletes the files of a download in a folder the person chose too. */
+/** With `remove`, `deleteFiles` moves the files of a download in a folder the person chose to the Trash too. */
 export function change(action: "pause" | "resume" | "remove", refs: string[], deleteFiles = false): Promise<Change[]> {
   return post<{ changes: Change[] }>(`/api/${action}`, { refs, delete: deleteFiles }).then((body) => body.changes);
 }
