@@ -239,6 +239,30 @@ fn perform<B: Backend>(effect: Effect, backend: &Arc<B>, tx: &Sender<Msg>) {
                 let _ = tx.send(Msg::Upgraded(backend.upgrade()));
             });
         }
+        Effect::Home { ask } => {
+            thread::spawn(move || {
+                let _ = tx.send(Msg::Home { ask, result: backend.home() });
+            });
+        }
+        Effect::FindTitles { search, words } => {
+            thread::spawn(move || {
+                let _ = tx.send(Msg::FoundTitles { search, result: backend.titles(&words) });
+            });
+        }
+        Effect::Title { ask, id } => {
+            thread::spawn(move || {
+                let result = backend.title(&id).map(Box::new);
+                let _ = tx.send(Msg::Title { ask, result });
+            });
+        }
+        Effect::PlayTitle(video) => {
+            thread::spawn(move || {
+                let result = backend.play_title(&video, &mut |step| {
+                    let _ = tx.send(Msg::PlayStep(Box::new(step)));
+                });
+                let _ = tx.send(Msg::TitlePlayed(result.map(|(player, played)| (player, Box::new(played)))));
+            });
+        }
     }
 }
 
