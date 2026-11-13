@@ -95,27 +95,18 @@ pub enum Fetch {
 }
 
 impl Fetch {
-    /// The pinned build for this machine, unless `allowed` is false. `TORRENTIAL_TEST_FFMPEG_URL`
-    /// and `TORRENTIAL_TEST_FFMPEG_SHA256` replace its URL and its hash. A test engine fetches only
-    /// from a URL its test gives.
+    /// The pinned build for this machine, unless `allowed` is false. Nothing in the environment
+    /// changes which build that is. A test engine fetches nothing; tests that fetch hand their
+    /// own build to `Ffmpeg::new`.
     pub fn from_env(env: &Env, allowed: bool) -> Fetch {
-        let Some(mut build) = Build::pinned(std::env::consts::OS, std::env::consts::ARCH) else {
+        if env.var("TORRENTIAL_TEST_NETWORK").is_some() || env.var("TORRENTIAL_TEST_ENGINE").is_some() {
             return Fetch::Unavailable;
-        };
-        match env.var("TORRENTIAL_TEST_FFMPEG_URL") {
-            Some(url) => build.url = url.to_string(),
-            None if env.var("TORRENTIAL_TEST_NETWORK").is_some() || env.var("TORRENTIAL_TEST_ENGINE").is_some() => {
-                return Fetch::Unavailable;
-            }
-            None => {}
         }
-        if let Some(sha256) = env.var("TORRENTIAL_TEST_FFMPEG_SHA256") {
-            build.sha256 = sha256.to_ascii_lowercase();
+        match Build::pinned(std::env::consts::OS, std::env::consts::ARCH) {
+            Some(build) if allowed => Fetch::Build(build),
+            Some(_) => Fetch::Off,
+            None => Fetch::Unavailable,
         }
-        if let Some(size) = env.var("TORRENTIAL_TEST_FFMPEG_SIZE").and_then(|size| size.parse().ok()) {
-            build.size = size;
-        }
-        if allowed { Fetch::Build(build) } else { Fetch::Off }
     }
 
     /// What a conversion gets when there is no ffmpeg here.
@@ -472,24 +463,22 @@ mod tests {
     }
 
     #[test]
-    fn a_test_engine_fetches_only_from_where_its_test_points_it() {
+    fn an_engine_fetches_the_pinned_build_whatever_its_environment_says() {
         let fetch = |vars: &[(&str, &str)], allowed| Fetch::from_env(&Env::from_pairs(vars.iter().copied()), allowed);
         let pinned = Build::pinned(std::env::consts::OS, std::env::consts::ARCH);
         let Some(pinned) = pinned else {
             assert_eq!(fetch(&[], true), Fetch::Unavailable);
             return;
         };
-        assert_eq!(fetch(&[], true), Fetch::Build(pinned.clone()));
-        assert_eq!(fetch(&[], false), Fetch::Off);
-        assert_eq!(fetch(&[("TORRENTIAL_TEST_ENGINE", "fake")], true), Fetch::Unavailable);
-        let served = [
-            ("TORRENTIAL_TEST_NETWORK", "loopback"),
+        let elsewhere = [
             ("TORRENTIAL_TEST_FFMPEG_URL", "http://127.0.0.1:9/ffmpeg.tar.xz"),
             ("TORRENTIAL_TEST_FFMPEG_SHA256", "ABC123"),
             ("TORRENTIAL_TEST_FFMPEG_SIZE", "4096"),
         ];
-        let build = Build { url: "http://127.0.0.1:9/ffmpeg.tar.xz".into(), sha256: "abc123".into(), size: 4096 };
-        assert_eq!(fetch(&served, true), Fetch::Build(build));
+        assert_eq!(fetch(&elsewhere, true), Fetch::Build(pinned));
+        assert_eq!(fetch(&elsewhere, false), Fetch::Off);
+        assert_eq!(fetch(&[("TORRENTIAL_TEST_ENGINE", "fake"), elsewhere[0]], true), Fetch::Unavailable);
+        assert_eq!(fetch(&[("TORRENTIAL_TEST_NETWORK", "loopback"), elsewhere[0]], true), Fetch::Unavailable);
     }
 
     #[test]
