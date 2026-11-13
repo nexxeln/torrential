@@ -67,6 +67,8 @@ pub struct Ctx {
     pub http_port: u16,
     pub web: super::web::State,
     pub titles: super::titles::Titles,
+    /// The phones and TVs this Mac let in, and the casts playing.
+    pub devices: Arc<super::devices::Devices>,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
@@ -112,6 +114,11 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         }
         Request::PlayTitle(request) => play_title(ctx, request, Finish::Stream, mpsc::unbounded_channel().0).await,
         Request::GetTitle(request) => play_title(ctx, request, Finish::Keep, mpsc::unbounded_channel().0).await,
+        Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port) }),
+        Request::AddDevice => {
+            ctx.devices.add(ctx.http_port, super::owner::now()).map(|list| Response::Devices { list })
+        }
+        Request::RemoveDevice { id } => ctx.devices.remove(&id, ctx.http_port).map(|list| Response::Devices { list }),
         Request::Home => home(ctx).await.map(|home| Response::Home { home: Box::new(home) }),
     };
     result.unwrap_or_else(|error| Response::Error { error })

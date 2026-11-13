@@ -39,11 +39,15 @@ pub enum ErrorCode {
     /// that the engine stopped it.
     NoSource,
     Interrupted,
+    /// A browser on the home network that is not one of the paired devices.
+    NotPaired,
+    /// Something only the machine running the engine may do, such as adding a device.
+    LocalOnly,
     Internal,
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 25] = [
+    pub const ALL: [ErrorCode; 27] = [
         Self::Usage,
         Self::ConfirmationRequired,
         Self::InvalidRef,
@@ -68,6 +72,8 @@ impl ErrorCode {
         Self::VerificationFailed,
         Self::NoSource,
         Self::Interrupted,
+        Self::NotPaired,
+        Self::LocalOnly,
         Self::Internal,
     ];
 
@@ -82,7 +88,9 @@ impl ErrorCode {
             | Self::SandboxWriteBlocked
             | Self::DaemonUnavailable
             | Self::DaemonVersion
-            | Self::StateCorrupt => 6,
+            | Self::StateCorrupt
+            | Self::NotPaired
+            | Self::LocalOnly => 6,
             Self::DiskFull
             | Self::TooLarge
             | Self::NoSelection
@@ -131,6 +139,8 @@ impl ErrorCode {
             Self::VerificationFailed => "verification_failed",
             Self::NoSource => "no_source",
             Self::Interrupted => "interrupted",
+            Self::NotPaired => "not_paired",
+            Self::LocalOnly => "local_only",
             Self::Internal => "internal",
         }
     }
