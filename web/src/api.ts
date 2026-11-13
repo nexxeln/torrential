@@ -12,6 +12,7 @@
 //   GET  /api/subtitles/online?id=&file=                 OnlineSubtitles
 //   GET  /api/subtitles/online/fetch?id=&file=&subtitle= WebVTT, see onlineSubtitleUrl
 //   GET  /api/thumbnail?id=&file=&t=                    JPEG, see thumbnailUrl
+//   POST /api/ffmpeg      {}                            NDJSON stream of FfmpegMessage
 //   GET  /api/pieces?id=&file=                          FilePieces
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
@@ -273,8 +274,12 @@ export interface MediaInfo {
    * one browsers read. If `canPlayType` accepts it, play the file's own URL.
    */
   direct: string | null;
-  /** ffmpeg is installed, so /api/stream, embedded subtitles, and thumbnails work. */
-  remux: boolean;
+  /**
+   * Whether /api/stream, embedded subtitles, and thumbnails work: `ready` now, `fetch` once
+   * POST /api/ffmpeg has fetched ffmpeg, or `missing` when ffmpeg is not installed and the engine
+   * does not fetch it.
+   */
+  ffmpeg: "ready" | "fetch" | "missing";
   /** The file's own chapters, in order. Empty for most files. */
   chapters: Chapter[];
 }
@@ -554,6 +559,17 @@ export function play(ref: string, file?: number, signal?: AbortSignal): Promise<
 
 export function media(id: string, file: number, signal?: AbortSignal): Promise<MediaInfo> {
   return fetch(`/api/media?id=${id}&file=${file}`, { signal }).then(json<MediaInfo>);
+}
+
+/** A line of POST /api/ffmpeg: bytes of the download so far, then `ready` or `error`. */
+export type FfmpegMessage = { type: "progress"; done: number; size: number } | { type: "ready" } | { type: "error"; error: ApiError };
+
+/** Has the engine fetch ffmpeg, saying how far the download is. The fetch carries on when this stops. */
+export async function* fetchFfmpeg(signal?: AbortSignal): AsyncGenerator<FfmpegMessage> {
+  const init = { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal };
+  const response = await fetch("/api/ffmpeg", init);
+  if (!response.ok || !response.body) await json<never>(response);
+  yield* lines<FfmpegMessage>(response);
 }
 
 /**

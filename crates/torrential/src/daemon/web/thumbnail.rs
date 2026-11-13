@@ -33,8 +33,7 @@ pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
     if let Some(jpeg) = kept {
         return Ok(jpeg);
     }
-    let tools = (ctx.web.tools)();
-    let (program, _) = tools.both().ok_or_else(ffmpeg::missing)?;
+    let program = ctx.web.ffmpeg.now()?.ffmpeg;
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
     let name = watch::name(&file);
     let none = |why: &str| Error::new(ErrorCode::NotFound, format!("no picture of {name} at {t} s: {why}"));
@@ -57,7 +56,7 @@ pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
     };
     let turn = tokio::time::timeout(QUEUE_FOR, ctx.web.thumbnailing.acquire()).await;
     let _turn = turn.map_err(|_| busy())?.map_err(|_| busy())?;
-    let mut command = tokio::process::Command::new(program);
+    let mut command = tokio::process::Command::new(&program);
     command.args(ffmpeg::thumbnail(&file.path, t)).stdin(Stdio::null()).kill_on_drop(true);
     let output = tokio::time::timeout(DECODE_WITHIN, command.output()).await;
     let output = output.map_err(|_| none("ffmpeg took too long"))?;

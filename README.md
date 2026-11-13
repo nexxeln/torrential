@@ -47,7 +47,7 @@ It plays while it downloads. Jump anywhere and torrential fetches that part firs
 
 To choose a torrent yourself, open Sources on any title. The plain torrent search is one click away, for everything that is not a film or a show.
 
-Browsers cannot read every format. Install [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`) and torrential converts MKV files and surround sound as you watch.
+Browsers cannot read every format, so torrential converts MKV files and surround sound with [ffmpeg](https://ffmpeg.org) as you watch. It uses the ffmpeg you have, or fetches its own the first time a file needs it.
 
 ## In your terminal
 
@@ -96,6 +96,8 @@ subtitles:
   online: false               # do not look for subtitles online
 catalog:
   online: false               # do not look up films and shows online
+ffmpeg:
+  fetch: false                # do not fetch ffmpeg when it is not installed
 updates: notify               # say when a new version is out instead of installing it, or off
 ```
 

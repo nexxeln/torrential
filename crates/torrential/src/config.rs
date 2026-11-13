@@ -26,7 +26,20 @@ pub struct Config {
     pub player: Option<Choice>,
     pub subtitles: SubtitleConfig,
     pub catalog: CatalogConfig,
+    pub ffmpeg: FfmpegConfig,
     pub plays_max: PlaysMax,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FfmpegConfig {
+    /// The engine fetches a pinned ffmpeg when none is installed and a file needs converting.
+    pub fetch: bool,
+}
+
+impl Default for FfmpegConfig {
+    fn default() -> Self {
+        Self { fetch: true }
+    }
 }
 
 /// The most torrential's plays folder holds before the plays watched longest ago leave it.
@@ -49,6 +62,7 @@ struct File {
     player: Option<Spanned<String>>,
     subtitles: Subtitles,
     catalog: Catalog,
+    ffmpeg: Ffmpeg,
     plays: Plays,
 }
 
@@ -93,6 +107,13 @@ struct Catalog {
     online: Option<bool>,
     /// A Cinemeta mirror.
     endpoint: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct Ffmpeg {
+    /// False stops the engine from fetching ffmpeg when none is installed.
+    fetch: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -365,6 +386,7 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         imdb_endpoint: None,
         cache_dir: None,
     };
+    let ffmpeg = FfmpegConfig { fetch: file.ffmpeg.fetch.unwrap_or(true) };
     let updates = file.updates.unwrap_or_default();
     let plays_max = match file.plays.max {
         None => PlaysMax::default(),
@@ -373,7 +395,7 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
             (Some(referenced.line()), format!("plays.max {value:?} is not a size; use a form like 20GiB, or none"))
         })?),
     };
-    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog, plays_max })
+    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog, ffmpeg, plays_max })
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -699,6 +721,18 @@ sources:
         assert!(error.message.starts_with("$TORRENTIAL_HOME/config/config.yaml line 2: "), "{}", error.message);
         let error = load("subtitles:\n  offline: true\n").unwrap_err();
         assert!(error.message.contains("unknown field `offline`"), "{}", error.message);
+    }
+
+    #[test]
+    fn fetching_ffmpeg_is_on_unless_the_file_turns_it_off() {
+        let fetch = |text: &str| parse(text, &env()).unwrap().ffmpeg.fetch;
+        assert_eq!(
+            [fetch(""), fetch("ffmpeg:\n  fetch: true\n"), fetch("ffmpeg:\n  fetch: false\n")],
+            [true, true, false]
+        );
+        assert!(Config::default().ffmpeg.fetch);
+        let error = load("ffmpeg:\n  fetch: never\n").unwrap_err();
+        assert!(error.message.starts_with("$TORRENTIAL_HOME/config/config.yaml line 2: "), "{}", error.message);
     }
 
     #[test]

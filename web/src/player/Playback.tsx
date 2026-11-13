@@ -272,9 +272,10 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
 
   // A file the browser said it could read, but could not: let the engine repackage it.
   const failure = sourceState.kind === "failed" ? sourceState.error : null;
+  const converts = media.ffmpeg === "ready";
   useEffect(() => {
-    if (failure && howKind === "direct" && media.remux && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
-  }, [failure, howKind, media.remux]);
+    if (failure && howKind === "direct" && converts && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
+  }, [failure, howKind, converts]);
 
   // Where playback is, remembered for the next visit.
   const remember = useCallback(() => {
@@ -686,7 +687,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
                 play={play}
                 duration={duration}
                 chapters={media.chapters}
-                frames={media.remux}
+                frames={converts}
                 aspect={media.video && media.video.height > 0 ? media.video.width / media.video.height : 16 / 9}
                 onSeek={actions.seekTo}
               />

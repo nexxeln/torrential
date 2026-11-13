@@ -842,6 +842,16 @@ fn a_killed_engine_comes_back_with_the_download_running() {
 }
 
 #[test]
+fn a_new_engine_keeps_its_state_where_only_its_user_can_change_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let state = std::fs::metadata(home.dir.path().join("th/state")).unwrap();
+    assert_eq!(state.permissions().mode() & 0o777, 0o700);
+    assert_eq!(home.run(&["daemon", "stop"]).code, 0);
+}
+
+#[test]
 fn a_new_fake_installation_starts_with_downloads_that_survive_a_restart() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
     let states = || {

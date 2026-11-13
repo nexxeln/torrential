@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode};
 
+use super::fetch::Readiness;
+
 /// The JSON of `GET /api/media`.
 #[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Media {
@@ -14,8 +16,8 @@ pub struct Media {
     pub subtitles: Vec<Subtitle>,
     /// A type for `canPlayType`, when browsers read the file's container.
     pub direct: Option<String>,
-    /// ffmpeg is installed, so the engine can convert the file as it plays.
-    pub remux: bool,
+    /// Whether the engine can convert the file as it plays.
+    pub ffmpeg: Readiness,
     /// The file's own chapters, in order.
     pub chapters: Vec<Chapter>,
 }
@@ -182,11 +184,11 @@ impl Media {
             .filter(|chapter| chapter.end > chapter.start)
             .collect();
         chapters.sort_by(|a, b| a.start.total_cmp(&b.start));
-        Ok(Media { duration, container, video, audio, subtitles, direct, remux: true, chapters })
+        Ok(Media { duration, container, video, audio, subtitles, direct, ffmpeg: Readiness::Ready, chapters })
     }
 
     /// What the file's name and header say when ffprobe is not installed.
-    pub fn without_ffprobe(name: &str, duration: Option<f64>) -> Media {
+    pub fn without_ffprobe(name: &str, duration: Option<f64>, ffmpeg: Readiness) -> Media {
         let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
         let (container, direct) = match extension.as_str() {
             "mp4" | "m4v" | "mov" => ("mp4", Some("video/mp4")),
@@ -201,7 +203,7 @@ impl Media {
             audio: Vec::new(),
             subtitles: Vec::new(),
             direct: direct.map(String::from),
-            remux: false,
+            ffmpeg,
             chapters: Vec::new(),
         }
     }
@@ -416,7 +418,7 @@ mod tests {
             }
           ],
           "direct": null,
-          "remux": true,
+          "ffmpeg": "ready",
           "chapters": [
             {
               "start": 0.0,
@@ -512,13 +514,14 @@ mod tests {
     #[test]
     fn a_file_without_ffprobe_goes_by_its_name() {
         let read = |name| {
-            let media = Media::without_ffprobe(name, Some(7.0));
-            (media.container, media.direct, media.remux, media.duration)
+            let media = Media::without_ffprobe(name, Some(7.0), Readiness::Fetch);
+            (media.container, media.direct, media.ffmpeg, media.duration)
         };
-        assert_eq!(read("Film.MP4"), ("mp4".to_string(), Some("video/mp4".to_string()), false, Some(7.0)));
-        assert_eq!(read("clip.webm"), ("webm".to_string(), Some("video/webm".to_string()), false, Some(7.0)));
-        assert_eq!(read("Film.mkv"), ("matroska".to_string(), None, false, Some(7.0)));
-        assert_eq!(read("Film.avi"), ("avi".to_string(), None, false, Some(7.0)));
+        let fetch = Readiness::Fetch;
+        assert_eq!(read("Film.MP4"), ("mp4".to_string(), Some("video/mp4".to_string()), fetch, Some(7.0)));
+        assert_eq!(read("clip.webm"), ("webm".to_string(), Some("video/webm".to_string()), fetch, Some(7.0)));
+        assert_eq!(read("Film.mkv"), ("matroska".to_string(), None, fetch, Some(7.0)));
+        assert_eq!(read("Film.avi"), ("avi".to_string(), None, fetch, Some(7.0)));
     }
 
     #[test]

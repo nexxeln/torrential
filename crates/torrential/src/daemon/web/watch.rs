@@ -15,6 +15,7 @@ use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
 use super::super::http::{self, Connection, Request};
 use super::super::owner::{self, Command, StreamFile, Update};
 use super::super::server::{Ctx, HEARTBEAT};
+use super::fetch::Found;
 use super::ffmpeg::{self, Encoder, Picture};
 use super::media::Media;
 use super::{fail, file_of, number};
@@ -79,16 +80,18 @@ pub async fn media(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Media>, E
     }
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
     let name = name(&file);
-    let tools = (ctx.web.tools)();
-    let Some((_, ffprobe)) = tools.both() else {
-        let end = file.size.min(HEADER);
-        let head = http::read(ctx, id, index, &file, 0, end).await.unwrap_or_default();
-        let tail = http::read(ctx, id, index, &file, file.size - end, file.size).await.unwrap_or_default();
-        let duration = torrential_core::media::duration(&head, &tail).map(|d| d.as_secs_f64());
-        return Ok(Arc::new(Media::without_ffprobe(&name, duration)));
+    let ffprobe = match ctx.web.ffmpeg.found() {
+        Found::Installed(programs) | Found::Fetched(programs) => programs.ffprobe,
+        missing => {
+            let end = file.size.min(HEADER);
+            let head = http::read(ctx, id, index, &file, 0, end).await.unwrap_or_default();
+            let tail = http::read(ctx, id, index, &file, file.size - end, file.size).await.unwrap_or_default();
+            let duration = torrential_core::media::duration(&head, &tail).map(|d| d.as_secs_f64());
+            return Ok(Arc::new(Media::without_ffprobe(&name, duration, missing.readiness())));
+        }
     };
     let url = http::url(ctx.http_port, id, index, &name);
-    let output = tokio::process::Command::new(ffprobe)
+    let output = tokio::process::Command::new(&ffprobe)
         .args(ffmpeg::probe(&url))
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -161,8 +164,7 @@ async fn stream_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion, E
         Some("h264") => Picture::H264,
         Some(other) => return Err(Error::new(ErrorCode::Usage, format!("video={other} is not copy or h264"))),
     };
-    let tools = (ctx.web.tools)();
-    let (program, _) = tools.both().ok_or_else(ffmpeg::missing)?;
+    let program = ctx.web.ffmpeg.now()?.ffmpeg;
     let media = media(ctx, id, index).await?;
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
     let name = name(&file);
@@ -176,7 +178,7 @@ async fn stream_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion, E
         ));
     }
     let url = http::url(ctx.http_port, id, index, &name);
-    Ok((program.to_path_buf(), ffmpeg::stream(&url, &media, t, audio, picture, Encoder::of_host()), None))
+    Ok((program, ffmpeg::stream(&url, &media, t, audio, picture, Encoder::of_host()), None))
 }
 
 /// WebVTT of a subtitle track inside a video, or of a subtitle file of the torrent.
@@ -194,8 +196,7 @@ pub async fn subtitles(conn: &mut Connection<'_>, request: &Request) -> io::Resu
 
 async fn subtitle_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion, Error> {
     let (id, index) = file_of(request)?;
-    let tools = (ctx.web.tools)();
-    let (program, _) = tools.both().ok_or_else(ffmpeg::missing)?;
+    let program = ctx.web.ffmpeg.now()?.ffmpeg;
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
     let name = name(&file);
     let Some(stream) = number::<u32>(request, "stream")? else {
@@ -206,7 +207,7 @@ async fn subtitle_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion,
             .await
             .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot read {name}: {e}")))?;
         let text = torrential_core::subtitle::decode(&bytes).into_bytes();
-        return Ok((program.to_path_buf(), ffmpeg::subtitle_file(ffmpeg::subtitle_format(&name)), Some(text)));
+        return Ok((program, ffmpeg::subtitle_file(ffmpeg::subtitle_format(&name)), Some(text)));
     };
     let t = number::<f64>(request, "t")?.unwrap_or(0.0);
     let media = media(ctx, id, index).await?;
@@ -221,7 +222,7 @@ async fn subtitle_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion,
         Some(_) => {}
     }
     let url = http::url(ctx.http_port, id, index, &name);
-    Ok((program.to_path_buf(), ffmpeg::embedded_subtitles(&url, stream, t), None))
+    Ok((program, ffmpeg::embedded_subtitles(&url, stream, t), None))
 }
 
 /// Runs a conversion and sends what it writes as it writes it. The program stops when the browser
