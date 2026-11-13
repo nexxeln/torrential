@@ -59,12 +59,16 @@ impl Trash {
 enum Way {
     /// One rename that never replaces.
     Rename,
-    /// A second name for the file, then the first one removed.
-    Link,
+    /// A second name for the file, given by the function held, then the first one removed.
+    Link(fn(&OwnedFd, &OsStr, &OwnedFd, &OsStr) -> Result<(), Errno>),
 }
 
 /// Every way, in the order tried.
-const WAYS: &[Way] = &[Way::Rename, Way::Link];
+const WAYS: &[Way] = &[Way::Rename, Way::Link(link)];
+
+fn link(from: &OwnedFd, name: &OsStr, into: &OwnedFd, to: &OsStr) -> Result<(), Errno> {
+    rustix::fs::linkat(from, name, into, to, AtFlags::empty())
+}
 
 /// Moves `name` in `from` to `to` in `into` without replacing what is there: it fails with EXIST
 /// when `to` is taken, and with NOTSUP when the disk has none of `ways`.
@@ -76,8 +80,8 @@ fn move_new(from: &OwnedFd, name: &OsStr, into: &OwnedFd, to: &OsStr, ways: &[Wa
                 &[Errno::INVAL, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP],
             ),
             // A disk with no second names, as FAT, refuses one with PERM.
-            Way::Link => (
-                rustix::fs::linkat(from, name, into, to, AtFlags::empty()).and_then(|()| {
+            Way::Link(link) => (
+                link(from, name, into, to).and_then(|()| {
                     rustix::fs::unlinkat(from, name, AtFlags::empty()).inspect_err(|_| {
                         let _ = rustix::fs::unlinkat(into, to, AtFlags::empty());
                     })
@@ -341,7 +345,7 @@ mod tests {
         let (_tmp, dir, trash) = left_in_trash();
         let film = dir.join("film.mkv");
         // The second time is a disk with no rename that never replaces, which moves by a link.
-        for ways in [WAYS, &[Way::Link]] {
+        for ways in [WAYS, &[Way::Link(link)]] {
             std::fs::write(&film, "film").unwrap();
             put_in(&folder(&trash), &folder(&dir), OsStr::new("film.mkv"), &film, identity(&film), ways).unwrap();
         }
@@ -349,6 +353,30 @@ mod tests {
         assert_eq!([read("film.mkv"), read("film.2.mkv"), read("film.3.mkv")], ["left there", "film", "film"]);
         assert_eq!(names(&trash.join("info")), ["film.2.mkv.trashinfo", "film.3.mkv.trashinfo"]);
         assert!(!film.exists());
+    }
+
+    #[test]
+    fn a_file_stays_where_it_is_on_a_disk_with_no_rename_that_never_replaces() {
+        // An editor saves the person's own film over the name just after the film got a second
+        // name in the Trash.
+        fn link_then_save(from: &OwnedFd, name: &OsStr, into: &OwnedFd, to: &OsStr) -> Result<(), Errno> {
+            link(from, name, into, to)?;
+            let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
+            let saved = rustix::fs::openat(from, ".film.mkv.tmp", flags, Mode::from_raw_mode(0o600))?;
+            std::fs::File::from(saved).write_all(b"the person's own film").unwrap();
+            rustix::fs::renameat(from, ".film.mkv.tmp", from, name)
+        }
+        let (_tmp, dir, trash) = left_in_trash();
+        let film = dir.join("film.mkv");
+        std::fs::write(&film, "the download's film").unwrap();
+        let disk = [Way::Link(link_then_save)];
+        let why = put_in(&folder(&trash), &folder(&dir), OsStr::new("film.mkv"), &film, identity(&film), &disk);
+        let refused = "the disk it is on cannot move it to the Trash in one step that never replaces another file";
+        assert_eq!(why, Err(refused.to_string()));
+        assert_eq!(std::fs::read_to_string(&film).unwrap(), "the download's film");
+        assert_eq!(names(&trash.join("files")), ["film.mkv"]);
+        assert_eq!(std::fs::read_to_string(trash.join("files/film.mkv")).unwrap(), "left there");
+        assert_eq!(names(&trash.join("info")), Vec::<String>::new());
     }
 
     #[test]
@@ -373,7 +401,7 @@ mod tests {
         // An editor saves by writing a new file and renaming it over the old one.
         std::fs::write(dir.join(".film.mkv.tmp"), "the person's own film").unwrap();
         std::fs::rename(dir.join(".film.mkv.tmp"), &film).unwrap();
-        for ways in [WAYS, &[Way::Link]] {
+        for ways in [WAYS, &[Way::Link(link)]] {
             let why = put_in(&folder(&trash), &folder(&dir), OsStr::new("film.mkv"), &film, checked, ways);
             assert_eq!(why, Err("it was replaced after you asked to delete it".to_string()), "{ways:?}");
         }
