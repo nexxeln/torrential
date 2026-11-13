@@ -97,7 +97,9 @@ fn failed_lines(sheet: &mut Sheet, error: &Error, room: usize) {
     }
     if let Some(Details::Tried(tried)) = &error.details {
         for tried in tried {
-            sheet.text(format!("Skipped {}: {}", short(&tried.release), tried.reason), PENCIL);
+            for row in wrap(&format!("Skipped {}: {}", short(&tried.release), tried.reason), room, usize::MAX) {
+                sheet.text(row, PENCIL);
+            }
         }
     }
     for row in wrap(error.hint.as_deref().unwrap_or_default(), room, usize::MAX) {

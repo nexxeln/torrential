@@ -568,6 +568,33 @@ fn a_play_that_fails_says_why_and_what_to_do_above_the_list_until_esc() {
 }
 
 #[test]
+fn a_skipped_source_wraps_on_a_narrow_terminal_like_the_message_and_the_hint() {
+    let mut state = opened((47, 19));
+    state.update(key(KeyCode::Enter));
+    let tried = vec![
+        Tried { release: result_id("4c1e9a"), reason: Skip::Unplayable { container: "mkv".into() } },
+        Tried { release: result_id("b7f20d"), reason: Skip::NoVideo },
+    ];
+    let none = Error::new(ErrorCode::NoSource, "no source of Sintel (2010) started")
+        .with_hint("search the torrents for it by name")
+        .with_details(Details::Tried(tried));
+    state.update(Msg::TitlePlayed(Err(none)));
+    assert_eq!(
+        list_lines(&state)[..8],
+        [
+            "│ play",
+            "│ Playback failed: no source of Sintel (2010)",
+            "│ started",
+            "│ Skipped 4c1e9a: its .mkv file needs ffmpeg,",
+            "│ which is not installed",
+            "│ Skipped b7f20d: none of its files is the",
+            "│ video",
+            "│ search the torrents for it by name",
+        ]
+    );
+}
+
+#[test]
 fn a_long_series_scrolls_with_the_cursor_and_keeps_the_season_in_the_margin() {
     let mut state = series((100, 12));
     press(&mut state, "jjjjj");
