@@ -142,7 +142,7 @@ impl Store {
         let version = usize::try_from(version)
             .map_err(|_| corrupt(&self.path, &format!("schema version {version} is not valid")))?;
         if version > migrations.len() {
-            return Err(corrupt(&self.path, &format!("schema version {version} is from a newer torrential")));
+            return Err(newer(&self.path, version, migrations.len()));
         }
         if version == migrations.len() {
             return Ok(());
@@ -545,6 +545,28 @@ fn corrupt(path: &Path, reason: &str) -> Error {
         ))
 }
 
+/// A newer torrential migrated the database past `known`. It kept the database it migrated from
+/// as `state.v{known}.bak`, the state this version last wrote.
+fn newer(path: &Path, version: usize, known: usize) -> Error {
+    let backup = path.with_extension(format!("v{known}.bak"));
+    let error = Error::new(
+        ErrorCode::StateCorrupt,
+        format!(
+            "the state database {} is from a newer torrential (schema version {version}; this version reads up to {known})",
+            path.display()
+        ),
+    );
+    if backup.is_file() {
+        error.with_hint(format!(
+            "install the newer torrential again, or stop it and replace {} with {}, the state from before the update",
+            path.display(),
+            backup.display()
+        ))
+    } else {
+        error.with_hint("install the newer torrential again")
+    }
+}
+
 fn json(value: &impl serde::Serialize) -> String {
     serde_json::to_string(value).expect("stored values serialize")
 }
@@ -816,7 +838,28 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.pragma_update(None, "user_version", 99).unwrap();
         drop(conn);
+        let known = MIGRATIONS.len();
         let err = Store::open(&path).err().unwrap();
-        assert!(err.message.ends_with("schema version 99 is from a newer torrential"), "{}", err.message);
+        assert_eq!(err.code, ErrorCode::StateCorrupt);
+        assert_eq!(
+            err.message,
+            format!(
+                "the state database {} is from a newer torrential (schema version 99; this version reads up to {known})",
+                path.display()
+            )
+        );
+        assert_eq!(err.hint.as_deref(), Some("install the newer torrential again"));
+
+        let backup = dir.path().join(format!("state.v{known}.bak"));
+        std::fs::write(&backup, b"the state before the update").unwrap();
+        let err = Store::open(&path).err().unwrap();
+        assert_eq!(
+            err.hint,
+            Some(format!(
+                "install the newer torrential again, or stop it and replace {} with {}, the state from before the update",
+                path.display(),
+                backup.display()
+            ))
+        );
     }
 }
