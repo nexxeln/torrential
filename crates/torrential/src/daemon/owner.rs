@@ -570,7 +570,7 @@ impl Owner {
         let reply = self.get(get, None, Home::Folder)?;
         if !dry_run {
             self.adopt(&[reply.job.id.to_hex()], "get");
-            self.keep_play(reply.job.id);
+            self.keep_play(reply.job.id)?;
         }
         Ok(reply)
     }
@@ -853,7 +853,7 @@ impl Owner {
                 return Err(error);
             }
         };
-        self.pressed_play(id, finish);
+        self.pressed_play(id, finish)?;
         match (&title, &self.jobs[&id].record.title) {
             // A download played by hand is being watched, so no title play puts it back.
             (None, _) => self.played(id)?,

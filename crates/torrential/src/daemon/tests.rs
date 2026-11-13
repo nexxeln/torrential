@@ -52,6 +52,8 @@ struct Outside {
     /// What the plays folder holds, and how long a play no one streams keeps downloading.
     plays_max: u64,
     idle_after: Duration,
+    /// Holds back some of the engine's events while it is closed.
+    gate: Option<Gate>,
 }
 
 impl Default for Outside {
@@ -63,6 +65,7 @@ impl Default for Outside {
             timing: TIMING,
             plays_max: 20 * GIB,
             idle_after: IDLE_AFTER,
+            gate: None,
         }
     }
 }
@@ -97,7 +100,11 @@ impl Harness {
     fn with_outside(search: search_port::Fake, outside: Outside) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        let engine: Box<dyn EnginePort> = match &outside.gate {
+            Some(gate) => Box::new(Gated { port: Fake::new(swarm.clone()), gate: gate.clone() }),
+            None => Box::new(Fake::new(swarm.clone())),
+        };
+        let running = Self::boot(&dir, engine, parse_fake, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 

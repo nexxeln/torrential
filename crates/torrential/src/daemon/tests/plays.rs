@@ -7,6 +7,7 @@ use torrential_core::protocol::{Change, PlayRequest, Request, Response};
 use torrential_core::{Place, Target};
 
 use super::super::admission::GIB;
+use super::super::engine_port::FakeTorrentFile;
 use super::super::owner::plays::Deletion;
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
@@ -25,6 +26,21 @@ impl Harness {
     async fn named_states(&self) -> Vec<(String, &'static str)> {
         self.status().await.into_iter().map(|job| (job.name.unwrap_or_default(), job.status.name())).collect()
     }
+
+    /// Plays `t` from the web app's search, into a folder of its own in the plays folder.
+    async fn play_web(&self, t: &FakeTorrentFile) {
+        self.swarm.publish(t.clone());
+        let (status, body) = post(self, "/api/play", json!({ "ref": magnet_link(t) })).await;
+        assert_eq!(status, 200, "{body}");
+    }
+}
+
+fn named(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+async fn names(h: &Harness) -> Vec<String> {
+    h.named_states().await.into_iter().map(|(name, _)| name).collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -156,4 +172,30 @@ async fn a_play_no_one_streams_pauses_and_streaming_it_again_resumes_it_but_a_sa
 
     let _watching = stream(Player::connect(&h).await, path);
     h.until("streaming the film again resumes it", |jobs| jobs[1].status.name() == "downloading").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_and_still_keeps_it() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let mine = torrent(0x61, "mine", &[("mine.mp4", 2 * GIB)]);
+    h.play_web(&mine).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let database = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    let refuse =
+        "CREATE TRIGGER refuse BEFORE UPDATE OF by_hand ON plays BEGIN SELECT RAISE(ABORT, 'the disk is failing'); END";
+    database.execute_batch(refuse).unwrap();
+
+    let error = h.get(Target::Prefix(prefix(&mine)), &[]).await.unwrap_err();
+    assert!(error.message.ends_with("the disk is failing"), "{error:?}");
+    database.execute_batch("DROP TRIGGER refuse").unwrap();
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.play_web(&torrent(0x62, "next", &[("next.mp4", 2 * GIB)])).await;
+    h.until("the next play is done", |jobs| jobs.len() == 2 && jobs.iter().all(|job| job.status.name() == "done"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(names(&h).await, named(&["mine", "next"]), "the play got by hand stays");
 }

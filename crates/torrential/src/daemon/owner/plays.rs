@@ -384,25 +384,33 @@ impl Owner {
 
     /// Someone pressed play on `id`. A play is watched now, and one played to keep is the
     /// person's.
-    pub(super) fn pressed_play(&mut self, id: TorrentId, finish: Finish) {
+    pub(super) fn pressed_play(&mut self, id: TorrentId, finish: Finish) -> Result<(), Error> {
         self.watched_now(id);
         if finish == Finish::Keep {
-            self.keep_play(id);
+            return self.keep_play(id);
         }
+        Ok(())
     }
 
     /// Makes a play the person's, as one they started by hand, so it never leaves the plays
-    /// folder or stops by itself.
-    pub(super) fn keep_play(&mut self, id: TorrentId) {
-        let Some(job) = self.jobs.get_mut(&id) else { return };
-        let Home::Plays(play) = &mut job.record.home else { return };
+    /// folder or stops by itself. It is theirs from now on even when that cannot be put on
+    /// record, until the engine stops.
+    pub(super) fn keep_play(&mut self, id: TorrentId) -> Result<(), Error> {
+        let Some(job) = self.jobs.get_mut(&id) else { return Ok(()) };
+        let Home::Plays(play) = &mut job.record.home else { return Ok(()) };
         if play.by_hand {
-            return;
+            return Ok(());
         }
-        match self.store.by_hand(id) {
-            Ok(()) => play.by_hand = true,
-            Err(error) => log(&format!("{id} may still leave the plays folder: {}", error.message)),
-        }
+        play.by_hand = true;
+        self.store.by_hand(id).map_err(|error| {
+            let message = format!(
+                "{} is yours now, but the engine cannot note that, so it may leave the plays folder once the engine \
+                 starts again: {}",
+                self.named(id),
+                error.message
+            );
+            Error { message, ..error }
+        })
     }
 
     /// Starts the idle clock of the plays a person resumed again.
