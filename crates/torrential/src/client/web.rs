@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use serde::Serialize;
 use torrential_core::{Error, ErrorCode};
@@ -9,7 +10,7 @@ use torrential_core::{Error, ErrorCode};
 use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
-use crate::daemon::web::fetch::{self, Fetch, Found, VERSION};
+use crate::daemon::web::fetch::{self, Fetch, Ffmpeg, Found, VERSION};
 use crate::daemon::web::ffmpeg::Tools;
 use crate::env::Env;
 use crate::output::theme::Token;
@@ -72,8 +73,9 @@ fn open(url: &str, env: &Env) -> Result<(), Error> {
 /// cannot read on its own: the one the engine runs, or what it does with none. `fetch` is what
 /// config.yaml says about fetching one.
 pub fn check(env: &Env, paths: &Paths, fetch: bool) -> Check {
-    let fetch = Fetch::from_env(env, fetch);
-    let found = Found::look(&Tools::find(env.var("PATH")), &fetch::root(&paths.state), &fetch);
+    let path = env.var("PATH").map(String::from);
+    let installed = Arc::new(move || Tools::find(path.as_deref()));
+    let found = Ffmpeg::new(installed, fetch::root(&paths.state), Fetch::from_env(env, fetch)).found();
     let converts = "the web player converts what the browser cannot read";
     let reads_itself = "the web player plays only MP4 and WebM files the browser reads itself";
     let (status, detail) = match found {
@@ -88,7 +90,7 @@ pub fn check(env: &Env, paths: &Paths, fetch: bool) -> Check {
                 torrential_core::units::format_size(build.size)
             ),
         ),
-        Found::Missing(Fetch::Off) => {
+        Found::Missing(Fetch::Off(_)) => {
             (CheckStatus::Warn, format!("not installed, and config.yaml turns off fetching it; {reads_itself}"))
         }
         Found::Missing(Fetch::Unavailable) => {

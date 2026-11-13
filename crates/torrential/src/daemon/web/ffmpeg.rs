@@ -36,7 +36,7 @@ impl Tools {
         Tools::find_in(&dirs)
     }
 
-    pub fn find_in(dirs: &[&Path]) -> Tools {
+    fn find_in(dirs: &[&Path]) -> Tools {
         let find = |name: &str| dirs.iter().map(|dir| dir.join(name)).find(|path| path.is_absolute() && path.is_file());
         Tools { ffmpeg: find("ffmpeg"), ffprobe: find("ffprobe") }
     }

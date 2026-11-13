@@ -562,12 +562,13 @@ async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
     let folder = h.dir.path().join("ffmpeg");
     assert_eq!(
         (names(&folder), names(&folder.join(VERSION))),
-        (vec![VERSION.to_string()], vec!["ffmpeg".into(), "ffprobe".into()])
+        (vec![VERSION.to_string()], vec!["ffmpeg".into(), "ffprobe".into(), "manifest.json".into()])
     );
     let fetched = folder.join(VERSION);
     assert_eq!(
-        [&folder, &fetched, &fetched.join("ffmpeg"), &fetched.join("ffprobe")].map(|path| mode(path)),
-        [0o700; 4],
+        [&folder, &fetched, &fetched.join("ffmpeg"), &fetched.join("ffprobe"), &fetched.join("manifest.json")]
+            .map(|path| mode(path)),
+        [0o700, 0o700, 0o700, 0o700, 0o600],
         "only this user can change what the engine runs"
     );
 
@@ -612,7 +613,7 @@ async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
     let pinned = Build { sha256: "0".repeat(64), ..build(url, &archive) };
     let h = Harness::with_outside(
         search_port::Fake::new(fake_catalog()),
-        Outside { fetch: Fetch::Build(pinned), ..Outside::default() },
+        Outside { fetch: Fetch::Build(pinned.clone()), ..Outside::default() },
     );
     for tries in 1..=2 {
         let (status, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
@@ -637,10 +638,48 @@ async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
 
     let off = Harness::with_outside(
         search_port::Fake::new(fake_catalog()),
-        Outside { fetch: Fetch::Off, ..Outside::default() },
+        Outside { fetch: Fetch::Off(pinned), ..Outside::default() },
     );
     let refused = post(&off, "/api/ffmpeg", json!({})).await;
     assert_eq!(error(&refused), (404, "not_found", "ffmpeg is not installed, and config.yaml turns off fetching it"));
+}
+
+/// The last line of `POST /api/ffmpeg`.
+async fn fetch_ffmpeg(h: &Harness) -> Value {
+    let (_, _, body) = fetch(h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    lines(&body).pop().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetched_ffmpeg_that_changed_on_disk_is_fetched_again() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let mut h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let fetched = h.dir.path().join("ffmpeg").join(VERSION);
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    let ffprobe = std::fs::read(fetched.join("ffprobe")).unwrap();
+
+    std::fs::write(fetched.join("ffprobe"), "#!/bin/sh\necho changed\n").unwrap();
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "a changed ffprobe is fetched again");
+    assert_eq!(std::fs::read(fetched.join("ffprobe")).unwrap(), ffprobe);
+
+    let copy = h.dir.path().join("ffmpeg-copy");
+    std::fs::copy(fetched.join("ffmpeg"), &copy).unwrap();
+    std::fs::remove_file(fetched.join("ffmpeg")).unwrap();
+    std::os::unix::fs::symlink(&copy, fetched.join("ffmpeg")).unwrap();
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    assert_eq!(asked.load(Ordering::SeqCst), 3, "a link to the same ffmpeg is fetched again");
+
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    assert_eq!(asked.load(Ordering::SeqCst), 3, "an ffmpeg as it was fetched is used again");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -9,7 +9,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
@@ -58,6 +58,7 @@ const PINS: [Pin; 3] = [
 
 const PROGRAMS: [&str; 2] = ["ffmpeg", "ffprobe"];
 const ARCHIVE: &str = "archive.tar.xz";
+const MANIFEST: &str = "manifest.json";
 /// Where a fetch puts its files until they are checked.
 const PARTIAL: &str = ".partial";
 /// A fresh program can take a while to start the first time, while macOS scans it.
@@ -88,8 +89,8 @@ impl Build {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Fetch {
     Build(Build),
-    /// config.yaml turns fetching off.
-    Off,
+    /// config.yaml turns fetching off. A build fetched before still runs.
+    Off(Build),
     /// torrential has no build for this machine.
     Unavailable,
 }
@@ -104,8 +105,16 @@ impl Fetch {
         }
         match Build::pinned(std::env::consts::OS, std::env::consts::ARCH) {
             Some(build) if allowed => Fetch::Build(build),
-            Some(_) => Fetch::Off,
+            Some(build) => Fetch::Off(build),
             None => Fetch::Unavailable,
+        }
+    }
+
+    /// The build a fetched folder must hold for the engine to run it.
+    fn pin(&self) -> Option<&Build> {
+        match self {
+            Fetch::Build(build) | Fetch::Off(build) => Some(build),
+            Fetch::Unavailable => None,
         }
     }
 
@@ -116,7 +125,7 @@ impl Fetch {
                 "torrential has not fetched ffmpeg yet, and this needs it",
                 format!("play the file in the web app once, which fetches it, or {INSTALL}"),
             ),
-            Fetch::Off => (
+            Fetch::Off(_) => (
                 "ffmpeg is not installed, and config.yaml turns off fetching it",
                 format!("{INSTALL}, then try again; torrential doctor shows what it found"),
             ),
@@ -140,22 +149,11 @@ pub enum Found {
 }
 
 impl Found {
-    /// `root` is the folder fetched builds go in.
-    pub fn look(installed: &Tools, root: &Path, fetch: &Fetch) -> Found {
-        if let Some(programs) = installed.both() {
-            return Found::Installed(programs);
-        }
-        match Tools::find_in(&[&root.join(VERSION)]).both() {
-            Some(programs) => Found::Fetched(programs),
-            None => Found::Missing(fetch.clone()),
-        }
-    }
-
     pub fn readiness(&self) -> Readiness {
         match self {
             Found::Installed(_) | Found::Fetched(_) => Readiness::Ready,
             Found::Missing(Fetch::Build(_)) => Readiness::Fetch,
-            Found::Missing(Fetch::Off | Fetch::Unavailable) => Readiness::Missing,
+            Found::Missing(Fetch::Off(_) | Fetch::Unavailable) => Readiness::Missing,
         }
     }
 }
@@ -197,17 +195,40 @@ pub struct Ffmpeg {
     installed: Arc<dyn Fn() -> Tools + Send + Sync>,
     root: PathBuf,
     fetch: Fetch,
-    /// The fetch under way, or the last one.
-    running: Mutex<Option<watch::Receiver<Stage>>>,
+    /// What this engine run knows of the fetched build. A fetch sets it as it ends.
+    fetched: Arc<Mutex<Fetched>>,
+}
+
+/// The fetched build, as far as this engine run knows.
+enum Fetched {
+    /// Not looked at yet. The first look hashes the programs, once for each engine run.
+    Unchecked,
+    /// The folder holds the pinned build's programs as they were unpacked.
+    Ready(Programs),
+    /// None, or not as it was fetched, so it needs fetching again.
+    Absent,
+    Running(watch::Receiver<Stage>),
 }
 
 impl Ffmpeg {
+    /// `root` is the folder fetched builds go in.
     pub fn new(installed: Arc<dyn Fn() -> Tools + Send + Sync>, root: PathBuf, fetch: Fetch) -> Ffmpeg {
-        Ffmpeg { installed, root, fetch, running: Mutex::default() }
+        Ffmpeg { installed, root, fetch, fetched: Arc::new(Mutex::new(Fetched::Unchecked)) }
     }
 
     pub fn found(&self) -> Found {
-        Found::look(&(self.installed)(), &self.root, &self.fetch)
+        if let Some(programs) = (self.installed)().both() {
+            return Found::Installed(programs);
+        }
+        let mut fetched = self.fetched.lock().expect("no holder panics");
+        if let Fetched::Unchecked = *fetched {
+            let checked = self.fetch.pin().and_then(|pin| check(&self.root, pin));
+            *fetched = checked.map_or(Fetched::Absent, Fetched::Ready);
+        }
+        match &*fetched {
+            Fetched::Ready(programs) => Found::Fetched(programs.clone()),
+            _ => Found::Missing(self.fetch.clone()),
+        }
     }
 
     /// The programs that are here now. Never fetches them.
@@ -226,45 +247,98 @@ impl Ffmpeg {
             Found::Missing(Fetch::Build(build)) => build,
             Found::Missing(fetch) => return Err(fetch.missing()),
         };
-        let mut running = self.running.lock().expect("no holder panics");
-        let live =
-            |stage: &&watch::Receiver<Stage>| !matches!(*stage.borrow(), Stage::Done(_)) && stage.has_changed().is_ok();
-        if let Some(stage) = running.as_ref().filter(live) {
-            return Ok(Fetching::Running(stage.clone()));
+        let mut fetched = self.fetched.lock().expect("no holder panics");
+        match &*fetched {
+            // A fetch ended since this request looked.
+            Fetched::Ready(_) => return Ok(Fetching::Here),
+            // A fetch that panicked has dropped its sender.
+            Fetched::Running(stage) if stage.has_changed().is_ok() => return Ok(Fetching::Running(stage.clone())),
+            _ => {}
         }
         let (report, stage) = watch::channel(Stage::Downloading { done: 0, size: build.size });
-        let root = self.root.clone();
+        *fetched = Fetched::Running(stage.clone());
+        let (root, state) = (self.root.clone(), self.fetched.clone());
         tokio::spawn(async move {
             let done = fetch(&build, &root, &report).await;
-            report.send_replace(Stage::Done(done));
+            *state.lock().expect("no holder panics") = match &done {
+                Ok(programs) => Fetched::Ready(programs.clone()),
+                Err(_) => Fetched::Absent,
+            };
+            report.send_replace(Stage::Done(done.map(drop)));
         });
-        *running = Some(stage.clone());
         Ok(Fetching::Running(stage))
     }
 }
 
-/// Downloads `build`, checks its hash, unpacks ffmpeg and ffprobe, and checks that they run, into
-/// `root`'s folder for this version. Anything else in `root` is removed. A failure leaves nothing.
-async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Result<(), Error> {
-    let folder = root.join(VERSION);
-    // A request that looked before the last fetch finished starts another, which has nothing to do.
-    if Tools::find_in(&[&folder]).both().is_some() {
-        return Ok(());
+/// What a fetch left in its folder: the build it unpacked, and the SHA-256 of each program as it
+/// came out of the archive.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct Manifest {
+    build: String,
+    ffmpeg: String,
+    ffprobe: String,
+}
+
+impl Manifest {
+    /// What the manifest in `folder` says when its programs are those of `build`, as they are now.
+    /// Fails when a program is a link or is not executable.
+    fn of(folder: &Path, build: &Build) -> io::Result<Manifest> {
+        let hash = |program: &str| {
+            let path = folder.join(program);
+            let meta = path.symlink_metadata()?;
+            if !meta.is_file() || meta.mode() & 0o100 == 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{program} is not a program")));
+            }
+            let mut hash = Sha256::new();
+            io::copy(&mut File::open(&path)?, &mut hash)?;
+            Ok(format!("{:x}", hash.finalize()))
+        };
+        Ok(Manifest { build: build.sha256.clone(), ffmpeg: hash("ffmpeg")?, ffprobe: hash("ffprobe")? })
     }
+
+    fn write(&self, folder: &Path) -> io::Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(folder.join(MANIFEST))?;
+        io::Write::write_all(&mut file, &serde_json::to_vec(self)?)
+    }
+}
+
+/// The programs `root`'s folder for this version holds, when only this user can change the
+/// folders and the programs are those its manifest records for `pin`.
+fn check(root: &Path, pin: &Build) -> Option<Programs> {
+    let folder = root.join(VERSION);
+    for dir in [root.parent().unwrap_or(root), root, &folder] {
+        private(dir).ok()?;
+    }
+    let recorded: Manifest = serde_json::from_slice(&std::fs::read(folder.join(MANIFEST)).ok()?).ok()?;
+    (recorded == Manifest::of(&folder, pin).ok()?).then(|| programs(&folder))
+}
+
+fn programs(folder: &Path) -> Programs {
+    Programs { ffmpeg: folder.join("ffmpeg"), ffprobe: folder.join("ffprobe") }
+}
+
+/// Downloads `build`, checks its hash, unpacks ffmpeg and ffprobe with a manifest of them, and
+/// checks that they run, into `root`'s folder for this version. Anything else in `root` is removed.
+/// A failure leaves nothing.
+async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Result<Programs, Error> {
+    let folder = root.join(VERSION);
     let started = Instant::now();
     super::super::log(&format!("fetching ffmpeg {VERSION} from {}", build.url));
     let fetched = async {
         let partial = Partial::create(root)?;
         let archive = partial.path.join(ARCHIVE);
         download(build, &archive, report).await?;
-        let into = partial.path.clone();
-        tokio::task::spawn_blocking(move || unpack(&archive, &into))
-            .await
-            .map_err(|e| Error::internal(format!("the ffmpeg unpacking stopped: {e}")))?
-            .map_err(|e| {
-                Error::new(ErrorCode::StorageError, format!("cannot unpack ffmpeg into {}: {e}", root.display()))
-                    .with_hint("free some space or fix the folder's permissions, then try again")
-            })?;
+        let (into, unpacked) = (partial.path.clone(), build.clone());
+        tokio::task::spawn_blocking(move || {
+            unpack(&archive, &into)?;
+            Manifest::of(&into, &unpacked)?.write(&into)
+        })
+        .await
+        .map_err(|e| Error::internal(format!("the ffmpeg unpacking stopped: {e}")))?
+        .map_err(|e| {
+            Error::new(ErrorCode::StorageError, format!("cannot unpack ffmpeg into {}: {e}", root.display()))
+                .with_hint("free some space or fix the folder's permissions, then try again")
+        })?;
         for program in PROGRAMS {
             runs(&partial.path.join(program)).await?;
         }
@@ -272,7 +346,7 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
     }
     .await;
     match &fetched {
-        Ok(()) => super::super::log(&format!("fetched ffmpeg {VERSION} in {} s", started.elapsed().as_secs())),
+        Ok(_) => super::super::log(&format!("fetched ffmpeg {VERSION} in {} s", started.elapsed().as_secs())),
         Err(error) => super::super::log(&format!("cannot fetch ffmpeg: {}", error.message)),
     }
     fetched
@@ -414,10 +488,11 @@ impl Partial {
     }
 
     /// Moves the programs to `folder`, where the engine finds them.
-    fn finish(self, folder: &Path) -> Result<(), Error> {
+    fn finish(self, folder: &Path) -> Result<Programs, Error> {
         std::fs::remove_file(self.path.join(ARCHIVE))
             .and_then(|()| std::fs::rename(&self.path, folder))
-            .map_err(|e| unwritable(folder, &e))
+            .map_err(|e| unwritable(folder, &e))?;
+        Ok(programs(folder))
     }
 }
 
@@ -506,8 +581,8 @@ mod tests {
             ("TORRENTIAL_TEST_FFMPEG_SHA256", "ABC123"),
             ("TORRENTIAL_TEST_FFMPEG_SIZE", "4096"),
         ];
-        assert_eq!(fetch(&elsewhere, true), Fetch::Build(pinned));
-        assert_eq!(fetch(&elsewhere, false), Fetch::Off);
+        assert_eq!(fetch(&elsewhere, true), Fetch::Build(pinned.clone()));
+        assert_eq!(fetch(&elsewhere, false), Fetch::Off(pinned));
         assert_eq!(fetch(&[("TORRENTIAL_TEST_ENGINE", "fake"), elsewhere[0]], true), Fetch::Unavailable);
         assert_eq!(fetch(&[("TORRENTIAL_TEST_NETWORK", "loopback"), elsewhere[0]], true), Fetch::Unavailable);
     }
@@ -516,24 +591,27 @@ mod tests {
     fn an_installed_ffmpeg_wins_over_the_fetched_one() {
         let dir = tempfile::tempdir().unwrap();
         let (installed, root) = (dir.path().join("bin"), dir.path().join("ffmpeg"));
-        for folder in [&installed, &root.join(VERSION)] {
-            std::fs::create_dir_all(folder).unwrap();
+        let fetched = root.join(VERSION);
+        let build = Build { url: String::new(), sha256: "ab".repeat(32), size: 0 };
+        for folder in [&installed, &fetched] {
+            DirBuilder::new().recursive(true).mode(0o700).create(folder).unwrap();
             for program in PROGRAMS {
-                std::fs::write(folder.join(program), "").unwrap();
+                OpenOptions::new().write(true).create_new(true).mode(0o700).open(folder.join(program)).unwrap();
             }
         }
-        let programs = |folder: &Path| Programs { ffmpeg: folder.join("ffmpeg"), ffprobe: folder.join("ffprobe") };
-        let system = Tools::find_in(&[&installed]);
-        assert_eq!(Found::look(&system, &root, &Fetch::Off), Found::Installed(programs(&installed)));
-        let fetched = Found::look(&Tools::default(), &root, &Fetch::Off);
-        assert_eq!(fetched, Found::Fetched(programs(&root.join(VERSION))));
-        assert_eq!(fetched.readiness(), Readiness::Ready);
+        Manifest::of(&fetched, &build).unwrap().write(&fetched).unwrap();
+        let found =
+            |installed: Tools, fetch| Ffmpeg::new(Arc::new(move || installed.clone()), root.clone(), fetch).found();
+        let system = Tools { ffmpeg: Some(installed.join("ffmpeg")), ffprobe: Some(installed.join("ffprobe")) };
+        assert_eq!(found(system.clone(), Fetch::Off(build.clone())), Found::Installed(programs(&installed)));
+        let fetched_found = found(Tools::default(), Fetch::Off(build.clone()));
+        assert_eq!(fetched_found, Found::Fetched(programs(&fetched)));
+        assert_eq!(fetched_found.readiness(), Readiness::Ready);
         let only_ffmpeg = Tools { ffmpeg: system.ffmpeg, ffprobe: None };
-        std::fs::remove_dir_all(root.join(VERSION)).unwrap();
-        let missing = |fetch| Found::look(&only_ffmpeg, &root, &fetch).readiness();
-        let build = Build { url: String::new(), sha256: String::new(), size: 0 };
+        std::fs::remove_dir_all(&fetched).unwrap();
+        let missing = |fetch| found(only_ffmpeg.clone(), fetch).readiness();
         assert_eq!(
-            [missing(Fetch::Build(build)), missing(Fetch::Off), missing(Fetch::Unavailable)],
+            [missing(Fetch::Build(build.clone())), missing(Fetch::Off(build)), missing(Fetch::Unavailable)],
             [Readiness::Fetch, Readiness::Missing, Readiness::Missing]
         );
     }
