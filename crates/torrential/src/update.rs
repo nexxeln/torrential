@@ -426,14 +426,14 @@ pub async fn watch(env: Env, paths: Paths, playing: Playing, board: Board, updat
                     if let Some(latest) = checked.newer(&current).filter(|_| playing.any()) {
                         crate::daemon::log(&format!("torrential {latest} waits until nothing is playing"));
                         board.post(Some(News::Waiting { latest }));
-                        playing.none().await;
+                        drop(playing.close().await);
                         continue;
                     }
                     match install(&releases, &paths, &env, now).await {
                         Ok(Outcome::Updated(to)) => {
                             crate::daemon::log(&format!("installed torrential {to}"));
                             write_json(&paths.state.join(UPDATED), &Updated { from: current, to: to.to_string() });
-                            playing.none().await;
+                            playing.close().await.keep();
                             return to;
                         }
                         Ok(Outcome::Latest(_)) => {}

@@ -186,10 +186,14 @@ impl Connection<'_> {
             return self.empty("405 Method Not Allowed", "", request.keep_alive).await;
         }
         match route(&request.path) {
-            Some((id, index)) => {
-                let _playing = self.ctx.playing.open();
-                self.file(request, id, index).await
-            }
+            Some((id, index)) => match self.ctx.playing.open() {
+                Ok(_playing) => self.file(request, id, index).await,
+                Err(updating) => {
+                    let message = updating.message.as_bytes();
+                    let text = "text/plain; charset=utf-8";
+                    self.send("503 Service Unavailable", text, "Retry-After: 5\r\n", message, &request).await
+                }
+            },
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
                     let headers = format!("Cache-Control: {}\r\n", asset.cache);

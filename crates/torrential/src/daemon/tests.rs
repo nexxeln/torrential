@@ -1527,6 +1527,35 @@ async fn a_player_gets_a_range_once_the_engine_has_its_pieces() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_player_that_asks_while_an_update_installs_hears_to_try_again() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let notes = torrent(82, "notes", &[("notes.srt", 10_000)]);
+    written(&h.downloads().join("notes/notes.srt"), 10_000);
+    h.get(h.torrent_file(&notes), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let srt = format!("/{}/0/notes.srt", notes.info_hash.id().to_hex());
+    let closed = h.running.ctx.playing.close().await;
+
+    let mut player = Player::connect(&h).await;
+    player.send("GET", &srt, &["Host: 127.0.0.1:47919"]).await;
+    let refused = player.answer(false).await;
+    drop(closed);
+    player.send("GET", &srt, &["Host: 127.0.0.1:47919"]).await;
+    let (status, _, _) = player.answer(false).await;
+
+    assert_eq!(
+        refused,
+        (
+            503,
+            "content-length: 50\ncontent-type: text/plain; charset=utf-8\nretry-after: 5\n".into(),
+            b"torrential is updating, try again in a few seconds".to_vec()
+        )
+    );
+    assert_eq!(status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn one_player_connection_gets_whole_files_ranges_and_refusals() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);

@@ -522,6 +522,16 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
             wire::write_async(&mut wr, &Response::Error { error }).await?;
             continue;
         }
+        let _playing = match request {
+            Request::Play(_) | Request::PlayTitle(_) => match ctx.playing.open() {
+                Ok(open) => Some(open),
+                Err(error) => {
+                    wire::write_async(&mut wr, &Response::Error { error }).await?;
+                    continue;
+                }
+            },
+            _ => None,
+        };
         match request {
             Request::Watch { refs } => return watch(ctx, refs, rd, wr).await,
             Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,

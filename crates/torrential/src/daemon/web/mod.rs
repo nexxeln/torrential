@@ -110,13 +110,19 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
         (Method::Get, "search") => return search(conn, request).await,
         (Method::Get, "events") => return watch::events(conn, request).await,
         (Method::Get, "stream") => {
-            let _playing = conn.ctx.playing.open();
+            let _playing = match conn.ctx.playing.open() {
+                Ok(open) => open,
+                Err(updating) => return fail(conn, request, &updating).await,
+            };
             return watch::stream(conn, request).await;
         }
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
         (Method::Get, "title/sources") => return titles::sources(conn, request).await,
         (Method::Post, "title/play") => {
-            let _playing = conn.ctx.playing.open();
+            let _playing = match conn.ctx.playing.open() {
+                Ok(open) => open,
+                Err(updating) => return fail(conn, request, &updating).await,
+            };
             return titles::play(conn, request).await;
         }
         (Method::Get, "title/art") => return titles::art(conn, request).await,
