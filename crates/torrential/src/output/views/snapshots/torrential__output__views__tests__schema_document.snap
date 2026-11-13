@@ -295,6 +295,153 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "tv",
+      "about": "List the TVs on the home network, play on one, and control what plays",
+      "arguments": [],
+      "flags": [],
+      "subcommands": [
+        {
+          "name": "list",
+          "about": "List the TVs on the home network and what plays on them, the default",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "play",
+          "about": "Play a film, an episode, or a torrent's video on a TV",
+          "arguments": [
+            {
+              "name": "WORDS",
+              "help": "A title ID such as tt0063350, tt0903747:3:5, or tt0903747 s03e05, or a download or search result ID, magnet link, infohash, or .torrent file or URL",
+              "required": true,
+              "repeatable": true
+            }
+          ],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one answers",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            },
+            {
+              "name": "--source",
+              "help": "With a title ID, play only this one of its torrents, by an ID from torrential sources",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "ID"
+            },
+            {
+              "name": "--file",
+              "help": "With a torrent, the index of the file to play, from torrential files",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "INDEX"
+            },
+            {
+              "name": "--subtitle",
+              "help": "The index of a subtitle file of the same torrent to show, from torrential files",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "INDEX"
+            },
+            {
+              "name": "--at",
+              "help": "Start at this time, such as 1:02:30 or 90s, instead of where you stopped",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "TIME"
+            }
+          ]
+        },
+        {
+          "name": "pause",
+          "about": "Pause what plays on the TV",
+          "arguments": [],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "resume",
+          "about": "Resume what plays on the TV",
+          "arguments": [],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "seek",
+          "about": "Go to a time in the video",
+          "arguments": [
+            {
+              "name": "TIME",
+              "help": "Such as 1:02:30, 90s, or 5m",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "volume",
+          "about": "Set the TV's volume",
+          "arguments": [
+            {
+              "name": "LEVEL",
+              "help": "From 0 to 100",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "stop",
+          "about": "Stop what plays on the TV",
+          "arguments": [],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "status",
       "about": "List downloads, or show one in detail",
       "arguments": [

@@ -145,7 +145,13 @@ pub fn get(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(u8, Jo
 
 /// Sends a title play and shows each of its steps until the reply. When no source of the title
 /// is found, a search for its name comes next.
-fn steps(conn: &mut Conn, request: &Request, video: &VideoRef, mode: Mode, started: &str) -> Result<Response, Error> {
+pub(super) fn steps(
+    conn: &mut Conn,
+    request: &Request,
+    video: &VideoRef,
+    mode: Mode,
+    started: &str,
+) -> Result<Response, Error> {
     conn.send(request)?;
     let shown = Shown::new(mode);
     let mut search = None;

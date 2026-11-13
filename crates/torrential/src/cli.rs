@@ -70,6 +70,14 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<DevicesCommand>,
     },
+    /// List the TVs on the home network, play on one, and control what plays
+    #[command(
+        after_help = "Examples:\n  torrential tv\n  torrential tv play tt0063350\n  torrential tv play tt0903747 s03e05 --tv bedroom\n  torrential tv play 6bc1af --json\n  torrential tv pause\n  torrential tv seek 1:02:30"
+    )]
+    Tv {
+        #[command(subcommand)]
+        command: Option<TvCommand>,
+    },
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -328,6 +336,65 @@ pub enum DevicesCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum TvCommand {
+    /// List the TVs on the home network and what plays on them, the default
+    List,
+    /// Play a film, an episode, or a torrent's video on a TV
+    Play(TvPlayArgs),
+    /// Pause what plays on the TV
+    Pause(TvArgs),
+    /// Resume what plays on the TV
+    Resume(TvArgs),
+    /// Go to a time in the video
+    Seek {
+        /// Such as 1:02:30, 90s, or 5m
+        #[arg(value_name = "TIME", value_parser = parse_time)]
+        time: f64,
+        #[command(flatten)]
+        tv: TvArgs,
+    },
+    /// Set the TV's volume
+    Volume {
+        /// From 0 to 100
+        #[arg(value_name = "LEVEL", value_parser = clap::value_parser!(u8).range(0..=100))]
+        level: u8,
+        #[command(flatten)]
+        tv: TvArgs,
+    },
+    /// Stop what plays on the TV
+    Stop(TvArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct TvArgs {
+    /// The TV, by a part of its name or its ID from torrential tv, when more than one plays
+    #[arg(long, value_name = "NAME")]
+    pub tv: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TvPlayArgs {
+    /// A title ID such as tt0063350, tt0903747:3:5, or tt0903747 s03e05, or a download or search result ID, magnet link, infohash, or .torrent file or URL
+    #[arg(value_name = "WORDS", required = true, num_args = 1..=2, add = ArgValueCandidates::new(complete_download_ids))]
+    pub words: Vec<String>,
+    /// The TV, by a part of its name or its ID from torrential tv, when more than one answers
+    #[arg(long, value_name = "NAME")]
+    pub tv: Option<String>,
+    /// With a title ID, play only this one of its torrents, by an ID from torrential sources
+    #[arg(long, value_name = "ID")]
+    pub source: Option<String>,
+    /// With a torrent, the index of the file to play, from torrential files
+    #[arg(long, value_name = "INDEX")]
+    pub file: Option<u32>,
+    /// The index of a subtitle file of the same torrent to show, from torrential files
+    #[arg(long, value_name = "INDEX")]
+    pub subtitle: Option<u32>,
+    /// Start at this time, such as 1:02:30 or 90s, instead of where you stopped
+    #[arg(long, value_name = "TIME", value_parser = parse_time)]
+    pub at: Option<f64>,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum DaemonCommand {
     /// Show whether the engine is running
     Status,
@@ -472,6 +539,22 @@ fn parse_limit(s: &str) -> Result<Limit, String> {
         .ok_or_else(|| format!("{s:?} is not a size; use a form like 8GB, or none"))
 }
 
+/// Seconds into a video, from `1:02:30`, `62:30`, `90s`, `5m`, or `90`.
+fn parse_time(s: &str) -> Result<f64, String> {
+    let invalid = || format!("{s:?} is not a time in a video; use a form like 1:02:30, 90s, or 5m");
+    if s.contains(':') {
+        let parts: Vec<&str> = s.trim().split(':').collect();
+        if parts.len() > 3 || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())) {
+            return Err(invalid());
+        }
+        return parts
+            .iter()
+            .try_fold(0.0, |total, part| part.parse::<f64>().map(|n| total * 60.0 + n))
+            .map_err(|_| invalid());
+    }
+    torrential_core::units::parse_duration(s).map(|d| d.as_secs_f64()).ok_or_else(invalid)
+}
+
 fn parse_duration(s: &str) -> Result<Duration, String> {
     torrential_core::units::parse_duration(s)
         .ok_or_else(|| format!("{s:?} is not a duration; use a form like 100s, 5m, or 1h30m"))
@@ -504,6 +587,29 @@ mod tests {
         let Some(Command::Get(args)) = cli.command else { panic!("expected get") };
         assert_eq!(args.files, ["*.mp4", "*.srt"]);
         assert_eq!(args.max_size, Some(60 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn a_time_in_a_video_reads_as_a_player_or_a_duration_writes_it() {
+        assert_eq!(parse_time("1:02:30"), Ok(3_750.0));
+        assert_eq!(parse_time("62:30"), Ok(3_750.0));
+        assert_eq!(parse_time("90s"), Ok(90.0));
+        assert_eq!(parse_time("5m"), Ok(300.0));
+        assert_eq!(parse_time("90"), Ok(90.0));
+        let wrong = Err("\"1::30\" is not a time in a video; use a form like 1:02:30, 90s, or 5m".to_string());
+        assert_eq!(parse_time("1::30"), wrong);
+        assert!(parse_time("1:2:3:4").is_err());
+        assert!(parse_time("soon").is_err());
+        let cli =
+            Cli::try_parse_from(["torrential", "tv", "play", "tt0903747", "s03e05", "--tv", "bedroom", "--at", "1:00"])
+                .unwrap();
+        let Some(Command::Tv { command: Some(TvCommand::Play(args)) }) = cli.command else {
+            panic!("expected tv play")
+        };
+        assert_eq!(
+            (args.words, args.tv.as_deref(), args.at),
+            (vec!["tt0903747".into(), "s03e05".into()], Some("bedroom"), Some(60.0))
+        );
     }
 
     #[test]
