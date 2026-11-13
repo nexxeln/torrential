@@ -307,12 +307,21 @@ pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Erro
 }
 
 /// For each title watched lately, its video to go on with, and the saved titles. A finished film,
-/// and a series the person has caught up with, are left out.
+/// and a series the person has caught up with, are left out. The catalog lookups share one
+/// deadline, so an unreachable catalog cannot hold the lists up. Past it, each title's details
+/// come from the copy kept on this machine, and a title with none is left out.
 pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
     let now = super::owner::now();
+    let deadline = tokio::time::Instant::now() + ctx.titles.timing.home;
+    let catalog = &ctx.titles.catalog;
     let mut going_on = Vec::new();
     for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
-        let Ok(details) = ctx.titles.catalog.title(&recent.video.title).await else { continue };
+        let id = &recent.video.title;
+        let details = match tokio::time::timeout_at(deadline, catalog.title(id)).await {
+            Ok(looked_up) => looked_up.ok(),
+            Err(_) => catalog.kept(id).await,
+        };
+        let Some(details) = details else { continue };
         let watched = ctx.titles.shelf.watched(&recent.video.title)?;
         let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
         let episode = video

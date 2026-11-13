@@ -28,6 +28,7 @@ const TIMING: Timing = Timing {
     file_list: Duration::from_millis(500),
     first_bytes: Duration::from_millis(500),
     budget: Duration::from_secs(20),
+    home: Duration::from_millis(300),
 };
 
 struct Harness {
