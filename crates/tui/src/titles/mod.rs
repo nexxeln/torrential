@@ -224,13 +224,18 @@ impl State {
         Vec::new()
     }
 
+    /// Esc clears the words in the search box, and in an empty box steps out of it: back to the
+    /// title it was opened over, or from a search to the home lists.
     fn titles_query_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         use KeyCode::*;
-        let listed = !self.titles.picks().is_empty();
         match key.code {
             Enter => return self.find_titles(),
             Esc if self.help => self.help = false,
-            Esc if !listed => self.titles.query = Input::default(),
+            Esc if !self.titles.query.text.is_empty() => self.titles.query = Input::default(),
+            Esc if self.titles.open.is_none() && self.titles.found.is_some() => {
+                self.titles.typing = false;
+                return self.back_titles();
+            }
             Esc | Down | Tab | BackTab => self.titles.typing = false,
             _ => edit(&mut self.titles.query, key),
         }

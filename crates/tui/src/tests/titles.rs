@@ -482,6 +482,32 @@ fn a_late_answer_to_an_older_home_or_title_request_changes_nothing() {
 }
 
 #[test]
+fn esc_clears_the_search_box_then_leaves_it_even_when_nothing_was_found() {
+    let mut state = opened((100, 30));
+    press(&mut state, "/nosferatu");
+    state.update(key(KeyCode::Enter));
+    state.update(Msg::FoundTitles { search: 1, result: Ok(Vec::new()) });
+    press(&mut state, "/");
+    assert_eq!((state.titles.typing, state.titles.query.text.as_str()), (true, "nosferatu"));
+    state.update(key(KeyCode::Esc));
+    assert_eq!((state.titles.typing, state.titles.query.text.as_str()), (true, ""), "the first esc clears the words");
+    state.update(key(KeyCode::Esc));
+    assert_eq!(
+        (state.titles.typing, state.titles.found.is_none()),
+        (false, true),
+        "the next esc steps back to the home lists"
+    );
+    assert_eq!(state.pick(), Some(Pick::Continue(video("tt9999901:1:3"))));
+
+    let mut nothing = empty((100, 30));
+    press(&mut nothing, "dune");
+    nothing.update(key(KeyCode::Esc));
+    nothing.update(key(KeyCode::Esc));
+    assert_eq!((nothing.titles.typing, nothing.titles.query.text.as_str()), (false, ""));
+    assert_eq!(footer(&nothing).trim(), "/ search   d downloads   ? keys");
+}
+
+#[test]
 fn a_long_series_scrolls_with_the_cursor_and_keeps_the_season_in_the_margin() {
     let mut state = series((100, 12));
     press(&mut state, "jjjjj");
