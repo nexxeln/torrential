@@ -107,6 +107,33 @@ fn the_list_keeps_thirty_two_tvs_and_drops_those_the_last_search_missed_first() 
 }
 
 #[test]
+fn a_cast_gives_up_on_a_tv_that_answers_its_polls_without_saying_what_it_does() {
+    let start = Instant::now();
+    let after = |seconds| start + Duration::from_secs(seconds);
+    let state = |state: &str| {
+        let answer = format!("<u:GetTransportInfoResponse>{state}</u:GetTransportInfoResponse>");
+        Ok(Polled::read(&answer, "", None))
+    };
+    let playing = state("<CurrentTransportState>PLAYING</CurrentTransportState>");
+    let mut contact = Contact { played: true, ..Contact::new(start) };
+    for (second, answer) in [(1, state("")), (2, state("<CurrentTransportState></CurrentTransportState>"))] {
+        contact.heard(after(second), &answer);
+    }
+    for second in 3..=60 {
+        contact.heard(after(second), &state("<CurrentTransportState>WARMING_UP</CurrentTransportState>"));
+    }
+    let lost = contact.lost(after(60), "LG TV").map(|error| error.message);
+    assert_eq!(lost.as_deref(), Some("LG TV stopped saying what it plays"));
+
+    let mut contact = Contact { played: true, ..Contact::new(start) };
+    contact.heard(after(30), &playing);
+    contact.heard(after(80), &state(""));
+    assert_eq!(contact.lost(after(89), "LG TV").map(|error| error.message), None, "PLAYING says what it does");
+    let lost = contact.lost(after(90), "LG TV").map(|error| error.message);
+    assert_eq!(lost.as_deref(), Some("LG TV stopped saying what it plays"));
+}
+
+#[test]
 fn a_cast_gives_up_on_a_tv_that_stops_answering_fails_every_poll_or_never_plays() {
     let start = Instant::now();
     let after = |seconds| start + Duration::from_secs(seconds);

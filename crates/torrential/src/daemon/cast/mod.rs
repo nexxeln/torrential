@@ -600,42 +600,40 @@ impl Run {
             polls += 1;
             let polled = self.poll(polls % VOLUME_EVERY == 1).await;
             let now = Instant::now();
-            match polled {
-                Ok(polled) => {
-                    (contact.answered, contact.said) = (now, now);
-                    let elsewhere = polled.uri.as_deref().is_some_and(|uri| !uri.is_empty() && !uri.contains(token));
-                    match polled.transport {
-                        Transport::Playing | Transport::Paused if !elsewhere => {
-                            contact.played = true;
-                            let paused = polled.transport == Transport::Paused;
-                            let duration = polled.duration.or(known);
-                            self.view.send_modify(|cast| {
-                                cast.state = if paused { CastState::Paused } else { CastState::Playing };
-                                cast.position = polled.position.or(cast.position);
-                                cast.duration = duration;
-                                cast.volume = polled.volume.or(cast.volume);
-                            });
-                            if !paused
-                                && let Some((at, tries)) = resume.take()
-                                && self.seek(at).await.is_err()
-                                && tries > 1
-                            {
-                                resume = Some((at, tries - 1));
-                            }
+            contact.heard(now, &polled);
+            if let Ok(polled) = polled
+                && let Some(transport) = polled.transport
+            {
+                let elsewhere = polled.uri.as_deref().is_some_and(|uri| !uri.is_empty() && !uri.contains(token));
+                match transport {
+                    Transport::Playing | Transport::Paused if !elsewhere => {
+                        contact.played = true;
+                        let paused = transport == Transport::Paused;
+                        let duration = polled.duration.or(known);
+                        self.view.send_modify(|cast| {
+                            cast.state = if paused { CastState::Paused } else { CastState::Playing };
+                            cast.position = polled.position.or(cast.position);
+                            cast.duration = duration;
+                            cast.volume = polled.volume.or(cast.volume);
+                        });
+                        if !paused
+                            && let Some((at, tries)) = resume.take()
+                            && self.seek(at).await.is_err()
+                            && tries > 1
+                        {
+                            resume = Some((at, tries - 1));
                         }
-                        _ if contact.played && elsewhere => {
-                            self.save(found);
-                            return Ok(());
-                        }
-                        Transport::Stopped if contact.played => {
-                            self.save(found);
-                            return Ok(());
-                        }
-                        _ => {}
                     }
+                    _ if contact.played && elsewhere => {
+                        self.save(found);
+                        return Ok(());
+                    }
+                    Transport::Stopped if contact.played => {
+                        self.save(found);
+                        return Ok(());
+                    }
+                    _ => {}
                 }
-                Err(Failed::Refused(..)) => contact.answered = now,
-                Err(Failed::Gone(_)) => {}
             }
             if let Some(error) = contact.lost(now, &tv.name) {
                 self.save(found);
@@ -713,13 +711,7 @@ impl Run {
             }
             _ => None,
         };
-        Ok(Polled {
-            transport: Transport::of(&xml::text(&transport, "CurrentTransportState").unwrap_or_default()),
-            position: xml::text(&position, "RelTime").and_then(|t| upnp::seconds(&t)),
-            duration: xml::text(&position, "TrackDuration").and_then(|t| upnp::seconds(&t)).filter(|d| *d > 0.0),
-            uri: xml::text(&position, "TrackURI"),
-            volume,
-        })
+        Ok(Polled::read(&transport, &position, volume))
     }
 
     async fn transport(&self, action: &str, args: &[(&str, &str)]) -> Result<String, Failed> {
@@ -769,6 +761,16 @@ impl Contact {
         Self { started: now, answered: now, said: now, played: false }
     }
 
+    /// Takes in one poll at `now`. A fault or an answer without a transport state is an answer,
+    /// but it does not say what the TV does.
+    fn heard(&mut self, now: Instant, polled: &Result<Polled, Failed>) {
+        match polled {
+            Ok(Polled { transport: Some(_), .. }) => (self.answered, self.said) = (now, now),
+            Ok(_) | Err(Failed::Refused(..)) => self.answered = now,
+            Err(Failed::Gone(_)) => {}
+        }
+    }
+
     /// Why the cast ends at `now`, if it does: the TV `tv` names has stopped answering, has failed
     /// every poll for a minute, or never started playing.
     fn lost(&self, now: Instant, tv: &str) -> Option<Error> {
@@ -804,23 +806,39 @@ enum Transport {
 }
 
 impl Transport {
-    fn of(state: &str) -> Self {
+    /// The state a TV says, or `None` for a state that UPnP AV does not name, or none at all.
+    fn of(state: &str) -> Option<Self> {
         match state {
-            "PLAYING" => Self::Playing,
-            "PAUSED_PLAYBACK" => Self::Paused,
-            "STOPPED" | "NO_MEDIA_PRESENT" => Self::Stopped,
-            _ => Self::Busy,
+            "PLAYING" => Some(Self::Playing),
+            "PAUSED_PLAYBACK" => Some(Self::Paused),
+            "STOPPED" | "NO_MEDIA_PRESENT" => Some(Self::Stopped),
+            "TRANSITIONING" | "PAUSED_RECORDING" | "RECORDING" => Some(Self::Busy),
+            _ => None,
         }
     }
 }
 
 /// What the TV said on one poll.
 struct Polled {
-    transport: Transport,
+    /// `None` when its answer said no state, which says nothing of what it does.
+    transport: Option<Transport>,
     position: Option<f64>,
     duration: Option<f64>,
     uri: Option<String>,
     volume: Option<u8>,
+}
+
+impl Polled {
+    /// Reads the answers to GetTransportInfo and GetPositionInfo.
+    fn read(transport: &str, position: &str, volume: Option<u8>) -> Self {
+        Polled {
+            transport: Transport::of(&xml::text(transport, "CurrentTransportState").unwrap_or_default()),
+            position: xml::text(position, "RelTime").and_then(|t| upnp::seconds(&t)),
+            duration: xml::text(position, "TrackDuration").and_then(|t| upnp::seconds(&t)).filter(|d| *d > 0.0),
+            uri: xml::text(position, "TrackURI"),
+            volume,
+        }
+    }
 }
 
 /// Returns once the cast `view` follows has ended, and can send its TV nothing more.
