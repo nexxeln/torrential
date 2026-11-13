@@ -11,8 +11,9 @@ import {
   TvIcon,
 } from "@heroicons/react/20/solid";
 import { PauseIcon, PlayIcon } from "@heroicons/react/24/solid";
-import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
+import { type ButtonHTMLAttributes, type CSSProperties, type ReactNode, useState } from "react";
 import type { Chapter } from "../api";
+import { preferences, savePreferences } from "../lib/storage";
 import type { PlayerActions } from "./actions";
 import { usePlayer } from "./context";
 import { TimeLabel, useChapter } from "./TimeLabel";
@@ -93,10 +94,26 @@ interface Props {
 export function Controls(props: Props) {
   const { actions, menu } = props;
   const paused = useVideo(usePlayer().video, (state) => state.paused || state.ended);
+  const [remaining, setRemaining] = useState(() => preferences().showRemaining);
+  const clock = (className: string) => (
+    <TimeLabel
+      duration={props.duration}
+      remaining={remaining}
+      onFlip={() => {
+        savePreferences({ showRemaining: !remaining });
+        setRemaining(!remaining);
+      }}
+      className={className}
+    />
+  );
 
   return (
     <div className="relative flex flex-col pr-(--edge-right) pb-(--edge-bottom) pl-(--edge-left)">
-      {props.seekBar}
+      {/* A phone has no room for the clock among the buttons, so it sits beside the timeline. */}
+      <div className="flex items-center gap-1">
+        <div className="min-w-0 flex-1">{props.seekBar}</div>
+        {clock("sm:hidden")}
+      </div>
       <div className="flex items-center gap-1 max-sm:gap-0">
         <ControlButton label={paused ? "Play (Space)" : "Pause (Space)"} onClick={() => actions.toggle()} className="*:[svg]:size-6">
           {paused ? <PlayIcon /> : <PauseIcon />}
@@ -107,7 +124,7 @@ export function Controls(props: Props) {
           </ControlButton>
         )}
         <Volume actions={actions} />
-        <TimeLabel duration={props.duration} />
+        {clock("max-sm:hidden")}
         <ChapterName chapters={props.chapters} />
         <div className="min-w-0 flex-1" />
 

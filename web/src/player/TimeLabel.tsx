@@ -1,15 +1,21 @@
 import { useRef, useState } from "react";
 import type { Chapter } from "../api";
 import { clock } from "../lib/format";
-import { preferences, savePreferences } from "../lib/storage";
 import { usePlayer } from "./context";
 import { useFrame } from "./frame";
 
-/** The time played, or on a click the time left, beside the video's length. Written to the DOM each frame. */
-export function TimeLabel({ duration }: { duration: number | null }) {
+interface Props {
+  duration: number | null;
+  /** Shows the time left instead of the time played. */
+  remaining: boolean;
+  onFlip: () => void;
+  className?: string;
+}
+
+/** The time played or the time left, beside the video's length. Written to the DOM each frame. */
+export function TimeLabel({ duration, remaining, onFlip, className = "" }: Props) {
   const { element, scrub } = usePlayer();
   const text = useRef<HTMLSpanElement>(null);
-  const [remaining, setRemaining] = useState(() => preferences().showRemaining);
 
   useFrame(() => {
     if (!text.current) return;
@@ -24,11 +30,8 @@ export function TimeLabel({ duration }: { duration: number | null }) {
       aria-label={remaining ? "Show time played" : "Show time left"}
       title={remaining ? "Show time played" : "Show time left"}
       data-time=""
-      onClick={() => {
-        savePreferences({ showRemaining: !remaining });
-        setRemaining(!remaining);
-      }}
-      className="shrink-0 rounded-lg px-2 py-1.5 text-sm font-medium whitespace-nowrap text-ink tabular-nums hover:bg-white/15 pointer-coarse:min-h-11"
+      onClick={onFlip}
+      className={`shrink-0 rounded-lg px-2 py-1.5 text-sm font-medium whitespace-nowrap text-ink tabular-nums hover:bg-white/15 pointer-coarse:min-h-11 ${className}`}
     >
       <span ref={text}>0:00</span>
       <span className="font-normal text-ink/60 max-sm:hidden"> / {duration ? clock(duration) : "–:––"}</span>
