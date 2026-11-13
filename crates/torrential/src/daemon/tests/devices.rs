@@ -433,6 +433,42 @@ async fn a_paired_phone_whose_first_request_is_slow_stays_open_while_strangers_c
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_whose_body_arrives_after_its_device_is_removed_is_refused_and_changes_nothing() {
+    let Some(ip) = lan() else { return };
+    let h = Harness::new();
+    let film = torrent(71, "film", &[("film.mp4", MIB)]);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let port = h.running.ctx.http_port;
+    let mut phone = Browser::on(ip, &h);
+    let id = phone.pair(&offer.code).await.json()["device"]["id"].as_str().unwrap().to_string();
+    // An open code keeps the engine on the network once the phone is gone.
+    devices(&h, Request::AddDevice).await;
+    let body = format!(r#"{{"refs":["{}"]}}"#, film.info_hash.id().to_hex());
+    let head = format!(
+        "POST /api/remove HTTP/1.1\r\nHost: {ip}:{port}\r\nCookie: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        phone.cookie.as_deref().unwrap(),
+        body.len()
+    );
+    let mut slow = TcpStream::connect((ip, port)).await.unwrap();
+    slow.write_all(head.as_bytes()).await.unwrap();
+    // Time for the engine to read the head and trust the phone's connection.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    devices(&h, Request::RemoveDevice { id }).await;
+    slow.write_all(body.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut answer)).await;
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(
+        answer.starts_with("HTTP/1.1 401 Unauthorized\r\n") && answer.contains("this device was removed on the Mac"),
+        "the phone's request is answered as a removed device's: {answer:?}"
+    );
+    let left: Vec<_> = h.status().await.into_iter().map(|job| job.id).collect();
+    assert_eq!(left, [film.info_hash.id()], "the film is not removed");
+}
+
 /// Another program on `port` of the home network, so the engine cannot listen there. macOS lets
 /// it sit on every address beside the engine's 127.0.0.1, and Linux on the home address.
 fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {

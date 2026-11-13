@@ -367,11 +367,12 @@ impl Connection<'_> {
                         self.empty("413 Content Too Large", "", false).await?;
                         return Ok(());
                     }
-                    let ctx = self.ctx;
-                    let asked = ask(self.peer, &request, ctx.http_port, &ctx.devices, super::owner::now());
+                    let (ctx, peer) = (self.ctx, self.peer);
+                    let ask_now =
+                        |request: &Request| ask(peer, request, ctx.http_port, &ctx.devices, super::owner::now());
                     // Before the body, so strangers that come while a slow body arrives cannot
                     // close a paired device's connection.
-                    if let Ok(Asker::Device(_) | Asker::Cast(_)) = asked
+                    if let Ok(Asker::Device(_) | Asker::Cast(_)) = ask_now(&request)
                         && let Some(stranger) = self.stranger.take()
                         && !stranger.trust()
                     {
@@ -380,17 +381,21 @@ impl Connection<'_> {
                     // Read before any refusal, since closing on an unread body resets the
                     // connection before the browser reads the answer.
                     request.body = self.read_body(request.length, by).await?;
-                    let asker = match asked {
+                    // Asked again, since a device may have been removed, or a cast dropped, while
+                    // the body arrived.
+                    let asker = match ask_now(&request) {
                         Ok(asker) => asker,
                         Err(refusal) => {
                             self.refuse(refusal).await?;
                             return Ok(());
                         }
                     };
-                    // A removed device or a dropped cast loses what it was still receiving.
+                    // A removed device or a dropped cast loses what it was still receiving. Checked
+                    // first, so one lost since it was asked starts nothing.
                     tokio::select! {
-                        keep = self.answer(*request, &asker) => keep?,
+                        biased;
                         () = ctx.devices.revoked(&asker) => return Ok(()),
+                        keep = self.answer(*request, &asker) => keep?,
                     }
                 }
             };
