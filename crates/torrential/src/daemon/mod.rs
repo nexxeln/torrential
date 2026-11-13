@@ -161,10 +161,10 @@ pub fn start(
     config: OwnerConfig,
     timing: titles::Timing,
     version: String,
-    http_port: u16,
+    http_ports: &[u16],
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
-    let players = http::bind(http_port)
+    let players = http::bind(http_ports)
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
@@ -298,10 +298,16 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         })?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
-        let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        let wanted = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        // Open pages reconnect to the address they loaded from, so the engine serves where it last did.
+        let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
+        let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let running =
-            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
+            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), &http_ports)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
+        if last != Some(players) {
+            let _ = crate::skill::write_atomic(&paths.http_port(), players.to_string().as_bytes());
+        }
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
             socket.display()

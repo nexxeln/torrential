@@ -90,6 +90,11 @@ impl Paths {
     pub fn startup_error(&self) -> PathBuf {
         self.state.join("engine.error")
     }
+
+    /// Holds the port the engine last served the web app on.
+    pub fn http_port(&self) -> PathBuf {
+        self.state.join("http-port")
+    }
 }
 
 pub fn uid() -> u32 {

@@ -38,9 +38,12 @@ const TYPES: [(&str, &str); 6] = [
     ("srt", "application/x-subrip"),
 ];
 
-/// Binds `port` on 127.0.0.1, or any free port when another program holds it.
-pub fn bind(port: u16) -> io::Result<TcpListener> {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).or_else(|_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+/// Binds the first of `ports` that is free on 127.0.0.1, or any free port when other programs hold them all.
+pub fn bind(ports: &[u16]) -> io::Result<TcpListener> {
+    match ports.iter().find_map(|&port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)).ok()) {
+        Some(listener) => Ok(listener),
+        None => TcpListener::bind((Ipv4Addr::LOCALHOST, 0)),
+    }
 }
 
 /// `http://127.0.0.1:{port}/{torrent ID}/{file index}/{file name}`. The server routes on the ID

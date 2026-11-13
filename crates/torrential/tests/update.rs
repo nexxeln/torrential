@@ -859,6 +859,33 @@ fn a_stop_asked_while_the_login_service_starts_an_update_stops_the_new_engine() 
     assert_eq!(ended.map(|status| status.code()), Some(Some(0)));
 }
 
+#[test]
+fn an_engine_on_another_port_because_its_own_was_taken_comes_back_on_that_port_after_an_update() {
+    if target().is_none() {
+        return;
+    }
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1"), None);
+    let mut install = Install::agent_with_engine(&server);
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let wanted = taken.local_addr().unwrap().port();
+    install.set("TORRENTIAL_TEST_HTTP_PORT", &wanted.to_string());
+    install.found("0.1.1");
+
+    let mut service = install.supervise();
+    eventually("the service started 0.1.1", || install.starts().iter().any(|(version, ..)| version == "0.1.1"));
+    let ports: Vec<u16> = install.starts().into_iter().map(|(_, _, port)| port).collect();
+    let news = Install::news(ports[0]);
+    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    let stop = install.run(&["engine", "stop"]);
+    let ended = service.wait().unwrap();
+
+    assert_ne!(ports[0], wanted);
+    assert_eq!(ports, [ports[0], ports[0]], "the new engine serves where the old one did");
+    assert_eq!(news.map(|news| news["version"].clone()), Some("0.1.1".into()));
+    assert_eq!((stop.code, ended.code()), (0, Some(0)));
+}
+
 /// Starts an engine that has found release 0.1.1, and sets `updates: notify` while the request
 /// whose path ends with `gate` waits. Returns the installed binary, the release, and the engine log.
 fn notify_while_waiting_on(gate: &'static str) -> (Vec<u8>, Vec<u8>, String, Install, Server) {
