@@ -624,6 +624,9 @@ impl Owner {
         };
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
+        if home == Home::Folder {
+            self.tending.deleter.outside_plays(&dir)?;
+        }
         let cap = Cap::new(max_size, setup_max_size);
         let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
         if let (Some(plan), Some(metainfo)) = (&plan, metainfo.as_deref()) {
@@ -1179,6 +1182,7 @@ impl Owner {
                     if job.observed.in_engine() {
                         self.engine.send(EngineCommand::Remove(id));
                         self.draining.insert(id);
+                        self.tending.letting_go.insert(id, Self::writes(&job));
                     }
                     self.pauses.iter_mut().for_each(|p| {
                         p.waiting.remove(&id);
@@ -1332,6 +1336,7 @@ impl Owner {
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
+                self.tending.letting_go.remove(&id);
                 self.put_back(id);
                 self.finish_deletions();
             }

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
-use torrential_core::{Place, Target};
+use torrential_core::{ErrorCode, Place, Target, TorrentId};
 
 use super::super::admission::GIB;
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
@@ -218,6 +218,23 @@ async fn a_plays_folder_moved_away_and_replaced_by_a_link_while_the_engine_runs_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn get_refuses_a_folder_inside_the_plays_folder_even_through_a_link() {
+    let h = Harness::new();
+    std::fs::create_dir_all(h.plays()).unwrap();
+    let films = h.dir.path().join("films");
+    symlink(h.plays(), &films).unwrap();
+    let iso = torrent(0x21, "iso", &[("disc.iso", MIB)]);
+    let error = h.get_into(&iso, films.join("mine")).await.unwrap_err();
+    let message = format!(
+        "{} is inside {}, the folder torrential keeps plays in",
+        films.join("mine").display(),
+        h.plays().display()
+    );
+    assert_eq!((error.code, error.message), (ErrorCode::PathConflict, message));
+    assert!(h.status().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
@@ -235,6 +252,38 @@ async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder(
     let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
     assert_eq!((removed[0].deleted.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
     assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_a_file_a_download_the_engine_has_not_let_go_of_writes() {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0x34; 20])));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let (ours, theirs) = (torrent(0x33, "set", &[("a.bin", MIB)]), torrent(0x34, "set", &[("a.bin", 4 * GIB)]));
+    let alias = h.dir.path().join("alias");
+    std::fs::create_dir_all(h.downloads()).unwrap();
+    symlink(h.downloads(), &alias).unwrap();
+    h.get_into(&ours, alias.clone()).await.unwrap();
+    h.until("ours is done", |jobs| jobs[0].status.name() == "done").await;
+    h.swarm.set_rate(0);
+    h.swarm.publish(theirs.clone());
+    h.get_into(&theirs, h.downloads()).await.unwrap();
+    let file = h.downloads().join("set/a.bin");
+    written(&file, MIB);
+    h.until("theirs downloads", |jobs| jobs[1].status.name() == "downloading").await;
+
+    gate.close();
+    h.rm(vec![prefix(&theirs)], false).await;
+    gate.until_held(1).await;
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
+    assert_eq!((removed[0].deleted.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+    gate.open();
 }
 
 #[tokio::test(flavor = "multi_thread")]

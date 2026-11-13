@@ -98,6 +98,9 @@ pub struct Tending {
     /// How many streams of each download are open now.
     viewers: BTreeMap<TorrentId, usize>,
     pub(super) deleter: Deleter,
+    /// The folder and the files of each download taken off the list that the engine has yet to
+    /// let go of.
+    pub(super) letting_go: BTreeMap<TorrentId, (PathBuf, Vec<PathBuf>)>,
     /// `rm`s that answer once their deletions are done.
     removals: Vec<Removal>,
     tended_at: Option<Instant>,
@@ -107,7 +110,14 @@ pub struct Tending {
 
 impl Tending {
     pub fn new(deleter: Deleter) -> Self {
-        Self { viewers: BTreeMap::new(), deleter, removals: Vec::new(), tended_at: None, refused: None }
+        Self {
+            viewers: BTreeMap::new(),
+            deleter,
+            letting_go: BTreeMap::new(),
+            removals: Vec::new(),
+            tended_at: None,
+            refused: None,
+        }
     }
 }
 
@@ -284,18 +294,24 @@ impl Owner {
         }
     }
 
-    /// What the downloads on the list write, found by what each file and folder is rather than by
-    /// its path, so no other name or link for one hides it.
+    /// The folder and the files `job` writes.
+    pub(super) fn writes(job: &JobEntry) -> (PathBuf, Vec<PathBuf>) {
+        let targets = job
+            .metainfo
+            .as_deref()
+            .zip(job.wanted())
+            .map(|(metainfo, wanted)| files::targets(metainfo, &job.record.dir, &wanted));
+        (job.record.dir.clone(), targets.unwrap_or_default())
+    }
+
+    /// What the downloads on the list, and those the engine has yet to let go of, write, found by
+    /// what each file and folder is rather than by its path, so no other name or link hides one.
     fn in_use(&self) -> Result<InUse, String> {
         let mut in_use = InUse::default();
-        for job in self.jobs.values() {
-            let targets = job
-                .metainfo
-                .as_deref()
-                .zip(job.wanted())
-                .map(|(metainfo, wanted)| files::targets(metainfo, &job.record.dir, &wanted));
+        let listed = self.jobs.values().map(Self::writes);
+        for (dir, targets) in listed.chain(self.tending.letting_go.values().cloned()) {
             in_use
-                .add(&job.record.dir, &targets.unwrap_or_default())
+                .add(&dir, &targets)
                 .map_err(|e| format!("torrential cannot tell whether another download uses it: {e}"))?;
         }
         Ok(in_use)

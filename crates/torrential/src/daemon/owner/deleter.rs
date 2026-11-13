@@ -335,6 +335,18 @@ impl Deleter {
         }
     }
 
+    /// Refuses a folder for a download the person chose when it is the plays folder or inside it,
+    /// whatever names or links lead there.
+    pub fn outside_plays(&self, dir: &Path) -> Result<(), Error> {
+        let Ok(root) = &self.plays else { return Ok(()) };
+        if !lineage(dir).is_ok_and(|lineage| lineage.contains(&root.identity)) {
+            return Ok(());
+        }
+        let message =
+            format!("{} is inside {}, the folder torrential keeps plays in", dir.display(), root.path.display());
+        Err(Error::new(ErrorCode::PathConflict, message).with_hint("choose another folder with --dir"))
+    }
+
     /// Takes a download off record, and puts on record what of it to delete, both or neither.
     /// It is deleted once the engine lets go of the download.
     pub fn remove(&mut self, store: &mut Store, tombstone: &Tombstone, doom: Option<Doom>) -> Result<(), Error> {
