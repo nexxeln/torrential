@@ -420,8 +420,11 @@ impl Owner {
             }
             Command::Resume { refs, all, reply } => {
                 self.adopt(&refs, "resume");
-                self.touch_plays(&refs);
-                let _ = reply.send(self.resume(&refs, all));
+                let resumed = self.resume(&refs, all);
+                if let Ok(changes) = &resumed {
+                    self.touch_plays(changes);
+                }
+                let _ = reply.send(resumed);
             }
             Command::Remove { refs, delete, reply } => self.rm(refs, delete, reply),
             Command::Verify { reference, repair, reply } => {

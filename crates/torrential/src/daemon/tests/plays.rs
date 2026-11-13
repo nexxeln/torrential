@@ -199,3 +199,22 @@ async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_an
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert_eq!(names(&h).await, named(&["mine", "next"]), "the play got by hand stays");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_all_starts_the_idle_clock_again_for_the_plays_it_resumes() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { idle_after: Duration::from_secs(3), ..Outside::default() },
+    );
+    h.swarm.set_rate(20 * MIB);
+    h.play_web(&torrent(0x81, "film", &[("film.mkv", 2 * GIB)])).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while h.states().await != ["paused"] {
+        assert!(std::time::Instant::now() < deadline, "no one streams it, so it pauses");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(matches!(h.ask(Request::Resume { refs: vec![], all: true }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(h.states().await, ["downloading"]);
+}

@@ -413,13 +413,12 @@ impl Owner {
         })
     }
 
-    /// Starts the idle clock of the plays a person resumed again.
-    pub(super) fn touch_plays(&mut self, refs: &[String]) {
-        if refs.is_empty() {
-            return;
-        }
-        for id in self.resolve_jobs(refs, "resume").unwrap_or_default() {
-            self.watched_now(id);
+    /// Starts the idle clock again for the plays a `resume` resumed.
+    pub(super) fn touch_plays(&mut self, changes: &[Change]) {
+        for change in changes.iter().filter(|change| change.result == "resumed") {
+            if let Ok(id) = change.id.parse() {
+                self.watched_now(id);
+            }
         }
     }
 
