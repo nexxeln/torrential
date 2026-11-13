@@ -221,6 +221,11 @@ lt::session_params make_params(SessionSettings const& s) {
   // libtorrent counts interesting web seeds in order, including connected ones,
   // so redirected seeds can fill the slots. 0 raises the limit from 3 to 100.
   p.set_int(lt::settings_pack::max_web_seed_connections, 0);
+  // A web seed picks its next pieces only when its queued requests run low,
+  // and by default it picks 16 MiB at a time, so a piece a reader waits for
+  // waits behind up to 16 MiB of others. libtorrent raises this to the piece
+  // size, so a seed picks one piece, or 1 MiB, at a time.
+  p.set_int(lt::settings_pack::urlseed_max_request_bytes, 1024 * 1024);
   p.set_int(lt::settings_pack::alert_queue_size, 10000);
   p.set_int(lt::settings_pack::alert_mask, lt::alert_category::status | lt::alert_category::error |
                                                lt::alert_category::storage | lt::alert_category::dht);
