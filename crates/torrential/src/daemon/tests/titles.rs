@@ -794,6 +794,8 @@ async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last
     first.abort();
     let _ = first.await;
     h.settled().await;
+    // The file written above is checked before the download goes on, and a slow machine is still checking here.
+    h.until("its check ends", |jobs| jobs[0].status.name() == "downloading").await;
     assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], on_disk.map(String::from).to_vec()));
 
     second.abort();
