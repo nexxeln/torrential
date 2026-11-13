@@ -563,3 +563,33 @@ async fn plays_in_a_plays_folder_replaced_while_the_engine_was_stopped_stop_and_
         )
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_a_file_that_a_finished_download_the_engine_has_not_let_go_of_writes() {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0x38; 20])));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let (ours, theirs) = (torrent(0x37, "set", &[("a.bin", MIB)]), torrent(0x38, "set", &[("a.bin", MIB)]));
+    let alias = h.dir.path().join("alias");
+    std::fs::create_dir_all(h.downloads()).unwrap();
+    symlink(h.downloads(), &alias).unwrap();
+    h.get_into(&ours, alias.clone()).await.unwrap();
+    h.until("ours is done", |jobs| jobs[0].status.name() == "done").await;
+    let file = h.downloads().join("set/a.bin");
+    written(&file, MIB);
+    gate.close();
+    h.get_into(&theirs, h.downloads()).await.unwrap();
+    h.until("theirs is done", |jobs| jobs.len() == 2 && jobs[1].status.name() == "done").await;
+    gate.until_held(1).await;
+
+    h.rm(vec![prefix(&theirs)], false).await;
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
+    assert_eq!((removed[0].trashed.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+    gate.open();
+}

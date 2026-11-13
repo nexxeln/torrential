@@ -1203,6 +1203,8 @@ impl Owner {
                     if job.observed.in_engine() {
                         self.engine.send(EngineCommand::Remove(id));
                         self.draining.insert(id);
+                    }
+                    if self.draining.contains(&id) {
                         self.tending.letting_go.insert(id, Self::writes(&job));
                     }
                     self.pauses.iter_mut().for_each(|p| {
