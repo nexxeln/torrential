@@ -567,7 +567,7 @@ async fn switch(ctx: &Ctx, client: &str) -> Response {
 }
 
 fn older(client: &str, engine: &str) -> bool {
-    matches!((Version::parse(client), Version::parse(engine)), (Some(client), Some(engine)) if client < engine)
+    Version::parse(engine).is_some_and(|engine| engine.newer_than(client))
 }
 
 async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {

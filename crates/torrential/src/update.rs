@@ -79,19 +79,6 @@ impl Version {
     }
 }
 
-impl Serialize for Version {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for Version {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Version::parse(&text).ok_or_else(|| serde::de::Error::custom(format!("{text} is not a version")))
-    }
-}
-
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
@@ -268,7 +255,7 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
         return Ok(Outcome::Latest(latest));
     }
     let (exe, target) = installed()?;
-    put_release(releases, env, latest, (&exe, target), || true).await?;
+    put_release(releases, env, latest, &exe, target, || true).await?;
     let _ = Command::new(&exe)
         .args(["skill", "refresh"])
         .stdin(Stdio::null())
@@ -279,7 +266,6 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
 }
 
 /// What `put_release` found or did.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Put {
     Installed,
     /// Another torrential that runs from the same executable, such as the engine of another home,
@@ -289,15 +275,16 @@ enum Put {
     NotWanted,
 }
 
-/// Downloads release `version` and puts its binary in place of the installed one, which is at
-/// `exe` and fits `target`, once the new binary says it is the release. It asks `wanted` right
-/// before the download and right before the binary goes in, and holds the lock on the folder of
-/// `exe` throughout, so torrentials that share the executable install one release at a time.
+/// Downloads release `version` for `target` and puts its binary in place of `exe`, once the new
+/// binary says it is the release. It asks `wanted` right before the download and right before the
+/// binary goes in, and holds the lock on the folder of `exe` throughout, so torrentials that share
+/// the executable install one release at a time.
 async fn put_release(
     releases: &Releases,
     env: &Env,
     version: Version,
-    (exe, target): (&Path, &str),
+    exe: &Path,
+    target: &str,
     wanted: impl Fn() -> bool,
 ) -> Result<Put, Error> {
     let _lock = FolderLock::take(exe.parent().unwrap_or(Path::new("/"))).await?;
@@ -463,7 +450,7 @@ impl Partial {
         Ok(Partial { path })
     }
 
-    /// Writes `binary`, the next binary at `at`, and checks that it is torrential `version`.
+    /// Writes `binary`, which is to replace `at`, and checks that it is torrential `version`.
     fn write(&self, binary: &[u8], version: Version, at: &Path, writes: &Writes) -> Result<(), Error> {
         OpenOptions::new()
             .write(true)
@@ -570,14 +557,12 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                     && checked.install_due(&current, now)
                     && let Some(latest) = checked.newer(&current)
                 {
-                    let put = match installed() {
-                        Ok((exe, target)) => {
-                            let auto = || matches!(crate::config::updates(&paths), Ok(Policy::Auto));
-                            put_release(&releases, &env, latest, (&exe, target), auto).await
-                        }
-                        Err(e) => Err(e),
+                    let put = async {
+                        let (exe, target) = installed()?;
+                        let auto = || matches!(crate::config::updates(&paths), Ok(Policy::Auto));
+                        put_release(&releases, &env, latest, &exe, target, auto).await
                     };
-                    match put {
+                    match put.await {
                         Ok(Put::Installed) => {
                             crate::daemon::log(&format!("installed torrential {latest}"));
                             write_json(

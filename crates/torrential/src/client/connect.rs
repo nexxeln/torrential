@@ -118,10 +118,7 @@ pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
 }
 
 fn newer(conn: &Conn, env: &Env) -> bool {
-    matches!(
-        (Version::parse(&conn.engine_version), Version::parse(&env.version())),
-        (Some(engine), Some(client)) if engine > client
-    )
+    Version::parse(&conn.engine_version).is_some_and(|engine| engine.newer_than(&env.version()))
 }
 
 /// Why a client stops the engine.

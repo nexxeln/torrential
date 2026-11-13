@@ -203,7 +203,7 @@ pub fn log(message: &str) {
 /// The exit status after which launchd (`KeepAlive` without `SuccessfulExit`) and systemd
 /// (`Restart=on-failure`) start the engine again, from the binary an update installed. Any other
 /// clean stop exits 0, which neither restarts.
-pub const RESTART: u8 = 75;
+const RESTART: u8 = 75;
 
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
 /// systemd started it, a switch to an installed update.
