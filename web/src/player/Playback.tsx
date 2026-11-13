@@ -14,6 +14,7 @@ import {
 } from "react";
 import type { MediaInfo, PlayInfo } from "../api";
 import { CastButton } from "../cast/CastButton";
+import { useCasting } from "../cast/casts";
 import { clock } from "../lib/format";
 import { fileName, isVideoFile, readable } from "../lib/release";
 import {
@@ -43,6 +44,7 @@ import { SeekBar } from "./SeekBar";
 import { audioLabel, offsetText, Settings, type SettingsPage } from "./Settings";
 import { Shortcuts } from "./Shortcuts";
 import { DirectSource, RemuxSource, type Source, type SourceState } from "./source";
+import { Unsaved } from "./saving";
 import { Stats } from "./Stats";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { useAirPlay, useMediaSession, useWakeLock } from "./system";
@@ -279,26 +281,38 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     if (failure && howKind === "direct" && media.remux && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
   }, [failure, howKind, media.remux]);
 
-  // Where playback is, remembered for the next visit.
-  const remember = useCallback(() => {
-    if (!duration || lastTime.current <= WORTH_RESUMING / 2) return;
-    memory.save(lastTime.current, duration);
-  }, [memory, duration]);
+  // Where playback is, remembered for the next visit while it plays here.
+  const [unsaved] = useState(() => new Unsaved());
+  const casting = useRef(false);
+  casting.current = useCasting(titled?.video);
+  const remember = useCallback(
+    (seen: boolean) => {
+      if (!unsaved.take({ seen, cast: casting.current }) || !duration || lastTime.current <= WORTH_RESUMING / 2) return;
+      memory.save(lastTime.current, duration);
+    },
+    [unsaved, memory, duration],
+  );
   useEffect(() => {
     const follow = () => {
-      if (video.snapshot().started) lastTime.current = element.ended && duration ? duration : element.currentTime;
+      if (!video.snapshot().started) return;
+      lastTime.current = element.ended && duration ? duration : element.currentTime;
+      unsaved.moved(!element.paused || element.ended);
     };
+    const now = () => remember(!document.hidden);
+    // The page was in view until it hid, so where it got to is still worth saving.
+    const hide = () => remember(true);
     const stop = new AbortController();
     for (const name of ["timeupdate", "ended"]) element.addEventListener(name, follow, { signal: stop.signal });
-    for (const name of ["pause", "ended"]) element.addEventListener(name, remember, { signal: stop.signal });
-    addEventListener("pagehide", remember, { signal: stop.signal });
-    const timer = setInterval(remember, SAVE_EVERY_MS);
+    for (const name of ["pause", "ended"]) element.addEventListener(name, now, { signal: stop.signal });
+    document.addEventListener("visibilitychange", () => document.hidden && hide(), { signal: stop.signal });
+    addEventListener("pagehide", hide, { signal: stop.signal });
+    const timer = setInterval(now, SAVE_EVERY_MS);
     return () => {
       stop.abort();
       clearInterval(timer);
-      remember();
+      now();
     };
-  }, [element, video, duration, remember]);
+  }, [element, video, duration, unsaved, remember]);
   useEffect(() => {
     if (!resumeNotice) return;
     const timer = setTimeout(() => setResumeNotice(false), 8000);

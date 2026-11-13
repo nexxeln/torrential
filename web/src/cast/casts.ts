@@ -55,6 +55,11 @@ export function useTvList(): TvList {
   return useSyncExternalStore(subscribe, () => list);
 }
 
+/** Whether a TV plays `video`, such as `tt0903747:3:5`, as the engine last said. */
+export function useCasting(video: string | undefined): boolean {
+  return useSyncExternalStore(subscribe, () => video !== undefined && list.casts.some((cast) => cast.video === video && cast.state !== "ended"));
+}
+
 /** Takes a list the engine just answered with, such as after a search, over any older answer on its way. */
 export function heard(next: TvList): void {
   round++;
