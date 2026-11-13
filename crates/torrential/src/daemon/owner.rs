@@ -174,6 +174,17 @@ pub enum Command {
     Connected,
     Disconnected { keep_until: Option<Instant> },
     Shutdown { reply: oneshot::Sender<()> },
+    /// Stops the engine for an update to restart it, but only once every download's progress is
+    /// saved. Otherwise the engine carries on and the update tries again later.
+    Restart { reply: Reply<()> },
+}
+
+/// How the owner's run ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ended {
+    Stopped,
+    /// Stopped with every download saved, for an update to restart the engine.
+    Restart,
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +275,11 @@ struct Stopping {
     waiting: BTreeSet<TorrentId>,
     deadline: Instant,
     replies: Vec<oneshot::Sender<()>>,
+    /// An update's restart, which happens only if the stop saves everything and no one else
+    /// asked the engine to stop meanwhile.
+    restart: Option<Reply<()>>,
+    /// A download's progress failed to save during the stop.
+    unsaved: bool,
 }
 
 pub struct Owner {
@@ -280,7 +296,7 @@ pub struct Owner {
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
     stopping: Option<Stopping>,
-    stopped: bool,
+    ended: Option<Ended>,
     engine: EngineHandle,
     parse: ParseTorrent,
     disk: Box<dyn Disk>,
@@ -330,7 +346,7 @@ impl Owner {
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
-            stopped: false,
+            ended: None,
             engine,
             parse,
             disk,
@@ -349,19 +365,22 @@ impl Owner {
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         mut events: mpsc::UnboundedReceiver<EngineEvent>,
-    ) {
+    ) -> Ended {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
-        while !self.stopped {
+        loop {
+            if let Some(ended) = self.ended {
+                return ended;
+            }
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => self.command(command),
-                    None => self.begin_stop(None),
+                    None => self.begin_stop(Stopper::Exit(None)),
                 },
                 event = events.recv() => match event {
                     Some(event) => self.engine_event(event),
                     None => {
                         super::log("the engine thread stopped, so the engine process is exiting");
-                        self.stopped = true;
+                        self.ended = Some(Ended::Stopped);
                     }
                 },
                 _ = tick.tick() => self.tick(),
@@ -428,7 +447,8 @@ impl Owner {
                 self.connections = self.connections.saturating_sub(1);
                 self.keep_until = self.keep_until.max(keep_until);
             }
-            Command::Shutdown { reply } => self.begin_stop(Some(reply)),
+            Command::Shutdown { reply } => self.begin_stop(Stopper::Exit(Some(reply))),
+            Command::Restart { reply } => self.begin_stop(Stopper::Update(reply)),
         }
     }
 
@@ -1346,6 +1366,11 @@ impl Owner {
     }
 
     fn fail(&mut self, id: TorrentId, error: Error) {
+        if let Some(stopping) = &mut self.stopping
+            && stopping.waiting.contains(&id)
+        {
+            stopping.unsaved = true;
+        }
         let Some(job) = self.jobs.get_mut(&id) else { return };
         job.verify = None;
         job.forget_sources();
@@ -1487,6 +1512,9 @@ impl Owner {
             return;
         }
         let saved = self.store.save_resume(id, &data, verified, piece_map, files.as_deref(), now()).is_ok();
+        if !saved && let Some(stopping) = &mut self.stopping {
+            stopping.unsaved = true;
+        }
         let job = self.jobs.get_mut(&id).expect("checked above");
         if saved {
             job.record.verified = verified;
@@ -1709,13 +1737,18 @@ impl Owner {
         if self.connections > 0 || self.busy() || self.stopping.is_some() {
             self.idle_since = now;
         } else if now.duration_since(self.idle_since) >= timeout && self.keep_until.is_none_or(|until| now >= until) {
-            self.begin_stop(None);
+            self.begin_stop(Stopper::Exit(None));
         }
     }
 
-    fn begin_stop(&mut self, reply: Option<oneshot::Sender<()>>) {
+    fn begin_stop(&mut self, by: Stopper) {
         if let Some(stopping) = &mut self.stopping {
-            stopping.replies.extend(reply);
+            match by {
+                Stopper::Exit(reply) => stopping.replies.extend(reply),
+                Stopper::Update(reply) => {
+                    let _ = reply.send(Err(Error::new(ErrorCode::DaemonUnavailable, "the engine is already stopping")));
+                }
+            }
             return;
         }
         self.put_back_all();
@@ -1738,10 +1771,16 @@ impl Owner {
                 Observed::Absent => {}
             }
         }
+        let (replies, restart) = match by {
+            Stopper::Exit(reply) => (reply.into_iter().collect(), None),
+            Stopper::Update(reply) => (Vec::new(), Some(reply)),
+        };
         self.stopping = Some(Stopping {
             waiting,
             deadline: Instant::now() + self.config.writes_stop_within,
-            replies: reply.into_iter().collect(),
+            replies,
+            restart,
+            unsaved: false,
         });
         self.finish_stop_if_done();
     }
@@ -1752,11 +1791,37 @@ impl Owner {
             return;
         }
         let stopping = self.stopping.take().expect("checked above");
+        let saved = stopping.waiting.is_empty() && !stopping.unsaved;
+        let ended = match stopping.restart {
+            Some(restart) if stopping.replies.is_empty() && !saved => {
+                let error = Error::new(ErrorCode::StorageError, "the engine could not save the progress of every download");
+                let _ = restart.send(Err(error));
+                self.schedule();
+                return;
+            }
+            Some(restart) if stopping.replies.is_empty() => {
+                let _ = restart.send(Ok(()));
+                Ended::Restart
+            }
+            Some(restart) => {
+                let _ = restart.send(Err(Error::new(ErrorCode::DaemonUnavailable, "the engine is stopping")));
+                Ended::Stopped
+            }
+            None => Ended::Stopped,
+        };
         for reply in stopping.replies {
             let _ = reply.send(());
         }
-        self.stopped = true;
+        self.ended = Some(ended);
     }
+}
+
+/// Who asked the engine to stop.
+enum Stopper {
+    /// A person, a signal, or the idle timeout. The engine stops whatever the last saves did.
+    Exit(Option<oneshot::Sender<()>>),
+    /// An update, which restarts the engine only once every download is saved.
+    Update(Reply<()>),
 }
 
 // Default macOS filesystems ignore case.

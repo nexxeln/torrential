@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode};
 
 use crate::daemon::owner::now;
-use crate::daemon::playing::Playing;
+use crate::daemon::owner;
+use crate::daemon::server::Ctx;
 use crate::env::Env;
 use crate::output::Mode;
 use crate::output::theme::{Token, paint};
@@ -25,6 +26,8 @@ const DAY: i64 = 24 * 60 * 60;
 const HOUR: i64 = 60 * 60;
 const CHECK_WITHIN: Duration = Duration::from_secs(10);
 const MAX_ASSET: usize = 256 << 20;
+/// How long a restart for an update waits after the engine could not save every download.
+const RESTART_RETRY: Duration = Duration::from_secs(60);
 const CHECKED: &str = "update.json";
 const UPDATED: &str = "updated.json";
 
@@ -400,10 +403,10 @@ impl Board {
 }
 
 /// Looks for newer releases, and under `updates: auto` installs one once nothing is playing.
-/// Returns the version it installed, which the engine restarts into. `updated_from` is the
-/// version this engine replaced, when an update started it.
-pub async fn watch(env: Env, paths: Paths, playing: Playing, board: Board, updated_from: Option<String>) -> Version {
-    let current = env.version();
+/// Returns the version it installed once the owner has stopped for the engine to restart into it.
+/// `updated_from` is the version this engine replaced, when an update started it.
+pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, updated_from: Option<String>) -> Version {
+    let (current, board) = (env.version(), &ctx.news);
     let Some(releases) = Releases::from_env(&env) else {
         board.post(updated_from.map(|from| News::Updated { from, to: current }));
         return std::future::pending().await;
@@ -423,18 +426,17 @@ pub async fn watch(env: Env, paths: Paths, playing: Playing, board: Board, updat
                 }
                 let checked = Checked::read(&paths);
                 if policy == Policy::Auto && checked.install_due(&current, now) {
-                    if let Some(latest) = checked.newer(&current).filter(|_| playing.any()) {
+                    if let Some(latest) = checked.newer(&current).filter(|_| ctx.playing.any()) {
                         crate::daemon::log(&format!("torrential {latest} waits until nothing is playing"));
                         board.post(Some(News::Waiting { latest }));
-                        drop(playing.close().await);
+                        drop(ctx.playing.close().await);
                         continue;
                     }
                     match install(&releases, &paths, &env, now).await {
                         Ok(Outcome::Updated(to)) => {
                             crate::daemon::log(&format!("installed torrential {to}"));
                             write_json(&paths.state.join(UPDATED), &Updated { from: current, to: to.to_string() });
-                            playing.close().await.keep();
-                            return to;
+                            return restart(&ctx, to).await;
                         }
                         Ok(Outcome::Latest(_)) => {}
                         Err(e) => {
@@ -451,6 +453,28 @@ pub async fn watch(env: Env, paths: Paths, playing: Playing, board: Board, updat
             }
         };
         tokio::time::sleep(Duration::from_secs(wait as u64)).await;
+    }
+}
+
+/// Stops the engine for a restart into `to` once nothing plays and every download is saved.
+async fn restart(ctx: &Ctx, to: Version) -> Version {
+    loop {
+        if ctx.playing.any() {
+            crate::daemon::log(&format!("the restart into torrential {to} waits until nothing is playing"));
+            ctx.news.post(Some(News::Waiting { latest: to }));
+        }
+        let closed = ctx.playing.close().await;
+        match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
+            Ok(()) => {
+                closed.keep();
+                return to;
+            }
+            Err(e) => {
+                crate::daemon::log(&format!("the restart into torrential {to} waits: {}", e.message));
+                drop(closed);
+                tokio::time::sleep(RESTART_RETRY).await;
+            }
+        }
     }
 }
 

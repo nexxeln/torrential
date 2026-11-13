@@ -39,7 +39,7 @@ use crate::update::{self, Version};
 use admission::Disk;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
-use owner::{Owner, OwnerConfig};
+use owner::{Ended, Owner, OwnerConfig};
 use search_port::SearchPort;
 use server::{Ctx, OwnerHandle};
 use store::Store;
@@ -150,7 +150,7 @@ fn fake(env: &Env) -> bool {
 
 pub struct Running {
     pub ctx: Arc<Ctx>,
-    pub owner: tokio::task::JoinHandle<()>,
+    pub owner: tokio::task::JoinHandle<Ended>,
     pub engine: std::thread::JoinHandle<()>,
     pub http: tokio::task::JoinHandle<()>,
 }
@@ -330,17 +330,12 @@ fn serve(env: &Env, paths: &Paths) -> Result<Option<Version>, Startup> {
             }
         });
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let (playing, news) = (running.ctx.playing.clone(), running.ctx.news.clone());
         let updated_from = env.var("TORRENTIAL_UPDATED_FROM").map(String::from);
-        let mut updates = tokio::spawn(update::watch(env.clone(), paths.clone(), playing, news, updated_from));
-        let mut owner = running.owner;
-        let updated = tokio::select! {
-            _ = &mut owner => None,
-            Ok(to) = &mut updates => {
-                shut_down(&running.ctx.owner);
-                let _ = owner.await;
-                Some(to)
-            }
+        let mut updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), updated_from));
+        // The update watcher returns the version it installed right after the owner agreed to stop for it.
+        let updated = match running.owner.await {
+            Ok(Ended::Restart) => (&mut updates).await.ok(),
+            _ => None,
         };
         accept.abort();
         running.http.abort();

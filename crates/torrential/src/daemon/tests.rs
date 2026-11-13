@@ -12,7 +12,7 @@ use super::engine_port::{
     AddTorrent, EngineEvent, EnginePort, Fake, FakeTorrentFile, MetaFile, Metainfo, ParseTorrent, Swarm, disagreement,
     parse_fake,
 };
-use super::owner::OwnerConfig;
+use super::owner::{Command, Ended, OwnerConfig};
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -1133,6 +1133,31 @@ async fn a_stop_whose_save_fails_leaves_the_engine_with_the_error_that_stopped_i
     let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
     assert_eq!((error.code, jobs[0].progress.verified), (ErrorCode::NoSource, GIB - 2 * GIB_PIECE));
     assert_eq!(h.swarm.refused_saves(id), 1, "it left the engine instead of saving again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_restarts_the_engine_only_once_every_download_is_saved() {
+    let mut h = Harness::new();
+    h.swarm.set_rate(GIB_PIECE);
+    let film = torrent(37, "film", &[("film.mkv", GIB)]);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("downloading", |jobs| jobs[0].status.name() == "downloading").await;
+    let db = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;")
+        .unwrap();
+
+    let refused = h.running.ctx.owner.ask(|reply| Command::Restart { reply }).await;
+    let carried_on = h.until("downloading again", |jobs| jobs[0].status.name() == "downloading").await;
+    db.execute_batch("DROP TRIGGER no_saves").unwrap();
+    let restarted = h.running.ctx.owner.ask(|reply| Command::Restart { reply }).await;
+    let ended = tokio::time::timeout(Duration::from_secs(5), &mut h.running.owner).await.unwrap().unwrap();
+
+    assert_eq!(
+        refused.map_err(|e| (e.code, e.message)),
+        Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into()))
+    );
+    assert_eq!(carried_on[0].id, film.info_hash.id());
+    assert_eq!((restarted.map_err(|e| e.message), ended), (Ok(()), Ended::Restart));
 }
 
 #[tokio::test(flavor = "multi_thread")]
