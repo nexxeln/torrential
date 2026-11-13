@@ -1632,4 +1632,5 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
 }
 
 mod titles;
+mod tui;
 mod web;

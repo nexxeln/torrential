@@ -39,10 +39,10 @@ pub fn run(env: &Env) -> Result<u8, Error> {
     }
 }
 
-struct EngineBackend {
-    paths: Paths,
-    downloads: PathBuf,
-    env: Env,
+pub(crate) struct EngineBackend {
+    pub(crate) paths: Paths,
+    pub(crate) downloads: PathBuf,
+    pub(crate) env: Env,
 }
 
 #[derive(Deserialize)]
