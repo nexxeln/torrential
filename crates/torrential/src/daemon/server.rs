@@ -28,6 +28,7 @@ use super::search_port::{Progress, SearchPort};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use crate::machine::Detector;
 use crate::output::views::title_name;
+use crate::update::Version;
 use crate::wire;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
@@ -97,7 +98,7 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             .ask(|reply| Command::Verify { reference, repair, reply })
             .await
             .map(|changes| Response::Changed { changes }),
-        Request::Shutdown => {
+        Request::Shutdown { .. } => {
             let (reply, done) = oneshot::channel();
             owner.tell(Command::Shutdown { reply });
             let _ = done.await;
@@ -490,7 +491,7 @@ pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
 
 async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (mut rd, mut wr) = stream.into_split();
-    let Some(Request::Hello { wire: client_wire, .. }) = wire::read_async::<Request>(&mut rd).await? else {
+    let Some(Request::Hello { client_version, wire: client_wire }) = wire::read_async::<Request>(&mut rd).await? else {
         return Ok(());
     };
     let hello = Response::Hello {
@@ -501,7 +502,17 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     };
     wire::write_async(&mut wr, &hello).await?;
     while let Some(request) = wire::read_async::<Request>(&mut rd).await? {
-        if client_wire != WIRE_VERSION && request != Request::Shutdown {
+        if request == (Request::Shutdown { asked: false }) && older(&client_version, &ctx.version) {
+            super::log(&format!("torrential {client_version} asked the engine to stop for its own version"));
+            let error = Error::new(
+                ErrorCode::DaemonVersion,
+                format!("the engine runs the newer torrential {}, so it keeps running", ctx.version),
+            )
+            .with_hint("restart this torrential");
+            wire::write_async(&mut wr, &Response::Error { error }).await?;
+            continue;
+        }
+        if client_wire != WIRE_VERSION && !matches!(request, Request::Shutdown { .. }) {
             let error = Error::new(
                 ErrorCode::DaemonVersion,
                 format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {client_wire}"),
@@ -523,6 +534,10 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn older(client: &str, engine: &str) -> bool {
+    matches!((Version::parse(client), Version::parse(engine)), (Some(client), Some(engine)) if client < engine)
 }
 
 async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {

@@ -155,6 +155,133 @@ fn a_version_mismatch_restarts_the_engine() {
     assert!(!alive(old_pid), "the old engine exited after saving its state");
 }
 
+fn frame(json: &str) -> Vec<u8> {
+    let mut bytes = (json.len() as u32).to_be_bytes().to_vec();
+    bytes.extend_from_slice(json.as_bytes());
+    bytes
+}
+
+fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json::Value> {
+    use std::io::Read;
+    let mut len = [0; 4];
+    stream.read_exact(&mut len).ok()?;
+    let mut body = vec![0; u32::from_be_bytes(len) as usize];
+    stream.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+#[test]
+fn a_client_that_finds_a_newer_engine_uses_it_and_leaves_it_running() {
+    let mut home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    home.unset("TORRENTIAL_TEST_VERSION");
+
+    let run = home.run(&["status"]);
+
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    assert_eq!(home.engine(), Some((pid, "9.0.0".into())));
+}
+
+#[test]
+fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_running() {
+    use std::io::Write;
+    let home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+
+    // Byte for byte what torrential 0.4.0 sends when it meets an engine of another version.
+    let mut old = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    old.write_all(&frame(r#"{"op":"hello","client_version":"0.4.0","wire":5}"#)).unwrap();
+    let hello = read_frame(&mut old).unwrap();
+    old.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
+    let answer = read_frame(&mut old);
+    std::thread::sleep(Duration::from_secs(2));
+
+    assert_eq!((hello["engine_version"].as_str(), hello["pid"].as_i64()), (Some("9.0.0"), Some(pid.into())));
+    assert_eq!(answer.unwrap()["error"]["code"], "daemon_version");
+    assert!(alive(pid), "the engine kept running");
+    let stop = home.run(&["engine", "stop", "--json"]);
+    assert_eq!(stop.code, 0, "{}", stop.stderr);
+    eventually("an asked stop ends it", Duration::from_secs(10), || !alive(pid));
+}
+
+#[test]
+fn a_client_that_cannot_talk_to_a_newer_engine_says_to_restart_it_and_leaves_it_running() {
+    use std::io::Write;
+    let home = Home::new();
+    let socket = home.dir.path().join("th/run/engine.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let asked = std::thread::spawn(move || {
+        let mut ops = Vec::new();
+        for stream in listener.incoming().take(1) {
+            let mut stream = stream.unwrap();
+            while let Some(request) = read_frame(&mut stream) {
+                ops.push(request["op"].as_str().unwrap().to_string());
+                let hello = format!(
+                    r#"{{"type":"hello","engine_version":"9.0.0","wire":99,"pid":{},"http_port":0}}"#,
+                    std::process::id()
+                );
+                stream.write_all(&frame(&hello)).unwrap();
+            }
+        }
+        ops
+    });
+
+    let run = home.run(&["status"]);
+
+    assert_eq!(
+        (run.code, run.stderr.as_str()),
+        (6, "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n")
+    );
+    assert_eq!(asked.join().unwrap(), ["hello"], "it asked nothing else of the engine");
+}
+
+#[test]
+fn engine_stop_also_stops_the_engine_an_update_restarted_into_meanwhile() {
+    use std::io::Write;
+    let home = Home::new();
+    let socket = home.dir.path().join("th/run/engine.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    // A stand-in engine: its first stop request finds it restarting into 0.1.1 under the same
+    // process ID, and only a stop that reaches 0.1.1 ends it.
+    let mut process = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = process.id();
+    let engine = std::thread::spawn(move || {
+        let (mut version, mut stops) = ("0.1.0", Vec::new());
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            while let Some(request) = read_frame(&mut stream) {
+                let reply = match request["op"].as_str().unwrap() {
+                    "end" => return stops,
+                    "hello" => format!(r#"{{"type":"hello","engine_version":"{version}","wire":5,"pid":{pid}}}"#),
+                    _ => {
+                        stops.push(version);
+                        if version == "0.1.1" {
+                            process.kill().unwrap();
+                            process.wait().unwrap();
+                        }
+                        version = "0.1.1";
+                        r#"{"type":"ok"}"#.to_string()
+                    }
+                };
+                stream.write_all(&frame(&reply)).unwrap();
+            }
+        }
+        stops
+    });
+
+    let stop = home.run(&["engine", "stop", "--json"]);
+    let stopped = !alive(pid as i32);
+    std::os::unix::net::UnixStream::connect(&socket).unwrap().write_all(&frame(r#"{"op":"end"}"#)).unwrap();
+
+    assert_eq!((stop.code, stop.stderr.as_str()), (0, ""));
+    assert_eq!(engine.join().unwrap(), ["0.1.0", "0.1.1"]);
+    assert!(stopped, "the engine had exited when engine stop returned");
+}
+
 #[test]
 fn a_sandboxed_client_refuses_to_start_an_engine() {
     let mut home = Home::with(&[("CODEX_SANDBOX_NETWORK_DISABLED", "1"), ("CODEX_THREAD_ID", "t-1")]);

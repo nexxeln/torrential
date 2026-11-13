@@ -9,6 +9,7 @@ use torrential_core::{Error, ErrorCode};
 use super::launch::{self, Blocked};
 use crate::env::Env;
 use crate::paths::Paths;
+use crate::update::Version;
 use crate::wire;
 
 pub const DEFAULT_REPLY_WITHIN: Duration = Duration::from_secs(30);
@@ -95,37 +96,74 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
 }
 
 pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
-    let current = |conn: &Conn| conn.engine_version == env.version() && conn.wire == WIRE_VERSION;
+    let usable = |conn: &Conn| conn.wire == WIRE_VERSION && (conn.engine_version == env.version() || newer(conn, env));
     if let Some(conn) = existing(paths, env)? {
-        if current(&conn) {
+        if usable(&conn) {
             return Ok(conn);
         }
-        stop(conn, paths, env)?;
+        // A client never stops a newer engine. It would be one from before an update, stopping the
+        // engine that update restarted.
+        if newer(&conn, env) {
+            return Err(Error::new(
+                ErrorCode::DaemonVersion,
+                format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
+            ));
+        }
+        stop(conn, paths, env, Stop::Replace)?;
         // The engine may have been restarting into the update that made this command's version.
-        if let Some(conn) = existing(paths, env)?.filter(current) {
+        if let Some(conn) = existing(paths, env)?.filter(usable) {
             return Ok(conn);
         }
     }
     launch::start(paths, env)
 }
 
-/// Asks the engine to stop and waits until it exits. An engine that was restarting into an update
-/// keeps its process ID, so another version answering from that ID counts as stopped too.
-pub fn stop(mut conn: Conn, paths: &Paths, env: &Env) -> Result<u32, Error> {
-    let (pid, version) = (conn.pid, conn.engine_version.clone());
-    let _ = conn.call_within(&Request::Shutdown, Duration::from_secs(20));
-    drop(conn);
-    let replaced =
-        || matches!(existing(paths, env), Ok(Some(conn)) if conn.pid == pid && conn.engine_version != version);
+fn newer(conn: &Conn, env: &Env) -> bool {
+    matches!(
+        (Version::parse(&conn.engine_version), Version::parse(&env.version())),
+        (Some(engine), Some(client)) if engine > client
+    )
+}
+
+/// Why a client stops the engine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stop {
+    /// The person asked, so the engine stops even when an update has just restarted it.
+    Asked,
+    /// The engine is older than this client, which starts its own. An engine that restarted into an
+    /// update meanwhile is what the client wanted, so it stays.
+    Replace,
+}
+
+/// Asks the engine to stop and waits until it exits. An engine restarting into an update keeps its
+/// process ID, so another version answering from that ID is the update.
+pub fn stop(mut conn: Conn, paths: &Paths, env: &Env, why: Stop) -> Result<u32, Error> {
+    let pid = conn.pid;
     let deadline = Instant::now() + Duration::from_secs(20);
-    while alive(pid) && !replaced() {
-        if Instant::now() > deadline {
-            return Err(Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
-                .with_hint(format!("kill {pid}, then run the command again")));
+    loop {
+        let version = conn.engine_version.clone();
+        let _ = conn.call_within(&Request::Shutdown { asked: why == Stop::Asked }, Duration::from_secs(20));
+        drop(conn);
+        conn = loop {
+            if !alive(pid) {
+                return Ok(pid);
+            }
+            if Instant::now() > deadline {
+                return Err(Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
+                    .with_hint(format!("kill {pid}, then run the command again")));
+            }
+            if let Ok(Some(next)) = existing(paths, env)
+                && next.pid == pid
+                && next.engine_version != version
+            {
+                break next;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if why == Stop::Replace {
+            return Ok(pid);
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    Ok(pid)
 }
 
 pub fn alive(pid: u32) -> bool {
