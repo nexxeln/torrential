@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
 const SCRIPT: &[u8] = b"#!/bin/sh\necho torrential 0.1.1\n";
+const BROKEN: &[u8] = b"#!/bin/sh\nexit 1\n";
 const AGENT_VARS: [&str; 8] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -43,15 +44,12 @@ impl Built {
         Built(dir)
     }
 
-    /// A release whose binary says it is torrential `says` and runs the engine as `runs`, or exits
-    /// at once when asked to run the engine and `runs` is nothing.
-    fn release(&self, says: &str, runs: Option<&str>) -> Vec<u8> {
+    /// A release whose binary says it is torrential `version` and runs as that version.
+    fn release(&self, version: &str) -> Vec<u8> {
         let real = self.0.path().join("torrential").display().to_string();
-        let engine =
-            runs.map_or_else(|| "exit 1".to_string(), |v| format!("TORRENTIAL_TEST_VERSION={v} exec '{real}' \"$@\""));
         format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"torrential {says}\" ;;\n  daemon) {engine} ;;\n  *) \
-             TORRENTIAL_TEST_VERSION={says} exec '{real}' \"$@\" ;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"torrential {version}\" ;;\n  *) \
+             TORRENTIAL_TEST_VERSION={version} exec '{real}' \"$@\" ;;\nesac\n"
         )
         .into_bytes()
     }
@@ -251,7 +249,7 @@ fn update_refreshes_the_installed_skill_and_then_reports_the_latest() {
         return;
     }
     let built = Built::new();
-    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
+    let server = Server::start("0.1.1", &built.release("0.1.1"), None);
     let mut install = Install::new(&server);
     let copy = install.dir.path().join(".agents/skills/torrential");
     std::fs::create_dir_all(&copy).unwrap();
@@ -431,12 +429,34 @@ impl Install {
 }
 
 #[test]
+fn a_release_whose_binary_does_not_run_is_never_installed() {
+    if target().is_none() {
+        return;
+    }
+    let server = Server::start("0.1.1", BROKEN, None);
+    let install = Install::agent_with_engine(&server);
+    install.found("0.1.1");
+    let before = std::fs::read(install.exe()).unwrap();
+
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    eventually("the engine gave the release up", || install.checked()["install_failed_at"].is_i64());
+
+    assert!(std::fs::read(install.exe()).unwrap() == before, "the installed binary is unchanged");
+    assert_eq!(install.files_in_bin(), ["torrential"], "no partial file is left behind");
+    assert_eq!(install.engine().1, "0.1.0");
+    let log = std::fs::read_to_string(install.state().join("engine.log")).unwrap();
+    let refused =
+        "the binary of torrential 0.1.1 does not run here (exit status: 1), so the installed torrential is unchanged";
+    assert!(log.contains(refused), "{log}");
+}
+
+#[test]
 fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_again() {
     if target().is_none() {
         return;
     }
     let built = Built::new();
-    let server = Server::start("0.1.1", &built.release("0.1.0", Some("0.1.0")), None);
+    let server = Server::start("0.1.1", &built.release("0.1.0"), None);
     let install = Install::agent_with_engine(&server);
     install.configure("updates: auto\n");
     install.found("0.1.1");
@@ -508,7 +528,7 @@ fn under_the_login_service_an_update_installs_while_a_film_plays_and_starts_once
     let Some(target) = target() else { return };
     let (answer, gate) = mpsc::channel();
     let built = Built::new();
-    let server = Server::gated("0.1.1", &built.release("0.1.1", Some("0.1.1")), None, Some(("/latest", gate)));
+    let server = Server::gated("0.1.1", &built.release("0.1.1"), None, Some(("/latest", gate)));
     let mut install = Install::agent_with_engine(&server);
     let port = free_port();
     install.set("TORRENTIAL_TEST_FAKE_RATE", "0");
@@ -534,7 +554,7 @@ fn under_the_login_service_an_update_installs_while_a_film_plays_and_starts_once
     let ended = service.wait().unwrap();
 
     assert_eq!(&head, b"HTTP/1.1 206");
-    assert_eq!(playing.0, built.release("0.1.1", Some("0.1.1")), "the release was installed while the film played");
+    assert_eq!(playing.0, built.release("0.1.1"), "the release was installed while the film played");
     assert_eq!(playing.1, Some((pid, "0.1.0".into())), "the engine kept its version until the film ended");
     assert_ne!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode);
     assert_eq!(news, Some(serde_json::json!({"version": "0.1.1", "notice": "Updated torrential to 0.1.1."})));
@@ -547,7 +567,7 @@ fn under_the_login_service_an_update_installs_while_a_film_plays_and_starts_once
 fn without_the_login_service_an_installed_update_starts_with_the_next_command() {
     let Some(target) = target() else { return };
     let built = Built::new();
-    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
+    let server = Server::start("0.1.1", &built.release("0.1.1"), None);
     let mut install = Install::agent_with_engine(&server);
     let port = free_port();
     install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
@@ -566,7 +586,7 @@ fn without_the_login_service_an_installed_update_starts_with_the_next_command() 
     let second = install.run(&["status"]);
 
     assert_eq!(started.code, 0);
-    assert_eq!(std::fs::read(install.exe()).unwrap(), built.release("0.1.1", Some("0.1.1")));
+    assert_eq!(std::fs::read(install.exe()).unwrap(), built.release("0.1.1"));
     assert_eq!(kept, Some((old_pid, "0.1.0".into())), "the engine kept the version it started with");
     assert_eq!(first.stderr, "# updated torrential from 0.1.0 to 0.1.1\n");
     assert_eq!(second.stderr, "");
@@ -583,7 +603,7 @@ fn two_engines_that_share_one_executable_install_an_update_once() {
     }
     let (answer, gate) = mpsc::channel();
     let built = Built::new();
-    let release = built.release("0.1.1", Some("0.1.1"));
+    let release = built.release("0.1.1");
     let server = Server::gated("0.1.1", &release, None, Some((".tar.gz", gate)));
     let homes = [Install::agent_with_engine(&server), Install::agent_with_engine(&server)];
     std::fs::remove_dir_all(homes[1].dir.path().join("bin")).unwrap();
@@ -621,7 +641,7 @@ fn two_engines_that_share_one_executable_install_an_update_once() {
 fn notify_while_waiting_on(gate: &'static str) -> (Vec<u8>, Vec<u8>, String, Install, Server) {
     let (answer, wait) = mpsc::channel();
     let built = Built::new();
-    let release = built.release("0.1.1", Some("0.1.1"));
+    let release = built.release("0.1.1");
     let server = Server::gated("0.1.1", &release, None, Some((gate, wait)));
     let install = Install::agent_with_engine(&server);
     if gate != "/latest" {
