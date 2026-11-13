@@ -677,3 +677,39 @@ async fn a_device_that_sends_the_engine_to_loopback_or_another_host_is_never_fol
     asked.sort();
     assert_eq!(asked, ["GET /based.xml", "GET /elsewhere.xml", "GET /redirect.xml"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_the_engine() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let liar = Liar::start(ip, tv.http, |at| {
+        let mut answers = vec![
+            (
+                format!("http://{}/description.xml", tv.http),
+                "uuid:fake-tv::urn:schemas-upnp-org:device:MediaRenderer:1".into(),
+            ),
+            (format!("http://{at}/huge.xml"), "uuid:huge::urn:schemas-upnp-org:device:MediaRenderer:1".into()),
+        ];
+        answers.extend((0..300).map(|n| (format!("http://{at}/d/{n}.xml"), format!("uuid:flood-{n}::{RENDERER}"))));
+        answers
+    })
+    .await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(Vec::new()),
+        Outside { tvs: Find::At(liar.ssdp), ..Outside::default() },
+    );
+
+    let found = tvs(&h, true).await.tvs;
+    let listed: Vec<String> =
+        found.iter().map(|tv| format!("{} {}", tv.name, serde_json::to_string(&tv.plays).unwrap())).collect();
+    assert_eq!(
+        listed,
+        [r#"Fake TV ["mkv","mp4"]"#, r#"Flood 0 ["mkv","mp4"]"#, r#"Flood 1 ["mkv","mp4"]"#],
+        "four answers from one address at most, a huge description refused, and a huge answer to GetProtocolInfo unread"
+    );
+    let descriptions = liar.requests().iter().filter(|asked| asked.starts_with("GET ")).count();
+    assert_eq!(descriptions, 3);
+    assert!(liar.count.most_open.load(Ordering::SeqCst) <= 4);
+    let sent = liar.count.most_sent.load(Ordering::SeqCst);
+    assert!(sent < 16 << 20, "the engine hung up on a huge answer after {sent} bytes");
+}

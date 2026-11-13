@@ -18,6 +18,10 @@ const MX: u64 = 2;
 const TTL: u32 = 2;
 /// A search is sent twice, since a lost datagram is never sent again.
 const SENDS: usize = 2;
+/// The most devices a search keeps, and the most from one address, so a device that answers for
+/// hundreds can neither fill the engine nor crowd out the TVs.
+pub const MOST: usize = 32;
+const MOST_FROM_ONE: usize = 4;
 
 /// Where searches go.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,11 +40,31 @@ pub struct Heard {
     pub from: Ipv4Addr,
 }
 
-/// The devices that answered, by the USN each gave.
-pub type Answers = BTreeMap<String, Heard>;
+/// The devices that answered, one for each description, in the order they answered.
+#[derive(Default, Debug)]
+pub struct Answers(Vec<Heard>);
 
-/// Searches for media renderers from `sources`, this machine's addresses on the home network, and
-/// returns the answers by USN.
+impl Answers {
+    /// Keeps `heard`, unless its description is kept already or it would pass a limit.
+    fn keep(&mut self, heard: Heard) {
+        let from_one = self.0.iter().filter(|kept| kept.from == heard.from).count();
+        if self.0.len() < MOST && from_one < MOST_FROM_ONE && !self.0.iter().any(|kept| kept.location == heard.location)
+        {
+            self.0.push(heard);
+        }
+    }
+}
+
+impl IntoIterator for Answers {
+    type Item = Heard;
+    type IntoIter = std::vec::IntoIter<Heard>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// Searches for media renderers from `sources`, this machine's addresses on the home network.
 pub async fn search(find: Find, sources: &[Ipv4Addr]) -> io::Result<Answers> {
     let (sockets, to) = match find {
         Find::Multicast => {
@@ -50,7 +74,7 @@ pub async fn search(find: Find, sources: &[Ipv4Addr]) -> io::Result<Answers> {
         Find::At(address) => (vec![UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?], address),
     };
     if sockets.is_empty() {
-        return Ok(Answers::new());
+        return Ok(Answers::default());
     }
     let message = request(to);
     for _ in 0..SENDS {
@@ -59,25 +83,29 @@ pub async fn search(find: Find, sources: &[Ipv4Addr]) -> io::Result<Answers> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let mut answers = Answers::new();
+    let mut answers = Answers::default();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(MX + 1);
     let link_local = sources.iter().any(Ipv4Addr::is_link_local);
     let mut tasks = tokio::task::JoinSet::new();
     for socket in sockets {
         tasks.spawn(async move {
-            let mut heard = Vec::new();
+            let mut heard = Answers::default();
             let mut buf = vec![0; 8 * 1024];
             while let Ok(Ok((length, from))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
                 let SocketAddr::V4(from) = from else { continue };
-                if neighbour(*from.ip(), link_local) {
-                    heard.extend(answer(&String::from_utf8_lossy(&buf[..length]), *from.ip()));
+                if neighbour(*from.ip(), link_local)
+                    && let Some(answer) = answer(&String::from_utf8_lossy(&buf[..length]), *from.ip())
+                {
+                    heard.keep(answer);
                 }
             }
             heard
         });
     }
     while let Some(heard) = tasks.join_next().await {
-        answers.extend(heard.unwrap_or_default());
+        for answer in heard.unwrap_or_default() {
+            answers.keep(answer);
+        }
     }
     Ok(answers)
 }
@@ -113,9 +141,9 @@ pub fn at(url: &Url, ip: Ipv4Addr) -> bool {
     url.scheme() == "http" && url.host() == Some(Host::Ipv4(ip))
 }
 
-/// The USN and where the description is of an answer from `from` to a search for media
-/// renderers. An answer whose LOCATION is on another address is `None`, as is anything else.
-fn answer(datagram: &str, from: Ipv4Addr) -> Option<(String, Heard)> {
+/// Where the description is of an answer from `from` to a search for media renderers. An answer
+/// whose LOCATION is on another address is `None`, as is anything else.
+fn answer(datagram: &str, from: Ipv4Addr) -> Option<Heard> {
     let mut lines = datagram.split("\r\n").flat_map(|line| line.split('\n'));
     let status = lines.next()?;
     if !status.starts_with("HTTP/1.1 200") && !status.starts_with("HTTP/1.0 200") {
@@ -131,8 +159,7 @@ fn answer(datagram: &str, from: Ipv4Addr) -> Option<(String, Heard)> {
     if headers.get("st").is_some_and(|st| !st.eq_ignore_ascii_case(RENDERER)) {
         return None;
     }
-    let usn = headers.get("usn").cloned().unwrap_or_else(|| location.to_string());
-    Some((usn, Heard { location, from }))
+    Some(Heard { location, from })
 }
 
 #[cfg(test)]
@@ -150,26 +177,17 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_gives_the_usn_and_where_the_description_is() {
+    fn an_answer_gives_where_the_description_is() {
         let lg = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\n\
                   LOCATION: http://192.168.1.40:1876/\r\nSERVER: Linux/4.4 UPnP/1.0 LGE WebOS TV/Version 0.9\r\n\
                   ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\
                   USN: uuid:6a3e0b2c::urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
         let tv = Ipv4Addr::new(192, 168, 1, 40);
         let heard = |location: &str, from| Heard { location: Url::parse(location).unwrap(), from };
-        assert_eq!(
-            answer(lg, tv),
-            Some((
-                "uuid:6a3e0b2c::urn:schemas-upnp-org:device:MediaRenderer:1".into(),
-                heard("http://192.168.1.40:1876/", tv)
-            ))
-        );
+        assert_eq!(answer(lg, tv), Some(heard("http://192.168.1.40:1876/", tv)));
         let nas = Ipv4Addr::new(10, 0, 0, 9);
         let bare = "HTTP/1.1 200 OK\nlocation: http://10.0.0.9/desc.xml\n\n";
-        assert_eq!(
-            answer(bare, nas),
-            Some(("http://10.0.0.9/desc.xml".into(), heard("http://10.0.0.9/desc.xml", nas)))
-        );
+        assert_eq!(answer(bare, nas), Some(heard("http://10.0.0.9/desc.xml", nas)));
         assert_eq!(answer("NOTIFY * HTTP/1.1\r\nLOCATION: http://10.0.0.9/\r\n\r\n", nas), None, "not an answer");
         let router = "HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.1/\r\nST: upnp:rootdevice\r\n\r\n";
         assert_eq!(answer(router, Ipv4Addr::new(10, 0, 0, 1)), None, "a device that is not a renderer");
@@ -179,6 +197,32 @@ mod tests {
         assert_eq!(answer(loopback, nas), None);
         let named = "HTTP/1.1 200 OK\r\nLOCATION: http://localhost:47919/\r\n\r\n";
         assert_eq!(answer(named, nas), None, "a name could lead anywhere");
+    }
+
+    #[test]
+    fn a_search_keeps_each_description_once_and_few_from_one_address() {
+        let mut answers = Answers::default();
+        for host in 1..=20u8 {
+            for n in 0..10 {
+                let from = Ipv4Addr::new(192, 168, 1, host);
+                let location = Url::parse(&format!("http://{from}:1876/{n}.xml")).unwrap();
+                answers.keep(Heard { location: location.clone(), from });
+                answers.keep(Heard { location, from });
+            }
+        }
+        let kept: Vec<String> = answers.into_iter().map(|heard| heard.location.to_string()).collect();
+        assert_eq!(kept.len(), MOST);
+        assert_eq!(
+            kept[..5],
+            [
+                "http://192.168.1.1:1876/0.xml",
+                "http://192.168.1.1:1876/1.xml",
+                "http://192.168.1.1:1876/2.xml",
+                "http://192.168.1.1:1876/3.xml",
+                "http://192.168.1.2:1876/0.xml",
+            ]
+        );
+        assert_eq!(kept.last().map(String::as_str), Some("http://192.168.1.8:1876/3.xml"));
     }
 
     #[test]

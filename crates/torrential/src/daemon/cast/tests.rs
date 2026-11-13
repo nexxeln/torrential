@@ -1,4 +1,21 @@
+use std::net::SocketAddr;
+
+use super::upnp::{Description, Service};
 use super::*;
+
+/// A TV with the UDN `udn` that answered a search from `address`.
+fn heard(udn: &str, address: &str) -> Known {
+    let at = |path: &str| url::Url::parse(&format!("http://{address}:1876{path}")).unwrap();
+    let description = Description {
+        udn: udn.into(),
+        name: "LG TV".into(),
+        transport: Service { kind: "urn:schemas-upnp-org:service:AVTransport:1".into(), control: at("/AVTransport") },
+        rendering: None,
+        connection: None,
+    };
+    let renderer = Arc::new(Renderer::new(description, address.into(), Vec::new()));
+    Known { renderer, location: at("/").to_string(), missed: 0 }
+}
 
 #[test]
 fn a_tv_is_named_by_its_id_or_any_part_of_its_name() {
@@ -50,4 +67,16 @@ fn a_tv_that_does_not_take_the_container_is_refused_in_a_sentence() {
     let error = refused(&tv, "Night/Night.avi");
     assert_eq!(error.message, "LG TV does not play AVI files, only MKV and MP4");
     assert_eq!(error.hint.as_deref(), Some("play it on this Mac, or choose a source in a format the TV plays"));
+}
+
+#[test]
+fn the_list_keeps_thirty_two_tvs_and_drops_those_the_last_search_missed_first() {
+    let casts = Casts::new(Weak::new(), Find::At(SocketAddr::from(([127, 0, 0, 1], 9))));
+    let search = |first: u8| (first..first + 32).map(|n| heard(&format!("uuid:{n}"), &format!("10.0.0.{n}"))).collect();
+    casts.state().found(search(1));
+    casts.state().found(search(101));
+    let hosts: Vec<u8> =
+        casts.list().tvs.iter().map(|tv| tv.address.parse::<Ipv4Addr>().unwrap().octets()[3]).collect();
+    assert_eq!(hosts.len(), 32);
+    assert!(hosts.iter().all(|host| *host > 100), "{hosts:?}");
 }

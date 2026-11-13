@@ -12,6 +12,8 @@ use super::xml;
 
 /// How long a TV may take to answer one request. A TV that is off answers none.
 const ANSWER_WITHIN: Duration = Duration::from_secs(4);
+/// The most of a description or an answer torrential reads. A TV's run to a few kilobytes.
+const READ_AT_MOST: usize = 256 * 1024;
 const AV_TRANSPORT: &str = "urn:schemas-upnp-org:service:AVTransport:";
 const RENDERING: &str = "urn:schemas-upnp-org:service:RenderingControl:";
 const CONNECTION: &str = "urn:schemas-upnp-org:service:ConnectionManager:";
@@ -204,7 +206,9 @@ pub async fn call(
         .await
         .map_err(|e| gone(tv, &e))?;
     let status = sent.status();
-    let text = sent.text().await.map_err(|e| gone(tv, &e))?;
+    let text = read(sent).await.map_err(|e| gone(tv, &e))?.ok_or_else(|| {
+        Failed::Gone(Error::new(ErrorCode::FetchFailed, format!("{tv} sent an answer too long to read")))
+    })?;
     if status.is_success() {
         return Ok(text);
     }
@@ -215,6 +219,21 @@ pub async fn call(
         code,
         Error::new(ErrorCode::FetchFailed, format!("{tv} refused {action} with error {code}{why}")),
     ))
+}
+
+/// The text of an answer, read as it arrives. `None` once it runs past `READ_AT_MOST`.
+pub async fn read(mut answer: reqwest::Response) -> Result<Option<String>, reqwest::Error> {
+    if answer.content_length().is_some_and(|length| length > READ_AT_MOST as u64) {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = answer.chunk().await? {
+        if body.len() + chunk.len() > READ_AT_MOST {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
 }
 
 fn gone(tv: &str, error: &reqwest::Error) -> Failed {

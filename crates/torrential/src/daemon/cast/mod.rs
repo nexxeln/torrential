@@ -37,6 +37,8 @@ const FRESH: Duration = Duration::from_secs(30);
 const MISSES: u8 = 2;
 /// How long a device description may take to arrive.
 const DESCRIBE_WITHIN: Duration = Duration::from_secs(4);
+/// How many devices a search describes at once.
+const DESCRIBING: usize = 4;
 /// How often a cast asks the TV where it is.
 const POLL: Duration = Duration::from_secs(1);
 /// How often a cast asks the TV its volume, in polls.
@@ -86,7 +88,8 @@ struct Known {
 
 impl State {
     /// Takes in the renderers one search found. A TV that misses `MISSES` searches in a row
-    /// leaves the list, unless a cast plays on it.
+    /// leaves the list, unless a cast plays on it, and one that missed the last search leaves to
+    /// keep the list to `ssdp::MOST`.
     fn found(&mut self, seen: Vec<Known>) {
         let seen: BTreeMap<String, Known> = seen.into_iter().map(|k| (k.renderer.tv.id.clone(), k)).collect();
         let State { tvs, casts, .. } = self;
@@ -97,6 +100,16 @@ impl State {
         }
         tvs.retain(|id, known| known.missed < MISSES || casts.contains_key(id));
         tvs.extend(seen);
+        let mut missing: Vec<String> = tvs
+            .iter()
+            .filter(|(id, known)| known.missed > 0 && !casts.contains_key(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        while tvs.len() > ssdp::MOST
+            && let Some(id) = missing.pop()
+        {
+            tvs.remove(&id);
+        }
         self.searched = Some(Instant::now());
     }
 
@@ -185,9 +198,12 @@ impl Casts {
             state.tvs.values().map(|k| (k.location.clone(), k.renderer.clone())).collect()
         };
         let mut found = tokio::task::JoinSet::new();
-        for heard in answers.into_values() {
+        let describing = Arc::new(tokio::sync::Semaphore::new(DESCRIBING));
+        for heard in answers {
             let (http, known) = (self.http.clone(), known.get(heard.location.as_str()).cloned());
+            let describing = describing.clone();
             found.spawn(async move {
+                let _turn = describing.acquire_owned().await;
                 let renderer = match known {
                     Some(renderer) => Some(renderer),
                     None => renderer(&http, &heard).await.map(Arc::new),
@@ -372,7 +388,7 @@ async fn renderer(http: &reqwest::Client, heard: &Heard) -> Option<Renderer> {
     if !answer.status().is_success() {
         return None;
     }
-    let description = upnp::describe(&answer.text().await.ok()?, &heard.location, heard.from)?;
+    let description = upnp::describe(&upnp::read(answer).await.ok()??, &heard.location, heard.from)?;
     let sink = match &description.connection {
         Some(connection) => upnp::call(http, connection, "GetProtocolInfo", &[], &description.name)
             .await
