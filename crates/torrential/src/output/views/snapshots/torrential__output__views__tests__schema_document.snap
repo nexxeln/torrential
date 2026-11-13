@@ -262,6 +262,39 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "devices",
+      "about": "List, add, or remove the phones and TVs that watch from this Mac",
+      "arguments": [],
+      "flags": [],
+      "subcommands": [
+        {
+          "name": "list",
+          "about": "List the paired devices and the open code, the default",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "add",
+          "about": "Show a code and a QR code that let one more phone or TV in for 5 minutes",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "remove",
+          "about": "Lock a device out at once",
+          "arguments": [
+            {
+              "name": "ID",
+              "help": "A device ID from torrential devices",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": []
+        }
+      ]
+    },
+    {
       "name": "status",
       "about": "List downloads, or show one in detail",
       "arguments": [
