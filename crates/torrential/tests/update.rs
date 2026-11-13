@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
 const SCRIPT: &[u8] = b"#!/bin/sh\necho torrential 0.1.1\n";
 const BROKEN: &[u8] = b"#!/bin/sh\nexit 1\n";
+/// A release that says it is 0.1.1 and exits as soon as it is asked to run an engine.
+const CRASHES: &[u8] = b"#!/bin/sh\ncase \"$1\" in\n  --version) echo torrential 0.1.1 ;;\n  *) exit 3 ;;\nesac\n";
 const AGENT_VARS: [&str; 8] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -236,7 +238,8 @@ fn assets(target: &str) -> [String; 2] {
 #[test]
 fn update_replaces_the_binary_with_the_verified_release() {
     let Some(target) = target() else { return };
-    let server = Server::start("0.1.1", SCRIPT, None);
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1"), None);
     let install = Install::new(&server);
     let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
 
@@ -244,7 +247,7 @@ fn update_replaces_the_binary_with_the_verified_release() {
 
     assert_eq!((run.code, run.stdout.as_str(), run.stderr.as_str()), (0, "Updated torrential 0.1.0 → 0.1.1.\n", ""));
     let installed = std::fs::metadata(install.exe()).unwrap();
-    assert_eq!(std::fs::read(install.exe()).unwrap(), SCRIPT);
+    assert_eq!(std::fs::read(install.exe()).unwrap(), built.release("0.1.1"));
     assert_eq!(installed.permissions().mode() & 0o777, 0o755);
     assert_ne!(installed.ino(), old_inode, "a rename put the new file in place");
     assert_eq!(install.files_in_bin(), ["torrential"]);
@@ -448,7 +451,7 @@ fn a_release_whose_binary_does_not_run_is_never_installed() {
     let before = std::fs::read(install.exe()).unwrap();
 
     assert_eq!(install.run(&["status", "--json"]).code, 0);
-    eventually("the engine gave the release up", || install.checked()["install_failed_at"].is_i64());
+    eventually("the engine refused the release", || install.checked()["refused"] == "0.1.1");
 
     assert!(std::fs::read(install.exe()).unwrap() == before, "the installed binary is unchanged");
     assert_eq!(install.files_in_bin(), ["torrential"], "no partial file is left behind");
@@ -473,7 +476,7 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
 
     assert_eq!(install.run(&["status", "--json"]).code, 0);
     let (pid, _) = install.engine();
-    eventually("the engine gave the release up", || install.checked()["install_failed_at"].is_i64());
+    eventually("the engine refused the release", || install.checked()["refused"] == "0.1.1");
     std::thread::sleep(Duration::from_secs(3));
     let after = (install.running(), Install::downloads_of_the_release(&server));
     assert_eq!(install.run(&["engine", "stop"]).code, 0);
@@ -489,6 +492,44 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
     assert_eq!(install.files_in_bin(), ["torrential"]);
     let log = std::fs::read_to_string(install.state().join("engine.log")).unwrap();
     assert!(log.contains("says it is torrential 0.1.0"), "{log}");
+}
+
+#[test]
+fn a_release_that_says_its_version_but_cannot_run_an_engine_is_never_installed_or_fetched_again() {
+    if target().is_none() {
+        return;
+    }
+    let server = Server::start("0.1.1", CRASHES, None);
+    let mut install = Install::agent_with_engine(&server);
+    let tmp = install.dir.path().join("t");
+    std::fs::create_dir(&tmp).unwrap();
+    install.set("TMPDIR", &tmp.display().to_string());
+    install.found("0.1.1");
+    let before = std::fs::read(install.exe()).unwrap();
+
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    eventually("the engine refused the release", || install.checked()["refused"] == "0.1.1");
+    let (pid, version) = install.engine();
+    assert_eq!(install.run(&["engine", "stop"]).code, 0);
+    // Two days on, the engine asks for the latest release again and still leaves this one alone.
+    let mut checked = install.checked();
+    let days_ago = checked["checked_at"].as_i64().unwrap() - 2 * 24 * 60 * 60;
+    checked["checked_at"] = days_ago.into();
+    std::fs::write(install.state().join("update.json"), checked.to_string()).unwrap();
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    eventually("the next engine asks for the latest release", || server.asked().contains(&"/latest".to_string()));
+    std::thread::sleep(Duration::from_secs(3));
+
+    assert_eq!(version, "0.1.0");
+    assert_ne!(install.engine().0, pid);
+    assert!(std::fs::read(install.exe()).unwrap() == before, "the installed binary is unchanged");
+    assert_eq!(install.files_in_bin(), ["torrential"], "no partial file is left behind");
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0, "the trial home is gone");
+    assert_eq!(Install::downloads_of_the_release(&server), 1, "the refused release is never fetched again");
+    let log = std::fs::read_to_string(install.state().join("engine.log")).unwrap();
+    let refused = "update failed: the binary of torrential 0.1.1 does not start an engine (exit status: 3), so the \
+                   installed torrential is unchanged";
+    assert!(log.contains(refused), "{log}");
 }
 
 #[test]
