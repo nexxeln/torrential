@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
-use torrential_core::{ErrorCode, JobStatus, Place, Target, TorrentId};
+use torrential_core::{ErrorCode, JobStatus, Place, Selection, Target, TorrentId};
 
 use super::super::admission::{GIB, reserve};
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
@@ -720,4 +720,58 @@ async fn a_plays_folder_replaced_by_a_link_while_the_engine_is_stopped_stops_eve
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(h.states().await, ["error"], "it stays stopped");
     assert_eq!(std::fs::read_dir(&decoys).unwrap().count(), 0, "nothing goes through the link");
+}
+
+/// An engine with `newer` in its plays folder, while `older`, about 2 GiB of it there, leaves for
+/// it, held by the engine, and with 1 GiB free on the disk beyond what it keeps in reserve.
+async fn older_play_leaving() -> Harness {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0xe7; 20])));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, gate: Some(gate.clone()), ..Outside::default() },
+    );
+    h.swarm.set_rate(2 * GIB);
+    let older = torrent(0xe7, "older", &[("older.mp4", 8 * GIB)]);
+    h.play_web(&older).await;
+    h.until("some of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
+    assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    gate.close();
+    h.play_web(&torrent(0xe8, "newer", &[("newer.mp4", GIB)])).await;
+    gate.until_held(1).await;
+    h.until("newer is done", |jobs| {
+        jobs.iter().any(|job| job.name.as_deref() == Some("newer") && job.status.name() == "done")
+    })
+    .await;
+    h.swarm.set_rate(0);
+    h.disk.set_free(reserve(ROOMY.total) + GIB);
+    h
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn more_files_for_a_running_download_need_room_on_the_disk_now_not_room_a_leaving_play_will_give() {
+    let h = older_play_leaving().await;
+    let set = torrent(0xe9, "set", &[("a.bin", MIB), ("b.bin", 2 * GIB)]);
+    h.swarm.publish(set.clone());
+    h.get(h.torrent_file(&set), &["a.bin"]).await.unwrap();
+
+    let error = h.get(Target::Prefix(prefix(&set)), &["a.bin", "b.bin"]).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::DiskFull, "{error:?}");
+    let jobs = h.status().await;
+    let set = jobs.iter().find(|job| job.name.as_deref() == Some("set")).unwrap();
+    assert_eq!(set.selection, Selection::Patterns(vec!["a.bin".into()]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_magnet_whose_files_need_room_a_leaving_play_will_give_stops_for_want_of_room() {
+    let h = older_play_leaving().await;
+    let set = torrent(0xea, "set", &[("b.bin", 2 * GIB)]);
+    h.get(super::magnet(&set), &[]).await.unwrap();
+    h.swarm.publish(set);
+
+    let jobs = h.until("the magnet stops", |jobs| jobs.iter().any(|job| job.status.name() == "error")).await;
+    let set = jobs.iter().find(|job| job.status.name() == "error").unwrap();
+    let JobStatus::Error { error } = &set.status else { unreachable!() };
+    assert_eq!((set.name.as_deref(), error.code), (Some("set"), ErrorCode::DiskFull));
 }

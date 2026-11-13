@@ -760,7 +760,8 @@ impl Owner {
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
         let needed = plan.needed(if recheck { 0 } else { job.verified() });
-        admission::check_disk(self.reclaimable(plan.space), needed, self.others_remaining(&job.record.dir, id))?;
+        // A running download gets the files at once, so only room the disk has now counts.
+        admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
             preview.record.selection = selection;
@@ -1402,7 +1403,8 @@ impl Owner {
             admission::check_size(plan.selected_size, cap, Some(id))?;
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
-            admission::check_disk(self.reclaimable(plan.space), plan.needed(0), self.others_remaining(&dir, id))?;
+            // The engine gets the files at once, so only room the disk has now counts.
+            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
             Ok(plan)
         });
         match admitted {
