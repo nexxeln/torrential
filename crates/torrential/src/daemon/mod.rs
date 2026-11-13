@@ -224,7 +224,8 @@ pub fn start(
     let shelf = titles::shelf::Shelf::open(store.path())?;
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
-    let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, config)?;
+    let playing = playing::Playing::new();
+    let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, playing.clone(), config)?;
     let (commands_tx, commands) = mpsc::unbounded_channel();
     let task = runtime.spawn(owner.run(commands, events));
     let ctx = Arc::new(Ctx {
@@ -237,7 +238,7 @@ pub fn start(
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
-        playing: playing::Playing::new(),
+        playing,
         news: update::Board::default(),
         devices,
     });

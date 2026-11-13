@@ -16,6 +16,7 @@ use super::super::book::{Home, Intent, JobEntry, Observed, Play};
 use super::super::engine_port::EngineCommand;
 use super::super::files;
 use super::super::log;
+use super::super::playing::{Open, Playing};
 use super::deleter::{Deleter, Doom, InUse};
 use super::{Finish, Owner, Reply, Shelving, now};
 
@@ -76,15 +77,19 @@ pub fn leaving(mut shares: Vec<Share>, max: u64) -> Vec<TorrentId> {
 }
 
 /// Someone streaming a download, from their request for its bytes until the answer ends. The
-/// owner hands it out with the file, in one step, and counts the leases still held.
+/// owner hands it out with the file, in one step, and counts the leases still held. Each one also
+/// counts as playing, which holds off an update's switch.
 pub struct Lease {
     _held: Arc<()>,
+    _playing: Open,
 }
 
 /// What the owner keeps track of for plays and deletions.
 pub struct Tending {
     /// The streams of each download: a play is streamed while a lease other than this one is held.
     viewers: BTreeMap<TorrentId, Arc<()>>,
+    /// What plays across the engine, which a lease adds to.
+    playing: Playing,
     pub(super) deleter: Deleter,
     /// The folder and the files of each download taken off the list that the engine has yet to
     /// let go of.
@@ -100,9 +105,10 @@ pub struct Tending {
 }
 
 impl Tending {
-    pub fn new(deleter: Deleter) -> Self {
+    pub fn new(deleter: Deleter, playing: Playing) -> Self {
         Self {
             viewers: BTreeMap::new(),
+            playing,
             deleter,
             letting_go: BTreeMap::new(),
             leaving: BTreeMap::new(),
@@ -205,13 +211,15 @@ impl Owner {
         }
     }
 
-    /// Someone starts streaming `id`, until they drop the lease. The first stream to open marks
-    /// when the play was watched, and resumes it if it stopped.
-    pub(super) fn lease(&mut self, id: TorrentId) -> Lease {
+    /// Someone starts streaming `id`, until they drop the lease, unless the engine is stopping for
+    /// an update. The first stream to open marks when the play was watched, and resumes it if it
+    /// stopped.
+    pub(super) fn lease(&mut self, id: TorrentId) -> Result<Lease, Error> {
+        let playing = self.tending.playing.open()?;
         let first = !self.streamed_now(id);
-        let lease = Lease { _held: Arc::clone(self.tending.viewers.entry(id).or_default()) };
+        let lease = Lease { _held: Arc::clone(self.tending.viewers.entry(id).or_default()), _playing: playing };
         if !first {
-            return lease;
+            return Ok(lease);
         }
         self.watched_now(id);
         if let Some(job) = self.jobs.get(&id)
@@ -221,7 +229,7 @@ impl Owner {
         {
             log(&format!("{id} is streaming but cannot resume: {}", error.message));
         }
-        lease
+        Ok(lease)
     }
 
     /// Whether someone holds a lease on `id`.

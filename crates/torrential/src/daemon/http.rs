@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{oneshot, watch};
-use torrential_core::TorrentId;
+use torrential_core::{ErrorCode, TorrentId};
 
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, StreamFile};
@@ -578,19 +578,17 @@ impl Connection<'_> {
         }
     }
 
-    /// Sends file `index` of download `id` to a player on this Mac, a paired device, or a cast. The
-    /// open stream holds off an update's switch, and none opens once the switch waits for none.
+    /// Sends file `index` of download `id` to a player on this Mac, a paired device, or a cast. Its
+    /// lease holds off an update's switch, and none is handed out once the switch waits for none.
     async fn file(&mut self, request: Request, id: TorrentId, index: u32) -> io::Result<bool> {
-        let _playing = match self.ctx.playing.open() {
-            Ok(open) => open,
-            Err(updating) => {
+        let keep = request.keep_alive;
+        let (file, _lease) = match self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await {
+            Ok(streaming) => streaming,
+            Err(updating) if updating.code == ErrorCode::DaemonUnavailable => {
                 let (message, text) = (updating.message.as_bytes(), "text/plain; charset=utf-8");
                 return self.send("503 Service Unavailable", text, "Retry-After: 5\r\n", message, &request).await;
             }
-        };
-        let keep = request.keep_alive;
-        let Ok((file, _lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
-            return self.empty("404 Not Found", "", keep).await;
+            Err(_) => return self.empty("404 Not Found", "", keep).await,
         };
         let Ok(range) = range(request.range.as_deref(), file.size) else {
             let unsatisfiable = format!("Content-Range: bytes */{}\r\n", file.size);

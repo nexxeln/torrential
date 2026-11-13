@@ -18,6 +18,7 @@ use super::engine_port::{
 };
 use super::files;
 use super::magnet::{self, Magnet};
+use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
@@ -342,6 +343,7 @@ impl Owner {
         engine: EngineHandle,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
+        playing: Playing,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
         // Opened first, for a plays folder other than the one used before changes what the plays are.
@@ -363,7 +365,7 @@ impl Owner {
         let (updates, _) = broadcast::channel(256);
         let mut owner = Self {
             tombstones: store.tombstones(now)?,
-            tending: Tending::new(deleter),
+            tending: Tending::new(deleter, playing),
             store,
             jobs,
             probes: BTreeSet::new(),
@@ -473,8 +475,8 @@ impl Owner {
                 let _ = reply.send(self.stream_file(id, index));
             }
             Command::Stream { id, index, reply } => {
-                let file = self.stream_file(id, index);
-                let _ = reply.send(file.map(|file| (file, self.lease(id))));
+                let streaming = self.stream_file(id, index).and_then(|file| Ok((file, self.lease(id)?)));
+                let _ = reply.send(streaming);
             }
             Command::Library { shelving, reply } => {
                 let _ = reply.send(self.library(shelving));
