@@ -1,9 +1,10 @@
-//! The engine's HTTP server on 127.0.0.1. It serves downloads to video players, and the web app
-//! with its API. A request for bytes that have not arrived asks the engine for their pieces first
-//! and waits for them, so a player can start and seek while the rest of the file downloads.
+//! The engine's HTTP server. It serves downloads to video players, and the web app with its API.
+//! It listens on 127.0.0.1, and on the home network too while a phone or TV is paired. A request
+//! for bytes that have not arrived asks the engine for their pieces first and waits for them, so a
+//! player can start and seek while the rest of the file downloads.
 
 use std::io::{self, SeekFrom};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use torrential_core::TorrentId;
 
+use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, StreamFile};
 use super::server::Ctx;
 use super::web;
@@ -38,9 +40,17 @@ const TYPES: [(&str, &str); 6] = [
     ("srt", "application/x-subrip"),
 ];
 
-/// Binds `port` on 127.0.0.1, or any free port when another program holds it.
-pub fn bind(port: u16) -> io::Result<TcpListener> {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).or_else(|_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+/// Binds `port` where `reach` says, or any free port when another program holds it.
+pub fn bind(port: u16, reach: Reach) -> io::Result<TcpListener> {
+    let ip = address(reach);
+    TcpListener::bind((ip, port)).or_else(|_| TcpListener::bind((ip, 0)))
+}
+
+fn address(reach: Reach) -> Ipv4Addr {
+    match reach {
+        Reach::Loopback => Ipv4Addr::LOCALHOST,
+        Reach::Network => Ipv4Addr::UNSPECIFIED,
+    }
 }
 
 /// `http://127.0.0.1:{port}/{torrent ID}/{file index}/{file name}`. The server routes on the ID
@@ -51,9 +61,13 @@ pub fn url(port: u16, id: TorrentId, index: u32, path: &str) -> String {
 
 /// The path part of `url`, which the web app requests from its own origin.
 pub fn route_of(id: TorrentId, index: u32, path: &str) -> String {
+    format!("/{}/{index}/{}", id.to_hex(), url_name(path))
+}
+
+/// The last part of `path`, percent-encoded for a URL.
+pub fn url_name(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let name: String = name
-        .bytes()
+    name.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
                 char::from(b).to_string()
@@ -61,20 +75,82 @@ pub fn route_of(id: TorrentId, index: u32, path: &str) -> String {
                 format!("%{b:02X}")
             }
         })
-        .collect();
-    format!("/{}/{index}/{name}", id.to_hex())
+        .collect()
 }
 
-pub async fn accept(ctx: Arc<Ctx>, listener: tokio::net::TcpListener) {
-    while let Ok((stream, _)) = listener.accept().await {
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            ctx.owner.tell(Command::Connected);
-            let _ = stream.set_nodelay(true);
-            let (rd, wr) = stream.into_split();
-            let _ = Connection { ctx: &ctx, rd, wr, pending: Vec::new(), chunked: false }.serve().await;
-            ctx.owner.tell(Command::Disconnected { keep_until: None });
-        });
+/// Where a connection comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Peer {
+    /// This Mac, over loopback.
+    Loopback,
+    /// Another machine, or this Mac by its address on the home network. `local` is the address it
+    /// connected to.
+    Network { local: IpAddr, remote: IpAddr },
+}
+
+impl Peer {
+    fn of(local: SocketAddr, remote: SocketAddr) -> Self {
+        let remote = remote.ip().to_canonical();
+        if remote.is_loopback() { Self::Loopback } else { Self::Network { local: local.ip().to_canonical(), remote } }
+    }
+}
+
+/// Serves connections, and moves the listening socket whenever the devices change where the engine
+/// should listen. Connections already open stay open.
+pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener) {
+    let mut reach = ctx.devices.reach();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, remote)) = accepted else { return };
+                let Ok(local) = stream.local_addr() else { continue };
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    ctx.owner.tell(Command::Connected);
+                    let _ = stream.set_nodelay(true);
+                    let (rd, wr) = stream.into_split();
+                    let peer = Peer::of(local, remote);
+                    let _ = Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false }.serve().await;
+                    ctx.owner.tell(Command::Disconnected { keep_until: None });
+                });
+            }
+            changed = reach.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let to = *reach.borrow_and_update();
+                drop(listener);
+                listener = listen(to, ctx.http_port).await;
+            }
+        }
+    }
+}
+
+/// A socket on `port` where `reach` says. Linux refuses every address while 127.0.0.1 holds the
+/// port, so the old socket closes first. When the home network cannot be had, 127.0.0.1 can.
+async fn listen(reach: Reach, port: u16) -> tokio::net::TcpListener {
+    let open = |ip: Ipv4Addr| {
+        let listener = TcpListener::bind((ip, port))?;
+        listener.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(listener)
+    };
+    loop {
+        match open(address(reach)) {
+            Ok(listener) => {
+                super::log(&match reach {
+                    Reach::Network => format!("listening on the home network on port {port}"),
+                    Reach::Loopback => format!("listening on 127.0.0.1 only on port {port}"),
+                });
+                return listener;
+            }
+            Err(e) => super::log(&format!("cannot listen on {}:{port}: {e}", address(reach))),
+        }
+        if reach == Reach::Network
+            && let Ok(listener) = open(Ipv4Addr::LOCALHOST)
+        {
+            return listener;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -93,6 +169,11 @@ pub struct Request {
     range: Option<String>,
     /// The body of a POST, which the guard has checked is JSON.
     pub body: Vec<u8>,
+    from: Sender,
+    /// The device token in the request's cookie.
+    pub cookie: Option<String>,
+    /// The User-Agent, lowercased.
+    pub agent: Option<String>,
     keep_alive: bool,
     /// HTTP/1.1, which can take a chunked answer.
     chunks: bool,
@@ -112,12 +193,13 @@ impl Request {
 }
 
 enum Head {
-    Request(Request),
+    Request(Box<Request>),
     Refused(&'static str),
 }
 
 pub struct Connection<'a> {
     pub ctx: &'a Ctx,
+    pub peer: Peer,
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     /// Bytes read past the end of the request being answered.
@@ -140,8 +222,22 @@ impl Connection<'_> {
                         self.empty("413 Content Too Large", "", false).await?;
                         return Ok(());
                     }
+                    // Read before any refusal, since closing on an unread body resets the
+                    // connection before the browser reads the answer.
                     request.body = self.read_body(request.length).await?;
-                    self.answer(request).await?
+                    let ctx = self.ctx;
+                    let asker = match ask(self.peer, &request, ctx.http_port, &ctx.devices, super::owner::now()) {
+                        Ok(asker) => asker,
+                        Err(refusal) => {
+                            self.refuse(refusal).await?;
+                            return Ok(());
+                        }
+                    };
+                    // A removed device or a dropped cast loses what it was still receiving.
+                    tokio::select! {
+                        keep = self.answer(*request, &asker) => keep?,
+                        () = ctx.devices.revoked(&asker) => return Ok(()),
+                    }
                 }
             };
             if !keep_alive {
@@ -156,7 +252,7 @@ impl Connection<'_> {
             let mut parsed = httparse::Request::new(&mut headers);
             match parsed.parse(&self.pending) {
                 Ok(httparse::Status::Complete(length)) => {
-                    let head = head(&parsed, self.ctx.http_port);
+                    let head = head(&parsed);
                     self.pending.drain(..length);
                     return Ok(Some(head));
                 }
@@ -178,23 +274,59 @@ impl Connection<'_> {
         Ok(self.pending.drain(..length).collect())
     }
 
-    async fn answer(&mut self, request: Request) -> io::Result<bool> {
+    async fn answer(&mut self, request: Request, asker: &Asker) -> io::Result<bool> {
+        match asker {
+            Asker::Stranger { removed } => return web::devices::stranger(self, &request, *removed).await,
+            Asker::Cast(_) if request.method == Method::Post => {
+                return self.empty("405 Method Not Allowed", "", request.keep_alive).await;
+            }
+            Asker::Cast(granted) => return self.file(request, granted.id, granted.index).await,
+            Asker::Local | Asker::Device(_) => {}
+        }
         if let Some(route) = request.path.strip_prefix("/api/") {
-            return web::answer(self, &request, route).await;
+            return web::answer(self, &request, route, asker).await;
         }
         if request.method == Method::Post {
             return self.empty("405 Method Not Allowed", "", request.keep_alive).await;
+        }
+        if request.path == web::devices::PAIR {
+            return self.empty("303 See Other", "Location: /\r\n", request.keep_alive).await;
         }
         match route(&request.path) {
             Some((id, index)) => self.file(request, id, index).await,
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
-                    let headers = format!("Cache-Control: {}\r\n", asset.cache);
+                    let mut headers = format!("Cache-Control: {}\r\n", asset.cache);
+                    // Browsers cap a cookie at 400 days, so each visit starts the 400 days again.
+                    if let (Asker::Device(_), Some(token)) = (asker, &request.cookie)
+                        && asset.content_type.starts_with("text/html")
+                    {
+                        headers.push_str(&web::devices::set_cookie(token));
+                    }
                     self.send("200 OK", asset.content_type, &headers, asset.bytes, &request).await
                 }
                 None => self.empty("404 Not Found", "", request.keep_alive).await,
             },
         }
+    }
+
+    async fn refuse(&mut self, refusal: Refusal) -> io::Result<()> {
+        let (status, text) = match refusal {
+            Refusal::Forbidden => return self.empty("403 Forbidden", "", false).await.map(drop),
+            Refusal::Elsewhere(address) => (
+                "403 Forbidden",
+                format!(
+                    "torrential answers only at its own address, so open http://{address} on this device instead.\n"
+                ),
+            ),
+            Refusal::CastEnded => ("404 Not Found", "This cast has ended, so press Play on TV again.\n".to_string()),
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            text.len()
+        );
+        self.wr.write_all(head.as_bytes()).await?;
+        self.wr.write_all(text.as_bytes()).await
     }
 
     /// Answers with a whole body.
@@ -387,7 +519,7 @@ pub async fn read(
     Ok(bytes)
 }
 
-fn head(parsed: &httparse::Request, port: u16) -> Head {
+fn head(parsed: &httparse::Request) -> Head {
     let header = |name: &str| {
         let value = parsed.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name))?.value;
         Some(String::from_utf8_lossy(value).trim().to_ascii_lowercase())
@@ -397,9 +529,10 @@ fn head(parsed: &httparse::Request, port: u16) -> Head {
         None => (parsed.path.unwrap_or_default().to_string(), String::new()),
     };
     let from = Sender { host: header("host"), site: header("sec-fetch-site"), origin: header("origin") };
-    if !from.allowed(port) {
-        return Head::Refused("403 Forbidden");
-    }
+    let cookie = header("cookie").and_then(|cookies| {
+        let token = cookies.split(';').find_map(|cookie| cookie.trim().strip_prefix(COOKIE)?.strip_prefix('='));
+        token.map(String::from)
+    });
     let method = match parsed.method {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
@@ -424,7 +557,56 @@ fn head(parsed: &httparse::Request, port: u16) -> Head {
         _ => connection.as_deref() == Some("keep-alive"),
     };
     let chunks = parsed.version == Some(1);
-    Head::Request(Request { method, path, query, range: header("range"), body: Vec::new(), keep_alive, chunks, length })
+    Head::Request(Box::new(Request {
+        method,
+        path,
+        query,
+        range: header("range"),
+        body: Vec::new(),
+        from,
+        cookie,
+        agent: header("user-agent"),
+        keep_alive,
+        chunks,
+        length,
+    }))
+}
+
+/// Why a request is refused before anything reads it.
+enum Refusal {
+    /// Over loopback, a request another website made, or one that names another host.
+    Forbidden,
+    /// From the home network, a request another website made, or one that names another host. It
+    /// holds the address to open instead.
+    Elsewhere(String),
+    /// A cast URL whose grant was dropped, or never made.
+    CastEnded,
+}
+
+/// Who sent `request`. A cast URL is let in by its grant alone, anything else over loopback is
+/// this Mac, and from the network a paired device's cookie lets it in.
+fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
+    match peer {
+        Peer::Loopback if !request.from.loopback_allowed(port) => return Err(Refusal::Forbidden),
+        Peer::Network { local, .. } => {
+            let name = devices.local_name();
+            if !request.from.home_allowed(port, local, name.as_deref()) {
+                let host = name.unwrap_or_else(|| local.to_string());
+                return Err(Refusal::Elsewhere(format!("{host}:{port}")));
+            }
+        }
+        Peer::Loopback => {}
+    }
+    if request.path.starts_with(CAST) {
+        return devices.granted(&request.path).map(Asker::Cast).ok_or(Refusal::CastEnded);
+    }
+    if peer == Peer::Loopback {
+        return Ok(Asker::Local);
+    }
+    Ok(match request.cookie.as_deref() {
+        Some(token) => devices.holder(token, now).map_or(Asker::Stranger { removed: true }, |d| Asker::Device(d.id)),
+        None => Asker::Stranger { removed: false },
+    })
 }
 
 /// What a request says about where it comes from, lowercased.
@@ -435,16 +617,16 @@ struct Sender {
 }
 
 impl Sender {
-    /// False for a request another website made through the person's browser. Players, curl, and
-    /// agents send none of these headers but `Host`.
-    fn allowed(&self, port: u16) -> bool {
+    /// For a request over loopback, false when another website made it through the person's
+    /// browser. Players, curl, and agents send none of these headers but `Host`.
+    fn loopback_allowed(&self, port: u16) -> bool {
         let local =
             |host: &str| matches!(host.rsplit_once(':').map_or(host, |(name, _)| name), "127.0.0.1" | "localhost");
         // A web page that rebinds its own hostname to 127.0.0.1 still names that hostname.
         if self.host.as_deref().is_some_and(|host| !local(host)) {
             return false;
         }
-        if matches!(self.site.as_deref(), Some("cross-site" | "same-site")) {
+        if self.cross_site() {
             return false;
         }
         let own = |origin: &str| {
@@ -454,6 +636,33 @@ impl Sender {
         };
         self.origin.as_deref().is_none_or(own)
     }
+
+    /// For a request from the home network, true when it names this Mac by its .local name or by
+    /// the address it connected to, on `port`, and no other website made it. A web page that
+    /// rebinds its own hostname to this Mac's address still names that hostname.
+    fn home_allowed(&self, port: u16, local: IpAddr, name: Option<&str>) -> bool {
+        let Some(host) = self.host.as_deref() else { return false };
+        let (host_name, host_port) = split_host(host);
+        let ours = host_name.parse::<IpAddr>().is_ok_and(|ip| ip.to_canonical() == local) || name == Some(host_name);
+        let same_origin = self.origin.as_deref().is_none_or(|origin| origin.strip_prefix("http://") == Some(host));
+        ours && host_port == Some(port) && !self.cross_site() && same_origin
+    }
+
+    fn cross_site(&self) -> bool {
+        matches!(self.site.as_deref(), Some("cross-site" | "same-site"))
+    }
+}
+
+/// The name and port of a `Host` header, which brackets an IPv6 address.
+fn split_host(host: &str) -> (&str, Option<u16>) {
+    let (name, port) = match host.strip_prefix('[').and_then(|rest| rest.split_once(']')) {
+        Some((name, rest)) => (name, rest.strip_prefix(':')),
+        None => match host.rsplit_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        },
+    };
+    (name, port.and_then(|port| port.parse().ok()))
 }
 
 /// The torrent ID and file index of a path `url` built.
@@ -506,12 +715,12 @@ mod tests {
         let allowed = |host: &str, site: Option<&str>, origin: Option<&str>| {
             let from =
                 Sender { host: Some(host.into()), site: site.map(String::from), origin: origin.map(String::from) };
-            from.allowed(47919)
+            from.loopback_allowed(47919)
         };
         // A player, curl, or an agent.
         assert!(allowed("127.0.0.1:47919", None, None));
         assert!(allowed("localhost", None, None));
-        assert!(Sender { host: None, site: None, origin: None }.allowed(47919), "HTTP/1.0 has no Host");
+        assert!(Sender { host: None, site: None, origin: None }.loopback_allowed(47919), "HTTP/1.0 has no Host");
         // The web app itself, and its address typed into the browser.
         assert!(allowed("127.0.0.1:47919", Some("same-origin"), Some("http://127.0.0.1:47919")));
         assert!(allowed("localhost:47919", Some("same-origin"), Some("http://localhost:47919")));
@@ -526,6 +735,36 @@ mod tests {
         assert!(!allowed("127.0.0.1:47919", None, Some("https://example.org")));
         assert!(!allowed("127.0.0.1:47919", None, Some("http://127.0.0.1:3000")));
         assert!(!allowed("127.0.0.1:47919", None, Some("null")));
+    }
+
+    #[test]
+    fn a_request_from_the_home_network_must_name_this_mac_and_come_from_its_page() {
+        let mac: IpAddr = "192.168.1.23".parse().unwrap();
+        let allowed = |host: Option<&str>, site: Option<&str>, origin: Option<&str>| {
+            let from =
+                Sender { host: host.map(String::from), site: site.map(String::from), origin: origin.map(String::from) };
+            from.home_allowed(47919, mac, Some("studio-mac.local"))
+        };
+        // A phone that opened either address, and a TV that plays a cast.
+        assert!(allowed(Some("studio-mac.local:47919"), Some("none"), None));
+        assert!(allowed(Some("studio-mac.local:47919"), Some("same-origin"), Some("http://studio-mac.local:47919")));
+        assert!(allowed(Some("192.168.1.23:47919"), None, None));
+        // A page that rebinds its hostname to this Mac's address.
+        assert!(!allowed(Some("rebound.example:47919"), None, None));
+        assert!(!allowed(Some("127.0.0.1:47919"), None, None));
+        // Another address, another port, or none.
+        assert!(!allowed(Some("192.168.1.24:47919"), None, None));
+        assert!(!allowed(Some("192.168.1.23:8080"), None, None));
+        assert!(!allowed(Some("192.168.1.23"), None, None));
+        assert!(!allowed(None, None, None));
+        // Another website, or another origin of this Mac.
+        assert!(!allowed(Some("studio-mac.local:47919"), Some("cross-site"), None));
+        assert!(!allowed(Some("studio-mac.local:47919"), Some("same-site"), None));
+        assert!(!allowed(Some("studio-mac.local:47919"), None, Some("http://192.168.1.23:47919")));
+        assert!(!allowed(Some("192.168.1.23:47919"), None, Some("http://192.168.1.23:3000")));
+        assert!(!allowed(Some("192.168.1.23:47919"), None, Some("null")));
+        let v6 = Sender { host: Some("[fd00::23]:47919".into()), site: None, origin: None };
+        assert!(v6.home_allowed(47919, "fd00::23".parse().unwrap(), None));
     }
 
     #[test]

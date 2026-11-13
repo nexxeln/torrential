@@ -2,6 +2,7 @@
 //! from the browser's side.
 
 pub mod assets;
+pub mod devices;
 pub mod ffmpeg;
 pub mod media;
 mod online;
@@ -22,6 +23,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, Release, SearchQuery, Target, TorrentId};
 
+use super::devices::Asker;
 use super::http::{Connection, Method, Request};
 use super::owner::Command;
 use super::search_port::Progress;
@@ -104,8 +106,8 @@ impl<K: Clone + Eq + Hash, V: Clone> Kept<K, V> {
     }
 }
 
-/// Answers the request for `/api/{route}`.
-pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -> io::Result<bool> {
+/// Answers the request for `/api/{route}` from this Mac or a paired device.
+pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, asker: &Asker) -> io::Result<bool> {
     match (request.method, route) {
         (Method::Get, "search") => return search(conn, request).await,
         (Method::Get, "events") => return watch::events(conn, request).await,
@@ -124,7 +126,7 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
     }
     // A browser that leaves, or stops a request, closes the connection. The work stops with it.
     let reply = tokio::select! {
-        reply = respond(ctx, request, route) => reply,
+        reply = respond(ctx, request, route, asker) => reply,
         gone = conn.gone() => return Err(gone),
     };
     match reply {
@@ -133,9 +135,13 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
     }
 }
 
-async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Error> {
+async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Result<Value, Error> {
     let owner = &ctx.owner;
     match (request.method, route) {
+        (Method::Get, "me") => devices::me(ctx, asker),
+        (Method::Get, "devices") => devices::list(ctx, asker),
+        (Method::Post, "devices/add") => devices::add(ctx, asker),
+        (Method::Post, "devices/remove") => devices::remove(ctx, asker, body(request)?),
         (Method::Post, "play") => value(play::play(ctx, body(request)?).await?),
         (Method::Get, "titles") => titles::search(ctx, request).await,
         (Method::Get, "title") => titles::page(ctx, request).await,
@@ -240,6 +246,8 @@ fn status(code: ErrorCode) -> &'static str {
     use ErrorCode::*;
     match code {
         Usage | ConfirmationRequired => "400 Bad Request",
+        NotPaired => "401 Unauthorized",
+        LocalOnly => "403 Forbidden",
         InvalidRef | InvalidTorrent | NotFound | NoSelection => "404 Not Found",
         AmbiguousRef | JobConflict | PathConflict => "409 Conflict",
         TooLarge => "413 Content Too Large",

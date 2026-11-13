@@ -798,6 +798,16 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "retryable": true
     },
     {
+      "code": "not_paired",
+      "exit": 6,
+      "retryable": false
+    },
+    {
+      "code": "local_only",
+      "exit": 6,
+      "retryable": false
+    },
+    {
       "code": "internal",
       "exit": 1,
       "retryable": false
