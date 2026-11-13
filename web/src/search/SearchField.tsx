@@ -1,5 +1,6 @@
 import { MagnifyingGlassIcon, XMarkIcon } from "@heroicons/react/16/solid";
 import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
+import { isTv } from "../lib/tv";
 import { navigate, watchPath } from "../router";
 import { Spinner } from "../ui/Spinner";
 
@@ -78,7 +79,10 @@ interface Props {
   aside?: ReactNode;
 }
 
-/** The search field at the top of a page, which `/` focuses from anywhere on it. */
+/**
+ * The search field at the top of a page, which `/` focuses from anywhere on it. It takes focus by
+ * itself only where a keyboard is at hand, since on a phone or a TV that opens the keyboard on screen.
+ */
 export function SearchField({ input, search, label, placeholder, busy, onKeyDown, status, aside }: Props) {
   const { text, setText, commit } = search;
   useEffect(() => {
@@ -102,14 +106,14 @@ export function SearchField({ input, search, label, placeholder, busy, onKeyDown
           name="q"
           aria-label={label}
           placeholder={placeholder}
-          autoFocus
+          autoFocus={!isTv() && matchMedia("(pointer: fine)").matches}
           autoComplete="off"
           spellCheck={false}
           enterKeyHint="search"
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={onKeyDown}
-          className="col-span-full row-start-1 h-12 w-full appearance-none rounded-xl bg-raised pr-12 pl-11 text-base text-ink inset-ring inset-ring-white/10 placeholder:text-pencil focus:outline-2 focus:-outline-offset-1 focus:outline-action/70 [&::-webkit-search-cancel-button]:hidden"
+          className="col-span-full row-start-1 h-12 w-full appearance-none rounded-xl bg-raised pr-12 pl-11 text-base text-ink inset-ring inset-ring-white/10 placeholder:text-pencil focus:outline-2 focus:-outline-offset-1 focus:outline-action/70 tv:focus:outline-[0.1875rem] tv:focus:outline-ink [&::-webkit-search-cancel-button]:hidden"
         />
         <div className="pointer-events-none col-start-1 row-start-1 flex justify-center">
           {busy ? <Spinner className="size-4 text-soft" /> : <MagnifyingGlassIcon className="size-4 fill-pencil" />}
@@ -120,13 +124,12 @@ export function SearchField({ input, search, label, placeholder, busy, onKeyDown
               type="button"
               aria-label="Clear the search"
               onClick={() => (setText(""), commit(""), input.current?.focus())}
-              className="relative flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
+              className="relative hit-area flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
             >
               <XMarkIcon className="size-4 fill-soft" />
-              <span className="absolute top-1/2 left-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden" aria-hidden="true" />
             </button>
           ) : (
-            <kbd className="pointer-events-none mr-1.5 rounded-md px-1.5 py-0.5 font-sans text-xs font-medium text-pencil inset-ring inset-ring-white/10 max-sm:hidden">
+            <kbd className="pointer-events-none mr-1.5 rounded-md px-1.5 py-0.5 font-sans text-xs font-medium text-pencil inset-ring inset-ring-white/10 max-sm:hidden tv:hidden">
               /
             </kbd>
           )}

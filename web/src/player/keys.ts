@@ -1,3 +1,5 @@
+import { isBack, isTv } from "../lib/tv";
+
 /** What a key press asks of the player. */
 export type Command =
   | { kind: "toggle" }
@@ -17,7 +19,9 @@ export type Command =
   | { kind: "audio" }
   | { kind: "stats" }
   | { kind: "shortcuts" }
-  /** Escape: close what is open, or go back. */
+  /** Shows the controls with focus on the timeline, for a remote that has no other way to reach them. */
+  | { kind: "controls" }
+  /** Escape or a remote's Back: close what is open, or go back. */
   | { kind: "leave" };
 
 type Key = { keys: string; does: string };
@@ -93,6 +97,13 @@ const NAMED: Record<string, Command | ((shift: boolean) => Command)> = {
   "?": { kind: "shortcuts" },
 };
 
+/** On a TV, Enter plays or pauses, and Up and Down bring up the controls, since the TV's own remote sets the volume. */
+const REMOTE: Record<string, Command> = {
+  Enter: { kind: "toggle" },
+  ArrowUp: { kind: "controls" },
+  ArrowDown: { kind: "controls" },
+};
+
 /**
  * The command for a key press, or null when the key belongs to the control that has focus.
  * Symbols are read as typed, wherever the layout puts them. Letters and digits fall back to the
@@ -100,16 +111,30 @@ const NAMED: Record<string, Command | ((shift: boolean) => Command)> = {
  */
 export function command(event: KeyboardEvent): Command | null {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  if (event.key === "Escape") return { kind: "leave" };
+  if (isBack(event)) return { kind: "leave" };
   const target = event.target as Element;
   // Menus and form controls use arrows, Home, End, and typing themselves.
   if (target.closest("[role=menu], input, select, textarea, [contenteditable]")) return null;
   if ((event.key === " " || event.key === "Enter") && target.closest("button, a")) return null;
 
   const { key, code, shiftKey: shift } = event;
+  const remote = isTv() ? REMOTE[key] : undefined;
+  if (remote) return remote;
   const digit = /^[0-9]$/.test(key) ? key : !shift && /^Digit[0-9]$/.test(code) && key.length === 1 && !NAMED[key] ? code.slice(5) : null;
   if (digit) return { kind: "seekTo", fraction: Number(digit) / 10 };
   const letter = /^[a-z]$/i.test(key) ? key.toLowerCase() : /^Key[A-Z]$/.test(code) && key.length === 1 ? code.slice(3).toLowerCase() : null;
   const found = letter ? LETTERS[letter] : NAMED[key];
   return typeof found === "function" ? found(shift) : (found ?? null);
+}
+
+/**
+ * Back on the screens before the video plays: leaves the player, and cancels the key so a TV
+ * browser does not also go back a page by itself.
+ */
+export function leaveOnBack(back: () => void): (event: KeyboardEvent) => void {
+  return (event) => {
+    if (command(event)?.kind !== "leave") return;
+    event.preventDefault();
+    back();
+  };
 }

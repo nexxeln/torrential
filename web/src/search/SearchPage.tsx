@@ -101,7 +101,7 @@ export function SearchPage({ query, everything }: Props) {
   const busy = state.kind === "searching";
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-4 pb-16 sm:px-6">
+    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-page pb-16">
       <Header current="search" />
       <main className="flex flex-col gap-3 pt-[min(8vh,--spacing(16))]">
         <SearchField
@@ -119,7 +119,7 @@ export function SearchPage({ query, everything }: Props) {
                 {[false, true].map((all) => (
                   <label
                     key={String(all)}
-                    className="cursor-pointer rounded-md px-2 py-0.5 font-medium text-pencil hover:text-ink has-checked:bg-white/8 has-checked:text-ink has-focus-visible:outline-2 has-focus-visible:outline-action"
+                    className="cursor-pointer rounded-md px-2 py-0.5 font-medium text-pencil hover:text-ink has-checked:bg-white/8 has-checked:text-ink has-focus-visible:outline-2 has-focus-visible:outline-action pointer-coarse:px-3 pointer-coarse:py-3 tv:has-focus:outline-[0.1875rem] tv:has-focus:outline-ink"
                   >
                     <input
                       type="radio"
@@ -158,7 +158,7 @@ export function SearchPage({ query, everything }: Props) {
           </div>
         )}
         {result && result.releases.length > 0 && (
-          <p className="pt-4 text-sm text-pencil max-sm:hidden">
+          <p className="pt-4 text-sm text-pencil max-sm:hidden tv:hidden">
             <kbd className="font-sans font-medium text-soft">↑ ↓</kbd> to choose ·{" "}
             <kbd className="font-sans font-medium text-soft">Enter</kbd> to play ·{" "}
             <kbd className="font-sans font-medium text-soft">/</kbd> to search

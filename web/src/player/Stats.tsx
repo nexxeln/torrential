@@ -53,7 +53,7 @@ export function Stats({ media, how, play, subtitle, offset, audio }: Props) {
   return (
     <dl
       aria-label="Playback details"
-      className="absolute top-20 left-[max(--spacing(3),2vw)] z-10 grid max-w-[calc(100%-(--spacing(6)))] animate-pop grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-xl bg-black/70 px-4 py-3 text-xs tabular-nums backdrop-blur-md motion-reduce:animate-none"
+      className="absolute top-20 left-(--edge-left) z-10 grid max-w-[calc(100%-(--spacing(6)))] animate-pop grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-xl bg-black/70 px-4 py-3 text-xs tabular-nums backdrop-blur-md motion-reduce:animate-none"
     >
       {rows.map(([name, value]) => (
         <div key={name} className="col-span-2 grid grid-cols-subgrid">

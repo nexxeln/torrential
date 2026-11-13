@@ -1,8 +1,10 @@
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon } from "@heroicons/react/16/solid";
 import { type CSSProperties, type KeyboardEvent, type ReactNode, useEffect, useRef } from "react";
+import { isBack } from "../lib/tv";
 
 const ITEMS = "[data-item]:not(:disabled)";
-const ROW = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ink hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none disabled:text-pencil disabled:hover:bg-transparent";
+const ROW =
+  "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ink hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none disabled:text-pencil disabled:hover:bg-transparent pointer-coarse:min-h-11 tv:focus:bg-white/25";
 
 interface MenuProps {
   /** Names the page for screen readers and keys the page's entrance. */
@@ -16,7 +18,7 @@ interface MenuProps {
 
 /**
  * One page of the settings popover. Up and Down move through its rows, Right or Enter opens a
- * row that leads on, Left or Backspace goes back a page, and Escape goes back or closes.
+ * row that leads on, Left or Backspace goes back a page, and Escape or a remote's Back goes back or closes.
  */
 export function Menu({ page, title, onBack, onClose, children }: MenuProps) {
   const menu = useRef<HTMLDivElement>(null);
@@ -44,6 +46,10 @@ export function Menu({ page, title, onBack, onClose, children }: MenuProps) {
       event.preventDefault();
       event.stopPropagation();
     };
+    if (event.key !== "Backspace" && isBack(event.nativeEvent)) {
+      handled();
+      return onBack ? onBack() : onClose();
+    }
     switch (event.key) {
       case "ArrowDown":
       case "ArrowUp":
@@ -62,9 +68,6 @@ export function Menu({ page, title, onBack, onClose, children }: MenuProps) {
         if (slider || !onBack) return;
         handled();
         return onBack();
-      case "Escape":
-        handled();
-        return onBack ? onBack() : onClose();
     }
   };
 
@@ -74,7 +77,7 @@ export function Menu({ page, title, onBack, onClose, children }: MenuProps) {
       role="menu"
       aria-label={title}
       onKeyDown={keys}
-      className="absolute right-0 bottom-full z-20 mb-3 max-h-[min(78vh,--spacing(144))] w-80 max-w-[calc(100vw-(--spacing(6)))] animate-pop overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl bg-neutral-900/85 p-1.5 inset-ring inset-ring-white/10 backdrop-blur-xl motion-reduce:animate-none"
+      className="absolute right-(--edge-right) bottom-full z-20 mb-3 sm:right-0 max-h-[min(78vh,--spacing(144))] w-80 max-w-[calc(100vw-(--spacing(6)))] animate-pop overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl bg-neutral-900/85 p-1.5 inset-ring inset-ring-white/10 backdrop-blur-xl motion-reduce:animate-none"
     >
       <div key={page} className="animate-page motion-reduce:animate-none" style={{ "--page-from": onBack ? "10px" : "-10px" } as CSSProperties}>
         {onBack ? (
@@ -167,7 +170,7 @@ export function MenuButton({ label, onPress, children, pressed }: { label: strin
       title={label}
       aria-pressed={pressed}
       onClick={onPress}
-      className="flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-sm font-medium text-ink inset-ring inset-ring-white/10 hover:bg-white/10 focus-visible:bg-white/15 focus-visible:outline-none aria-pressed:bg-white/15 aria-pressed:inset-ring-white/25"
+      className="flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-sm font-medium text-ink inset-ring inset-ring-white/10 hover:bg-white/10 focus-visible:bg-white/15 focus-visible:outline-none aria-pressed:bg-white/15 aria-pressed:inset-ring-white/25 pointer-coarse:h-11 pointer-coarse:min-w-11 tv:focus:bg-white/30"
     >
       {children}
     </button>
