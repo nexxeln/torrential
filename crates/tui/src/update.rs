@@ -1,18 +1,19 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use torrential_core::protocol::{Change, Event, FilesReply, GetOutcome, GetReply};
+use torrential_core::protocol::{Change, Event, FilesReply, GetOutcome, GetReply, Home, TitlePage, TitlePlayed};
 use torrential_core::text::sanitize;
 use torrential_core::units::count;
 use torrential_core::{
-    Arch, Error, Job, JobStatus, Machine, Preferences, ReleaseId, SearchQuery, SearchResult, TorrentId,
+    Arch, AttemptEvent, Error, Job, JobStatus, Machine, Preferences, ReleaseId, SearchQuery, SearchResult, TitleCard,
+    TitleId, TorrentId, VideoRef,
 };
 
 use crate::format::{first_fit, home_path};
 use crate::layout;
 use crate::state::{
-    DownloadFiles, Edit, Engine, Files, Focus, Input, Item, JobAction, RankedFor, Ranking, Search, SearchPhase, State,
-    Tone, Upgrade,
+    DownloadFiles, Edit, Engine, Files, Focus, Input, Item, JobAction, Page, RankedFor, Ranking, Search, SearchPhase,
+    State, Tone, Upgrade,
 };
 use crate::tree::Tree;
 
@@ -35,6 +36,11 @@ pub enum Msg {
     Saved { edit: Edit, result: Result<Preferences, Error> },
     NewerVersion(String),
     Upgraded(Result<Option<String>, Error>),
+    Home(Result<Home, Error>),
+    FoundTitles { search: u64, result: Result<Vec<TitleCard>, Error> },
+    Title { id: TitleId, result: Result<Box<TitlePage>, Error> },
+    PlayStep(Box<AttemptEvent>),
+    TitlePlayed(Result<(String, Box<TitlePlayed>), Error>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -49,6 +55,10 @@ pub enum Effect {
     Copy(String),
     SavePreferences(Edit),
     Upgrade,
+    Home,
+    FindTitles { search: u64, words: String },
+    Title(TitleId),
+    PlayTitle(VideoRef),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,6 +66,7 @@ pub enum Action {
     Quit,
     Help,
     Search,
+    Titles,
     Downloads,
     Results,
     NextSection,
@@ -165,9 +176,30 @@ impl State {
                 self.upgraded(result);
                 Vec::new()
             }
+            Msg::Home(result) => {
+                self.home_arrived(result);
+                Vec::new()
+            }
+            Msg::FoundTitles { search, result } => {
+                self.titles_found(search, result);
+                Vec::new()
+            }
+            Msg::Title { id, result } => {
+                self.title_arrived(id, result.map(|page| *page));
+                Vec::new()
+            }
+            Msg::PlayStep(step) => {
+                self.play_step(*step);
+                Vec::new()
+            }
+            Msg::TitlePlayed(result) => {
+                self.title_played(result.map(|(player, played)| (player, *played)));
+                Vec::new()
+            }
         });
         self.plan_prefetch();
         self.settle(before);
+        self.settle_titles();
         effects
     }
 
@@ -259,6 +291,9 @@ impl State {
         if key.code == KeyCode::F(1) {
             return self.act(Action::Help);
         }
+        if self.page == Page::Titles {
+            return self.titles_key(key);
+        }
         if self.focus == Focus::Query {
             return self.query_key(key);
         }
@@ -279,6 +314,7 @@ impl State {
             Char('q') => Action::Quit,
             Char('?') => Action::Help,
             Char('/') => Action::Search,
+            Char('t') => Action::Titles,
             Char('d') => Action::Downloads,
             Char('r') => Action::Results,
             Tab => Action::NextSection,
@@ -317,6 +353,7 @@ impl State {
                 self.focus = Focus::Query;
                 self.query.caret = self.query.text.chars().count();
             }
+            Action::Titles => return self.show_titles(),
             Action::Downloads => return self.enter(Section::Downloads),
             Action::Results => return self.enter(Section::Results),
             Action::NextSection => return self.cycle(1),
@@ -700,6 +737,7 @@ impl State {
                 return Vec::new();
             }
             Esc if !self.items().is_empty() => return self.enter_list(),
+            Esc if self.query.text.is_empty() => return self.show_titles(),
             Down | Tab => return self.enter_list(),
             BackTab => return self.cycle(-1),
             Esc => self.query = Input::default(),
@@ -780,6 +818,7 @@ impl State {
     fn watch(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Snapshot { jobs } => {
+                let back = self.engine != Engine::Ready;
                 self.engine = Engine::Ready;
                 for job in &jobs {
                     self.note_arrival(job);
@@ -787,16 +826,19 @@ impl State {
                 self.downloads = jobs;
                 self.resort();
                 self.pending.retain(|id, _| self.downloads.iter().any(|j| j.id == *id));
+                let mut effects = Vec::new();
                 if !self.touched
                     && self.focus == Focus::Query
                     && self.cursor.is_none()
                     && let Some(first) = self.downloads.first().map(|j| j.id)
                 {
-                    let mut effects = self.select(Item::Download(first));
-                    effects.push(Effect::FreeSpace);
-                    return effects;
+                    effects = self.select(Item::Download(first));
                 }
-                vec![Effect::FreeSpace]
+                effects.push(Effect::FreeSpace);
+                if back && self.page == Page::Titles {
+                    effects.push(Effect::Home);
+                }
+                effects
             }
             Event::Job { job } => {
                 let id = job.id;
