@@ -652,8 +652,8 @@ impl Owner {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
-            // A new play makes room in the plays folder only once nothing but the disk refuses it,
-            // and then finds what is free with the plays that went already gone.
+            // A new play makes room in the plays folder only once nothing but the disk refuses it.
+            // The plays the engine did not hold are gone by then, so the disk is measured again.
             let space = match home {
                 Home::Plays(_) if !dry_run => {
                     self.make_room_for(id, plan.selected_size);

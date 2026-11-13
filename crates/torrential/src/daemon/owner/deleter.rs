@@ -235,8 +235,8 @@ pub struct Deleter {
 
 impl Deleter {
     /// Opens the plays folder at `plays` and picks up the deletions a stop cut short. When the
-    /// folder there is not the one the engine used before, the plays it had are left as they
-    /// are, as downloads in a folder the person chose.
+    /// folder there is not the one the engine used before, the plays it had stay where they are,
+    /// stopped, as downloads in a folder the person chose.
     pub fn open(plays: &Path, trash: Trash, store: &mut Store) -> Result<Deleter, Error> {
         let root = Root::open(plays);
         let stopped = Error::new(
@@ -397,6 +397,9 @@ impl Deleter {
             };
             for path in &report.deleted {
                 log(&format!("deleted {}", path.display()));
+            }
+            for path in &report.trashed {
+                log(&format!("moved {} to the Trash", path.display()));
             }
             if pending.failed.as_ref() != Some(&report.kept) {
                 for (path, why) in &report.kept {
@@ -808,13 +811,13 @@ mod tests {
         assert_eq!(store.deletions().unwrap(), [], "it is not tried again");
     }
 
-    /// A small disk image mounted at a folder until it is dropped, or `None` when the system
-    /// cannot mount one.
+    /// A small disk image mounted at a folder until it is dropped.
     #[cfg(target_os = "macos")]
     struct Mounted(PathBuf);
 
     #[cfg(target_os = "macos")]
     impl Mounted {
+        /// Makes the image at `image` and mounts it at `point`, or `None` when the system cannot.
         fn at(point: &Path, image: &Path) -> Option<Mounted> {
             let hdiutil = |args: &[&std::ffi::OsStr]| {
                 std::process::Command::new("hdiutil").args(args).status().is_ok_and(|status| status.success())
