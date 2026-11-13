@@ -9,11 +9,13 @@ use torrential_core::{Error, ErrorCode};
 use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
+use crate::daemon::web::fetch::{self, Fetch, Found, VERSION};
 use crate::daemon::web::ffmpeg::Tools;
 use crate::env::Env;
 use crate::output::theme::Token;
 use crate::output::views::{Check, CheckStatus};
 use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::paths::Paths;
 
 #[derive(Serialize)]
 struct Web {
@@ -67,18 +69,31 @@ fn open(url: &str, env: &Env) -> Result<(), Error> {
 }
 
 /// The `torrential doctor` line about ffmpeg, which the web player uses to play what the browser
-/// cannot read on its own.
-pub fn check(env: &Env) -> Check {
-    let tools = Tools::find(env.var("PATH"));
-    let (status, detail) = match (&tools.ffmpeg, &tools.ffprobe) {
-        (Some(ffmpeg), Some(_)) => {
-            (CheckStatus::Ok, format!("{}; the web player converts what the browser cannot read", ffmpeg.display()))
+/// cannot read on its own: the one the engine runs, or what it does with none. `fetch` is what
+/// config.yaml says about fetching one.
+pub fn check(env: &Env, paths: &Paths, fetch: bool) -> Check {
+    let fetch = Fetch::from_env(env, fetch);
+    let found = Found::look(&Tools::find(env.var("PATH")), &fetch::root(&paths.state), &fetch);
+    let converts = "the web player converts what the browser cannot read";
+    let reads_itself = "the web player plays only MP4 and WebM files the browser reads itself";
+    let (status, detail) = match found {
+        Found::Installed(programs) => (CheckStatus::Ok, format!("{}; {converts}", programs.ffmpeg.display())),
+        Found::Fetched(programs) => {
+            (CheckStatus::Ok, format!("{}, fetched by torrential; {converts}", programs.ffmpeg.display()))
         }
-        _ => (
-            CheckStatus::Warn,
-            "ffmpeg and ffprobe not found; the web player plays only MP4 and WebM files the browser reads itself"
-                .to_string(),
+        Found::Missing(Fetch::Build(build)) => (
+            CheckStatus::Ok,
+            format!(
+                "not installed; torrential fetches ffmpeg {VERSION} ({}) the first time a file needs converting",
+                torrential_core::units::format_size(build.size)
+            ),
         ),
+        Found::Missing(Fetch::Off) => {
+            (CheckStatus::Warn, format!("not installed, and config.yaml turns off fetching it; {reads_itself}"))
+        }
+        Found::Missing(Fetch::Unavailable) => {
+            (CheckStatus::Warn, format!("ffmpeg and ffprobe not found; {reads_itself}"))
+        }
     };
     Check { check: "ffmpeg".into(), status, detail }
 }
