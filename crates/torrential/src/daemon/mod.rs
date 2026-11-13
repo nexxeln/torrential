@@ -68,7 +68,7 @@ impl Ports {
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
             Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
         let installed = Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
-        let fetch = web::fetch::Fetch::from_env(env, true);
+        let fetch = web::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
         let ffmpeg = web::fetch::Ffmpeg::new(installed, web::fetch::root(&paths.state), fetch);
         // The fake engine's subtitles are made up too, unless a test asks for the real sources.
         let subtitles: Arc<dyn subtitle_port::SubtitlePort> =

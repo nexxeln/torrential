@@ -94,6 +94,8 @@ subtitles:
   online: false               # do not look for subtitles online
 catalog:
   online: false               # do not look up films and shows online
+ffmpeg:
+  fetch: false                # do not fetch ffmpeg when it is not installed
 updates: auto                 # install new versions by itself, or off
 ```
 
