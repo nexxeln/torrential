@@ -36,6 +36,7 @@ export function FilesPanel({ id, videos, current, onClose }: Props) {
   return (
     <aside
       aria-label="Videos in this torrent"
+      data-overlay=""
       className="absolute inset-y-0 right-0 z-30 flex w-88 max-w-full animate-appear flex-col bg-raised/95 inset-ring inset-ring-white/10 backdrop-blur-md motion-reduce:animate-none"
     >
       <div className="flex items-center justify-between py-3 pr-3 pl-5">

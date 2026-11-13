@@ -83,12 +83,15 @@ function first(scope: Element): HTMLElement | null {
 }
 
 /**
- * Where arrow keys move focus from `active`, or null when they do something else there: the
- * player seeks with them until one of its controls has focus, and menus and fields use their own.
+ * Where arrow keys move focus from `active`, or null when they do something else there: an open
+ * panel or dialog keeps focus to itself, the player seeks with them until one of its controls has
+ * focus, and menus and fields use their own.
  */
 function scope(active: HTMLElement | null, direction: Direction): Element | null {
   if (active?.closest("[role=menu]")) return null;
   if ((direction === "left" || direction === "right") && active?.matches(SIDEWAYS)) return null;
+  const overlays = document.querySelectorAll("[data-overlay]");
+  if (overlays.length) return overlays[overlays.length - 1]!;
   const player = document.querySelector("[data-player]");
   if (player) return active && player.contains(active) ? player : null;
   return document.body;
@@ -107,7 +110,7 @@ function pressed(event: KeyboardEvent, onBack: (() => void) | null): void {
     const candidates = focusables(within).filter((element) => element !== active);
     const target = active
       ? candidates[nearest(boxOf(active), direction, candidates.map(boxOf))]
-      : (first(document.querySelector("main") ?? within) ?? candidates[0]);
+      : (first(page ? (document.querySelector("main") ?? within) : within) ?? candidates[0]);
     if (!target) return;
     event.preventDefault();
     land(target, page);

@@ -521,6 +521,8 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const starting = !stuck && !started && waiting;
   const showControls = !stuck && !starting && (awake || onControls || paused || menu.length > 0 || scrubbing);
   const hidden = showControls || stuck || starting ? undefined : "";
+  /** The shortcuts dialog, or on a TV the files panel, covers the bars, so a remote cannot reach them. */
+  const overlaid = sheet || (filesOpen && isTv());
 
   return (
     <PlayerContext value={parts}>
@@ -574,7 +576,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
 
         <div
           data-hidden={hidden}
-          inert={hidden === ""}
+          inert={hidden === "" || overlaid}
           className="absolute inset-x-0 top-0 z-10 transition-opacity duration-300 data-hidden:pointer-events-none data-hidden:opacity-0 motion-reduce:transition-none"
         >
           <TopBar
@@ -640,7 +642,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
 
         <div
           data-hidden={showControls ? undefined : ""}
-          inert={!showControls}
+          inert={!showControls || overlaid}
           onPointerEnter={(event) => setOnControls(event.pointerType === "mouse")}
           onPointerLeave={() => setOnControls(false)}
           className="absolute inset-x-0 bottom-0 z-10 bg-linear-to-t from-black/85 via-black/45 to-transparent pt-20 transition-opacity duration-300 data-hidden:pointer-events-none data-hidden:opacity-0 motion-reduce:transition-none"
