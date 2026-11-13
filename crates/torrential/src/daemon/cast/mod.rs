@@ -184,6 +184,15 @@ impl Casts {
         TvList { tvs: state.tvs(), casts }
     }
 
+    /// Whether a cast of `video` is under way, which keeps its place in the watch history to itself.
+    pub fn plays(&self, video: &VideoRef) -> bool {
+        let state = self.state();
+        state.casts.values().any(|entry| {
+            let cast = entry.view.borrow();
+            !cast.ended() && cast.video.as_ref() == Some(video)
+        })
+    }
+
     /// The TVs and the casts, after a search of the home network unless one ran in the last 30
     /// seconds and `fresh` is false.
     pub async fn search(&self, fresh: bool) -> TvList {

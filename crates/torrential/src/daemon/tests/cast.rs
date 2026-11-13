@@ -19,6 +19,7 @@ use super::super::cast::Find;
 use super::super::devices::names::Names;
 use super::super::search_port::{self, FakeSource};
 use super::titles::listed;
+use super::web::post;
 use super::{GIB, Harness, MIB, Outside, prefix, torrent, written};
 
 /// The machine's address on the home network, or `None` on one with no network to test over.
@@ -796,4 +797,37 @@ async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
     assert_eq!(error.code, ErrorCode::NetworkUnavailable);
     assert!(error.message.starts_with("Fake TV cannot be reached"), "{}", error.message);
     assert_eq!(tv.actions(), ["GetProtocolInfo", "SetAVTransportURI"], "no Play to bring back what the TV had");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let film = torrent(86, "Night", &[("Night.mkv", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let tab = |position: f64| serde_json::json!({ "video": "tt0063350", "position": position, "duration": 5760.0 });
+
+    cast(&h, CastRequest { video: Some(night()), ..by_hand(Target::Prefix(prefix(&film))) }).await.unwrap();
+    tv.set(|screen| screen.position = 600.0);
+    until(&h, "ten minutes in", |cast| cast.position == Some(600.0)).await;
+    control(&h, CastAction::Pause).await.unwrap();
+    assert_eq!(kept(&h), Some((600.0, Some(5_760.0))));
+    let (status, saved) = post(&h, "/api/watched", tab(100.0)).await;
+    assert_eq!((status, &saved["kept"]), (200, &serde_json::json!(false)));
+    assert_eq!(kept(&h), Some((600.0, Some(5_760.0))), "a paused tab's save while the TV plays the film");
+
+    control(&h, CastAction::Resume).await.unwrap();
+    tv.set(|screen| screen.position = 1_200.0);
+    until(&h, "twenty minutes in", |cast| cast.position == Some(1_200.0)).await;
+    post(&h, "/api/watched", tab(100.0)).await;
+    control(&h, CastAction::Stop).await.unwrap();
+    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "the cast's last place stands");
+
+    let (status, saved) = post(&h, "/api/watched", tab(1_230.0)).await;
+    assert_eq!((status, &saved["kept"]), (200, &serde_json::json!(true)));
+    assert_eq!(kept(&h), Some((1_230.0, Some(5_760.0))), "a tab that plays after the cast saves as before");
 }

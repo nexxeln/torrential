@@ -26,7 +26,7 @@
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
 //   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
-//   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
+//   POST /api/watched        { video, position, duration, release? }   { watched: Watched, kept: boolean }
 //   POST /api/library        { title, saved }              { saved: boolean }
 //   GET  /api/home                                         Home
 //
