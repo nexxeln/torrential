@@ -117,8 +117,8 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, a
         (Method::Get, "events") => return watch::events(conn, request).await,
         (Method::Get, "stream") => return watch::stream(conn, request).await,
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
-        (Method::Get, "title/sources") => return titles::sources(conn, request).await,
-        (Method::Post, "title/play") => return titles::play(conn, request).await,
+        (Method::Get, "title/sources") => return titles::sources(conn, request, asker).await,
+        (Method::Post, "title/play") => return titles::play(conn, request, asker).await,
         (Method::Get, "title/art") => return titles::art(conn, request).await,
         _ => {}
     }
@@ -315,8 +315,8 @@ async fn results(
     let ctx = conn.ctx;
     conn.begin(NDJSON, request).await?;
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let preferences = query.profile.preferences;
-    let rank_for = || ctx.machine.profile(preferences);
+    let Profile { preferences, player, .. } = query.profile;
+    let rank_for = || ctx.machine.profile(preferences, player);
     let search = ctx.search.search_stream(query, &rank_for, progress_tx);
     tokio::pin!(search);
     let result = loop {

@@ -1,10 +1,10 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, HashMap};
-use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
 use torrential_core::error::Details;
+use torrential_core::quality::band;
 use torrential_core::title::{Namesakes, Span, Wanted};
 use torrential_core::{
     Arch, Category, Error, ErrorCode, Flag, InfoHash, Language, LocatorId, Profile, Quality, Release, ReleaseId,
@@ -145,26 +145,14 @@ struct TitleFit {
     swarm: Swarm,
     /// Other titles share the name and this release names no year.
     undated: bool,
-    /// The bitrate is in the usual band for its resolution, or unknown.
-    in_band: bool,
+    /// Mbit/s per film or episode. `None` when the size or the runtime is unknown.
+    mbps: Option<f64>,
     /// Words in the name beyond the title, its year, and tags, as an alternate version has.
     other_words: usize,
 }
 
 /// Below this many Mbit/s a release is a fake or a broken file.
 const FAKE_MBPS: f64 = 0.25;
-
-/// The Mbit/s at each resolution that looks right and streams comfortably. A small encode of a
-/// popular release sits low in it, and a remux runs above it.
-fn band(resolution: Option<Resolution>) -> RangeInclusive<f64> {
-    match resolution {
-        Some(Resolution::Sd) => 0.3..=4.0,
-        Some(Resolution::P720) => 0.6..=8.0,
-        Some(Resolution::P1080) => 1.0..=16.0,
-        Some(Resolution::P2160) => 3.0..=40.0,
-        None => 0.3..=16.0,
-    }
-}
 
 /// Mbit/s per film or episode, from the size and the catalog's runtime. `None` when either is
 /// unknown, and for a release of every season, whose episodes are not counted.
@@ -385,7 +373,7 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
     c.title = Some(TitleFit {
         swarm,
         undated: wanted.namesakes == Namesakes::Leading && reading.year.is_none(),
-        in_band: bitrate.is_none_or(|mbps| band(c.quality.resolution).contains(&mbps)),
+        mbps: bitrate,
         other_words: wanted.other_words(&c.release.name),
     });
     Some(c)
@@ -395,7 +383,7 @@ fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
 /// names the year, standing, bitrate, a plain name, span, screen, and seeders. The chain after
 /// it orders every search.
 fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
-    let fits = |c: &Candidate| profile.fits(c.release.size, c.quality);
+    let fits = |c: &Candidate| profile.fits(c.release.size, c.quality, c.title.as_ref().and_then(|t| t.mbps));
     let is_video = |c: &Candidate| c.release.category == Some(Category::Video) || c.quality.resolution.is_some();
     let video_search = candidates.iter().filter(|c| is_video(c)).count() * 2 > candidates.len();
     let closeness = |c: &Candidate| if video_search { profile.closeness(c.resolution) } else { 0 };
@@ -407,7 +395,7 @@ fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
             swarm: t.swarm,
             undated: t.undated,
             standing: Reverse(standing(c)),
-            off_band: !t.in_band,
+            off_band: t.mbps.is_some_and(|mbps| !band(c.quality.resolution).contains(&mbps)),
             other_words: t.other_words,
             span: breadth(c.release.span),
             closeness: profile.closeness(c.resolution),

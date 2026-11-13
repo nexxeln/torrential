@@ -503,9 +503,11 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         Err(error) => checks.push(check("skill", CheckStatus::Fail, error.message)),
     }
     let profile = match (&settings, crate::machine::detect(env)) {
-        (Ok(settings), Ok(machine)) => {
-            views::profile_check(&Profile { detected: Some(machine), preferences: settings.preferences, room: None })
-        }
+        (Ok(settings), Ok(machine)) => views::profile_check(&Profile {
+            detected: Some(machine),
+            preferences: settings.preferences,
+            ..Profile::default()
+        }),
         (Err(_), _) => check("profile", CheckStatus::Skipped, "the config has an error".into()),
         (_, Err(error)) => check("profile", CheckStatus::Fail, error.message),
     };

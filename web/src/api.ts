@@ -25,7 +25,7 @@
 //   GET  /api/titles?q=                                    TitleSearch
 //   GET  /api/title?id=                                    TitlePage
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
-//   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
+//   GET  /api/title/sources?video=[&width=&height=&scale=&playback=]   NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
 //   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
 //   POST /api/library        { title, saved }              { saved: boolean }
@@ -328,6 +328,15 @@ export type Kind = "film" | "series";
 export type Span = string;
 /** What the browser decodes, from MediaSource.isTypeSupported. */
 export type Playback = "h264" | "hevc" | "hevc-hdr";
+/** The screen a title plays on and what its browser decodes. The engine ranks the title's sources for it. */
+export interface Viewer {
+  /** The screen in device pixels. */
+  width: number;
+  height: number;
+  /** Device pixels to a CSS pixel. */
+  scale: number;
+  playback: Playback;
+}
 /**
  * How likely a release's swarm is to send data now: `strong` is 20 or more seeders or a lawful catalog that does not
  * count them, `fair` 5 to 19, `weak` 1 to 4, and `unknown` uncounted, or 0 in a lawful catalog.
@@ -411,7 +420,8 @@ export interface TitlePage extends TitleCard {
 export interface PlayTitle {
   /** `tt0063350`, `tt0903747:3:5`, or a series ID for its next episode. */
   video: string;
-  playback?: Playback;
+  /** The engine ranks for what this browser decodes, on this screen from another device and on the Mac's display from the Mac. */
+  viewer?: Viewer;
   /** Play only this release, with no fallback. */
   source?: string;
   /** The download that stalled. The engine plays another source, then pauses this one. */
@@ -698,10 +708,10 @@ export function artUrl(id: string, kind: "poster" | "background" | "logo" | { se
   return `/api/title/art?${params}`;
 }
 
-/** The releases of one film or episode, ranked for playing here, as each source answers. The last message is `done` or `error`. */
-export async function* sources(video: string, playback?: Playback, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
+/** The releases of one film or episode, ranked for playing in this browser, as each source answers. The last message is `done` or `error`. */
+export async function* sources(video: string, viewer?: Viewer, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
   const params = new URLSearchParams({ video });
-  if (playback) params.set("playback", playback);
+  if (viewer) for (const [name, value] of Object.entries(viewer)) params.set(name, String(value));
   yield* searchMessages(`/api/title/sources?${params}`, { signal });
 }
 
