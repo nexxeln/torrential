@@ -162,6 +162,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
         let page = phone.get(path).await;
         assert_eq!((page.status, page.header("location")), (303, Some("/pair")), "{path}");
     }
+    let mut idle = TcpStream::connect((ip, h.running.ctx.http_port)).await.unwrap();
     let page = phone.get("/pair").await;
     assert_eq!(page.status, 200);
     assert!(page.text().contains("Enter the code that Add a device shows in torrential on the Mac."));
@@ -207,6 +208,11 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
         .expect("removing the phone ends the events it was receiving")
         .unwrap();
     listening(&h, ip, false).await;
+    let mut nothing = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), idle.read_to_end(&mut nothing))
+        .await
+        .expect("a connection from the network closes with the network")
+        .unwrap();
 
     devices(&h, Request::AddDevice).await;
     listening(&h, ip, true).await;

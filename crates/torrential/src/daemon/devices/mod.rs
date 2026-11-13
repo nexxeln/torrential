@@ -292,6 +292,11 @@ impl Devices {
         self.reach.subscribe()
     }
 
+    /// Returns once the engine stops listening on the home network.
+    pub async fn closed(&self) {
+        let _ = self.reach.subscribe().wait_for(|reach| *reach == Reach::Loopback).await;
+    }
+
     /// This Mac's .local name, as phones and TVs on the home network open it.
     pub fn local_name(&self) -> Option<String> {
         self.state().names.local.clone()

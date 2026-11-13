@@ -110,7 +110,15 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener) {
                     let _ = stream.set_nodelay(true);
                     let (rd, wr) = stream.into_split();
                     let peer = Peer::of(local, remote);
-                    let _ = Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false }.serve().await;
+                    let serve = Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false }.serve();
+                    // Once the engine stops listening on the network, nothing from it stays open.
+                    match peer {
+                        Peer::Loopback => drop(serve.await),
+                        Peer::Network { .. } => tokio::select! {
+                            _ = serve => {}
+                            () = ctx.devices.closed() => {}
+                        },
+                    }
                     ctx.owner.tell(Command::Disconnected { keep_until: None });
                 });
             }
