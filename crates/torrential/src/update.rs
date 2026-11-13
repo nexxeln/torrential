@@ -268,7 +268,7 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
         return Ok(Outcome::Latest(latest));
     }
     let (exe, target) = installed()?;
-    put_release(releases, env, latest, &exe, target).await?;
+    put_release(releases, env, latest, (&exe, target), || true).await?;
     let _ = Command::new(&exe)
         .args(["skill", "refresh"])
         .stdin(Stdio::null())
@@ -285,19 +285,35 @@ enum Put {
     /// Another torrential that runs from the same executable, such as the engine of another home,
     /// installed the release first.
     AlreadyInstalled,
+    /// `wanted` said no before the download or before the binary went in.
+    NotWanted,
 }
 
-/// Downloads release `version` for `target` and puts its binary in place of `exe`, once that binary
-/// says it is the release. It holds the lock on the folder of `exe` throughout, so torrentials that
-/// share the executable install one release at a time.
-async fn put_release(releases: &Releases, env: &Env, version: Version, exe: &Path, target: &str) -> Result<Put, Error> {
+/// Downloads release `version` and puts its binary in place of the installed one, which is at
+/// `exe` and fits `target`, once the new binary says it is the release. It asks `wanted` right
+/// before the download and right before the binary goes in, and holds the lock on the folder of
+/// `exe` throughout, so torrentials that share the executable install one release at a time.
+async fn put_release(
+    releases: &Releases,
+    env: &Env,
+    version: Version,
+    (exe, target): (&Path, &str),
+    wanted: impl Fn() -> bool,
+) -> Result<Put, Error> {
     let _lock = FolderLock::take(exe.parent().unwrap_or(Path::new("/"))).await?;
     if confirm(exe, version).is_ok() {
         return Ok(Put::AlreadyInstalled);
     }
     let writes = Writes::new(env, "torrential update".into());
     let partial = Partial::create(exe, &writes)?;
-    partial.put(&fetch(releases, version, target).await?, version, exe, &writes)?;
+    if !wanted() {
+        return Ok(Put::NotWanted);
+    }
+    partial.write(&fetch(releases, version, target).await?, version, exe, &writes)?;
+    if !wanted() {
+        return Ok(Put::NotWanted);
+    }
+    partial.place(exe, &writes)?;
     Ok(Put::Installed)
 }
 
@@ -447,9 +463,8 @@ impl Partial {
         Ok(Partial { path })
     }
 
-    /// Writes `binary`, checks that it is torrential `version`, and moves it to `at`, syncing the file
-    /// and then its folder so the move outlasts a power cut.
-    fn put(self, binary: &[u8], version: Version, at: &Path, writes: &Writes) -> Result<(), Error> {
+    /// Writes `binary`, the next binary at `at`, and checks that it is torrential `version`.
+    fn write(&self, binary: &[u8], version: Version, at: &Path, writes: &Writes) -> Result<(), Error> {
         OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -460,7 +475,11 @@ impl Partial {
                 file.sync_all()
             })
             .map_err(|e| writes.error(at, e))?;
-        confirm(&self.path, version)?;
+        confirm(&self.path, version)
+    }
+
+    /// Moves the binary to `at` and syncs the folder, so the move outlasts a power cut.
+    fn place(self, at: &Path, writes: &Writes) -> Result<(), Error> {
         std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))?;
         let dir = at.parent().unwrap_or(Path::new("/"));
         std::fs::File::open(dir).and_then(|folder| folder.sync_all()).map_err(|e| writes.error(dir, e))
@@ -552,7 +571,10 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                     && let Some(latest) = checked.newer(&current)
                 {
                     let put = match installed() {
-                        Ok((exe, target)) => put_release(&releases, &env, latest, &exe, target).await,
+                        Ok((exe, target)) => {
+                            let auto = || matches!(crate::config::updates(&paths), Ok(Policy::Auto));
+                            put_release(&releases, &env, latest, (&exe, target), auto).await
+                        }
                         Err(e) => Err(e),
                     };
                     match put {
@@ -567,6 +589,11 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                         Ok(Put::AlreadyInstalled) => {
                             crate::daemon::log(&format!("torrential {latest} is already installed"));
                             return switch(&ctx, latest, service).await;
+                        }
+                        Ok(Put::NotWanted) => {
+                            crate::daemon::log(&format!(
+                                "updates is no longer auto, so torrential {latest} is not installed"
+                            ));
                         }
                         Err(e) => {
                             crate::daemon::log(&format!("update failed: {}", e.message));

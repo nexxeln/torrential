@@ -615,3 +615,49 @@ fn two_engines_that_share_one_executable_install_an_update_once() {
     assert_eq!(homes[0].files_in_bin(), ["torrential"], "no partial file is left behind");
     assert_eq!(running, [Some((pids[0], "0.1.0".into())), Some((pids[1], "0.1.0".into()))]);
 }
+
+/// Starts an engine that has found release 0.1.1, and sets `updates: notify` while the request
+/// whose path ends with `gate` waits. Returns the installed binary, the release, and the engine log.
+fn notify_while_waiting_on(gate: &'static str) -> (Vec<u8>, Vec<u8>, String, Install, Server) {
+    let (answer, wait) = mpsc::channel();
+    let built = Built::new();
+    let release = built.release("0.1.1", Some("0.1.1"));
+    let server = Server::gated("0.1.1", &release, None, Some((gate, wait)));
+    let install = Install::agent_with_engine(&server);
+    if gate != "/latest" {
+        install.found("0.1.1");
+    }
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    eventually("the engine asks the release server", || server.asked().iter().any(|path| path.ends_with(gate)));
+    install.configure("updates: notify\n");
+    answer.send(()).unwrap();
+    let log = || std::fs::read_to_string(install.state().join("engine.log")).unwrap();
+    eventually("the engine leaves the release", || log().contains("updates is no longer auto"));
+    (std::fs::read(install.exe()).unwrap(), release, log(), install, server)
+}
+
+#[test]
+fn updates_notify_set_while_the_release_downloads_keeps_it_from_being_installed() {
+    if target().is_none() {
+        return;
+    }
+    let (installed, release, log, install, server) = notify_while_waiting_on(".tar.gz");
+
+    assert_ne!(installed, release);
+    assert_eq!(install.files_in_bin(), ["torrential"], "no partial file is left behind");
+    assert_eq!(install.engine().1, "0.1.0");
+    assert!(log.contains("updates is no longer auto, so torrential 0.1.1 is not installed"), "{log}");
+    assert_eq!(Install::downloads_of_the_release(&server), 1);
+}
+
+#[test]
+fn updates_notify_set_while_the_engine_looks_for_releases_keeps_it_from_downloading() {
+    if target().is_none() {
+        return;
+    }
+    let (installed, release, _, install, server) = notify_while_waiting_on("/latest");
+
+    assert_ne!(installed, release);
+    assert_eq!(install.engine().1, "0.1.0");
+    assert_eq!(server.asked(), ["/latest"]);
+}
