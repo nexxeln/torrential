@@ -348,6 +348,69 @@ async fn a_code_opened_while_the_engine_starts_listening_still_opens_it_to_the_n
     listening(&h, ip, true).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_from_the_network_that_sends_no_whole_request_closes_within_ten_seconds() {
+    let Some(ip) = lan() else { return };
+    let h = Harness::new();
+    devices(&h, Request::AddDevice).await;
+    listening(&h, ip, true).await;
+    let port = h.running.ctx.http_port;
+    let idle = TcpStream::connect((ip, port)).await.unwrap();
+    let mut slow = TcpStream::connect((ip, port)).await.unwrap();
+    slow.write_all(format!("GET /pair HTTP/1.1\r\nHost: {ip}:{port}\r\n").as_bytes()).await.unwrap();
+    let mut body = TcpStream::connect((ip, port)).await.unwrap();
+    let head = format!(
+        "POST /api/pair HTTP/1.1\r\nHost: {ip}:{port}\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n"
+    );
+    body.write_all(head.as_bytes()).await.unwrap();
+    for (mut stream, what) in
+        [(idle, "a connection that sends nothing"), (slow, "a head that never ends"), (body, "a body that never comes")]
+    {
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(12), stream.read_to_end(&mut rest))
+            .await
+            .unwrap_or_else(|_| panic!("{what} stays open"))
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&rest), "", "{what}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_address_holds_at_most_16_connections_before_a_request_on_them_shows_a_cookie() {
+    let Some(ip) = lan() else { return };
+    let h = Harness::new();
+    devices(&h, Request::AddDevice).await;
+    listening(&h, ip, true).await;
+    let port = h.running.ctx.http_port;
+    let mut idle = Vec::new();
+    for _ in 0..16 {
+        idle.push(TcpStream::connect((ip, port)).await.unwrap());
+    }
+    let mut over = TcpStream::connect((ip, port)).await.unwrap();
+    let mut rest = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), over.read_to_end(&mut rest))
+        .await
+        .expect("the engine closes a 17th connection at once")
+        .unwrap();
+    assert_eq!(mac_again(port).get("/api/me").await.json(), serde_json::json!({ "asker": "mac" }), "the Mac gets in");
+    drop(idle);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut stream = TcpStream::connect((ip, port)).await.unwrap();
+        stream
+            .write_all(format!("GET /pair HTTP/1.1\r\nHost: {ip}:{port}\r\nConnection: close\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer).await;
+        if answer.starts_with(b"HTTP/1.1 200 OK") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the address gets in again once its connections close");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Another program on `port` of the home network, so the engine cannot listen there. macOS lets
 /// it sit on every address beside the engine's 127.0.0.1, and Linux on the home address.
 fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {

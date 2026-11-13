@@ -3,13 +3,15 @@
 //! for bytes that have not arrived asks the engine for their pieces first and waits for them, so a
 //! player can start and seek while the rest of the file downloads.
 
+use std::collections::HashMap;
 use std::io::{self, SeekFrom};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use torrential_core::TorrentId;
@@ -27,6 +29,18 @@ const POLL: Duration = Duration::from_millis(100);
 const STALL: Duration = Duration::from_secs(5 * 60);
 /// How often the engine tries the home network again while another program holds its port.
 const RETRY: Duration = Duration::from_secs(2);
+/// How long a connection may take to send a whole request, counted from the end of the last
+/// answer. One that sends none in that time closes, so idle sockets cannot pile up.
+const REQUEST_WAIT: Duration = Duration::from_secs(10);
+/// Connections from one address of the home network that no request has shown a device's cookie
+/// or a cast grant on yet. A browser opens six at most to one site.
+const STRANGERS_PER_ADDRESS: usize = 16;
+/// Such connections from every address together, well inside the 256 file descriptors launchd
+/// gives a login service.
+const STRANGERS: usize = 64;
+/// How long the engine waits after it fails to accept a connection, such as when it has no file
+/// descriptor left, before it tries again.
+const BACKOFF: Duration = Duration::from_secs(1);
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
 /// Smaller chunks of a streamed answer go out in one write with their framing.
@@ -103,6 +117,7 @@ impl Peer {
 /// was read when `listener` was bound, so a change since then counts. Connections already open
 /// stay open.
 pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut reach: watch::Receiver<Reach>) {
+    let strangers = Arc::new(Strangers::default());
     let mut retry = tokio::time::Instant::now();
     loop {
         let want = *reach.borrow_and_update();
@@ -112,27 +127,16 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
         }
         let astray = reach_of(&listener) != want;
         tokio::select! {
-            accepted = listener.accept() => {
-                let Ok((stream, remote)) = accepted else { return };
-                let Ok(local) = stream.local_addr() else { continue };
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    ctx.owner.tell(Command::Connected);
-                    let _ = stream.set_nodelay(true);
-                    let (rd, wr) = stream.into_split();
-                    let peer = Peer::of(local, remote);
-                    let serve = Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false }.serve();
-                    // Once the engine stops listening on the network, nothing from it stays open.
-                    match peer {
-                        Peer::Loopback => drop(serve.await),
-                        Peer::Network { .. } => tokio::select! {
-                            _ = serve => {}
-                            () = ctx.devices.closed() => {}
-                        },
-                    }
-                    ctx.owner.tell(Command::Disconnected { keep_until: None });
-                });
-            }
+            accepted = listener.accept() => match accepted {
+                Ok((stream, remote)) => spawn(&ctx, &strangers, stream, remote),
+                // A client that left before the engine took its connection.
+                Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset) => {}
+                // Out of file descriptors or memory, which connections give back as they end.
+                Err(e) => {
+                    super::log(&format!("cannot take a connection: {e}"));
+                    tokio::time::sleep(BACKOFF).await;
+                }
+            },
             changed = reach.changed() => {
                 if changed.is_err() {
                     return;
@@ -140,6 +144,80 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
                 retry = tokio::time::Instant::now();
             }
             () = tokio::time::sleep_until(retry), if astray => {}
+        }
+    }
+}
+
+/// Serves one connection in a task of its own. One from the network that `strangers` has no room
+/// for closes at once.
+fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: SocketAddr) {
+    let Ok(local) = stream.local_addr() else { return };
+    let peer = Peer::of(local, remote);
+    let stranger = match peer {
+        Peer::Loopback => None,
+        Peer::Network { remote, .. } => match strangers.admit(remote) {
+            Some(stranger) => Some(stranger),
+            None => return,
+        },
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        ctx.owner.tell(Command::Connected);
+        let _ = stream.set_nodelay(true);
+        let (rd, wr) = stream.into_split();
+        let serve = Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false, stranger }.serve();
+        // Once the engine stops listening on the network, nothing from it stays open.
+        match peer {
+            Peer::Loopback => drop(serve.await),
+            Peer::Network { .. } => tokio::select! {
+                _ = serve => {}
+                () = ctx.devices.closed() => {}
+            },
+        }
+        ctx.owner.tell(Command::Disconnected { keep_until: None });
+    });
+}
+
+/// The connections from the network that no request has shown a device's cookie or a cast grant
+/// on yet, by address. Idle sockets from one machine cannot crowd out the others, nor use up the
+/// engine's file descriptors.
+#[derive(Default)]
+struct Strangers {
+    open: Mutex<HashMap<IpAddr, usize>>,
+}
+
+impl Strangers {
+    fn open(&self) -> MutexGuard<'_, HashMap<IpAddr, usize>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Counts one more connection from `ip`, or `None` when that address or every address
+    /// together holds as many as they may.
+    fn admit(self: &Arc<Self>, ip: IpAddr) -> Option<Stranger> {
+        let mut open = self.open();
+        let all: usize = open.values().sum();
+        if open.get(&ip).copied().unwrap_or(0) >= STRANGERS_PER_ADDRESS || all >= STRANGERS {
+            return None;
+        }
+        *open.entry(ip).or_default() += 1;
+        Some(Stranger { strangers: self.clone(), ip })
+    }
+}
+
+/// A connection that counts in `Strangers` until it is dropped.
+struct Stranger {
+    strangers: Arc<Strangers>,
+    ip: IpAddr,
+}
+
+impl Drop for Stranger {
+    fn drop(&mut self) {
+        let mut open = self.strangers.open();
+        if let Some(count) = open.get_mut(&self.ip) {
+            *count -= 1;
+            if *count == 0 {
+                open.remove(&self.ip);
+            }
         }
     }
 }
@@ -242,12 +320,16 @@ pub struct Connection<'a> {
     pending: Vec<u8>,
     /// The streamed answer in progress is chunked, not ended by closing the connection.
     chunked: bool,
+    /// Counts against the limit on strangers until a request on this connection shows a paired
+    /// device's cookie or a cast grant.
+    stranger: Option<Stranger>,
 }
 
 impl Connection<'_> {
     async fn serve(mut self) -> io::Result<()> {
         loop {
-            let keep_alive = match self.read_head().await? {
+            let by = tokio::time::Instant::now() + REQUEST_WAIT;
+            let keep_alive = match self.read_head(by).await? {
                 None => return Ok(()),
                 Some(Head::Refused(status)) => {
                     self.empty(status, "", false).await?;
@@ -260,7 +342,7 @@ impl Connection<'_> {
                     }
                     // Read before any refusal, since closing on an unread body resets the
                     // connection before the browser reads the answer.
-                    request.body = self.read_body(request.length).await?;
+                    request.body = self.read_body(request.length, by).await?;
                     let ctx = self.ctx;
                     let asker = match ask(self.peer, &request, ctx.http_port, &ctx.devices, super::owner::now()) {
                         Ok(asker) => asker,
@@ -269,6 +351,9 @@ impl Connection<'_> {
                             return Ok(());
                         }
                     };
+                    if matches!(asker, Asker::Device(_) | Asker::Cast(_)) {
+                        self.stranger = None;
+                    }
                     // A removed device or a dropped cast loses what it was still receiving.
                     tokio::select! {
                         keep = self.answer(*request, &asker) => keep?,
@@ -282,7 +367,9 @@ impl Connection<'_> {
         }
     }
 
-    async fn read_head(&mut self) -> io::Result<Option<Head>> {
+    /// The next request's head, or `None` once the client closes the connection or sends no whole
+    /// head `by` then.
+    async fn read_head(&mut self, by: tokio::time::Instant) -> io::Result<Option<Head>> {
         loop {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut parsed = httparse::Request::new(&mut headers);
@@ -295,15 +382,19 @@ impl Connection<'_> {
                 Ok(httparse::Status::Partial) if self.pending.len() < MAX_HEAD => {}
                 _ => return Ok(Some(Head::Refused("400 Bad Request"))),
             }
-            if self.rd.read_buf(&mut self.pending).await? == 0 {
+            let Ok(read) = tokio::time::timeout_at(by, self.rd.read_buf(&mut self.pending)).await else {
+                return Ok(None);
+            };
+            if read? == 0 {
                 return Ok(None);
             }
         }
     }
 
-    async fn read_body(&mut self, length: usize) -> io::Result<Vec<u8>> {
+    async fn read_body(&mut self, length: usize, by: tokio::time::Instant) -> io::Result<Vec<u8>> {
         while self.pending.len() < length {
-            if self.rd.read_buf(&mut self.pending).await? == 0 {
+            let read = tokio::time::timeout_at(by, self.rd.read_buf(&mut self.pending)).await?;
+            if read? == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
         }
@@ -823,6 +914,21 @@ mod tests {
         assert!(!allowed(Some("192.168.1.23:47919"), None, Some("null")));
         let v6 = Sender { host: Some("[fd00::23]:47919".into()), site: None, origin: None };
         assert!(v6.home_allowed(47919, "fd00::23".parse().unwrap(), None));
+    }
+
+    #[test]
+    fn strangers_get_16_connections_an_address_and_64_in_all() {
+        let strangers = Arc::new(Strangers::default());
+        let address = |n: u8| IpAddr::V4(Ipv4Addr::new(192, 168, 1, n));
+        let first: Vec<Stranger> = (0..16).map(|_| strangers.admit(address(40)).unwrap()).collect();
+        assert!(strangers.admit(address(40)).is_none(), "a 17th from one address");
+        let mut rest: Vec<Stranger> = (0..48).map(|n| strangers.admit(address(100 + n / 4)).unwrap()).collect();
+        assert!(strangers.admit(address(99)).is_none(), "a 65th from any address");
+        rest.pop();
+        assert!(strangers.admit(address(99)).is_some(), "a connection that ends makes room");
+        drop(first);
+        assert!(strangers.admit(address(40)).is_some());
+        assert_eq!(strangers.open().get(&address(41)), None, "an address that never got in leaves nothing behind");
     }
 
     #[test]
