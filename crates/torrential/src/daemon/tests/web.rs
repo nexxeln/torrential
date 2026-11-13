@@ -1,5 +1,6 @@
 //! The web app's side of the engine's HTTP server: its pages, its API, and what it asks ffmpeg for.
 
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -567,6 +568,30 @@ async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
     let (_, _, again) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
     assert_eq!(lines(&again), [json!({ "type": "ready" })]);
     assert_eq!(asked.load(Ordering::SeqCst), 1, "a fetched ffmpeg is not fetched again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_whose_file_the_browser_cannot_read_starts_the_ffmpeg_fetch_as_it_starts() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let film = torrent(0xb1, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264", &[("Night.1968.1080p.mkv", 2 * GIB)]);
+    let listed = vec![titles::listed(&film, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(listed, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let h = Harness::with_outside(search, Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() });
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    let (_, _, body) = fetch(&h, "POST", "/api/title/play", &FETCH, r#"{"video":"tt0063350"}"#).await;
+    let steps: Vec<String> = lines(&body).iter().map(titles::step).collect();
+    assert_eq!(steps.last().map(String::as_str), Some("playing tt0063350 b1b1b1 file 0 at null"), "{steps:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while asked.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the play never began the fetch");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_, _, followed) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!(lines(&followed).last(), Some(&json!({ "type": "ready" })));
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the player follows the fetch the play began");
 }
 
 #[tokio::test(flavor = "multi_thread")]

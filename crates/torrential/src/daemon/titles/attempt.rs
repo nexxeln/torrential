@@ -356,6 +356,10 @@ impl Trial<'_> {
         }
         let remux = ctx.web.ffmpeg.found().readiness() != Readiness::Missing;
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
+        // ffmpeg comes while the download starts, when the browser cannot read this file itself.
+        if !ask.containers.open(&metainfo.files[playable.video as usize].path, false) {
+            let _ = ctx.web.ffmpeg.fetch();
+        }
 
         report(AttemptEvent::Check { check: Check::Start });
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));
