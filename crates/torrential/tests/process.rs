@@ -251,11 +251,11 @@ fn engine_stop_also_stops_the_engine_an_update_restarted_into_meanwhile() {
     let pid = process.id();
     let engine = std::thread::spawn(move || {
         let (mut version, mut stops) = ("0.1.0", Vec::new());
-        for stream in listener.incoming() {
+        'serve: for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             while let Some(request) = read_frame(&mut stream) {
                 let reply = match request["op"].as_str().unwrap() {
-                    "end" => return stops,
+                    "end" => break 'serve,
                     "hello" => format!(r#"{{"type":"hello","engine_version":"{version}","wire":5,"pid":{pid}}}"#),
                     _ => {
                         stops.push(version);
@@ -270,6 +270,8 @@ fn engine_stop_also_stops_the_engine_an_update_restarted_into_meanwhile() {
                 stream.write_all(&frame(&reply)).unwrap();
             }
         }
+        let _ = process.kill();
+        let _ = process.wait();
         stops
     });
 

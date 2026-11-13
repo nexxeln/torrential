@@ -214,7 +214,7 @@ pub fn run(env: &Env) -> u8 {
     let held = match Held::take(env, &paths) {
         Ok(Some(held)) => held,
         Ok(None) => {
-            // Nothing for launchd or systemd to start again: the other engine serves this home.
+            // The other engine serves this home, so launchd and systemd have nothing to start again.
             log(&format!("another engine owns {}", paths.state.display()));
             return 0;
         }
@@ -325,7 +325,7 @@ pub fn guard(env: &Env, pid: u32) -> u8 {
         if late && alive(pid) {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
-        // Whoever holds the lock owns the update: an engine that holds it says it is up or rolls back.
+        // Whoever holds the lock owns the update. An engine that holds it says it is up or rolls back.
         if (late || !alive(pid))
             && let Ok(Some(lock)) = lock(&paths.lock())
         {
@@ -503,6 +503,8 @@ impl Held {
     }
 
     /// The descriptors in `fds`, when the first is this state's lock file and the others are sockets.
+    // `st_dev` is an i32 on macOS and a u64 on Linux.
+    #[allow(clippy::unnecessary_cast)]
     fn inherited(fds: &str, paths: &Paths) -> Option<Held> {
         use std::os::fd::FromRawFd;
         let fds: Vec<i32> = fds.split(',').map(|fd| fd.parse().ok()).collect::<Option<_>>()?;
