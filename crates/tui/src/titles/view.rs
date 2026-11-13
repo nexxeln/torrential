@@ -6,12 +6,13 @@ use std::time::Duration;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::style::{Color, Style};
+use torrential_core::error::Details;
 use torrential_core::protocol::TitlePage;
 use torrential_core::units::{count, format_duration};
-use torrential_core::{Kind, Next, TitleCard, VideoRef};
+use torrential_core::{Error, Kind, Next, ReleaseId, TitleCard, VideoRef};
 
-use super::{Found, Load, Opened, Pick, episodes, label, title_name};
-use crate::format::{age, width};
+use super::{Found, Load, Opened, Pick, Play, episodes, label, title_name};
+use crate::format::{age, char_width, width};
 use crate::layout::Screen;
 use crate::state::{Engine, State};
 use crate::theme::*;
@@ -75,12 +76,41 @@ impl Sheet {
 pub fn lines(state: &State, screen: &Screen) -> Vec<Line> {
     let mut sheet = Sheet { narrow: screen.narrow(), word: None, lines: Vec::new() };
     let titles = &state.titles;
+    let room = screen.right - screen.at.content;
+    if let Some(Play::Failed(error)) = &titles.play {
+        failed_lines(&mut sheet, error, room.into());
+    }
     match (&titles.open, &titles.found) {
-        (Some(open), _) => title_lines(&mut sheet, state, open, screen.right - screen.at.content),
+        (Some(open), _) => title_lines(&mut sheet, state, open, room),
         (None, Some(found)) => found_lines(&mut sheet, found),
         (None, None) => home_lines(&mut sheet, state),
     }
     sheet.lines
+}
+
+/// Why the last play did not play: what failed, each source it moved past, and what to do, such
+/// as the address to open in a player when none is installed.
+fn failed_lines(sheet: &mut Sheet, error: &Error, room: usize) {
+    sheet.word("play", ERROR);
+    for row in wrap(&format!("Playback failed: {}", error.message), room, usize::MAX) {
+        sheet.text(row, ERROR);
+    }
+    if let Some(Details::Tried(tried)) = &error.details {
+        for tried in tried {
+            sheet.text(format!("Skipped {}: {}", short(&tried.release), tried.reason), PENCIL);
+        }
+    }
+    for row in wrap(error.hint.as_deref().unwrap_or_default(), room, usize::MAX) {
+        sheet.text(row, PENCIL);
+    }
+    sheet.gap();
+}
+
+/// A release's ID as the lists show it: its first six hex digits, after the `u` of a locator.
+fn short(release: &ReleaseId) -> String {
+    let id = release.to_ref();
+    let shown = if id.starts_with('u') { 7 } else { 6 };
+    id.chars().take(shown).collect()
 }
 
 fn home_lines(sheet: &mut Sheet, state: &State) {
@@ -281,8 +311,9 @@ fn time_left(position: f64, duration: f64) -> String {
     format!("{} left", format_duration(left))
 }
 
-/// `text` in rows at most `room` cells wide, broken between words. Past `most` rows, the last row
-/// holds the rest, for `put` to end in an ellipsis.
+/// `text` in rows at most `room` cells wide, broken between words. A word wider than a row, such
+/// as an address, is broken inside, so all of it shows. Past `most` rows, the last row holds the
+/// rest, for `put` to end in an ellipsis.
 fn wrap(text: &str, room: usize, most: usize) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     for word in text.split_whitespace() {
@@ -292,7 +323,21 @@ fn wrap(text: &str, room: usize, most: usize) -> Vec<String> {
                 row.push(' ');
                 row.push_str(word);
             }
-            _ => rows.push(word.to_string()),
+            _ if width(word) <= room => rows.push(word.to_string()),
+            last => {
+                match last {
+                    Some(row) if width(row) + 2 <= room => row.push(' '),
+                    _ => rows.push(String::new()),
+                }
+                for c in word.chars() {
+                    if rows.len() < most && rows.last().is_some_and(|row| width(row) + char_width(c) > room) {
+                        rows.push(String::new());
+                    }
+                    if let Some(row) = rows.last_mut() {
+                        row.push(c);
+                    }
+                }
+            }
         }
     }
     rows

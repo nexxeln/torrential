@@ -1103,7 +1103,11 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
     let reserve = |pairs: &[(&str, &str)]| if pairs.is_empty() { 0 } else { hints_width(pairs) + 4 };
     let first = reserve(&kept);
     let must = reserve(&pairs.iter().copied().filter(essential).collect::<Vec<_>>());
-    let note = match (&state.toast, &state.titles.starting, &state.upgrade) {
+    let starting = match &state.titles.play {
+        Some(titles::Play::Starting { step, .. }) => Some(step),
+        _ => None,
+    };
+    let note = match (&state.toast, starting, &state.upgrade) {
         (Some(toast), _, _) => {
             let color = match toast.tone {
                 Tone::Info => TEXT,
@@ -1112,7 +1116,7 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
             };
             Some((toast.text.clone(), color, first))
         }
-        (None, Some(starting), _) => Some((format!("{}{}", starting.step, state.spinner()), PENCIL, first)),
+        (None, Some(step), _) => Some((format!("{step}{}", state.spinner()), PENCIL, first)),
         (None, None, Some(Upgrade::Available(latest))) => {
             let typing = match state.page {
                 Page::Titles => state.titles.typing,

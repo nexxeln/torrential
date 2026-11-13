@@ -55,11 +55,14 @@ pub struct Opened {
     pub scroll: u16,
 }
 
-/// A play on its way, and the step it waits on.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Starting {
-    pub name: String,
-    pub step: String,
+/// The last play from these screens, while it starts or after it failed. One that plays is gone,
+/// and a toast says so.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Play {
+    /// What is starting, and the step it waits on.
+    Starting { name: String, step: String },
+    /// Why it did not play and what to do, above the list until Esc or the next play.
+    Failed(Error),
 }
 
 pub struct Titles {
@@ -73,7 +76,7 @@ pub struct Titles {
     pub scroll: u16,
     /// The title screen, over the home lists or the search.
     pub open: Option<Opened>,
-    pub starting: Option<Starting>,
+    pub play: Option<Play>,
     next_search: u64,
     /// The last request for the home lists, and for the open title's page. Only the answer to the
     /// last one is used: an earlier one may answer later.
@@ -91,7 +94,7 @@ impl Titles {
             cursor: None,
             scroll: 0,
             open: None,
-            starting: None,
+            play: None,
             next_search: 1,
             home_ask: 0,
             title_ask: 0,
@@ -143,7 +146,7 @@ impl Titles {
     pub fn spinning(&self) -> bool {
         let searching = self.found.as_ref().is_some_and(|f| f.titles == Load::Loading);
         let opening = self.open.as_ref().is_some_and(|o| o.page == Load::Loading);
-        searching || opening || self.starting.is_some()
+        searching || opening || matches!(self.play, Some(Play::Starting { .. }))
     }
 }
 
@@ -283,9 +286,13 @@ impl State {
         vec![Effect::FindTitles { search: id, words }]
     }
 
-    /// Esc: from a title to the list it opened from, from a search to the home lists, and from the
-    /// home lists into the search box.
+    /// Esc: away with a failed play's note, from a title to the list it opened from, from a search
+    /// to the home lists, and from the home lists into the search box.
     fn back_titles(&mut self) -> Vec<Effect> {
+        if matches!(self.titles.play, Some(Play::Failed(_))) {
+            self.titles.play = None;
+            return Vec::new();
+        }
         if self.titles.open.is_some() {
             return self.close_title();
         }
@@ -376,8 +383,8 @@ impl State {
                 Some(*episode)
             }
         };
-        if let Some(starting) = &self.titles.starting {
-            self.say(Tone::Info, format!("Still starting {}.", starting.name));
+        if let Some(Play::Starting { name, .. }) = &self.titles.play {
+            self.say(Tone::Info, format!("Still starting {name}."));
             return Vec::new();
         }
         let shown = match &pick {
@@ -385,7 +392,7 @@ impl State {
             _ => episode,
         };
         let name = title_name(&card, shown);
-        self.titles.starting = Some(Starting { name, step: "Looking up the title".into() });
+        self.titles.play = Some(Play::Starting { name, step: "Looking up the title".into() });
         vec![Effect::PlayTitle(VideoRef { title: card.id, episode })]
     }
 
@@ -427,19 +434,22 @@ impl State {
     }
 
     pub(crate) fn play_step(&mut self, step: AttemptEvent) {
-        if let (Some(starting), Some(text)) = (self.titles.starting.as_mut(), step_text(&step)) {
-            starting.step = text;
+        if let (Some(Play::Starting { step: shown, .. }), Some(text)) = (self.titles.play.as_mut(), step_text(&step)) {
+            *shown = text;
         }
     }
 
     pub(crate) fn title_played(&mut self, result: Result<(String, TitlePlayed), Error>) {
-        self.titles.starting = None;
+        self.titles.play = None;
         match result {
             Ok((player, played)) => match played.resume_at {
                 Some(at) => self.say(Tone::Success, format!("Resuming {} at {} in {player}", played.name, clock(at))),
                 None => self.say(Tone::Success, format!("Playing {} in {player}", played.name)),
             },
-            Err(error) => self.say(Tone::Error, format!("Playback failed: {}", error.message)),
+            Err(error) => {
+                self.say(Tone::Error, format!("Playback failed: {}", error.message));
+                self.titles.play = Some(Play::Failed(error));
+            }
         }
     }
 

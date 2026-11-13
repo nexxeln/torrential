@@ -1,9 +1,11 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Modifier;
+use torrential_core::error::Details;
 use torrential_core::protocol::{Continue, Home, TitlePage, TitlePlayed};
 use torrential_core::title::Episode;
 use torrential_core::{
-    Art, AttemptEvent, Check, EpisodeInfo, Kind, Next, Season, TitleCard, TitleDetails, TitleId, VideoRef, Watched,
+    Art, AttemptEvent, Check, EpisodeInfo, Kind, Next, Season, Skip, TitleCard, TitleDetails, TitleId, Tried, VideoRef,
+    Watched,
 };
 
 use super::render::{MARK, find, line, render, snapshots};
@@ -505,6 +507,64 @@ fn esc_clears_the_search_box_then_leaves_it_even_when_nothing_was_found() {
     nothing.update(key(KeyCode::Esc));
     assert_eq!((nothing.titles.typing, nothing.titles.query.text.as_str()), (false, ""));
     assert_eq!(footer(&nothing).trim(), "/ search   d downloads   ? keys");
+}
+
+#[test]
+fn a_play_that_fails_says_why_and_what_to_do_above_the_list_until_esc() {
+    let mut state = opened((100, 30));
+    state.update(key(KeyCode::Enter));
+    let url = "http://127.0.0.1:47919/4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_living_dead.mp4";
+    let no_player =
+        Error::new(ErrorCode::NotFound, "no media player found (looked for IINA, mpv, and VLC)").with_hint(format!(
+            "open {url} in any player, or set player: in /Users/ada/.config/torrential/config.yaml to the player's \
+             absolute path"
+        ));
+    state.update(Msg::TitlePlayed(Err(no_player)));
+    assert_eq!(
+        list_lines(&state)[..7],
+        [
+            "       play │ Playback failed: no media player found (looked for IINA, mpv, and VLC)",
+            "            │ open http://127.0.0.1:47919/4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_",
+            "            │ living_dead.mp4 in any player, or set player: in",
+            "            │ /Users/ada/.config/torrential/config.yaml to the player's absolute path",
+            "            │",
+            "   continue ● Harbor Lights  S01E03 · Third Light                                         22m left",
+            "            │ Night of the Living Dead (1968)                                           1h01m left",
+        ]
+    );
+    assert!(footer(&state).starts_with("              Playback failed: no media player found"), "{}", footer(&state));
+
+    press(&mut state, "jjj");
+    assert_eq!(state.update(key(KeyCode::Char('P'))), [Effect::PlayTitle(video("tt1727587"))]);
+    assert_eq!(
+        list_lines(&state)[0],
+        "   continue │ Harbor Lights  S01E03 · Third Light                                         22m left"
+    );
+    let tried = vec![
+        Tried { release: result_id("4c1e9a"), reason: Skip::NoData { waited_s: 30 } },
+        Tried { release: result_id("b7f20d"), reason: Skip::NoVideo },
+    ];
+    let none = Error::new(ErrorCode::NoSource, "no source of Sintel (2010) started")
+        .with_hint("search the torrents for it by name")
+        .with_details(Details::Tried(tried));
+    state.update(Msg::TitlePlayed(Err(none)));
+    assert_eq!(
+        list_lines(&state)[..6],
+        [
+            "       play │ Playback failed: no source of Sintel (2010) started",
+            "            │ Skipped 4c1e9a: no data arrived in 30s",
+            "            │ Skipped b7f20d: none of its files is the video",
+            "            │ search the torrents for it by name",
+            "            │",
+            "   continue │ Harbor Lights  S01E03 · Third Light                                         22m left",
+        ]
+    );
+    state.update(key(KeyCode::Esc));
+    assert_eq!(
+        list_lines(&state)[0],
+        "   continue │ Harbor Lights  S01E03 · Third Light                                         22m left"
+    );
+    assert_eq!((state.titles.typing, state.pick()), (false, Some(Pick::Saved(title_id("tt1727587")))));
 }
 
 #[test]
