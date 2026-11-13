@@ -41,3 +41,4 @@ url = "2.5"
 assert_cmd = "2.2"
 insta = { version = "1.49", features = ["json"] }
 tempfile = "3.27"
+tokio = { version = "1.53", features = ["test-util"] }

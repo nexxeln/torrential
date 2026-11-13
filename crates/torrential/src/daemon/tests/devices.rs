@@ -326,7 +326,9 @@ async fn a_cast_grant_serves_its_one_file_to_a_tv_until_it_is_dropped() {
     drop(grant);
     let after = tv.get(&path).await;
     assert_eq!((after.status, after.text().as_str()), (404, ended), "while a code keeps the network open");
-    h.running.ctx.devices.expire(offer.expires_at);
+    let mut phone = Browser::on(ip, &h);
+    let id = phone.pair(&offer.code).await.json()["device"]["id"].as_str().unwrap().to_string();
+    devices(&h, Request::RemoveDevice { id }).await;
     listening(&h, ip, false).await;
 }
 

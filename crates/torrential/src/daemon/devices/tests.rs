@@ -19,12 +19,12 @@ impl Home {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         drop(Store::open(&dir.path().join("state.db")).unwrap());
-        let devices = Arc::new(Devices::open(&dir.path().join("state.db"), NOW).unwrap());
+        let devices = Arc::new(Devices::open(&dir.path().join("state.db")).unwrap());
         Self { dir, devices }
     }
 
     fn reopened(&self) -> Devices {
-        Devices::open(&self.dir.path().join("state.db"), NOW).unwrap()
+        Devices::open(&self.dir.path().join("state.db")).unwrap()
     }
 
     fn code(&self) -> String {
@@ -55,7 +55,7 @@ async fn a_phone_pairs_with_the_code_and_its_cookie_lets_it_in_from_then_on() {
     assert_eq!(device.id.len(), 8);
     assert_eq!(token.len(), 64);
     assert_eq!(home.devices.holder(&token, NOW + 20), Some(Device { seen_at: NOW + 20, ..device.clone() }));
-    assert_eq!(home.devices.list(PORT, NOW + 20).offer, None, "a code lets one device in");
+    assert_eq!(home.devices.list(PORT).offer, None, "a code lets one device in");
     assert_eq!(refusal(home.pair(&offer.code, IPHONE, NOW + 30)), "NoOffer");
 
     let restarted = home.reopened();
@@ -80,15 +80,29 @@ fn the_database_keeps_only_a_hash_of_the_token() {
     assert!(!file.windows(64).any(|w| w == token.as_bytes()), "nor its hex");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_code_stops_working_after_five_minutes() {
     let home = Home::new();
     let code = home.code();
+    tokio::time::sleep(Duration::from_secs(299)).await;
+    assert!(home.devices.list(PORT).offer.is_some(), "not expired yet");
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(refusal(home.pair(&code, IPHONE, NOW + 300)), "NoOffer");
-    home.devices.expire(NOW + 299);
-    assert!(home.devices.list(PORT, NOW + 299).offer.is_some(), "not expired yet");
-    home.devices.expire(NOW + 300);
-    assert_eq!(home.devices.list(PORT, NOW).offer, None);
+    assert_eq!(home.devices.list(PORT).offer, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_code_closes_five_minutes_after_it_opens_even_when_the_clock_is_set_back() {
+    let home = Home::new();
+    let reach = home.devices.reach();
+    // The Mac's clock ran an hour fast when the code opened, and was put right after.
+    let fast = crate::daemon::owner::now() + 3600;
+    home.devices.add(PORT, fast).unwrap();
+    tokio::time::sleep(Duration::from_secs(299)).await;
+    assert_eq!(*reach.borrow(), Reach::Network, "the code is still open");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(*reach.borrow(), Reach::Loopback, "the engine stops listening on the network");
+    assert_eq!(home.devices.list(PORT).offer, None);
 }
 
 #[tokio::test]
@@ -119,21 +133,21 @@ async fn one_address_gets_ten_pairing_tries_a_minute() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_engine_listens_on_the_network_while_a_device_is_paired_a_code_is_open_or_a_cast_plays() {
     let home = Home::new();
     let reach = home.devices.reach();
     assert_eq!(*reach.borrow(), Reach::Loopback);
     home.code();
     assert_eq!(*reach.borrow(), Reach::Network, "an open code");
-    home.devices.expire(NOW + 300);
+    tokio::time::sleep(Duration::from_secs(301)).await;
     assert_eq!(*reach.borrow(), Reach::Loopback, "the code expired");
 
     let code_again = home.code();
     let (device, _) = home.pair(&code_again, IPHONE, NOW).unwrap();
-    home.devices.expire(NOW + 300);
+    tokio::time::sleep(Duration::from_secs(300)).await;
     assert_eq!(*reach.borrow(), Reach::Network, "a paired device");
-    home.devices.remove(&device.id, PORT, NOW).unwrap();
+    home.devices.remove(&device.id, PORT).unwrap();
     assert_eq!(*reach.borrow(), Reach::Loopback, "the last device removed");
 
     let grant = home.devices.grant(TorrentId::from_bytes([7; 20]), 0, "Sintel.mkv").unwrap();
@@ -153,12 +167,12 @@ async fn a_removed_device_is_locked_out_and_its_open_requests_end() {
     let waiting = tokio::spawn(async move { devices.revoked(&asker).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished(), "a paired device keeps its requests");
-    let left = home.devices.remove(&device.id, PORT, NOW).unwrap();
+    let left = home.devices.remove(&device.id, PORT).unwrap();
     assert_eq!(left.devices, []);
     tokio::time::timeout(Duration::from_secs(1), waiting).await.expect("removing ends its requests").unwrap();
     assert_eq!(home.devices.holder(&token, NOW), None);
     assert_eq!(home.reopened().holder(&token, NOW), None);
-    let error = home.devices.remove(&device.id, PORT, NOW).unwrap_err();
+    let error = home.devices.remove(&device.id, PORT).unwrap_err();
     assert_eq!(
         (error.code, error.message, error.hint),
         (
@@ -230,7 +244,7 @@ async fn a_second_iphone_is_named_iphone_2() {
     let (device, _) =
         home.devices.pair(&second, Some(IPHONE), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 41)), NOW).unwrap();
     assert_eq!(device.name, "iPhone 2");
-    let names: Vec<String> = home.devices.list(PORT, NOW).devices.into_iter().map(|d| d.name).collect();
+    let names: Vec<String> = home.devices.list(PORT).devices.into_iter().map(|d| d.name).collect();
     assert_eq!(names.len(), 2);
 }
 

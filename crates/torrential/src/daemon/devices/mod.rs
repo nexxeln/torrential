@@ -14,13 +14,14 @@ use std::time::Duration;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
+use tokio::time::Instant;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer, TorrentId};
 
 use super::store::sql_error;
 use names::Names;
 
-/// How long a pairing code works, in seconds.
-const OFFER_SECS: i64 = 5 * 60;
+/// How long a pairing code works.
+const OFFER: Duration = Duration::from_secs(5 * 60);
 /// Wrong codes after which an offer stops working, so guessing six digits has a 5 in a million
 /// chance.
 const WRONG_CODES: u32 = 5;
@@ -155,8 +156,17 @@ struct Paired {
 
 struct Offer {
     code: String,
+    /// Unix seconds, which the Mac shows.
     expires_at: i64,
+    /// When the code stops working, on a clock that setting the Mac's time does not move.
+    deadline: Instant,
     wrong: u32,
+}
+
+impl Offer {
+    fn open(&self) -> bool {
+        Instant::now() < self.deadline
+    }
 }
 
 struct Grant {
@@ -175,8 +185,8 @@ struct State {
 }
 
 impl State {
-    fn reach(&self, now: i64) -> Reach {
-        let open = self.offer.as_ref().is_some_and(|offer| offer.expires_at > now);
+    fn reach(&self) -> Reach {
+        let open = self.offer.as_ref().is_some_and(Offer::open);
         if open || !self.paired.is_empty() || !self.grants.is_empty() { Reach::Network } else { Reach::Loopback }
     }
 
@@ -184,8 +194,8 @@ impl State {
         self.paired.values().map(|paired| &paired.device).find(|device| device.id == id)
     }
 
-    fn offer(&self, port: u16, now: i64) -> Option<PairingOffer> {
-        let offer = self.offer.as_ref().filter(|offer| offer.expires_at > now)?;
+    fn offer(&self, port: u16) -> Option<PairingOffer> {
+        let offer = self.offer.as_ref().filter(|offer| offer.open())?;
         let lan_address = self.names.lan.first().map(|ip| format!("{ip}:{port}"));
         let address = self.names.local.as_ref().map(|name| format!("{name}:{port}")).or(lan_address.clone())?;
         Some(PairingOffer {
@@ -197,10 +207,10 @@ impl State {
         })
     }
 
-    fn list(&self, port: u16, now: i64) -> DeviceList {
+    fn list(&self, port: u16) -> DeviceList {
         let mut devices: Vec<Device> = self.paired.values().map(|paired| paired.device.clone()).collect();
         devices.sort_by(|a, b| (a.added_at, &a.id).cmp(&(b.added_at, &b.id)));
-        DeviceList { devices, offer: self.offer(port, now) }
+        DeviceList { devices, offer: self.offer(port) }
     }
 
     /// Counts a pairing try from `from`. False once it has made too many this minute.
@@ -231,7 +241,7 @@ pub struct Devices {
 }
 
 impl Devices {
-    pub fn open(path: &Path, now: i64) -> Result<Self, Error> {
+    pub fn open(path: &Path) -> Result<Self, Error> {
         let conn = Connection::open(path).map_err(|e| sql_error(path, e))?;
         conn.execute_batch("PRAGMA synchronous = FULL;").map_err(|e| sql_error(path, e))?;
         conn.busy_timeout(Duration::from_secs(1)).map_err(|e| sql_error(path, e))?;
@@ -256,7 +266,7 @@ impl Devices {
             paired
         };
         let state = State { paired, offer: None, grants: HashMap::new(), tries: HashMap::new(), names: Names::read() };
-        let reach = watch::Sender::new(state.reach(now));
+        let reach = watch::Sender::new(state.reach());
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
@@ -278,8 +288,8 @@ impl Devices {
         sql_error(&self.path, e)
     }
 
-    fn publish(&self, state: &State, now: i64) {
-        let reach = state.reach(now);
+    fn publish(&self, state: &State) {
+        let reach = state.reach();
         self.reach.send_if_modified(|current| std::mem::replace(current, reach) != reach);
     }
 
@@ -303,8 +313,8 @@ impl Devices {
     }
 
     /// The paired devices and the open offer.
-    pub fn list(&self, port: u16, now: i64) -> DeviceList {
-        self.state().list(port, now)
+    pub fn list(&self, port: u16) -> DeviceList {
+        self.state().list(port)
     }
 
     /// The device with this ID, if it is paired.
@@ -332,34 +342,41 @@ impl Devices {
                 break format!("{:06}", n % 1_000_000);
             }
         };
+        let mut deadline = Instant::now() + OFFER;
         let list = {
             let mut state = self.state();
             state.names = names;
-            state.offer = Some(Offer { code, expires_at: now + OFFER_SECS, wrong: 0 });
-            self.publish(&state, now);
-            state.list(port, now)
+            state.offer = Some(Offer { code, expires_at: now + OFFER.as_secs() as i64, deadline, wrong: 0 });
+            self.publish(&state);
+            state.list(port)
         };
         let devices = Arc::downgrade(self);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(OFFER_SECS as u64)).await;
-            if let Some(devices) = devices.upgrade() {
-                devices.expire(super::owner::now());
+            loop {
+                tokio::time::sleep_until(deadline).await;
+                match devices.upgrade().and_then(|devices| devices.expire()) {
+                    Some(later) => deadline = later,
+                    None => return,
+                }
             }
         });
         Ok(list)
     }
 
-    /// Closes the offer if it has expired by `now`.
-    pub fn expire(&self, now: i64) {
+    /// Closes the offer once its deadline has passed. The deadline of an offer still open, which
+    /// a newer code can have.
+    fn expire(&self) -> Option<Instant> {
         let mut state = self.state();
-        if state.offer.as_ref().is_some_and(|offer| offer.expires_at <= now) {
+        let open = state.offer.as_ref().filter(|offer| offer.open()).map(|offer| offer.deadline);
+        if open.is_none() {
             state.offer = None;
         }
-        self.publish(&state, now);
+        self.publish(&state);
+        open
     }
 
     /// Locks a device out, ending the requests it has open.
-    pub fn remove(&self, id: &str, port: u16, now: i64) -> Result<DeviceList, Error> {
+    pub fn remove(&self, id: &str, port: u16) -> Result<DeviceList, Error> {
         let mut state = self.state();
         let Some(key) = state.paired.iter().find(|(_, paired)| paired.device.id == id).map(|(key, _)| *key) else {
             return Err(Error::new(ErrorCode::NotFound, format!("no device has the ID {id}"))
@@ -367,9 +384,9 @@ impl Devices {
         };
         self.conn().execute("DELETE FROM devices WHERE id = ?1", [id]).map_err(|e| self.fail(e))?;
         state.paired.remove(&key);
-        self.publish(&state, now);
+        self.publish(&state);
         self.revoke();
-        Ok(state.list(port, now))
+        Ok(state.list(port))
     }
 
     /// Lets a device in when `code` is the open offer's, and returns the token for its cookie.
@@ -378,7 +395,7 @@ impl Devices {
         if !state.count_try(from, now) {
             return Err(Refused::TooManyTries);
         }
-        let Some(offer) = state.offer.as_mut().filter(|offer| offer.expires_at > now) else {
+        let Some(offer) = state.offer.as_mut().filter(|offer| offer.open()) else {
             return Err(Refused::NoOffer);
         };
         let typed: String = code.chars().filter(char::is_ascii_digit).collect();
@@ -388,7 +405,7 @@ impl Devices {
                 return Err(Refused::WrongCode);
             }
             state.offer = None;
-            self.publish(&state, now);
+            self.publish(&state);
             return Err(Refused::Burned);
         }
         let token = Token::new().map_err(Refused::Failed)?;
@@ -409,7 +426,7 @@ impl Devices {
             .map_err(|e| Refused::Failed(self.fail(e)))?;
         state.offer = None;
         state.paired.insert(token.key(), Paired { device: device.clone(), written: now });
-        self.publish(&state, now);
+        self.publish(&state);
         Ok((device, token.hex()))
     }
 
@@ -441,7 +458,7 @@ impl Devices {
         let key = token.key();
         let mut state = self.state();
         state.grants.insert(key, Grant { id, index, path: path.clone() });
-        self.publish(&state, super::owner::now());
+        self.publish(&state);
         Ok(CastGrant { devices: Arc::downgrade(self), key, path })
     }
 
@@ -458,7 +475,7 @@ impl Devices {
     fn drop_grant(&self, key: Key) {
         let mut state = self.state();
         if state.grants.remove(&key).is_some() {
-            self.publish(&state, super::owner::now());
+            self.publish(&state);
             self.revoke();
         }
     }

@@ -112,13 +112,11 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         }
         Request::PlayTitle(request) => play_title(ctx, request, Finish::Stream, mpsc::unbounded_channel().0).await,
         Request::GetTitle(request) => play_title(ctx, request, Finish::Keep, mpsc::unbounded_channel().0).await,
-        Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port, super::owner::now()) }),
+        Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port) }),
         Request::AddDevice => {
             ctx.devices.add(ctx.http_port, super::owner::now()).map(|list| Response::Devices { list })
         }
-        Request::RemoveDevice { id } => {
-            ctx.devices.remove(&id, ctx.http_port, super::owner::now()).map(|list| Response::Devices { list })
-        }
+        Request::RemoveDevice { id } => ctx.devices.remove(&id, ctx.http_port).map(|list| Response::Devices { list }),
     };
     result.unwrap_or_else(|error| Response::Error { error })
 }

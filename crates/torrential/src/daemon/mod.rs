@@ -164,7 +164,7 @@ pub fn start(
     http_port: u16,
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
-    let devices = Arc::new(devices::Devices::open(store.path(), owner::now())?);
+    let devices = Arc::new(devices::Devices::open(store.path())?);
     let reach = *devices.reach().borrow();
     let players = http::bind(http_port, reach)
         .and_then(|listener| {

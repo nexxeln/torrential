@@ -92,7 +92,7 @@ pub fn me(ctx: &Ctx, asker: &Asker) -> Result<Value, Error> {
 /// `GET /api/devices`.
 pub fn list(ctx: &Ctx, asker: &Asker) -> Result<Value, Error> {
     local_only(asker)?;
-    shown(ctx.devices.list(ctx.http_port, now()))
+    shown(ctx.devices.list(ctx.http_port))
 }
 
 /// `POST /api/devices/add`: opens a pairing offer.
@@ -109,7 +109,7 @@ pub struct Remove {
 /// `POST /api/devices/remove`.
 pub fn remove(ctx: &Ctx, asker: &Asker, Remove { id }: Remove) -> Result<Value, Error> {
     local_only(asker)?;
-    shown(ctx.devices.remove(&id, ctx.http_port, now())?)
+    shown(ctx.devices.remove(&id, ctx.http_port)?)
 }
 
 fn local_only(asker: &Asker) -> Result<(), Error> {
