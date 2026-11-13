@@ -17,6 +17,10 @@ use crate::client::tui::EngineBackend;
 use crate::env::Env;
 use crate::paths::Paths;
 
+/// A machine with no language, so the player is handed no subtitle language whatever the host's
+/// own language is.
+const MACHINE: &str = r#"{"os": "macos", "display": null, "arch": "arm64", "language": null}"#;
+
 /// The terminal UI of bare `torrential`, connected to `h`'s socket. Its only player is a stub
 /// `mpv` that writes its arguments to a file, so no real player ever starts.
 struct Tui {
@@ -44,6 +48,7 @@ impl Tui {
             ("TORRENTIAL_HOME", format!("{home}/th")),
             ("PATH", format!("{home}/bin")),
             ("TORRENTIAL_TEST_VERSION", h.running.ctx.version.clone()),
+            ("TORRENTIAL_TEST_MACHINE", MACHINE.to_string()),
         ];
         let env = Env::from_pairs(vars.iter().map(|(key, value)| (*key, value.as_str())));
         let paths = Paths::from_process(&env).unwrap();
