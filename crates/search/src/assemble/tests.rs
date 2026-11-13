@@ -958,6 +958,18 @@ fn a_phone_plays_720p_first_a_4k_tv_2160p_and_this_mac_its_1080p() {
     assert_eq!(played(&wanted, mac(), &runs), [hd, small, uhd]);
 }
 
+#[test]
+fn a_phone_plays_a_copy_its_screen_shows_before_a_remux_with_more_seeders() {
+    let remux = "Night.of.the.Living.Dead.1968.1080p.BluRay.REMUX.AVC.DTS-HD.MA-FGT";
+    let small = "Night Of The Living Dead 1968 720p BRRip x264-x0r";
+    let runs =
+        [fresh(&knaben(), vec![video(0x97, remux, Some(150), 20 * GB), video(0x98, small, Some(3), 1_700_000_000)])];
+    let wanted = night(Namesakes::Leading, 1968);
+    assert_eq!(played(&wanted, watching_on(1170, 2532, 3.0), &runs), [small, remux]);
+    assert_eq!(played(&wanted, watching_on(3840, 2160, 1.0), &runs), [remux, small], "28 Mbit/s streams to a 4K TV");
+    assert_eq!(played(&wanted, mac(), &runs), [remux, small], "this Mac reads the file from disk");
+}
+
 fn friday() -> Wanted {
     Wanted {
         name: "His Girl Friday".into(),

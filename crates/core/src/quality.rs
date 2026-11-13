@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,18 @@ impl Resolution {
             1200.. => Self::P720,
             _ => Self::Sd,
         })
+    }
+}
+
+/// The Mbit/s at each resolution that looks right and streams comfortably. A small encode of a
+/// popular release sits low in it, and a remux runs above it.
+pub fn band(resolution: Option<Resolution>) -> RangeInclusive<f64> {
+    match resolution {
+        Some(Resolution::Sd) => 0.3..=4.0,
+        Some(Resolution::P720) => 0.6..=8.0,
+        Some(Resolution::P1080) => 1.0..=16.0,
+        Some(Resolution::P2160) => 3.0..=40.0,
+        None => 0.3..=16.0,
     }
 }
 
