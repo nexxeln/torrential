@@ -736,6 +736,28 @@ async fn a_title_whose_file_the_browser_cannot_read_starts_the_ffmpeg_fetch_as_i
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_paired_device_may_fetch_ffmpeg_and_a_stranger_may_not() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let Some(phone) = On::pair(&h).await else { return };
+    let (status, _, body) = exchange(Page::to(&h, phone.ip()).await, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"].clone();
+    assert_eq!((status, code), (401, json!("not_paired")));
+    let (status, _, _) = fetch(&h, "POST", "/api/ffmpeg", &["Content-Type: text/plain"], "{}").await;
+    assert_eq!(status, 415, "a form another website can send is refused");
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "neither starts a download");
+
+    let (status, _, body) = fetch_on(&h, &phone, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!((status, lines(&body).pop()), (200, Some(json!({ "type": "ready" }))));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
     let calls = tempfile::tempdir().unwrap();
     let archive = archive(&calls.path().join("calls"), FILM, "true");
@@ -1908,6 +1930,21 @@ async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg
     assert_eq!(first_tried(&h, &phone, &phone_screen).await, remux.name, "ffmpeg without ffprobe converts nothing");
     StandIns::install(&h, FILM, "");
     assert_eq!(first_tried(&h, &phone, &phone_screen).await, hdr.name, "ffmpeg converts it for the phone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_plays_first_where_the_ffmpeg_that_converts_it_can_still_be_fetched() {
+    let hdr = torrent(0xb1, "Night.of.the.Living.Dead.1968.2160p.UHD.BluRay.REMUX.HDR.HEVC", &[("Night.mp4", MIB)]);
+    let h264 = json!({ "width": 1920, "height": 1080, "scale": 1, "playback": "h264" });
+    let pinned = build("http://127.0.0.1:9/ffmpeg.tar.xz".into(), b"");
+    let (fetches, _) = titles::night_with(Outside { fetch: Fetch::Build(pinned.clone()), ..Outside::default() });
+    let (off, night) = titles::night_with(Outside { fetch: Fetch::Off(pinned), ..Outside::default() });
+    for h in [&fetches, &off] {
+        h.swarm.publish(hdr.clone());
+        h.play_for(&hdr, &[0], Some("tt0063350")).await.unwrap();
+    }
+    assert_eq!(first_tried(&fetches, &On::Mac, &h264).await, hdr.name, "fetching ffmpeg costs less than a download");
+    assert_eq!(first_tried(&off, &On::Mac, &h264).await, night[0].name, "config.yaml turns fetching off");
 }
 
 /// A Torznab indexer on this machine that answers every search with `releases`, each a torrent
