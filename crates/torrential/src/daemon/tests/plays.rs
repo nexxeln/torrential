@@ -662,3 +662,33 @@ async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_ca
     let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
     assert_eq!((jobs.len(), jobs[0].name.as_deref(), error.code), (1, Some("newer"), ErrorCode::DiskFull));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to_the_trash() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { trash_pause: Duration::from_secs(1), ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let set = torrent(0xc7, "set", &[("notes.txt", MIB)]);
+    h.get(h.torrent_file(&set), &[]).await.unwrap();
+    let notes = h.downloads().join("set/notes.txt");
+    written(&notes, MIB);
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let saved = notes.clone();
+    // An editor saves by writing a new file and renaming it over the old one.
+    let save = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let draft = saved.with_file_name(".notes.txt.swp");
+        std::fs::write(&draft, "the person's own notes").unwrap();
+        std::fs::rename(&draft, &saved).unwrap();
+    });
+
+    let removed = h.rm(vec![prefix(&set)], true).await;
+    save.join().unwrap();
+    let kept = Kept { path: notes.clone(), reason: "it was replaced after you asked to delete it".into() };
+    assert_eq!((removed[0].trashed.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "the person's own notes");
+    let trashed = std::fs::read_dir(h.dir.path().join("trash/files")).map_or(0, Iterator::count);
+    assert_eq!(trashed, 0);
+}

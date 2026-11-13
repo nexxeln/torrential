@@ -55,6 +55,8 @@ struct Outside {
     idle_after: Duration,
     /// Holds back some of the engine's events while it is closed.
     gate: Option<Gate>,
+    /// How long a file waits between its check and its move to the Trash.
+    trash_pause: Duration,
 }
 
 impl Default for Outside {
@@ -67,6 +69,7 @@ impl Default for Outside {
             plays_max: 20 * GIB,
             idle_after: IDLE_AFTER,
             gate: None,
+            trash_pause: Duration::ZERO,
         }
     }
 }
@@ -84,6 +87,7 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
         plays: Plays { root: dir.join("plays"), max: outside.plays_max, idle_after: outside.idle_after },
         trash: Trash::At(dir.join("trash")),
         deletion_pause: Duration::ZERO,
+        trash_pause: outside.trash_pause,
     }
 }
 
@@ -1676,4 +1680,9 @@ fn settings_for_tests_reach_only_an_engine_a_test_started() {
     assert_eq!(trash(&[named, ("HOME", "/home/ada")]), Trash::system(std::path::Path::new("/home/ada/.local/share")));
     assert_eq!(trash(&[named, ("TORRENTIAL_TEST_ENGINE", "fake")]), Trash::At("/tmp/trash".into()));
     assert_eq!(trash(&[("TORRENTIAL_TEST_NETWORK", "loopback")]), Trash::At("/th/state/trash".into()));
+
+    let trash_pause = |pairs: &[(&str, &str)]| super::trash_pause(&env(pairs));
+    let held = ("TORRENTIAL_TEST_TRASH_PAUSE", "5s");
+    assert_eq!(trash_pause(&[held]), Duration::ZERO);
+    assert_eq!(trash_pause(&[held, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(5));
 }

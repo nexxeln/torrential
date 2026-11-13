@@ -44,6 +44,9 @@ pub struct OwnerConfig {
     /// How long a play leaving the plays folder waits before it goes: no time, except in a test
     /// that does something in between.
     pub deletion_pause: Duration,
+    /// How long a file waits between the check that it is the file to move to the Trash and the
+    /// move: no time, except in a test that changes it in between.
+    pub trash_pause: Duration,
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T, Error>>;
@@ -328,7 +331,7 @@ impl Owner {
         config: OwnerConfig,
     ) -> Result<Self, Error> {
         // Opened first, for a plays folder other than the one used before changes what the plays are.
-        let deleter = Deleter::open(&config.plays.root, config.trash.clone(), &mut store)?;
+        let deleter = Deleter::open(&config.plays.root, config.trash.clone(), config.trash_pause, &mut store)?;
         let mut jobs = BTreeMap::new();
         for stored in store.jobs()? {
             let metainfo = match &stored.metainfo {

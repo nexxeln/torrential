@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
+use super::deleter::Identity;
+
 /// Where the files of a download in a folder the person chose go when they delete them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Trash {
@@ -25,6 +27,8 @@ pub enum Trash {
 }
 
 const NO_TRASH: &str = "there is no Trash on the disk it is on";
+const NO_SAFE_MOVE: &str = "the disk it is on cannot move it to the Trash without risk of replacing a file there";
+const REPLACED: &str = "it was replaced after you asked to delete it";
 
 impl Trash {
     /// The person's Trash on this system. `data_home` is `$XDG_DATA_HOME`, or `~/.local/share`.
@@ -32,27 +36,97 @@ impl Trash {
         if cfg!(target_os = "macos") { Self::Finder } else { Self::Freedesktop { home: data_home.join("Trash") } }
     }
 
-    /// Moves the file `name` in `folder` to the Trash. `path` is where the person knows it to be.
-    /// A file that cannot go stays where it is, and the error says why.
-    pub fn put(&self, folder: &OwnedFd, name: &OsStr, path: &Path) -> Result<(), String> {
+    /// Moves the file `name` in `folder` to the Trash, while it is the file `file`. `path` is
+    /// where the person knows it to be. A file that cannot go stays where it is, and the error
+    /// says why.
+    pub fn put(&self, folder: &OwnedFd, name: &OsStr, path: &Path, file: Identity) -> Result<(), String> {
         match self {
-            Self::Finder => finder(folder, name),
+            Self::Finder => finder(folder, name, file),
             Self::Freedesktop { home } => {
                 let (trash, from) = freedesktop(home, folder, path)?;
-                put_in(&trash, folder, name, &from)
+                put_in(&trash, folder, name, &from, file, WAYS)
             }
             Self::At(dir) => {
                 std::fs::create_dir_all(dir).map_err(|_| NO_TRASH)?;
-                put_in(&open(CWD, dir)?, folder, name, path)
+                put_in(&open(CWD, dir)?, folder, name, path, file, WAYS)
             }
         }
+    }
+}
+
+/// A way to move a file to a new name that fails when the name is taken. A disk may lack one.
+#[derive(Clone, Copy, Debug)]
+enum Way {
+    /// One rename that never replaces.
+    Rename,
+    /// A second name for the file, then the first one removed.
+    Link,
+}
+
+/// Every way, in the order tried.
+const WAYS: &[Way] = &[Way::Rename, Way::Link];
+
+/// Moves `name` in `from` to `to` in `into` without replacing what is there: it fails with EXIST
+/// when `to` is taken, and with NOTSUP when the disk has none of `ways`.
+fn move_new(from: &OwnedFd, name: &OsStr, into: &OwnedFd, to: &OsStr, ways: &[Way]) -> Result<(), Errno> {
+    for way in ways {
+        let (moved, unsupported): (_, &[Errno]) = match way {
+            Way::Rename => (
+                rustix::fs::renameat_with(from, name, into, to, RenameFlags::NOREPLACE),
+                &[Errno::INVAL, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP],
+            ),
+            // A disk with no second names, as FAT, refuses one with PERM.
+            Way::Link => (
+                rustix::fs::linkat(from, name, into, to, AtFlags::empty()).and_then(|()| {
+                    rustix::fs::unlinkat(from, name, AtFlags::empty()).inspect_err(|_| {
+                        let _ = rustix::fs::unlinkat(into, to, AtFlags::empty());
+                    })
+                }),
+                &[Errno::PERM, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP],
+            ),
+        };
+        match moved {
+            Err(e) if unsupported.contains(&e) => continue,
+            moved => return moved,
+        }
+    }
+    Err(Errno::NOTSUP)
+}
+
+/// What a move to the Trash took when it was not the file checked: something took the file's
+/// place before the move.
+enum Replaced {
+    /// It went back where it was.
+    PutBack,
+    /// Something else is at its name by now, so it stays in the Trash.
+    Kept,
+}
+
+impl Replaced {
+    fn why(self) -> String {
+        match self {
+            Replaced::PutBack => REPLACED.into(),
+            Replaced::Kept => format!("{REPLACED}, and what took its place is in the Trash, as its name is taken now"),
+        }
+    }
+}
+
+/// Checks that a move took the file `file` to `to` in `into`, and puts anything else back at
+/// `name` in `folder`, where it was.
+fn check_moved(into: &OwnedFd, to: &OsStr, folder: &OwnedFd, name: &OsStr, file: Identity) -> Result<(), Replaced> {
+    match rustix::fs::statat(into, to, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if Identity::of(&stat) == file => Ok(()),
+        _ => match move_new(into, to, folder, name, WAYS) {
+            Ok(()) => Err(Replaced::PutBack),
+            Err(_) => Err(Replaced::Kept),
+        },
     }
 }
 
 /// NSFileManager's `trashItemAtURL`, as Finder moves a file to the Trash, never deletes: on a
 /// disk with no Trash it fails.
 #[cfg(target_os = "macos")]
-fn finder(folder: &OwnedFd, name: &OsStr) -> Result<(), String> {
+fn finder(folder: &OwnedFd, name: &OsStr, file: Identity) -> Result<(), String> {
     use objc2_foundation::{NSFileManager, NSURL};
     use std::ffi::CString;
     use std::ptr::NonNull;
@@ -68,18 +142,25 @@ fn finder(folder: &OwnedFd, name: &OsStr) -> Result<(), String> {
         let path = NonNull::new(path.as_ptr().cast_mut()).expect("a C string is never null");
         // `path` is a C string that outlives the call.
         let url = unsafe { NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(path, false, None) };
-        NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|error| {
-            if error.code() == NS_FEATURE_UNSUPPORTED_ERROR {
-                NO_TRASH.to_string()
-            } else {
-                failed(error.localizedDescription().to_string())
-            }
-        })
+        let mut moved = None;
+        NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, Some(&mut moved)).map_err(
+            |error| {
+                if error.code() == NS_FEATURE_UNSUPPORTED_ERROR {
+                    NO_TRASH.to_string()
+                } else {
+                    failed(error.localizedDescription().to_string())
+                }
+            },
+        )?;
+        let unchecked = "it is in the Trash, which did not say where, so torrential cannot check it was the file";
+        let at = moved.and_then(|url| url.path()).map(|path| PathBuf::from(path.to_string())).ok_or(unchecked)?;
+        let (Some(dir), Some(to)) = (at.parent(), at.file_name()) else { return Err(unchecked.into()) };
+        check_moved(&open(CWD, dir).map_err(|_| unchecked)?, to, folder, name, file).map_err(Replaced::why)
     })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn finder(_: &OwnedFd, _: &OsStr) -> Result<(), String> {
+fn finder(_: &OwnedFd, _: &OsStr, _: Identity) -> Result<(), String> {
     Err(NO_TRASH.to_string())
 }
 
@@ -113,10 +194,19 @@ fn freedesktop(home: &Path, folder: &OwnedFd, path: &Path) -> Result<(OwnedFd, P
     }
 }
 
-/// Moves `name` in `folder` into the freedesktop trash `trash`, noting that it came from `from`.
-fn put_in(trash: &OwnedFd, folder: &OwnedFd, name: &OsStr, from: &Path) -> Result<(), String> {
+/// Moves `name` in `folder` into the freedesktop trash `trash`, noting that it came from `from`,
+/// in one of `ways`, and puts it back when it was not the file `file`.
+fn put_in(
+    trash: &OwnedFd,
+    folder: &OwnedFd,
+    name: &OsStr,
+    from: &Path,
+    file: Identity,
+    ways: &[Way],
+) -> Result<(), String> {
     let failed = |e: Errno| match e {
         Errno::XDEV => NO_TRASH.to_string(),
+        Errno::NOTSUP => NO_SAFE_MOVE.to_string(),
         e => format!("it could not go to the Trash: {}", io::Error::from(e)),
     };
     let (files, info) = (make_folder(trash, "files")?, make_folder(trash, "info")?);
@@ -134,14 +224,17 @@ fn put_in(trash: &OwnedFd, folder: &OwnedFd, name: &OsStr, from: &Path) -> Resul
         };
         let moved = match std::fs::File::from(note).write_all(text.as_bytes()) {
             Err(e) => Err(Errno::from_io_error(&e).unwrap_or(Errno::IO)),
-            Ok(()) => match rustix::fs::renameat_with(folder, name, &files, &named, RenameFlags::NOREPLACE) {
-                // A file system that cannot promise not to replace relies on the name taken in info.
-                Err(Errno::INVAL | Errno::NOSYS) => rustix::fs::renameat(folder, name, &files, &named),
-                moved => moved,
-            },
+            Ok(()) => move_new(folder, name, &files, &named, ways),
         };
         match moved {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                return check_moved(&files, &named, folder, name, file).map_err(|replaced| {
+                    if let Replaced::PutBack = replaced {
+                        let _ = rustix::fs::unlinkat(&info, &entry, AtFlags::empty());
+                    }
+                    replaced.why()
+                });
+            }
             Err(e) => {
                 let _ = rustix::fs::unlinkat(&info, &entry, AtFlags::empty());
                 if e != Errno::EXIST {
@@ -218,6 +311,77 @@ mod tests {
         rustix::fs::openat(CWD, path, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).unwrap()
     }
 
+    fn identity(path: &Path) -> Identity {
+        use std::os::unix::fs::MetadataExt;
+        let found = std::fs::symlink_metadata(path).unwrap();
+        Identity { device: found.dev(), inode: found.ino() }
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> =
+            std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        names
+    }
+
+    /// A Downloads folder holding `film.mkv`, and a trash whose `files` already has a file of
+    /// that name, left there without its note.
+    fn left_in_trash() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, trash) = (tmp.path().join("Downloads"), tmp.path().join("trash"));
+        std::fs::create_dir_all(trash.join("files")).unwrap();
+        std::fs::create_dir_all(trash.join("info")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(trash.join("files/film.mkv"), "left there").unwrap();
+        (tmp, dir, trash)
+    }
+
+    #[test]
+    fn a_file_left_in_the_trash_without_its_note_is_never_replaced() {
+        let (_tmp, dir, trash) = left_in_trash();
+        let film = dir.join("film.mkv");
+        // The second time is a disk with no rename that never replaces, which moves by a link.
+        for ways in [WAYS, &[Way::Link]] {
+            std::fs::write(&film, "film").unwrap();
+            put_in(&folder(&trash), &folder(&dir), OsStr::new("film.mkv"), &film, identity(&film), ways).unwrap();
+        }
+        let read = |name: &str| std::fs::read_to_string(trash.join("files").join(name)).unwrap();
+        assert_eq!([read("film.mkv"), read("film.2.mkv"), read("film.3.mkv")], ["left there", "film", "film"]);
+        assert_eq!(names(&trash.join("info")), ["film.2.mkv.trashinfo", "film.3.mkv.trashinfo"]);
+        assert!(!film.exists());
+    }
+
+    #[test]
+    fn a_file_stays_where_it_is_on_a_disk_that_cannot_move_it_without_risk_of_replacing_another() {
+        let (_tmp, dir, trash) = left_in_trash();
+        let film = dir.join("film.mkv");
+        std::fs::write(&film, "film").unwrap();
+        let why = put_in(&folder(&trash), &folder(&dir), OsStr::new("film.mkv"), &film, identity(&film), &[]);
+        let refused = "the disk it is on cannot move it to the Trash without risk of replacing a file there";
+        assert_eq!(why, Err(refused.to_string()));
+        assert_eq!(std::fs::read_to_string(&film).unwrap(), "film");
+        assert_eq!(std::fs::read_to_string(trash.join("files/film.mkv")).unwrap(), "left there");
+        assert_eq!(names(&trash.join("info")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_file_put_in_place_of_the_one_checked_goes_back_where_it_was() {
+        let (_tmp, dir, trash) = left_in_trash();
+        let film = dir.join("film.mkv");
+        std::fs::write(&film, "the download's film").unwrap();
+        let checked = identity(&film);
+        // An editor saves by writing a new file and renaming it over the old one.
+        std::fs::write(dir.join(".film.mkv.tmp"), "the person's own film").unwrap();
+        std::fs::rename(dir.join(".film.mkv.tmp"), &film).unwrap();
+        for ways in [WAYS, &[Way::Link]] {
+            let why = put_in(&folder(&trash), &folder(&dir), OsStr::new("film.mkv"), &film, checked, ways);
+            assert_eq!(why, Err("it was replaced after you asked to delete it".to_string()), "{ways:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&film).unwrap(), "the person's own film");
+        assert_eq!(names(&trash.join("files")), ["film.mkv"]);
+        assert_eq!(names(&trash.join("info")), Vec::<String>::new());
+    }
+
     #[test]
     fn a_file_goes_to_a_freedesktop_trash_under_a_name_no_other_file_there_has() {
         let tmp = tempfile::tempdir().unwrap();
@@ -225,7 +389,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for (text, n) in [("first", 1), ("second", 2)] {
             std::fs::write(dir.join("a film.mkv"), text).unwrap();
-            trash.put(&folder(&dir), OsStr::new("a film.mkv"), &dir.join("a film.mkv")).unwrap();
+            let file = identity(&dir.join("a film.mkv"));
+            trash.put(&folder(&dir), OsStr::new("a film.mkv"), &dir.join("a film.mkv"), file).unwrap();
             assert!(!dir.join("a film.mkv").exists(), "{n}");
         }
         let files = tmp.path().join("trash/files");
@@ -241,9 +406,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("Downloads");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("disc.iso"), "disc").unwrap();
+        let disc = dir.join("disc.iso");
+        std::fs::write(&disc, "disc").unwrap();
         let trash = Trash::Freedesktop { home: tmp.path().join("share/Trash") };
-        trash.put(&folder(&dir), OsStr::new("disc.iso"), &dir.join("disc.iso")).unwrap();
+        trash.put(&folder(&dir), OsStr::new("disc.iso"), &disc, identity(&disc)).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.path().join("share/Trash/files/disc.iso")).unwrap(), "disc");
     }
 
