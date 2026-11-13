@@ -38,4 +38,7 @@ pub struct DeviceList {
     /// The most recently added last.
     pub devices: Vec<Device>,
     pub offer: Option<PairingOffer>,
+    /// Why no device can reach this machine while one should, in one sentence. `None` while
+    /// they can.
+    pub unreachable: Option<String>,
 }

@@ -341,10 +341,50 @@ async fn a_code_opened_while_the_engine_starts_listening_still_opens_it_to_the_n
     let _ = (&mut h.running.http).await;
     let ctx = h.running.ctx.clone();
     let reach = ctx.devices.reach();
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, ctx.http_port)).await.unwrap();
+    // Another port than the engine's, which a client socket elsewhere may take once it is free.
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     devices(&h, Request::AddDevice).await;
     tokio::spawn(http::accept(ctx, listener, reach));
     listening(&h, ip, true).await;
+}
+
+/// Another program on `port` of the home network, so the engine cannot listen there. macOS lets
+/// it sit on every address beside the engine's 127.0.0.1, and Linux on the home address.
+fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {
+    let at = if cfg!(target_os = "macos") { Ipv4Addr::UNSPECIFIED } else { ip };
+    std::net::TcpListener::bind((at, port)).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_keeps_trying_the_home_network_while_another_program_holds_its_port() {
+    let Some(ip) = lan() else { return };
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let squatter = squatter(ip, port);
+    devices(&h, Request::AddDevice).await;
+    let why = format!(
+        "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
+    );
+    unreachable(&h, Some(&why)).await;
+    let me = mac_again(port).get("/api/me").await;
+    assert_eq!(me.json(), serde_json::json!({ "asker": "mac" }), "the Mac keeps 127.0.0.1");
+    assert_eq!(mac_again(port).get("/api/devices").await.json()["unreachable"], why, "the Devices page");
+    drop(squatter);
+    listening(&h, ip, true).await;
+    unreachable(&h, None).await;
+}
+
+/// Waits until the device list gives `why` no phone or TV can reach the engine.
+async fn unreachable(h: &Harness, why: Option<&str>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let listed = devices(h, Request::Devices).await.unreachable;
+        if listed.as_deref() == why {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the list says {listed:?}, not {why:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -353,7 +393,10 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
     let port = h.running.ctx.http_port;
     let mac = Browser { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), port, host: format!("127.0.0.1:{port}"), cookie: None };
     assert_eq!(mac.get("/api/me").await.json(), serde_json::json!({ "asker": "mac" }));
-    assert_eq!(mac.get("/api/devices").await.json(), serde_json::json!({ "devices": [], "offer": null }));
+    assert_eq!(
+        mac.get("/api/devices").await.json(),
+        serde_json::json!({ "devices": [], "offer": null, "unreachable": null })
+    );
     let opened = mac.send("POST", "/api/devices/add", &[], "{}").await.json();
     let rows = opened["offer"]["qr"].as_array().unwrap();
     assert!(rows.len() >= 21 && rows.iter().all(|row| row.as_str().unwrap().len() == rows.len()));

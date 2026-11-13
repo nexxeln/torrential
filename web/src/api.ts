@@ -626,6 +626,8 @@ export interface DeviceList {
   /** The most recently added last. */
   devices: Device[];
   offer: PairingOffer | null;
+  /** Why no phone or TV can reach the Mac while one should, in one sentence. */
+  unreachable: string | null;
 }
 
 /** Whether the browser asking is the Mac itself or a paired device. */

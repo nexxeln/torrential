@@ -25,6 +25,8 @@ pub const PORT: u16 = 47919;
 const CHUNK: u64 = 1 << 20;
 const POLL: Duration = Duration::from_millis(100);
 const STALL: Duration = Duration::from_secs(5 * 60);
+/// How often the engine tries the home network again while another program holds its port.
+const RETRY: Duration = Duration::from_secs(2);
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
 /// Smaller chunks of a streamed answer go out in one write with their framing.
@@ -96,11 +98,19 @@ impl Peer {
     }
 }
 
-/// Serves connections, and moves the listening socket whenever `reach` changes where the engine
-/// should listen. `reach` was read when `listener` was bound, so a change since then counts.
-/// Connections already open stay open.
+/// Serves connections, and keeps the listening socket where `reach` says the engine should listen,
+/// trying the home network again every few seconds while another program holds the port. `reach`
+/// was read when `listener` was bound, so a change since then counts. Connections already open
+/// stay open.
 pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut reach: watch::Receiver<Reach>) {
+    let mut retry = tokio::time::Instant::now();
     loop {
+        let want = *reach.borrow_and_update();
+        if reach_of(&listener) != want && tokio::time::Instant::now() >= retry {
+            listener = listen(listener, want, ctx.http_port, &ctx.devices).await;
+            retry = tokio::time::Instant::now() + RETRY;
+        }
+        let astray = reach_of(&listener) != want;
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((stream, remote)) = accepted else { return };
@@ -127,12 +137,9 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
                 if changed.is_err() {
                     return;
                 }
-                let to = *reach.borrow_and_update();
-                if reach_of(&listener) != to {
-                    drop(listener);
-                    listener = listen(to, ctx.http_port).await;
-                }
+                retry = tokio::time::Instant::now();
             }
+            () = tokio::time::sleep_until(retry), if astray => {}
         }
     }
 }
@@ -145,9 +152,11 @@ fn reach_of(listener: &tokio::net::TcpListener) -> Reach {
     }
 }
 
-/// A socket on `port` where `reach` says. Linux refuses every address while 127.0.0.1 holds the
-/// port, so the old socket closes first. When the home network cannot be had, 127.0.0.1 can.
-async fn listen(reach: Reach, port: u16) -> tokio::net::TcpListener {
+/// A socket on `port` where `reach` says, in place of `old`. Linux refuses every address while
+/// 127.0.0.1 holds the port, so the old socket closes first. When the home network cannot be had,
+/// 127.0.0.1 can, and `devices` records why.
+async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: &Devices) -> tokio::net::TcpListener {
+    drop(old);
     let open = |ip: Ipv4Addr| {
         let listener = TcpListener::bind((ip, port))?;
         listener.set_nonblocking(true)?;
@@ -156,13 +165,21 @@ async fn listen(reach: Reach, port: u16) -> tokio::net::TcpListener {
     loop {
         match open(address(reach)) {
             Ok(listener) => {
+                devices.refused(None);
                 super::log(&match reach {
                     Reach::Network => format!("listening on the home network on port {port}"),
                     Reach::Loopback => format!("listening on 127.0.0.1 only on port {port}"),
                 });
                 return listener;
             }
-            Err(e) => super::log(&format!("cannot listen on {}:{port}: {e}", address(reach))),
+            Err(e) => {
+                // The engine tries the home network again every few seconds, so each new reason
+                // is logged once.
+                let new = reach == Reach::Loopback || devices.refused(Some(e.kind()));
+                if new {
+                    super::log(&format!("cannot listen on {}:{port}: {e}", address(reach)));
+                }
+            }
         }
         if reach == Reach::Network
             && let Ok(listener) = open(Ipv4Addr::LOCALHOST)

@@ -376,7 +376,7 @@ mod tests {
     fn a_device_list_reads_as_one_flat_document() {
         let list = Response::Devices { list: crate::DeviceList::default() };
         let text = serde_json::to_string(&list).unwrap();
-        assert_eq!(text, r#"{"type":"devices","devices":[],"offer":null}"#);
+        assert_eq!(text, r#"{"type":"devices","devices":[],"offer":null,"unreachable":null}"#);
         assert_eq!(serde_json::from_str::<Response>(&text).unwrap(), list);
         let remove = serde_json::to_value(Request::RemoveDevice { id: "3f9a0c2e".into() }).unwrap();
         assert_eq!(remove, serde_json::json!({"op": "remove_device", "id": "3f9a0c2e"}));

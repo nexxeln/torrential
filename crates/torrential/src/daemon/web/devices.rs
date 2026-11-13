@@ -121,11 +121,12 @@ fn local_only(asker: &Asker) -> Result<(), Error> {
 }
 
 /// The list as the web app shows it, with the offer's QR code.
-fn shown(DeviceList { devices, offer }: DeviceList) -> Result<Value, Error> {
+fn shown(DeviceList { devices, offer, unreachable }: DeviceList) -> Result<Value, Error> {
     #[derive(Serialize)]
     struct Shown {
         devices: Vec<Device>,
         offer: Option<Offer>,
+        unreachable: Option<String>,
     }
     #[derive(Serialize)]
     struct Offer {
@@ -135,5 +136,5 @@ fn shown(DeviceList { devices, offer }: DeviceList) -> Result<Value, Error> {
         qr: Vec<String>,
     }
     let offer = offer.map(|offer| Offer { qr: qr(&offer.url), offer });
-    value(Shown { devices, offer })
+    value(Shown { devices, offer, unreachable })
 }

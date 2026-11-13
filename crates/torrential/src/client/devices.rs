@@ -32,7 +32,7 @@ pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Resul
                 let mut stdout = anstream::stdout().lock();
                 let _ = stdout.write_all(blocks(&qr(&offer.url)).as_bytes());
             }
-            offer_doc(offer, now())
+            offer_doc(offer, list.unreachable.as_deref(), now())
         }
         _ => list_doc(&list, now()),
     };
@@ -59,11 +59,12 @@ fn list_doc(list: &DeviceList, now: i64) -> Doc {
             offer.code, offer.address
         ));
     }
+    summary.extend(list.unreachable.clone());
     let next = list.devices.is_empty().then(|| "torrential devices add".to_string());
     Doc { body: Body::Table { header: vec!["ID", "NAME", "ADDED", "SEEN"], rows }, summary, next }
 }
 
-fn offer_doc(offer: &PairingOffer, now: i64) -> Doc {
+fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
     let mut fields = vec![
         ("address", Cell::styled(format!("http://{}", offer.address), Token::Accent)),
         ("code", Cell::styled(&offer.code, Token::Accent)),
@@ -72,13 +73,10 @@ fn offer_doc(offer: &PairingOffer, now: i64) -> Doc {
         fields.push(("or", Cell::new(format!("http://{lan}"))));
     }
     fields.push(("expires", Cell::new(format!("in {}", format::age(Some(now), offer.expires_at)))));
-    Doc {
-        body: Body::Fields { title: Vec::new(), fields },
-        summary: vec![
-            "scan the QR code with the phone's camera, or open the address on the TV and enter the code".into(),
-        ],
-        next: Some("torrential devices".into()),
-    }
+    let mut summary =
+        vec!["scan the QR code with the phone's camera, or open the address on the TV and enter the code".to_string()];
+    summary.extend(unreachable.map(String::from));
+    Doc { body: Body::Fields { title: Vec::new(), fields }, summary, next: Some("torrential devices".into()) }
 }
 
 /// A QR code in half blocks, two rows to a line, dark on light whatever the terminal's colors,
@@ -130,6 +128,7 @@ mod tests {
                 Device { id: "b71d04aa".into(), name: "LG TV".into(), added_at: NOW - 3_600, seen_at: NOW - 3_600 },
             ],
             offer: Some(offer()),
+            unreachable: None,
         };
         assert_eq!(
             list_doc(&list, NOW).plain(),
@@ -144,9 +143,19 @@ mod tests {
     }
 
     #[test]
+    fn the_list_says_why_no_phone_or_tv_can_reach_the_mac() {
+        let why = "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port 47919 (address in use) and keeps trying";
+        let list = DeviceList { unreachable: Some(why.into()), ..DeviceList::default() };
+        assert_eq!(
+            list_doc(&list, NOW).plain(),
+            format!("ID\tNAME\tADDED\tSEEN\n# 0 devices\n# {why}\nnext: torrential devices add\n")
+        );
+    }
+
+    #[test]
     fn adding_shows_the_address_and_the_code_to_type() {
         assert_eq!(
-            offer_doc(&offer(), NOW).plain(),
+            offer_doc(&offer(), None, NOW).plain(),
             "address: http://studio-mac.local:47919\n\
              code:    482913\n\
              or:      http://192.168.1.23:47919\n\

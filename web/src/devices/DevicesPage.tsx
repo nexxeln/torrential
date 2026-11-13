@@ -132,6 +132,11 @@ export function DevicesPage() {
             {state.error.hint && <span className="text-pencil"> {sentence(state.error.hint)}</span>}
           </p>
         )}
+        {list?.unreachable && (
+          <p role="alert" className="max-w-[60ch] text-base text-pretty text-error sm:text-sm">
+            {sentence(list.unreachable)}
+          </p>
+        )}
         {list &&
           (offer ? (
             <Offer offer={offer} now={now} />

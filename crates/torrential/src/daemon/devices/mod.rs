@@ -6,6 +6,7 @@
 pub mod names;
 
 use std::collections::HashMap;
+use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -182,6 +183,9 @@ struct State {
     /// Pairing tries by address: the minute, and the tries in it.
     tries: HashMap<IpAddr, (i64, u32)>,
     names: Names,
+    /// Why the engine's last try to listen on the home network failed, or `None` after one that
+    /// worked.
+    refused: Option<io::ErrorKind>,
 }
 
 impl State {
@@ -210,7 +214,12 @@ impl State {
     fn list(&self, port: u16) -> DeviceList {
         let mut devices: Vec<Device> = self.paired.values().map(|paired| paired.device.clone()).collect();
         devices.sort_by(|a, b| (a.added_at, &a.id).cmp(&(b.added_at, &b.id)));
-        DeviceList { devices, offer: self.offer(port) }
+        let unreachable = self.refused.filter(|_| self.reach() == Reach::Network).map(|why| {
+            format!(
+                "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} ({why}) and keeps trying"
+            )
+        });
+        DeviceList { devices, offer: self.offer(port), unreachable }
     }
 
     /// Counts a pairing try from `from`. False once it has made too many this minute.
@@ -265,7 +274,14 @@ impl Devices {
             }
             paired
         };
-        let state = State { paired, offer: None, grants: HashMap::new(), tries: HashMap::new(), names: Names::read() };
+        let state = State {
+            paired,
+            offer: None,
+            grants: HashMap::new(),
+            tries: HashMap::new(),
+            names: Names::read(),
+            refused: None,
+        };
         let reach = watch::Sender::new(state.reach());
         Ok(Self {
             conn: Mutex::new(conn),
@@ -305,6 +321,12 @@ impl Devices {
     /// Returns once the engine stops listening on the home network.
     pub async fn closed(&self) {
         let _ = self.reach.subscribe().wait_for(|reach| *reach == Reach::Loopback).await;
+    }
+
+    /// Records why the engine could not listen on the home network, or `None` once it could. True
+    /// when that differs from what was recorded.
+    pub fn refused(&self, why: Option<io::ErrorKind>) -> bool {
+        std::mem::replace(&mut self.state().refused, why) != why
     }
 
     /// This Mac's .local name, as phones and TVs on the home network open it.
