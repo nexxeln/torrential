@@ -54,8 +54,12 @@ pub enum Request {
         refs: Vec<String>,
         all: bool,
     },
+    /// Takes downloads off the list. A play's files go with it. Files in a folder the person chose
+    /// go only with `delete`.
     Remove {
         refs: Vec<String>,
+        #[serde(default)]
+        delete: bool,
     },
     Verify {
         reference: String,
@@ -288,7 +292,7 @@ pub struct DownloadPlan {
 }
 
 /// The result of a pause, resume, remove, or verify for one download.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Change {
     pub id: String,
     pub name: Option<String>,
@@ -296,6 +300,19 @@ pub struct Change {
     pub result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// What `rm` deleted from disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<PathBuf>,
+    /// What `rm` was to delete and left.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<Kept>,
+}
+
+/// A file or folder `rm` was to delete and left, and why.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Kept {
+    pub path: PathBuf,
+    pub reason: String,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

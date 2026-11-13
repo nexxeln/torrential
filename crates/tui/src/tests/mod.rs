@@ -51,6 +51,7 @@ fn job(short: &str, name: &str, status: JobStatus, size: u64, done: u64, rate: u
         selection: Selection::All,
         added_at: CLOCK - days_ago * 86_400,
         title: None,
+        place: torrential_core::Place::Folder,
     }
 }
 

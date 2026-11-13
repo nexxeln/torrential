@@ -97,12 +97,12 @@ async fn fetch(h: &Harness, method: &str, path: &str, headers: &[&str], body: &s
     (status, headers, body)
 }
 
-async fn get(h: &Harness, path: &str) -> (u16, Value) {
+pub(super) async fn get(h: &Harness, path: &str) -> (u16, Value) {
     let (status, _, body) = fetch(h, "GET", path, &[], "").await;
     (status, serde_json::from_slice(&body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&body))))
 }
 
-async fn post(h: &Harness, path: &str, body: Value) -> (u16, Value) {
+pub(super) async fn post(h: &Harness, path: &str, body: Value) -> (u16, Value) {
     let (status, _, body) = fetch(h, "POST", path, &["Content-Type: application/json"], &body.to_string()).await;
     (status, serde_json::from_slice(&body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&body))))
 }
@@ -112,7 +112,7 @@ fn error((status, body): &(u16, Value)) -> (u16, &str, &str) {
     (*status, body["error"]["code"].as_str().unwrap_or_default(), body["error"]["message"].as_str().unwrap_or_default())
 }
 
-fn magnet_link(torrent: &FakeTorrentFile) -> String {
+pub(super) fn magnet_link(torrent: &FakeTorrentFile) -> String {
     let Target::Magnet(link) = magnet(torrent) else { unreachable!() };
     link
 }
@@ -291,12 +291,12 @@ async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
     h.swarm.set_rate(100 * GIB);
     let clip = include_bytes!("../../../../core/tests/fixtures/media/faststart.mp4");
     let film = torrent(63, "film", &[("film.mp4", clip.len() as u64), ("film.mkv", 5_000)]);
-    std::fs::create_dir_all(h.downloads().join("film")).unwrap();
-    std::fs::write(h.downloads().join("film/film.mp4"), clip).unwrap();
-    written(&h.downloads().join("film/film.mkv"), 5_000);
     h.swarm.publish(film.clone());
     let id = film.info_hash.id().to_hex();
     post(&h, "/api/play", json!({ "ref": magnet_link(&film), "file": 0 })).await;
+    std::fs::create_dir_all(h.play_folder(&film).join("film")).unwrap();
+    std::fs::write(h.play_folder(&film).join("film/film.mp4"), clip).unwrap();
+    written(&h.play_folder(&film).join("film/film.mkv"), 5_000);
     post(&h, "/api/play", json!({ "ref": prefix(&film), "file": 1 })).await;
     let (status, media) = get(&h, &format!("/api/media?id={id}&file=0")).await;
     assert_eq!(status, 200, "{media}");
@@ -548,13 +548,13 @@ async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
     // "déjà vu" in Windows-1252, as old subtitle files are.
     let lines = b"1\n00:00:03,000 --> 00:00:04,000\nd\xE9j\xE0 vu\n";
     let film = torrent(67, "film", &[("film.mkv", made.len() as u64), ("film.fr.srt", lines.len() as u64)]);
-    std::fs::create_dir_all(h.downloads().join("film")).unwrap();
-    std::fs::write(h.downloads().join("film/film.mkv"), &made).unwrap();
-    std::fs::write(h.downloads().join("film/film.fr.srt"), lines).unwrap();
     h.swarm.publish(film.clone());
     let id = film.info_hash.id().to_hex();
     let (status, playing) = post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
     assert_eq!((status, &playing["subtitles"][0]["index"]), (200, &json!(1)), "{playing}");
+    std::fs::create_dir_all(h.play_folder(&film).join("film")).unwrap();
+    std::fs::write(h.play_folder(&film).join("film/film.mkv"), &made).unwrap();
+    std::fs::write(h.play_folder(&film).join("film/film.fr.srt"), lines).unwrap();
 
     let (status, media) = get(&h, &format!("/api/media?id={id}&file=0")).await;
     assert_eq!(status, 200, "{media}");
@@ -627,10 +627,10 @@ async fn a_video_without_subtitles_gets_them_from_online_sources() {
     let h = Harness::new();
     let size = 300_000;
     let film = torrent(68, "Sintel (2010) [1080p]", &[("Sintel.2010.1080p.mkv", size), ("poster.jpg", 9_000)]);
-    let bytes = written(&h.downloads().join("Sintel (2010) [1080p]/Sintel.2010.1080p.mkv"), size);
     h.swarm.publish(film.clone());
     let id = film.info_hash.id().to_hex();
     post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    let bytes = written(&h.play_folder(&film).join("Sintel (2010) [1080p]/Sintel.2010.1080p.mkv"), size);
     let online = format!("/api/subtitles/online?id={id}&file=0");
 
     // The sources are down. That is not an answer to keep.
@@ -689,9 +689,9 @@ async fn a_video_without_subtitles_gets_them_from_online_sources() {
     // Once the file is on disk, its hash goes with the search, for subtitles timed for this exact file.
     let whole = Harness::new();
     whole.swarm.set_rate(100 * GIB);
-    written(&whole.downloads().join("Sintel (2010) [1080p]/Sintel.2010.1080p.mkv"), size);
     whole.swarm.publish(film.clone());
     post(&whole, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    written(&whole.play_folder(&film).join("Sintel (2010) [1080p]/Sintel.2010.1080p.mkv"), size);
     whole.until("done", |jobs| jobs[0].status.name() == "done").await;
     let (_, found) = get(&whole, &online).await;
     assert_eq!(found["subtitles"][0]["exact"], json!(true));
@@ -750,7 +750,7 @@ async fn the_player_sees_which_parts_of_a_file_have_arrived_and_gets_pictures_on
         fetch(&h, "GET", &format!("/api/thumbnail?id={id}&file=1&t={}", second_of(whole_around)), &[], "").await;
     assert_eq!((status, jpeg.as_slice()), (200, &b"a jpeg"[..]), "{map}");
     assert!(headers.contains("content-type: image/jpeg\n"), "{headers}");
-    let on_disk = h.downloads().join("film/film.mkv").display().to_string();
+    let on_disk = h.play_folder(&film).join("film/film.mkv").display().to_string();
     assert_eq!(
         tools.calls().last().unwrap(),
         &format!(
@@ -794,10 +794,10 @@ async fn a_finished_file_has_every_part_without_asking_the_engine() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
     let film = torrent(70, "film", &[("film.mkv", 4 * super::MIB)]);
-    written(&h.downloads().join("film/film.mkv"), 4 * super::MIB);
     h.swarm.publish(film.clone());
     let id = film.info_hash.id().to_hex();
     post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    written(&h.play_folder(&film).join("film/film.mkv"), 4 * super::MIB);
     h.until("done", |jobs| jobs[0].status.name() == "done").await;
     assert_eq!(get(&h, &format!("/api/pieces?id={id}&file=0")).await, (200, json!({ "pieces": "8".repeat(200) })));
 }
@@ -905,7 +905,7 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_the_connection_while_a_source_sends_nothing_pauses_its_download_and_keeps_what_it_wrote() {
     let (h, night) = titles::night();
-    let third = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
+    let third = h.play_folder(&night[2]).join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
     let body = json!({ "video": "tt0063350", "source": night[2].info_hash.id().to_hex() }).to_string();
     let mut page = Page::open(&h).await;
     page.send("POST", "/api/title/play", &["Content-Type: application/json"], &body).await;

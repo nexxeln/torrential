@@ -125,7 +125,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn remove(&self, id: &str) -> Result<Vec<Change>, Error> {
-        self.changes(Request::Remove { refs: vec![id.to_string()] }, DEFAULT_REPLY_WITHIN)
+        self.changes(Request::Remove { refs: vec![id.to_string()], delete: false }, DEFAULT_REPLY_WITHIN)
     }
 
     fn verify(&self, id: &str) -> Result<Vec<Change>, Error> {

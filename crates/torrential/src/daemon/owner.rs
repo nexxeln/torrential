@@ -11,7 +11,7 @@ use torrential_core::{
 };
 
 use super::admission::{self, Cap, Disk};
-use super::book::{self, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
+use super::book::{self, Home, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
 use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
 };
@@ -20,6 +20,9 @@ use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use plays::{Destination, Plays, Tending};
+
+pub mod plays;
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -31,6 +34,7 @@ pub struct OwnerConfig {
     pub save_resume_every: Duration,
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
+    pub plays: Plays,
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T, Error>>;
@@ -104,7 +108,8 @@ pub struct GetCommand {
 
 pub struct PlayCommand {
     pub source: Source,
-    pub dir: Option<PathBuf>,
+    /// Where the download goes, if the play starts one.
+    pub to: Destination,
     /// Indexes into the torrent's file list.
     pub files: Vec<u32>,
     pub setup_max_size: Option<u64>,
@@ -166,7 +171,7 @@ pub enum Command {
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
     Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
-    Remove { refs: Vec<String>, reply: Reply<Vec<Change>> },
+    Remove { refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>> },
     Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
     StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
@@ -279,6 +284,7 @@ pub struct Owner {
     under_test: BTreeMap<TorrentId, UnderTest>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
+    tending: Tending,
     stopping: Option<Stopping>,
     stopped: bool,
     engine: EngineHandle,
@@ -325,6 +331,7 @@ impl Owner {
         let (updates, _) = broadcast::channel(256);
         let mut owner = Self {
             tombstones: store.tombstones(now)?,
+            tending: Tending::new(store.deletions()?),
             store,
             jobs,
             probes: BTreeSet::new(),
@@ -345,6 +352,8 @@ impl Owner {
             keep_until: None,
             resume_saved_at: Instant::now(),
         };
+        // Nothing is in the engine yet, so what a removal cut short by a crash left goes now.
+        owner.finish_deletions();
         owner.schedule();
         Ok(owner)
     }
@@ -412,9 +421,7 @@ impl Owner {
                 self.adopt(&refs, "resume");
                 let _ = reply.send(self.resume(&refs, all));
             }
-            Command::Remove { refs, reply } => {
-                let _ = reply.send(self.remove(&refs));
-            }
+            Command::Remove { refs, delete, reply } => self.rm(refs, delete, reply),
             Command::Verify { reference, repair, reply } => {
                 self.adopt(std::slice::from_ref(&reference), "verify");
                 let _ = reply.send(self.verify(&reference, repair));
@@ -557,9 +564,10 @@ impl Owner {
     /// `get` as a person runs it, which makes a download under test theirs.
     fn get_by_hand(&mut self, get: GetCommand) -> Result<GetReply, Error> {
         let dry_run = get.dry_run;
-        let reply = self.get(get, None)?;
+        let reply = self.get(get, None, Home::Folder)?;
         if !dry_run {
             self.adopt(&[reply.job.id.to_hex()], "get");
+            self.keep_play(reply.job.id);
         }
         Ok(reply)
     }
@@ -577,8 +585,8 @@ impl Owner {
         }
     }
 
-    /// `title` links a download this creates to the title it is for.
-    fn get(&mut self, get: GetCommand, title: Option<Linked>) -> Result<GetReply, Error> {
+    /// `title` links a download this creates to the title it is for, and `home` says where its files live.
+    fn get(&mut self, get: GetCommand, title: Option<Linked>, home: Home) -> Result<GetReply, Error> {
         let GetCommand { source, dir, files, max_size, setup_max_size, dry_run } = get;
         if !files.is_empty() {
             super::files::compile(&files)?;
@@ -627,6 +635,7 @@ impl Owner {
             piece_map: None,
             files_verified: None,
             title,
+            home,
         };
         if dry_run {
             let job = JobEntry::new(record, metainfo, Observed::Absent).view();
@@ -773,7 +782,7 @@ impl Owner {
     }
 
     fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>), Error> {
-        let PlayCommand { source, dir, files, setup_max_size, title, finish } = play;
+        let PlayCommand { source, to, files, setup_max_size, title, finish } = play;
         let id = match &source {
             Source::Download(id) if self.jobs.contains_key(id) => *id,
             Source::Download(id) => return Err(no_download(&id.to_hex())),
@@ -822,13 +831,26 @@ impl Owner {
                 patterns.push(pattern);
             }
         }
-        if title.is_some() && matches!(before, Before::Absent) {
-            let into = dir.as_deref().unwrap_or(&self.config.default_dir);
-            admission::check_free(&files::footprint(&metainfo, into), id)?;
-        }
-        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false });
-        let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
-        let id = self.get(get, made.filter(|_| matches!(before, Before::Absent)))?.job.id;
+        let absent = matches!(before, Before::Absent);
+        let (dir, home) = if absent { self.destination(id, to)? } else { (None, Home::Folder) };
+        let free = match &title {
+            Some(_) if absent => {
+                let into = dir.as_deref().unwrap_or(&self.config.default_dir);
+                admission::check_free(&files::footprint(&metainfo, into), id)
+            }
+            _ => Ok(()),
+        };
+        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false }).filter(|_| absent);
+        let get =
+            GetCommand { source, dir: dir.clone(), files: patterns, max_size: None, setup_max_size, dry_run: false };
+        let id = match free.and_then(|()| self.get(get, made, home)) {
+            Ok(reply) => reply.job.id,
+            Err(error) => {
+                self.unmade(dir.as_deref(), home);
+                return Err(error);
+            }
+        };
+        self.pressed_play(id, finish);
         match (&title, &self.jobs[&id].record.title) {
             // A download played by hand is being watched, so no title play puts it back.
             (None, _) => self.played(id)?,
@@ -903,7 +925,7 @@ impl Owner {
             Some(PutBack::Pause) => self.pause(vec![id.to_hex()], oneshot::channel().0),
             Some(PutBack::Fail(error)) => self.fail(id, error),
             Some(PutBack::Remove) => {
-                if let Err(error) = self.remove(&[id.to_hex()]) {
+                if let Err(error) = self.remove(&[id.to_hex()], false) {
                     super::log(&format!("{id} stays, for it could not be removed: {}", error.message));
                 }
             }
@@ -1053,7 +1075,7 @@ impl Owner {
 
     fn change(&self, id: TorrentId, result: &str) -> Change {
         let job = &self.jobs[&id];
-        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), path: None }
+        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), ..Change::default() }
     }
 
     fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
@@ -1104,7 +1126,10 @@ impl Owner {
         Ok(changes)
     }
 
-    fn remove(&mut self, refs: &[String]) -> Result<Vec<Change>, Error> {
+    /// Takes downloads off the list. What of them to delete is put on record with each removal,
+    /// and deleted once the engine lets go of it: a play's folder always, and the files of a
+    /// download in a folder the person chose only with `delete`.
+    fn remove(&mut self, refs: &[String], delete: bool) -> Result<Vec<Change>, Error> {
         let mut targets = Vec::new();
         for reference in refs {
             match self.resolve_job(reference, "rm") {
@@ -1125,6 +1150,7 @@ impl Owner {
                     name: tomb.name,
                     result: "already_removed".into(),
                     path: tomb.path,
+                    ..Change::default()
                 }),
                 Ok(id) if !self.jobs.contains_key(&id) => {}
                 Ok(id) => {
@@ -1132,7 +1158,9 @@ impl Owner {
                     let view = job.view();
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
-                    self.store.remove(&tomb)?;
+                    let deletion = plays::deletion(job, delete);
+                    let pending = self.store.remove(&tomb, deletion.as_ref())?;
+                    self.tending.doomed.extend(pending);
                     let job = self.jobs.remove(&id).expect("resolved above");
                     self.streamed.remove(&id);
                     self.under_test.remove(&id);
@@ -1154,6 +1182,7 @@ impl Owner {
                         name: job.record.name,
                         result: "removed".into(),
                         path: view.path,
+                        ..Change::default()
                     });
                 }
             }
@@ -1292,6 +1321,7 @@ impl Owner {
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
                 self.put_back(id);
+                self.finish_deletions();
             }
         }
         self.finish_stop_if_done();
@@ -1702,6 +1732,7 @@ impl Owner {
         self.finish_stop_if_done();
         self.check_idle(now);
         self.save_progress(now);
+        self.finish_deletions();
     }
 
     fn save_progress(&mut self, now: Instant) {

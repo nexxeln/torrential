@@ -38,7 +38,7 @@ Anything else, or a particular release:
 
 Downloads run in a background engine and keep going after your turn. `wait` returns within 100 seconds. Never give it a `--timeout` longer than your tool allows, and never poll with `sleep`. In Claude Code, run `torrential wait <id> --timeout 110m` with `run_in_background` and a `timeout` of 7200000: background commands may run up to 2 hours, foreground ones 10 minutes.
 
-Manage downloads with `status`, `pause`, `resume` (`--all` after a reboot), `verify` (then `wait`), and `rm`, which keeps the files.
+Manage downloads with `status`, `pause`, `resume` (`--all` after a reboot), `verify` (then `wait`), and `rm`. `rm` deletes the files of a play (`"place": "plays"` in `--json`) and keeps the files of any other download unless you add `--delete`. Its `--json` lists what it deleted under `deleted`.
 
 A `# update:` line means a newer torrential is out. Tell the user once and offer `torrential update`, or `torrential setup --updates auto` to always update.
 

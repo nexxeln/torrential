@@ -36,7 +36,8 @@ next:  torrential wait 9b5212
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": null
   },
@@ -80,7 +81,8 @@ next:  torrential wait 6bc1af
           "*.srt"
         ]
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": {
       "selected_files": 2,
@@ -128,7 +130,8 @@ next:  torrential wait 9b5212
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": null
   },
@@ -168,7 +171,8 @@ path:  /Users/ada/Downloads/torrential/archlinux-2026.10.01-x86_64.iso
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": null
   },
@@ -213,7 +217,8 @@ next:  torrential wait 6bc1af
           "*.srt"
         ]
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": {
       "selected_files": 2,
@@ -270,7 +275,8 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt'
           "*.srt"
         ]
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": {
       "selected_files": 2,
@@ -325,7 +331,8 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir <EMPTY 
           "*.srt"
         ]
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": {
       "selected_files": 2,
@@ -381,7 +388,8 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir /Users/
           "*.srt"
         ]
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     "plan": {
       "selected_files": 2,

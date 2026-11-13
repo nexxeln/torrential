@@ -163,14 +163,14 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Err
             value(server::files(ctx, target, METADATA_WAIT).await?)
         }
         (Method::Post, "pause" | "resume" | "remove") => {
-            let Refs { refs } = body(request)?;
+            let Refs { refs, delete } = body(request)?;
             if refs.is_empty() {
                 return Err(Error::new(ErrorCode::Usage, "refs names no download"));
             }
             let changes = match route {
                 "pause" => owner.ask(|reply| Command::Pause { refs, reply }).await?,
                 "resume" => owner.ask(|reply| Command::Resume { refs, all: false, reply }).await?,
-                _ => owner.ask(|reply| Command::Remove { refs, reply }).await?,
+                _ => owner.ask(|reply| Command::Remove { refs, delete, reply }).await?,
             };
             Ok(json!({ "changes": changes }))
         }
@@ -181,6 +181,9 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Err
 #[derive(Deserialize)]
 struct Refs {
     refs: Vec<String>,
+    /// With `remove`, deletes the files of a download in a folder the person chose too.
+    #[serde(default)]
+    delete: bool,
 }
 
 fn method(request: &Request) -> &'static str {

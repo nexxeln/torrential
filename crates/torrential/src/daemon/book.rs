@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Progress, Selection, TitleLink, TorrentId};
+use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Place, Progress, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
 use super::engine_port::{Metainfo, Stats};
@@ -85,6 +85,26 @@ pub struct JobRecord {
     pub piece_map: Option<PieceMap>,
     pub files_verified: Option<Vec<u64>>,
     pub title: Option<Linked>,
+    pub home: Home,
+}
+
+/// Where a download's files live, which decides who may delete them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Home {
+    /// The downloads folder or a folder the person chose. Its files go only when the person asks.
+    Folder,
+    /// A folder of its own inside torrential's plays folder.
+    Plays(Play),
+}
+
+/// A download in torrential's plays folder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Play {
+    /// When someone last pressed play on it or streamed it, in Unix seconds.
+    pub watched_at: i64,
+    /// The person asked for it by hand with `get`, so it never leaves the plays folder or stops
+    /// by itself.
+    pub by_hand: bool,
 }
 
 /// The title a download was made for, and whether it ever reached playing.
@@ -229,6 +249,10 @@ impl JobEntry {
             selection: self.record.selection.clone(),
             added_at: self.record.added_at,
             title: self.record.title.as_ref().map(|linked| linked.link.clone()),
+            place: match self.record.home {
+                Home::Folder => Place::Folder,
+                Home::Plays(_) => Place::Plays,
+            },
         }
     }
 }
@@ -315,6 +339,7 @@ mod tests {
             piece_map: None,
             files_verified: None,
             title: None,
+            home: Home::Folder,
         };
         JobEntry::new(record, None, observed)
     }

@@ -5,7 +5,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
-use super::book::{Intent, JobRecord, Linked};
+use super::book::{Home, Intent, JobRecord, Linked, Play};
+use super::owner::plays::Deletion;
 use super::search_port::SavedLink;
 
 const MIGRATIONS: &[&str] = &[
@@ -84,6 +85,17 @@ CREATE TABLE library (
     saved_at INTEGER NOT NULL
 ) STRICT;
 "#,
+    r#"
+CREATE TABLE plays (
+    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    watched_at INTEGER NOT NULL,
+    by_hand INTEGER NOT NULL DEFAULT 0 CHECK (by_hand IN (0, 1))
+) STRICT;
+CREATE TABLE deletions (
+    job TEXT NOT NULL,
+    what TEXT NOT NULL
+) STRICT;
+"#,
 ];
 
 #[derive(Clone, PartialEq, Debug)]
@@ -98,6 +110,14 @@ pub const TOMBSTONE_SECS: i64 = 86_400;
 pub const RESULTS_SECS: i64 = 7 * 86_400;
 pub const METAINFO_SECS: i64 = RESULTS_SECS;
 pub const METAINFO_BYTES: i64 = 64 << 20;
+
+/// A deletion a removal asked for and that is not yet done.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Pending {
+    pub key: i64,
+    pub job: TorrentId,
+    pub deletion: Deletion,
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct StoredJob {
@@ -185,9 +205,10 @@ impl Store {
             .prepare(
                 "SELECT j.id, j.info_hash, j.name, j.dir, j.selection, j.max_size, j.magnet, j.intent, j.finished_at, \
                  j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup, \
-                 t.title, t.span, t.release, t.played FROM jobs j \
+                 t.title, t.span, t.release, t.played, p.watched_at, p.by_hand FROM jobs j \
                  LEFT JOIN metainfo m ON m.id = j.id \
                  LEFT JOIN job_titles t ON t.job = j.id \
+                 LEFT JOIN plays p ON p.job = j.id \
                  ORDER BY j.added_at",
             )
             .map_err(|e| self.fail(e))?;
@@ -216,6 +237,7 @@ impl Store {
                         r.get::<_, Option<String>>(18)?,
                         r.get::<_, Option<bool>>(19)?,
                     ),
+                    (r.get::<_, Option<i64>>(20)?, r.get::<_, Option<bool>>(21)?),
                 ))
             })
             .map_err(|e| self.fail(e))?;
@@ -239,6 +261,7 @@ impl Store {
                 bytes,
                 from_setup,
                 title,
+                play,
             ) = row.map_err(|e| self.fail(e))?;
             let bad = |what: &str| corrupt(&self.path, &format!("job {id} has an unreadable {what}"));
             let intent = match (intent.as_str(), finished_at, error) {
@@ -267,6 +290,10 @@ impl Store {
                     .transpose()
                     .map_err(|_| bad("file progress"))?,
                 title: linked(title).map_err(|_| bad("title link"))?,
+                home: match play {
+                    (Some(watched_at), Some(by_hand)) => Home::Plays(Play { watched_at, by_hand }),
+                    _ => Home::Folder,
+                },
             };
             jobs.push(StoredJob { record, metainfo: bytes });
         }
@@ -304,6 +331,12 @@ impl Store {
             }
             if let Some(linked) = &record.title {
                 insert_link(tx, record.id, &linked.link, now)?;
+            }
+            if let Home::Plays(play) = record.home {
+                tx.execute(
+                    "INSERT INTO plays (job, watched_at, by_hand) VALUES (?1, ?2, ?3)",
+                    params![record.id.to_hex(), play.watched_at, play.by_hand],
+                )?;
             }
             tx.execute("DELETE FROM tombstones WHERE id = ?1", [record.id.to_hex()])?;
             Ok(())
@@ -420,10 +453,19 @@ impl Store {
         })
     }
 
-    pub fn remove(&mut self, tombstone: &Tombstone) -> Result<(), Error> {
+    /// Removes a download and puts on record what of it to delete, both or neither.
+    pub fn remove(&mut self, tombstone: &Tombstone, deletion: Option<&Deletion>) -> Result<Option<Pending>, Error> {
         self.write(|tx| {
             let id = tombstone.id.to_hex();
             tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
+            let pending = match deletion {
+                Some(deletion) => {
+                    tx.execute("INSERT INTO deletions (job, what) VALUES (?1, ?2)", [&id, &json(deletion)])?;
+                    let key = tx.last_insert_rowid();
+                    Some(Pending { key, job: tombstone.id, deletion: deletion.clone() })
+                }
+                None => None,
+            };
             tx.execute(
                 "INSERT OR REPLACE INTO tombstones (id, name, path, removed_at) VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -434,8 +476,42 @@ impl Store {
                 ],
             )?;
             tx.execute("DELETE FROM tombstones WHERE removed_at < ?1", [tombstone.removed_at - TOMBSTONE_SECS])?;
-            evict_metainfo(tx, tombstone.removed_at)
+            evict_metainfo(tx, tombstone.removed_at)?;
+            Ok(pending)
         })
+    }
+
+    /// The deletions removals asked for that are not done, oldest first.
+    pub fn deletions(&self) -> Result<Vec<Pending>, Error> {
+        let mut stmt =
+            self.conn.prepare("SELECT rowid, job, what FROM deletions ORDER BY rowid").map_err(|e| self.fail(e))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| self.fail(e))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (key, job, what) = row.map_err(|e| self.fail(e))?;
+            let bad = || corrupt(&self.path, &format!("deletion {key} is unreadable"));
+            let deletion = serde_json::from_str(&what).map_err(|_| bad())?;
+            pending.push(Pending { key, job: job.parse().map_err(|_| bad())?, deletion });
+        }
+        Ok(pending)
+    }
+
+    pub fn deleted(&mut self, key: i64) -> Result<(), Error> {
+        self.write(|tx| tx.execute("DELETE FROM deletions WHERE rowid = ?1", [key]).map(drop))
+    }
+
+    /// Notes that someone pressed play on a play, or streamed it, at `at`.
+    pub fn watched(&mut self, id: TorrentId, at: i64) -> Result<(), Error> {
+        self.write(|tx| {
+            tx.execute("UPDATE plays SET watched_at = ?2 WHERE job = ?1", params![id.to_hex(), at]).map(drop)
+        })
+    }
+
+    /// Notes that the person asked for a play by hand, so it never leaves the plays folder by itself.
+    pub fn by_hand(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("UPDATE plays SET by_hand = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
     }
 
     /// Links a download that already existed to the title a play joined it for.
@@ -679,6 +755,7 @@ mod tests {
             piece_map: None,
             files_verified: None,
             title: None,
+            home: Home::Folder,
         }
     }
 
@@ -731,7 +808,7 @@ mod tests {
         assert_eq!(titles, [Some(made), Some(Linked { link, played: true })]);
 
         let gone = Tombstone { id: TorrentId::from_bytes([1; 20]), name: None, path: None, removed_at: 120 };
-        store.remove(&gone).unwrap();
+        store.remove(&gone, None).unwrap();
         let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
         assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
         let links: i64 = store.conn.query_row("SELECT count(*) FROM job_titles", [], |r| r.get(0)).unwrap();
@@ -775,10 +852,38 @@ mod tests {
             path: Some("/dl/job 1".into()),
             removed_at: 1_000,
         };
-        store.remove(&tomb).unwrap();
+        store.remove(&tomb, None).unwrap();
         assert!(store.jobs().unwrap().is_empty());
         assert_eq!(store.tombstones(1_000 + 60).unwrap(), [tomb]);
         assert!(store.tombstones(1_000 + TOMBSTONE_SECS + 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_play_keeps_its_place_and_its_deletion_outlives_the_engine_until_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        let play = JobRecord {
+            dir: "/th/data/plays/0101010101010101-0".into(),
+            home: Home::Plays(Play { watched_at: 100, by_hand: false }),
+            ..record(1)
+        };
+        store.insert(&play, None, 100).unwrap();
+        store.insert(&record(2), None, 100).unwrap();
+        store.watched(play.id, 250).unwrap();
+        store.by_hand(play.id).unwrap();
+        let homes: Vec<Home> = store.jobs().unwrap().into_iter().map(|j| j.record.home).collect();
+        assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true }), Home::Folder]);
+        let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
+        let deletion = Deletion::Play { folder: play.dir.clone() };
+        let pending = store.remove(&tomb, Some(&deletion)).unwrap().unwrap();
+        assert_eq!(pending.deletion, deletion);
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.deletions().unwrap(), std::slice::from_ref(&pending));
+        assert_eq!(store.jobs().unwrap().len(), 1);
+        store.deleted(pending.key).unwrap();
+        assert_eq!(store.deletions().unwrap(), []);
     }
 
     #[test]
@@ -797,7 +902,7 @@ mod tests {
         for n in 5..10 {
             store.cache_metainfo(id([n; 20]), &largest, later + i64::from(n)).unwrap();
         }
-        store.remove(&Tombstone { id: id([3; 20]), name: None, path: None, removed_at: later + 10 }).unwrap();
+        store.remove(&Tombstone { id: id([3; 20]), name: None, path: None, removed_at: later + 10 }, None).unwrap();
 
         let kept: Vec<u8> = (1..10).filter(|n| store.metainfo(id([*n; 20])).unwrap().is_some()).collect();
         assert_eq!(kept, [1, 6, 7, 8, 9]);

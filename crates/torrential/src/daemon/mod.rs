@@ -271,6 +271,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         save_resume_every,
         stall_after,
         writes_stop_within: WRITES_STOP_WITHIN,
+        plays: owner::plays::Plays { root: paths.plays() },
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

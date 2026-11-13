@@ -567,10 +567,24 @@ pub fn changes(command: ChangeCommand, changes: &[Change]) -> Doc {
         .collect();
     let next = (!next_ids.is_empty()).then(|| format!("torrential {verb} {}", next_ids.join(" ")));
     let summary = match command {
-        ChangeCommand::Remove => vec!["files were kept".to_string()],
+        ChangeCommand::Remove => removed_files(changes, &ids),
         _ => Vec::new(),
     };
     Doc { body: Body::Table { header, rows }, summary, next }
+}
+
+/// What `rm` did with the files of the downloads it removed, and what it left and why.
+fn removed_files(changes: &[Change], ids: &[String]) -> Vec<String> {
+    let removed = changes.iter().zip(ids).filter(|(c, _)| c.result == "removed");
+    let (deleted, kept): (Vec<_>, Vec<_>) = removed.partition(|(c, _)| !c.deleted.is_empty());
+    let named = |of: &[(&Change, &String)]| of.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>().join(", ");
+    let done = match (deleted.is_empty(), kept.is_empty()) {
+        (true, _) => "files were kept".to_string(),
+        (false, true) => "files were deleted".to_string(),
+        (false, false) => format!("files of {} were deleted, and files of {} were kept", named(&deleted), named(&kept)),
+    };
+    let left = changes.iter().flat_map(|c| &c.kept).map(|k| format!("kept {}: {}", k.path.display(), k.reason));
+    std::iter::once(done).chain(left).collect()
 }
 
 #[derive(Clone, PartialEq, Debug)]

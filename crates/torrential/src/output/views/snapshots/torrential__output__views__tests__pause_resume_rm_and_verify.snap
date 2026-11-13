@@ -54,7 +54,9 @@ next: torrential wait c32cdd
 ID	RESULT	PATH
 9b5212	removed	/Users/ada/isos/archlinux-2026.10.01-x86_64.iso
 c32cdd	already_removed	/Users/ada/datasets/stackexchange
-# files were kept
+6bc1af	removed	/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0/night_of_the_living_dead_dvd
+# files of 6bc1af were deleted, and files of 9b5212 were kept
+# kept /Users/ada/isos/archlinux-2026.10.01-x86_64.iso: it is not a regular file
 
 --- json
 {
@@ -65,13 +67,28 @@ c32cdd	already_removed	/Users/ada/datasets/stackexchange
       "id": "9b521219bc48550140a666f74a29048ed78e933b",
       "name": "archlinux-2026.10.01-x86_64.iso",
       "result": "removed",
-      "path": "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"
+      "path": "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso",
+      "kept": [
+        {
+          "path": "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso",
+          "reason": "it is not a regular file"
+        }
+      ]
     },
     {
       "id": "c32cdd0000000000000000000000000000000000",
       "name": "stackexchange",
       "result": "already_removed",
       "path": "/Users/ada/datasets/stackexchange"
+    },
+    {
+      "id": "6bc1af0000000000000000000000000000000000",
+      "name": "night_of_the_living_dead_dvd",
+      "result": "removed",
+      "path": "/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0/night_of_the_living_dead_dvd",
+      "deleted": [
+        "/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0"
+      ]
     }
   ],
   "next": null

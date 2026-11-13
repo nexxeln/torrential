@@ -13,6 +13,7 @@ use super::engine_port::{
     parse_fake,
 };
 use super::owner::OwnerConfig;
+use super::owner::plays::Plays;
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -71,6 +72,7 @@ fn config(dir: &std::path::Path) -> OwnerConfig {
         save_resume_every: Duration::from_millis(100),
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
+        plays: Plays { root: dir.join("plays") },
     }
 }
 
@@ -252,6 +254,11 @@ impl Harness {
     fn downloads(&self) -> PathBuf {
         self.dir.path().join("downloads")
     }
+
+    /// The folder the first play of `t` downloads into.
+    fn play_folder(&self, t: &FakeTorrentFile) -> PathBuf {
+        self.dir.path().join("plays").join(format!("{}-0", &t.info_hash.id().to_hex()[..16]))
+    }
 }
 
 /// Holds back some of an engine's events while it is closed.
@@ -407,7 +414,7 @@ async fn every_command_answers_usage_for_a_title() {
         Request::Status { refs: refs() },
         Request::Pause { refs: refs() },
         Request::Resume { refs: refs(), all: false },
-        Request::Remove { refs: refs() },
+        Request::Remove { refs: refs(), delete: false },
         Request::Verify { reference: "tt0903747:3:5".into(), repair: false },
     ];
     let mut answers = Vec::new();
@@ -531,7 +538,7 @@ async fn pause_and_rm_are_idempotent_and_rm_keeps_the_path() {
     assert_eq!(h.changes(pause()).await.unwrap(), [(id.clone(), "paused".into())]);
     assert_eq!(h.changes(pause()).await.unwrap(), [(id.clone(), "already_paused".into())]);
     assert_eq!(h.states().await, ["paused"]);
-    let rm = || Request::Remove { refs: vec![id.clone()] };
+    let rm = || Request::Remove { refs: vec![id.clone()], delete: false };
     let Response::Changed { changes } = h.ask(rm()).await else { panic!("expected changes") };
     assert_eq!(
         (changes[0].result.as_str(), changes[0].path.clone()),
@@ -543,7 +550,7 @@ async fn pause_and_rm_are_idempotent_and_rm_keeps_the_path() {
         ("already_removed", Some(h.downloads().join("arch.iso")))
     );
     assert!(h.status().await.is_empty());
-    let unknown = h.changes(Request::Remove { refs: vec!["abcdef".into()] }).await.unwrap_err();
+    let unknown = h.changes(Request::Remove { refs: vec!["abcdef".into()], delete: false }).await.unwrap_err();
     assert_eq!(unknown.code, ErrorCode::NotFound);
 }
 
@@ -639,7 +646,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
             h.downloads().display()
         )
     );
-    h.changes(Request::Remove { refs: vec![prefix(&film)] }).await.unwrap();
+    h.changes(Request::Remove { refs: vec![prefix(&film)], delete: false }).await.unwrap();
 
     let busy: Vec<FakeTorrentFile> = (45..48).map(|n| torrent(n, &format!("busy{n}"), &[("f", GIB)])).collect();
     for t in &busy {
@@ -648,7 +655,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
     let set = torrent(48, "set", &[("a.bin", GIB), ("docs/b.bin", GIB)]);
     assert_eq!(h.get(h.torrent_file(&set), &[]).await.unwrap().outcome, GetOutcome::Queued);
     h.disk.link(h.downloads().join("set/docs"));
-    h.changes(Request::Remove { refs: vec![prefix(&busy[0])] }).await.unwrap();
+    h.changes(Request::Remove { refs: vec![prefix(&busy[0])], delete: false }).await.unwrap();
     let jobs = h.until("the queued download stopped", |jobs| jobs[2].status.name() != "queued").await;
     let JobStatus::Error { error } = &jobs[2].status else { panic!("{jobs:#?}") };
     assert_eq!(
@@ -1630,5 +1637,6 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
 }
 
+mod plays;
 mod titles;
 mod web;
