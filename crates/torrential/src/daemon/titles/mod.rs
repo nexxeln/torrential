@@ -261,6 +261,7 @@ mod tests {
             selection: Selection::All,
             added_at: 0,
             title,
+            place: torrential_core::Place::Folder,
         };
         titles.failed(release(2).id, Skip::NoVideo);
         titles.failed(release(40).id, Skip::NoData { waited_s: 30 });

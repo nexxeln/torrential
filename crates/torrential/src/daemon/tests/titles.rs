@@ -15,6 +15,7 @@ use torrential_core::{
 
 use super::super::admission::GIB;
 use super::super::engine_port::{Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
+use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{self, FakeSource};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
@@ -50,7 +51,7 @@ pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
     night_with(Outside::default())
 }
 
-/// `night`, with `outside` around the engine.
+/// `night`, with what `outside` sets.
 pub(super) fn night_with(outside: Outside) -> (Harness, [FakeTorrentFile; 4]) {
     let night = [
         torrent(0xa1, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", &[("Night.1968.720p.mp4", 2 * GIB)]),
@@ -119,7 +120,7 @@ impl Harness {
         let link = |title: &str| TitleLink { title: title.parse().unwrap(), span: Span::Film, release: None };
         let play = PlayCommand {
             source: Source::Torrent { metainfo: t.metainfo().unwrap(), origin: Origin::File },
-            dir: Some(self.downloads()),
+            to: Destination::Folder(Some(self.downloads())),
             files: files.to_vec(),
             setup_max_size: None,
             title: title.map(|title| TitlePlay { link: link(title), hold }),
@@ -157,7 +158,7 @@ impl Harness {
     }
 
     /// Stops the engine where it is, lets `change` at the disk, and starts it again.
-    async fn restart_after(self, change: impl FnOnce()) -> Self {
+    pub(super) async fn restart_after(self, change: impl FnOnce()) -> Self {
         let Self { dir, running, swarm, disk, search, outside } = self;
         running.owner.abort();
         let _ = running.owner.await;
@@ -188,16 +189,16 @@ impl Harness {
         steps
     }
 
-    /// Plays the film from the search, or from `pin` alone, and answers each step as the web app
-    /// reads it.
-    async fn play_film(&self, pin: Option<&FakeTorrentFile>) -> Vec<Value> {
+    /// Gets the film to keep from the search, or from `pin` alone, as `torrential get tt0063350`
+    /// does into the downloads folder, and answers each step as the web app reads it.
+    async fn get_film(&self, pin: Option<&FakeTorrentFile>) -> Vec<Value> {
         let ask = PlayTitle {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace: None,
             player: Player::External,
             containers: Containers::Browser,
-            finish: Finish::Stream,
+            finish: Finish::Keep,
         };
         let mut steps = Vec::new();
         attempt::run(&self.running.ctx, ask, |event| steps.push(serde_json::to_value(event).unwrap())).await;
@@ -470,12 +471,12 @@ async fn a_play_or_get_by_hand_still_starts_over_a_file_that_is_there() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_title_play_skips_a_source_whose_folder_already_exists_and_plays_the_next() {
+async fn getting_a_title_skips_a_source_whose_folder_already_exists_and_gets_the_next() {
     let (h, night) = night();
     let theirs = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
     std::fs::create_dir_all(&theirs).unwrap();
     std::fs::write(theirs.join("Night.1968.1080p.mp4"), "the person's own film").unwrap();
-    let steps = h.play_film(None).await;
+    let steps = h.get_film(None).await;
     let third = night[2].info_hash.id().to_hex();
     let skipped = steps.iter().find(|s| s["type"] == "skipped" && s["release"] == third.as_str());
     assert_eq!(
@@ -500,7 +501,7 @@ async fn a_title_play_skips_a_source_whose_folder_already_exists_and_plays_the_n
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_title_play_skips_a_source_when_the_disk_cannot_say_that_its_path_is_free() {
+async fn getting_a_title_skips_a_source_when_the_disk_cannot_say_that_its_path_is_free() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } == 0 {
         return;
@@ -512,7 +513,7 @@ async fn a_title_play_skips_a_source_when_the_disk_cannot_say_that_its_path_is_f
     std::fs::write(theirs.join("Night.1968.1080p.mp4"), "the person's own film").unwrap();
     let shut = |mode| std::fs::set_permissions(&downloads, std::fs::Permissions::from_mode(mode)).unwrap();
     shut(0o000);
-    let steps = h.play_film(Some(&night[2])).await;
+    let steps = h.get_film(Some(&night[2])).await;
     shut(0o755);
     let reason = &steps[steps.len() - 2]["reason"];
     let message = format!(
@@ -793,7 +794,8 @@ async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last
     h.swarm.set_rate(0);
     let first = testing(&h, &night[3]).await;
     let second = testing(&h, &night[3]).await;
-    write(&h.downloads().join("night_of_the_living_dead/night_of_the_living_dead.mp4"));
+    let folder = h.play_folder(&night[3]);
+    write(&folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4"));
     let on_disk = ["night_of_the_living_dead", "night_of_the_living_dead/night_of_the_living_dead.mp4"];
 
     first.abort();
@@ -801,13 +803,13 @@ async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last
     h.settled().await;
     // The file written above is checked before the download goes on, and a slow machine is still checking here.
     h.until("its check ends", |jobs| jobs[0].status.name() == "downloading").await;
-    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], on_disk.map(String::from).to_vec()));
+    assert_eq!((h.states().await, tree(&folder)), (vec!["downloading"], on_disk.map(String::from).to_vec()));
 
     second.abort();
     let _ = second.await;
     h.until("the last play to go pauses it", |jobs| jobs[0].status.name() == "paused").await;
     h.settled().await;
-    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["paused"], on_disk.map(String::from).to_vec()));
+    assert_eq!((h.states().await, tree(&folder)), (vec!["paused"], on_disk.map(String::from).to_vec()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

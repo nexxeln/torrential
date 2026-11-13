@@ -14,7 +14,7 @@ use torrential_core::{
 
 use super::super::devices::Asker;
 use super::super::http::{Connection, Request};
-use super::super::owner::{Command, Finish, now};
+use super::super::owner::{Command, Finish, Shelving, now};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::super::titles::catalog_port::label;
@@ -291,12 +291,11 @@ pub struct Library {
 
 /// `POST /api/library`: saves a title, or takes it out.
 pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
-    if request.saved {
-        let details = ctx.titles.catalog.title(&request.title).await?;
-        ctx.titles.shelf.save(&details.card, now())?;
-    } else {
-        ctx.titles.shelf.unsave(&request.title)?;
-    }
+    let shelving = match request.saved {
+        true => Shelving::Save(ctx.titles.catalog.title(&request.title).await?.card),
+        false => Shelving::Unsave(request.title),
+    };
+    ctx.owner.ask(|reply| Command::Library { shelving, reply }).await?;
     Ok(json!({ "saved": request.saved }))
 }
 

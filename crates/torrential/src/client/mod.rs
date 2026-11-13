@@ -123,7 +123,8 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             changes(engine()?, request, ChangeCommand::Resume, mode)
         }
         Command::Rm(args) => {
-            changes(engine()?, Request::Remove { refs: job_refs(&args.references, &cwd)? }, ChangeCommand::Remove, mode)
+            let request = Request::Remove { refs: job_refs(&args.references, &cwd)?, delete: args.delete };
+            changes(engine()?, request, ChangeCommand::Remove, mode)
         }
         Command::Verify(args) => {
             let reference = job_refs(std::slice::from_ref(&args.reference), &cwd)?.remove(0);

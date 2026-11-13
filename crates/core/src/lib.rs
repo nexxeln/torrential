@@ -20,7 +20,7 @@ pub use catalog::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetai
 pub use device::{Device, DeviceList, PairingOffer};
 pub use error::{Error, ErrorCode};
 pub use id::{HexPrefix, InfoHash, LocatorId, ReleaseId, Target, TorrentId};
-pub use job::{Eighths, FileRisk, Job, JobStatus, PieceMap, Progress, Selection, Slice, TorrentFile};
+pub use job::{Eighths, FileRisk, Job, JobStatus, PieceMap, Place, Progress, Selection, Slice, TorrentFile};
 pub use preferences::{Playback, Preferences, Screen};
 pub use profile::{Arch, Display, Language, Machine, Os, Player, Profile, Setting, Source, Viewer};
 pub use quality::{Codec, Quality, Resolution};

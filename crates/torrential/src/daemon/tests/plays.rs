@@ -1,0 +1,777 @@
+//! Where plays download, how they leave the plays folder, and what `rm` deletes.
+
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use serde_json::json;
+use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
+use torrential_core::{ErrorCode, JobStatus, Place, Selection, Target, TorrentId};
+
+use super::super::admission::{GIB, reserve};
+use super::super::engine_port::{EngineEvent, FakeTorrentFile};
+use super::super::owner::Command;
+use super::super::owner::deleter::{Identity, PlayName};
+use super::super::store::{Store, Tombstone};
+use super::titles::{night, night_with};
+use super::web::{magnet_link, post};
+use super::{Gate, Harness, MIB, Outside, Player, ROOMY, prefix, torrent, written};
+
+impl Harness {
+    async fn rm(&self, refs: Vec<String>, delete: bool) -> Vec<Change> {
+        match self.ask(Request::Remove { refs, delete }).await {
+            Response::Changed { changes } => changes,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The name and state of each download, in the order status lists them.
+    async fn named_states(&self) -> Vec<(String, &'static str)> {
+        self.status().await.into_iter().map(|job| (job.name.unwrap_or_default(), job.status.name())).collect()
+    }
+
+    /// Plays `t` from the web app's search, into a folder of its own in the plays folder.
+    async fn play_web(&self, t: &FakeTorrentFile) {
+        self.swarm.publish(t.clone());
+        let (status, body) = post(self, "/api/play", json!({ "ref": magnet_link(t) })).await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    /// Gets `t` into `dir`, as `torrential get --dir` does.
+    async fn get_into(&self, t: &FakeTorrentFile, dir: PathBuf) -> Result<(), torrential_core::Error> {
+        let target = self.torrent_file(t);
+        let request =
+            GetRequest { target, dir: Some(dir), files: vec![], max_size: None, setup_max_size: None, dry_run: false };
+        self.get_with(request).await.map(drop)
+    }
+
+    fn plays(&self) -> PathBuf {
+        self.dir.path().join("plays")
+    }
+}
+
+fn named(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+async fn names(h: &Harness) -> Vec<String> {
+    h.named_states().await.into_iter().map(|(name, _)| name).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_downloads_into_a_folder_of_its_own_and_leaves_a_folder_of_the_same_name_alone() {
+    let (h, night) = night();
+    let theirs = h.downloads().join("night_of_the_living_dead");
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(theirs.join("night_of_the_living_dead.mp4"), "the person's own film").unwrap();
+    let steps = h.play_title("tt0063350", Some(&night[3]), None).await;
+    assert_eq!(steps.last().unwrap(), "playing tt0063350 a4a4a4 file 0 at null");
+    let jobs = h.status().await;
+    assert_eq!((&jobs[0].dir, jobs[0].place), (&h.play_folder(&night[3]), Place::Plays));
+    let film = std::fs::read_to_string(theirs.join("night_of_the_living_dead.mp4")).unwrap();
+    assert_eq!(film, "the person's own film");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_and_a_play_by_hand_download_into_the_downloads_folder() {
+    let h = Harness::new();
+    let (kept, watched) =
+        (torrent(0xb1, "kept", &[("kept.iso", MIB)]), torrent(0xb2, "watched", &[("watched.mp4", MIB)]));
+    h.get(h.torrent_file(&kept), &[]).await.unwrap();
+    let request = PlayRequest { target: h.torrent_file(&watched), dir: None, files: vec![0], setup_max_size: None };
+    assert!(matches!(h.ask(Request::Play(request)).await, Response::Play { .. }));
+    let places: Vec<_> = h.status().await.into_iter().map(|job| (job.dir, job.place)).collect();
+    assert_eq!(places, [(h.downloads(), Place::Folder), (h.downloads(), Place::Folder)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_deletes_a_plays_folder_and_trashes_the_files_of_a_download_in_the_persons_folder_only_when_asked() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let (film, iso) = (torrent(0xc1, "film", &[("film.mp4", MIB)]), torrent(0xc2, "iso", &[("disc.iso", MIB)]));
+    h.swarm.publish(film.clone());
+    post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    let folder = h.play_folder(&film);
+    written(&folder.join("film/film.mp4"), MIB);
+    h.get(h.torrent_file(&iso), &[]).await.unwrap();
+    let disc = h.downloads().join("iso/disc.iso");
+    written(&disc, MIB);
+    h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+
+    let removed = h.rm(vec![prefix(&film), prefix(&iso)], false).await;
+    let deleted: Vec<_> = removed.into_iter().map(|change| (change.result, change.deleted)).collect();
+    assert_eq!(deleted, [("removed".to_string(), vec![folder.clone()]), ("removed".to_string(), vec![])]);
+    assert_eq!((folder.exists(), std::fs::read(&disc).unwrap().len()), (false, MIB as usize));
+
+    h.get(h.torrent_file(&iso), &[]).await.unwrap();
+    h.until("the disc is done again", |jobs| jobs[0].status.name() == "done").await;
+    let removed = h.rm(vec![prefix(&iso)], true).await;
+    let json = serde_json::to_value(&removed[0]).unwrap();
+    assert_eq!((&json["deleted"], &json["trashed"]), (&json!(null), &json!([disc])));
+    assert!(!h.downloads().join("iso").exists(), "the folder it leaves empty goes too");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
+    let h = Harness::new();
+    let film = torrent(0xd1, "film", &[("film.mp4", MIB)]);
+    h.swarm.publish(film.clone());
+    post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    let folder = h.play_folder(&film);
+    written(&folder.join("film/film.mp4"), MIB);
+    let database = h.dir.path().join("state.db");
+    let h = h
+        .restart_after(|| {
+            let mut store = Store::open(&database).unwrap();
+            let tomb = Tombstone { id: film.info_hash.id(), name: None, path: None, removed_at: 1 };
+            let name = PlayName::parse(folder.file_name().unwrap().to_str().unwrap()).unwrap();
+            let made = std::fs::metadata(&folder).unwrap();
+            let folder = Identity { device: made.dev(), inode: made.ino() };
+            store.remove(&tomb, Some((&name, folder, MIB))).unwrap();
+        })
+        .await;
+    assert_eq!((h.status().await.len(), folder.exists()), (0, false));
+    let store = Store::open(&database).unwrap();
+    assert_eq!(store.deletions().unwrap(), [], "it is done, so a later start has nothing to delete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_play_watched_longest_ago_leaves_once_the_plays_folder_is_over_its_limit() {
+    let (h, night) = night_with(Outside { plays_max: 3 * GIB, ..Outside::default() });
+    h.swarm.set_rate(100 * GIB);
+    assert_eq!(post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await.0, 200);
+    h.play_title("tt0063350", Some(&night[3]), None).await;
+    let got = torrent(0xe1, "got", &[("got.mp4", GIB)]);
+    let older = torrent(0xe2, "older", &[("older.mp4", 2 * GIB)]);
+    let newer = torrent(0xe3, "newer", &[("newer.mp4", 2 * GIB)]);
+    for t in [&got, &older, &newer] {
+        h.swarm.publish(t.clone());
+    }
+    post(&h, "/api/play", json!({ "ref": magnet_link(&got) })).await;
+    h.get(Target::Prefix(prefix(&got)), &[]).await.unwrap();
+    post(&h, "/api/play", json!({ "ref": magnet_link(&older) })).await;
+    h.until("every play is done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+    // When a play was watched is kept to the second.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(h.status().await.len(), 3, "the plays that may leave take 2 GiB of 3 GiB");
+
+    post(&h, "/api/play", json!({ "ref": magnet_link(&newer) })).await;
+    h.until("the play watched longest ago leaves", |jobs| jobs.len() == 3).await;
+    let named = ["night_of_the_living_dead", "got", "newer"].map(|name| (name.to_string(), "done"));
+    h.until("newer is done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+    assert_eq!(h.named_states().await, named, "a saved title's play and one got by hand stay");
+    assert_eq!([&older, &newer].map(|t| h.play_folder(t).exists()), [false, true]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_no_one_streams_pauses_and_streaming_it_again_resumes_it_but_a_saved_titles_play_goes_on() {
+    let (h, night) = night_with(Outside { idle_after: Duration::from_secs(1), ..Outside::default() });
+    h.swarm.set_rate(20 * MIB);
+    post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await;
+    h.play_title("tt0063350", Some(&night[3]), None).await;
+    let film = torrent(0xf1, "film", &[("film.mkv", 2 * GIB)]);
+    h.swarm.publish(film.clone());
+    post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
+    // A range far past what has arrived keeps the stream open, as a player waiting for it does.
+    let stream = |player: Player, path: String| {
+        let mut player = player;
+        tokio::spawn(async move { player.get(&path, "bytes=2000000000-2000000099").await })
+    };
+
+    let watching = stream(Player::connect(&h).await, path.clone());
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let downloading = ["night_of_the_living_dead", "film"].map(|name| (name.to_string(), "downloading"));
+    assert_eq!(h.named_states().await, downloading, "someone streams the film");
+
+    watching.abort();
+    h.until("no one streams the film, so it pauses", |jobs| jobs[1].status.name() == "paused").await;
+    let paused = [("night_of_the_living_dead".to_string(), "downloading"), ("film".to_string(), "paused")];
+    assert_eq!(h.named_states().await, paused);
+
+    let _watching = stream(Player::connect(&h).await, path);
+    h.until("streaming the film again resumes it", |jobs| jobs[1].status.name() == "downloading").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plays_folder_moved_away_and_replaced_by_a_link_while_the_engine_runs_has_nothing_deleted() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let film = torrent(0x11, "film", &[("film.mp4", MIB)]);
+    h.play_web(&film).await;
+    let folder = h.play_folder(&film);
+    written(&folder.join("film/film.mp4"), MIB);
+    h.until("the film is done", |jobs| jobs[0].status.name() == "done").await;
+    let (moved, decoys) = (h.dir.path().join("plays.old"), h.dir.path().join("decoys"));
+    std::fs::rename(h.plays(), &moved).unwrap();
+    let decoy = decoys.join(folder.file_name().unwrap()).join("film/film.mp4");
+    written(&decoy, 4);
+    symlink(&decoys, h.plays()).unwrap();
+
+    let removed = h.rm(vec![prefix(&film)], false).await;
+    let refused = "the plays folder was moved or replaced since the engine started";
+    assert_eq!(
+        (removed[0].deleted.clone(), removed[0].kept.clone()),
+        (vec![], vec![Kept { path: folder.clone(), reason: refused.into() }])
+    );
+    assert_eq!(std::fs::read(&decoy).unwrap().len(), 4, "the decoy behind the link stays");
+    assert!(
+        moved.join(folder.file_name().unwrap()).join("film/film.mp4").exists(),
+        "and so does the folder moved away"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_refuses_a_folder_inside_the_plays_folder_even_through_a_link() {
+    let h = Harness::new();
+    std::fs::create_dir_all(h.plays()).unwrap();
+    let films = h.dir.path().join("films");
+    symlink(h.plays(), &films).unwrap();
+    let iso = torrent(0x21, "iso", &[("disc.iso", MIB)]);
+    let error = h.get_into(&iso, films.join("mine")).await.unwrap_err();
+    let message = format!(
+        "{} is inside {}, the folder torrential keeps plays in",
+        films.join("mine").display(),
+        h.plays().display()
+    );
+    assert_eq!((error.code, error.message), (ErrorCode::PathConflict, message));
+    assert!(h.status().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let (theirs, ours) = (torrent(0x31, "set", &[("a.bin", MIB)]), torrent(0x32, "set", &[("a.bin", MIB)]));
+    let alias = h.dir.path().join("alias");
+    std::fs::create_dir_all(h.downloads()).unwrap();
+    symlink(h.downloads(), &alias).unwrap();
+    h.get_into(&theirs, h.downloads()).await.unwrap();
+    h.get_into(&ours, alias.clone()).await.unwrap();
+    let file = h.downloads().join("set/a.bin");
+    written(&file, MIB);
+    h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
+    assert_eq!((removed[0].deleted.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_a_file_a_download_the_engine_has_not_let_go_of_writes() {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0x34; 20])));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let (ours, theirs) = (torrent(0x33, "set", &[("a.bin", MIB)]), torrent(0x34, "set", &[("a.bin", 4 * GIB)]));
+    let alias = h.dir.path().join("alias");
+    std::fs::create_dir_all(h.downloads()).unwrap();
+    symlink(h.downloads(), &alias).unwrap();
+    h.get_into(&ours, alias.clone()).await.unwrap();
+    h.until("ours is done", |jobs| jobs[0].status.name() == "done").await;
+    h.swarm.set_rate(0);
+    h.swarm.publish(theirs.clone());
+    h.get_into(&theirs, h.downloads()).await.unwrap();
+    let file = h.downloads().join("set/a.bin");
+    written(&file, MIB);
+    h.until("theirs downloads", |jobs| jobs[1].status.name() == "downloading").await;
+
+    gate.close();
+    h.rm(vec![prefix(&theirs)], false).await;
+    gate.until_held(1).await;
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
+    assert_eq!((removed[0].deleted.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+    gate.open();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names_after() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    let iso = torrent(0x41, "iso", &[("disc.iso", 4 * GIB)]);
+    h.swarm.publish(iso.clone());
+    h.get_into(&iso, h.downloads()).await.unwrap();
+    let disc = h.downloads().join("iso/disc.iso");
+    written(&disc, MIB);
+    h.until("it downloads", |jobs| jobs[0].status.name() == "downloading").await;
+    gate.close();
+    h.rm(vec![prefix(&iso)], true).await;
+    gate.until_held(1).await;
+
+    let h = h.restart_after(|| std::fs::write(&disc, "the person's own file").unwrap()).await;
+    h.until("the engine is back", |jobs| jobs.is_empty()).await;
+    assert_eq!(std::fs::read_to_string(&disc).unwrap(), "the person's own file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saving_a_title_while_its_play_leaves_the_plays_folder_keeps_the_play_and_its_files() {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0xa4; 20])));
+    let (h, night) = night_with(Outside { plays_max: 200 * MIB, gate: Some(gate.clone()), ..Outside::default() });
+    h.swarm.set_rate(100 * MIB);
+    h.play_title("tt0063350", Some(&night[3]), None).await;
+    let folder = h.play_folder(&night[3]);
+    written(&folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4"), MIB);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    gate.close();
+    h.play_web(&torrent(0x51, "film", &[("film.mp4", 2 * GIB)])).await;
+    gate.until_held(1).await;
+
+    assert_eq!(post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await.0, 200);
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(names(&h).await, named(&["night_of_the_living_dead", "film"]));
+    assert!(folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_and_still_keeps_it() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let mine = torrent(0x61, "mine", &[("mine.mp4", 2 * GIB)]);
+    h.play_web(&mine).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let database = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    let refuse =
+        "CREATE TRIGGER refuse BEFORE UPDATE OF by_hand ON plays BEGIN SELECT RAISE(ABORT, 'the disk is failing'); END";
+    database.execute_batch(refuse).unwrap();
+
+    let error = h.get(Target::Prefix(prefix(&mine)), &[]).await.unwrap_err();
+    assert!(error.message.ends_with("the disk is failing"), "{error:?}");
+    database.execute_batch("DROP TRIGGER refuse").unwrap();
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.play_web(&torrent(0x62, "next", &[("next.mp4", 2 * GIB)])).await;
+    h.until("the next play is done", |jobs| jobs.len() == 2 && jobs.iter().all(|job| job.status.name() == "done"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(names(&h).await, named(&["mine", "next"]), "the play got by hand stays");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_whose_file_is_handed_to_a_stream_stays_until_the_stream_ends() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let older = torrent(0x71, "older", &[("older.mp4", 2 * GIB)]);
+    h.play_web(&older).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let id = older.info_hash.id();
+    let stream = h.running.ctx.owner.ask(|reply| Command::Stream { id, index: 0, reply }).await.unwrap();
+
+    h.play_web(&torrent(0x72, "newer", &[("newer.mp4", 2 * GIB)])).await;
+    h.until("the newer play is done", |jobs| jobs.len() == 2 && jobs.iter().all(|job| job.status.name() == "done"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(names(&h).await, named(&["older", "newer"]), "someone streams the older play");
+    drop(stream);
+    h.until("the older play leaves once no one streams it", |jobs| jobs.len() == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_all_starts_the_idle_clock_again_for_the_plays_it_resumes() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { idle_after: Duration::from_secs(3), ..Outside::default() },
+    );
+    h.swarm.set_rate(20 * MIB);
+    h.play_web(&torrent(0x81, "film", &[("film.mkv", 2 * GIB)])).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while h.states().await != ["paused"] {
+        assert!(std::time::Instant::now() < deadline, "no one streams it, so it pauses");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(matches!(h.ask(Request::Resume { refs: vec![], all: true }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(h.states().await, ["downloading"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_goes_once_it_can() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 4 * MIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let stuck = torrent(0x91, "stuck", &[("stuck.mp4", 3 * MIB)]);
+    h.play_web(&stuck).await;
+    let inner = h.play_folder(&stuck).join("stuck");
+    written(&inner.join("stuck.mp4"), 3 * MIB);
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let shut = |mode| std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(mode)).unwrap();
+    shut(0o555);
+    h.rm(vec![prefix(&stuck)], false).await;
+    assert!(inner.join("stuck.mp4").exists());
+
+    h.play_web(&torrent(0x92, "older", &[("older.mp4", MIB)])).await;
+    h.until("older is done", |jobs| jobs.len() == 1 && jobs[0].status.name() == "done").await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.play_web(&torrent(0x93, "newer", &[("newer.mp4", MIB)])).await;
+    h.until("the play watched longest ago leaves, for what is left to delete counts", |jobs| {
+        jobs.len() == 1 && jobs[0].name.as_deref() == Some("newer")
+    })
+    .await;
+    shut(0o755);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while h.play_folder(&stuck).exists() {
+        assert!(std::time::Instant::now() < deadline, "the folder goes once it can be deleted");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_play_on_a_full_disk_starts_once_older_plays_make_room() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(2 * GIB);
+    let older = torrent(0xb1, "older", &[("older.mp4", 8 * GIB)]);
+    h.play_web(&older).await;
+    h.until("half of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
+    assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.disk.set_free(reserve(ROOMY.total) + GIB);
+    h.disk.frees(h.play_folder(&older), 2 * GIB);
+
+    h.play_web(&torrent(0xb2, "newer", &[("newer.mp4", 2 * GIB)])).await;
+    assert_eq!(names(&h).await.last().map(String::as_str), Some("newer"));
+    h.until("the older play has left", |jobs| jobs.len() == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_trash() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let set = torrent(0xc4, "set", &[("a.mkv", MIB), ("docs/b.txt", 2)]);
+    h.get(h.torrent_file(&set), &[]).await.unwrap();
+    let (a, b) = (h.downloads().join("set/a.mkv"), h.downloads().join("set/docs/b.txt"));
+    let film = written(&a, MIB);
+    written(&b, 2);
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+
+    let removed = h.rm(vec![prefix(&set)], true).await;
+    assert_eq!(removed[0].trashed, [a.clone(), b.clone()]);
+    let trash = h.dir.path().join("trash");
+    assert_eq!((a.exists(), b.exists(), h.downloads().join("set").exists()), (false, false, false));
+    assert_eq!(std::fs::read(trash.join("files/a.mkv")).unwrap(), film);
+    let info = std::fs::read_to_string(trash.join("info/b.txt.trashinfo")).unwrap();
+    let lines: Vec<&str> = info.lines().collect();
+    assert_eq!(lines[..2], ["[Trash Info]".to_string(), format!("Path={}", b.display())]);
+    let date = lines[2].strip_prefix("DeletionDate=").unwrap();
+    assert_eq!((date.len(), &date[4..5], &date[10..11]), (19, "-", "T"), "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_put_in_place_of_one_rm_delete_was_asked_for_stays_and_does_not_go_to_the_trash() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    let iso = torrent(0x42, "iso", &[("disc.iso", 4 * GIB), ("notes.txt", 2)]);
+    h.swarm.publish(iso.clone());
+    h.get_into(&iso, h.downloads()).await.unwrap();
+    let (disc, notes) = (h.downloads().join("iso/disc.iso"), h.downloads().join("iso/notes.txt"));
+    written(&disc, MIB);
+    written(&notes, 2);
+    h.until("it downloads", |jobs| jobs[0].status.name() == "downloading").await;
+    gate.close();
+    h.rm(vec![prefix(&iso)], true).await;
+    gate.until_held(1).await;
+
+    let theirs = h.downloads().join("theirs.iso");
+    std::fs::write(&theirs, "the person's own file").unwrap();
+    std::fs::rename(&theirs, &disc).unwrap();
+    gate.open();
+    let trash = h.dir.path().join("trash");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while notes.exists() {
+        assert!(std::time::Instant::now() < deadline, "the file not replaced goes");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&disc).unwrap(), "the person's own file");
+    assert_eq!((trash.join("files/notes.txt").exists(), trash.join("files/disc.iso").exists()), (true, false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_folder_moved_away_with_another_folder_put_at_its_name_has_nothing_deleted() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let film = torrent(0x12, "film", &[("film.mp4", MIB)]);
+    h.play_web(&film).await;
+    let folder = h.play_folder(&film);
+    written(&folder.join("film/film.mp4"), MIB);
+    h.until("the film is done", |jobs| jobs[0].status.name() == "done").await;
+    let moved = h.dir.path().join("moved");
+    std::fs::rename(&folder, &moved).unwrap();
+    written(&folder.join("film/film.mp4"), 4);
+
+    let removed = h.rm(vec![prefix(&film)], false).await;
+    let refused = "it is not the folder torrential made for the play";
+    assert_eq!(
+        (removed[0].deleted.clone(), removed[0].kept.clone()),
+        (vec![], vec![Kept { path: folder.clone(), reason: refused.into() }])
+    );
+    assert_eq!(std::fs::read(folder.join("film/film.mp4")).unwrap().len(), 4, "the folder at its name stays");
+    assert!(moved.join("film/film.mp4").exists(), "and so does the folder moved away");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plays_in_a_plays_folder_replaced_while_the_engine_was_stopped_stop_and_say_why() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let (clip, film) = (torrent(0x15, "clip", &[("clip.mp4", MIB)]), torrent(0x16, "film", &[("film.mkv", 4 * GIB)]));
+    h.play_web(&clip).await;
+    h.until("the clip is done", |jobs| jobs[0].status.name() == "done").await;
+    h.swarm.set_rate(0);
+    h.play_web(&film).await;
+    let plays = h.plays();
+    let h = h
+        .restart_after(|| {
+            std::fs::rename(&plays, plays.with_extension("old")).unwrap();
+            std::fs::create_dir(&plays).unwrap();
+        })
+        .await;
+
+    let jobs = h.status().await;
+    let seen: Vec<_> = jobs.iter().map(|job| (job.name.clone().unwrap(), job.status.name(), job.place)).collect();
+    assert_eq!(seen, [("clip".to_string(), "done", Place::Folder), ("film".to_string(), "error", Place::Folder)]);
+    let JobStatus::Error { error } = &jobs[1].status else { unreachable!() };
+    assert_eq!(
+        (error.code, error.message.as_str(), error.hint.as_deref()),
+        (
+            ErrorCode::PathConflict,
+            "the plays folder it was in was moved or replaced, so torrential stopped it",
+            Some("resume it to go on downloading where it was, or remove it")
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_a_file_that_a_finished_download_the_engine_has_not_let_go_of_writes() {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0x38; 20])));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let (ours, theirs) = (torrent(0x37, "set", &[("a.bin", MIB)]), torrent(0x38, "set", &[("a.bin", MIB)]));
+    let alias = h.dir.path().join("alias");
+    std::fs::create_dir_all(h.downloads()).unwrap();
+    symlink(h.downloads(), &alias).unwrap();
+    h.get_into(&ours, alias.clone()).await.unwrap();
+    h.until("ours is done", |jobs| jobs[0].status.name() == "done").await;
+    let file = h.downloads().join("set/a.bin");
+    written(&file, MIB);
+    gate.close();
+    h.get_into(&theirs, h.downloads()).await.unwrap();
+    h.until("theirs is done", |jobs| jobs.len() == 2 && jobs[1].status.name() == "done").await;
+    gate.until_held(1).await;
+
+    h.rm(vec![prefix(&theirs)], false).await;
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
+    assert_eq!((removed[0].trashed.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+    gate.open();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_on_a_play_again_notes_that_it_is_the_persons_when_the_first_get_could_not() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let mine = torrent(0x63, "mine", &[("mine.mp4", MIB)]);
+    h.play_web(&mine).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let database = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    let refuse =
+        "CREATE TRIGGER refuse BEFORE UPDATE OF by_hand ON plays BEGIN SELECT RAISE(ABORT, 'the disk is failing'); END";
+    database.execute_batch(refuse).unwrap();
+    assert!(h.get(Target::Prefix(prefix(&mine)), &[]).await.is_err());
+    database.execute_batch("DROP TRIGGER refuse").unwrap();
+
+    h.get(Target::Prefix(prefix(&mine)), &[]).await.unwrap();
+    let noted: bool = database.query_row("SELECT by_hand FROM plays", [], |row| row.get(0)).unwrap();
+    assert!(noted, "the next start finds the play the person's");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_too_large_to_get_is_refused_before_any_play_leaves_for_it() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let older = torrent(0xb5, "older", &[("older.mp4", 2 * GIB)]);
+    h.play_web(&older).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let huge = torrent(0xb6, "huge", &[("huge.mkv", 60 * GIB)]);
+    h.swarm.publish(huge.clone());
+    let (status, body) = post(&h, "/api/play", json!({ "ref": magnet_link(&huge) })).await;
+    assert_eq!((status, &body["error"]["code"]), (413, &json!("too_large")), "{body}");
+    assert_eq!(names(&h).await, named(&["older"]));
+    assert!(h.play_folder(&older).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_cannot_be_deleted() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(2 * GIB);
+    let older = torrent(0xb7, "older", &[("older.mp4", 8 * GIB)]);
+    h.play_web(&older).await;
+    let inner = h.play_folder(&older).join("older");
+    written(&inner.join("older.mp4"), MIB);
+    h.until("half of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
+    assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.disk.set_free(reserve(ROOMY.total) + GIB);
+    let shut = |mode| std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(mode)).unwrap();
+    shut(0o555);
+
+    h.play_web(&torrent(0xb8, "newer", &[("newer.mp4", 2 * GIB)])).await;
+    let jobs = h.until("the newer play stops", |jobs| jobs.iter().any(|job| job.status.name() == "error")).await;
+    shut(0o755);
+    let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
+    assert_eq!((jobs.len(), jobs[0].name.as_deref(), error.code), (1, Some("newer"), ErrorCode::DiskFull));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to_the_trash() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { trash_pause: Duration::from_secs(1), ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let set = torrent(0xc7, "set", &[("notes.txt", MIB)]);
+    h.get(h.torrent_file(&set), &[]).await.unwrap();
+    let notes = h.downloads().join("set/notes.txt");
+    written(&notes, MIB);
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let saved = notes.clone();
+    // An editor saves by writing a new file and renaming it over the old one.
+    let save = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let draft = saved.with_file_name(".notes.txt.swp");
+        std::fs::write(&draft, "the person's own notes").unwrap();
+        std::fs::rename(&draft, &saved).unwrap();
+    });
+
+    let removed = h.rm(vec![prefix(&set)], true).await;
+    save.join().unwrap();
+    let kept = Kept { path: notes.clone(), reason: "it was replaced after you asked to delete it".into() };
+    assert_eq!((removed[0].trashed.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "the person's own notes");
+    let trashed = std::fs::read_dir(h.dir.path().join("trash/files")).map_or(0, Iterator::count);
+    assert_eq!(trashed, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plays_folder_replaced_by_a_link_while_the_engine_is_stopped_stops_every_play_and_says_why() {
+    let h = Harness::new();
+    h.swarm.set_rate(20 * MIB);
+    let film = torrent(0x13, "film", &[("film.mp4", 2 * GIB)]);
+    h.play_web(&film).await;
+    h.until("the film downloads", |jobs| jobs[0].status.name() == "downloading").await;
+    let (plays, moved, decoys) = (h.plays(), h.dir.path().join("plays.old"), h.dir.path().join("decoys"));
+    let h = h
+        .restart_after(|| {
+            std::fs::rename(&plays, &moved).unwrap();
+            std::fs::create_dir_all(&decoys).unwrap();
+            symlink(&decoys, &plays).unwrap();
+        })
+        .await;
+
+    let jobs = h.until("the film stops", |jobs| jobs[0].status.name() == "error").await;
+    let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
+    let why = format!(
+        "torrential cannot use the plays folder {}: it is a link, and torrential deletes plays only in a folder of its \
+         own, so torrential stopped it",
+        plays.display()
+    );
+    assert_eq!((error.code, error.message.as_str()), (ErrorCode::PathConflict, why.as_str()));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(h.states().await, ["error"], "it stays stopped");
+    assert_eq!(std::fs::read_dir(&decoys).unwrap().count(), 0, "nothing goes through the link");
+}
+
+/// An engine with `newer` in its plays folder, while `older`, about 2 GiB of it there, leaves for
+/// it, held by the engine, and with 1 GiB free on the disk beyond what it keeps in reserve.
+async fn older_play_leaving() -> Harness {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0xe7; 20])));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, gate: Some(gate.clone()), ..Outside::default() },
+    );
+    h.swarm.set_rate(2 * GIB);
+    let older = torrent(0xe7, "older", &[("older.mp4", 8 * GIB)]);
+    h.play_web(&older).await;
+    h.until("some of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
+    assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    gate.close();
+    h.play_web(&torrent(0xe8, "newer", &[("newer.mp4", GIB)])).await;
+    gate.until_held(1).await;
+    h.until("newer is done", |jobs| {
+        jobs.iter().any(|job| job.name.as_deref() == Some("newer") && job.status.name() == "done")
+    })
+    .await;
+    h.swarm.set_rate(0);
+    h.disk.set_free(reserve(ROOMY.total) + GIB);
+    h
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn more_files_for_a_running_download_need_room_on_the_disk_now_not_room_a_leaving_play_will_give() {
+    let h = older_play_leaving().await;
+    let set = torrent(0xe9, "set", &[("a.bin", MIB), ("b.bin", 2 * GIB)]);
+    h.swarm.publish(set.clone());
+    h.get(h.torrent_file(&set), &["a.bin"]).await.unwrap();
+
+    let error = h.get(Target::Prefix(prefix(&set)), &["a.bin", "b.bin"]).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::DiskFull, "{error:?}");
+    let jobs = h.status().await;
+    let set = jobs.iter().find(|job| job.name.as_deref() == Some("set")).unwrap();
+    assert_eq!(set.selection, Selection::Patterns(vec!["a.bin".into()]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_magnet_whose_files_need_room_a_leaving_play_will_give_stops_for_want_of_room() {
+    let h = older_play_leaving().await;
+    let set = torrent(0xea, "set", &[("b.bin", 2 * GIB)]);
+    h.get(super::magnet(&set), &[]).await.unwrap();
+    h.swarm.publish(set);
+
+    let jobs = h.until("the magnet stops", |jobs| jobs.iter().any(|job| job.status.name() == "error")).await;
+    let set = jobs.iter().find(|job| job.status.name() == "error").unwrap();
+    let JobStatus::Error { error } = &set.status else { unreachable!() };
+    assert_eq!((set.name.as_deref(), error.code), (Some("set"), ErrorCode::DiskFull));
+}
