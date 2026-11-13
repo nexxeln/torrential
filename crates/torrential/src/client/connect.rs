@@ -164,11 +164,22 @@ pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
     let deadline = Instant::now() + BACK_WITHIN;
     let mut stopped = None;
     loop {
-        if let Some(conn) = running(paths, env)? {
-            stopped = Some(stop(conn, Stop::Asked)?);
-        }
-        if !paths.socket().exists() || Instant::now() > deadline {
-            return Ok(stopped);
+        let failed = match running(paths, env) {
+            Ok(found) => {
+                if let Some(conn) = found {
+                    stopped = Some(stop(conn, Stop::Asked)?);
+                }
+                if !paths.socket().exists() {
+                    return Ok(stopped);
+                }
+                None
+            }
+            // An engine that switches can take the connection and exit before it answers.
+            Err(e) if e.code == ErrorCode::DaemonUnavailable => Some(e),
+            Err(e) => return Err(e),
+        };
+        if Instant::now() > deadline {
+            return failed.map_or(Ok(stopped), Err);
         }
         std::thread::sleep(Duration::from_millis(100));
     }

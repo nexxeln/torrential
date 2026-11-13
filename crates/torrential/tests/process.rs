@@ -908,6 +908,36 @@ fn daemon_stop_is_idempotent() {
     assert_eq!(home.run(&["daemon", "stop"]).stdout, "result: already_stopped\n");
 }
 
+#[test]
+fn an_engine_stop_whose_engine_exits_before_it_answers_stops_the_engine_that_starts_next() {
+    use std::process::Stdio;
+    let home = Home::new();
+    let socket = home.dir.path().join("th/run/engine.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let leaving = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let stop = home.process(&["engine", "stop"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let (mut taken, _) = leaving.accept().unwrap();
+    let hello = read_frame(&mut taken).unwrap();
+
+    let log = home.dir.path().join("next.log");
+    let mut next = home.process(&["daemon", "run"]).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();
+    let pid = next.id();
+    // Reaped as it exits, so the stop sees it gone.
+    let next = std::thread::spawn(move || next.wait().unwrap().code());
+    eventually("the next engine is up", Duration::from_secs(30), || {
+        std::fs::read_to_string(&log).unwrap_or_default().contains(" started, pid ")
+    });
+    drop((taken, leaving));
+    let stop = stop.wait_with_output().unwrap();
+
+    assert_eq!(hello["op"], "hello");
+    assert_eq!(
+        (String::from_utf8(stop.stdout).unwrap(), String::from_utf8(stop.stderr).unwrap()),
+        (format!("result: stopped\npid:    {pid}\n"), String::new())
+    );
+    assert_eq!(next.join().unwrap(), Some(0));
+}
+
 const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
 
 impl Home {
