@@ -236,7 +236,7 @@ impl State {
             Some(_) => layout::ranking_span(&placed),
             None => self.cursor.and_then(|item| layout::span(&placed, item)),
         };
-        self.scroll = layout::settle(&placed, lines, scroll, viewport);
+        self.scroll = layout::settle(layout::total(&placed), lines, scroll, viewport);
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -693,7 +693,6 @@ impl State {
 
     fn query_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         use KeyCode::*;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             Enter => return self.run_search(),
             Esc if self.help => {
@@ -703,44 +702,8 @@ impl State {
             Esc if !self.items().is_empty() => return self.enter_list(),
             Down | Tab => return self.enter_list(),
             BackTab => return self.cycle(-1),
-            _ => {}
-        }
-        let input = &mut self.query;
-        match key.code {
-            Esc => *input = Input::default(),
-            Char('u') if ctrl => *input = Input::default(),
-            Char('a') if ctrl => input.caret = 0,
-            Char('e') if ctrl => input.caret = input.text.chars().count(),
-            Char('k') if ctrl => input.text = input.text.chars().take(input.caret).collect(),
-            Char('w') if ctrl => {
-                let before: Vec<char> = input.text.chars().take(input.caret).collect();
-                let mut cut = before.len();
-                while cut > 0 && before[cut - 1] == ' ' {
-                    cut -= 1;
-                }
-                while cut > 0 && before[cut - 1] != ' ' {
-                    cut -= 1;
-                }
-                let after: String = input.text.chars().skip(input.caret).collect();
-                input.text = before[..cut].iter().collect::<String>() + &after;
-                input.caret = cut;
-            }
-            Left => input.caret = input.caret.saturating_sub(1),
-            Right => input.caret = (input.caret + 1).min(input.text.chars().count()),
-            Home => input.caret = 0,
-            End => input.caret = input.text.chars().count(),
-            Backspace if input.caret > 0 => {
-                input.caret -= 1;
-                input.text = remove_char(&input.text, input.caret);
-            }
-            Delete if input.caret < input.text.chars().count() => input.text = remove_char(&input.text, input.caret),
-            Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                let mut chars: Vec<char> = input.text.chars().collect();
-                chars.insert(input.caret, c);
-                input.text = chars.into_iter().collect();
-                input.caret += 1;
-            }
-            _ => {}
+            Esc => self.query = Input::default(),
+            _ => edit(&mut self.query, key),
         }
         Vec::new()
     }
@@ -1004,6 +967,47 @@ impl State {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// Applies a key typed into a search box: text, the caret, and the readline keys.
+pub(crate) fn edit(input: &mut Input, key: KeyEvent) {
+    use KeyCode::*;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        Char('u') if ctrl => *input = Input::default(),
+        Char('a') if ctrl => input.caret = 0,
+        Char('e') if ctrl => input.caret = input.text.chars().count(),
+        Char('k') if ctrl => input.text = input.text.chars().take(input.caret).collect(),
+        Char('w') if ctrl => {
+            let before: Vec<char> = input.text.chars().take(input.caret).collect();
+            let mut cut = before.len();
+            while cut > 0 && before[cut - 1] == ' ' {
+                cut -= 1;
+            }
+            while cut > 0 && before[cut - 1] != ' ' {
+                cut -= 1;
+            }
+            let after: String = input.text.chars().skip(input.caret).collect();
+            input.text = before[..cut].iter().collect::<String>() + &after;
+            input.caret = cut;
+        }
+        Left => input.caret = input.caret.saturating_sub(1),
+        Right => input.caret = (input.caret + 1).min(input.text.chars().count()),
+        Home => input.caret = 0,
+        End => input.caret = input.text.chars().count(),
+        Backspace if input.caret > 0 => {
+            input.caret -= 1;
+            input.text = remove_char(&input.text, input.caret);
+        }
+        Delete if input.caret < input.text.chars().count() => input.text = remove_char(&input.text, input.caret),
+        Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+            let mut chars: Vec<char> = input.text.chars().collect();
+            chars.insert(input.caret, c);
+            input.text = chars.into_iter().collect();
+            input.caret += 1;
+        }
+        _ => {}
     }
 }
 

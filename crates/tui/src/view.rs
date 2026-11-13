@@ -14,16 +14,16 @@ use crate::format::{
 };
 use crate::layout::{self, Block, Indent, MASTHEAD, SEARCH, Screen};
 use crate::state::{
-    Engine, Files, Focus, Item, ROWS, RankedFor, Ranking, Row, SearchPhase, Sort, State, Tone, Upgrade, label,
+    Engine, Files, Focus, Input, Item, ROWS, RankedFor, Ranking, Row, SearchPhase, Sort, State, Tone, Upgrade, label,
 };
 use crate::theme::*;
 use crate::tree::{Check, NodeKind, Tree};
 
-fn fg(c: Color) -> Style {
+pub(crate) fn fg(c: Color) -> Style {
     Style::new().fg(c)
 }
 
-fn bold(c: Color) -> Style {
+pub(crate) fn bold(c: Color) -> Style {
     fg(c).add_modifier(Modifier::BOLD)
 }
 
@@ -44,7 +44,7 @@ fn put_right(buf: &mut Buffer, right: u16, y: u16, text: &str, style: Style) -> 
     x
 }
 
-fn spans(buf: &mut Buffer, x: u16, y: u16, max: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
+pub(crate) fn spans(buf: &mut Buffer, x: u16, y: u16, max: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
     let mut used = 0;
     for (text, style) in parts {
         used += put(buf, x + used, y, max.saturating_sub(used), text.as_ref(), *style);
@@ -56,7 +56,7 @@ fn spans_width(parts: &[(impl AsRef<str>, Style)]) -> u16 {
     parts.iter().map(|(t, _)| width(t.as_ref()) as u16).sum()
 }
 
-fn spans_right(buf: &mut Buffer, right: u16, y: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
+pub(crate) fn spans_right(buf: &mut Buffer, right: u16, y: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
     let w = spans_width(parts);
     spans(buf, right.saturating_sub(w), y, w, parts);
     right.saturating_sub(w)
@@ -68,23 +68,23 @@ fn paint(buf: &mut Buffer) {
     }
 }
 
-fn margin(buf: &mut Buffer, at: Indent, y: u16, text: &str, style: Style) {
+pub(crate) fn margin(buf: &mut Buffer, at: Indent, y: u16, text: &str, style: Style) {
     if let Some(edge) = at.margin {
         put_right(buf, edge + 1, y, text, style);
     }
 }
 
-fn mark(buf: &mut Buffer, at: Indent, y: u16) {
+pub(crate) fn mark(buf: &mut Buffer, at: Indent, y: u16) {
     put(buf, at.mark, y, 1, "●", fg(ACTION));
 }
 
-fn arrow(buf: &mut Buffer, at: Indent, y: u16, glyph: &str) {
+pub(crate) fn arrow(buf: &mut Buffer, at: Indent, y: u16, glyph: &str) {
     if buf[(at.mark, y)].symbol() == "│" {
         put(buf, at.mark, y, 1, glyph, fg(PENCIL));
     }
 }
 
-fn rule(buf: &mut Buffer, at: Indent, top: u16, bottom: u16) {
+pub(crate) fn rule(buf: &mut Buffer, at: Indent, top: u16, bottom: u16) {
     for y in top..bottom {
         put(buf, at.mark, y, 1, "│", fg(RULE));
     }
@@ -199,7 +199,7 @@ pub fn render(buf: &mut Buffer, state: &State, mode: ColorMode) -> Option<Positi
     let caret = search(buf, state, &screen);
     rule(buf, screen.at, SEARCH + 1, screen.list.y);
     if state.help {
-        help(buf, &screen);
+        help(buf, &screen, &HELP, &NOTES);
     } else {
         list(buf, state, &screen);
     }
@@ -258,19 +258,32 @@ fn short_of_space(state: &State) -> bool {
 }
 
 fn search(buf: &mut Buffer, state: &State, screen: &Screen) -> Option<Position> {
-    let at = screen.at;
     let focused = state.focus == Focus::Query;
+    let hint = if focused { "type a name, then press enter" } else { "press / to search" };
+    let status = [false, true].map(|short| search_status(state, short));
+    search_box(buf, screen, &state.query, focused, hint, status)
+}
+
+/// The search line: the words typed or a hint, and on the right a status, `long` where it fits
+/// beside the words and `short` where it does not. Returns where the caret goes while typing.
+pub(crate) fn search_box(
+    buf: &mut Buffer,
+    screen: &Screen,
+    input: &Input,
+    focused: bool,
+    hint: &str,
+    [long, short]: [Vec<(String, Style)>; 2],
+) -> Option<Position> {
+    let at = screen.at;
     margin(buf, at, SEARCH, "search", fg(PENCIL));
     if focused {
         mark(buf, at, SEARCH);
     } else {
         rule(buf, at, SEARCH, SEARCH + 1);
     }
-    let text = &state.query.text;
-    let hint = if focused { "type a name, then press enter" } else { "press / to search" };
+    let text = &input.text;
     let left = width(if text.is_empty() { hint } else { text }) as u16;
     let room = screen.right - at.content;
-    let [long, short] = [false, true].map(|short| search_status(state, short));
     let status = if left + 3 + spans_width(&long) <= room { long } else { short };
     let used = spans_width(&status);
     spans_right(buf, screen.right, SEARCH, &status);
@@ -283,7 +296,7 @@ fn search(buf: &mut Buffer, state: &State, screen: &Screen) -> Option<Position> 
         put(buf, x, SEARCH, room, text, fg(INK));
         return None;
     }
-    let before: String = text.chars().take(state.query.caret).collect();
+    let before: String = text.chars().take(input.caret).collect();
     let skip = (width(&before) as u16).saturating_sub(room.saturating_sub(1));
     let shown: String = {
         let mut cells = 0;
@@ -1025,14 +1038,14 @@ const NOTES: [&str; 4] = [
     "Removing a download keeps its files.",
 ];
 
-fn help(buf: &mut Buffer, screen: &Screen) {
+fn help(buf: &mut Buffer, screen: &Screen, sections: &[(&str, &[(&str, &str)])], notes: &[&str]) {
     let at = screen.at;
     let area = screen.list;
     rule(buf, at, area.y, area.bottom());
     let room = screen.right - at.content;
     let start = if at.narrow() { at.detail } else { at.content };
     let mut y = area.y;
-    for (word, pairs) in HELP {
+    for &(word, pairs) in sections {
         if at.narrow() {
             if y >= area.bottom() {
                 return;
@@ -1056,8 +1069,8 @@ fn help(buf: &mut Buffer, screen: &Screen) {
         }
         y += 1;
     }
-    for (k, note) in NOTES.iter().enumerate() {
-        put(buf, at.content, y + 1 + k as u16, room, note, fg(PENCIL));
+    for (note, y) in notes.iter().zip(y + 1..area.bottom()) {
+        put(buf, at.content, y, room, note, fg(PENCIL));
     }
 }
 
