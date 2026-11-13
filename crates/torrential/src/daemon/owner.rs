@@ -38,8 +38,8 @@ pub struct OwnerConfig {
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
     pub plays: Plays,
-    /// How long files moved aside wait before they are deleted: no time, except in a test that
-    /// stops the engine in between.
+    /// How long a play leaving the plays folder, and files moved aside, wait before they go: no
+    /// time, except in a test that does something in between.
     pub deletion_pause: Duration,
 }
 
@@ -1722,7 +1722,7 @@ impl Owner {
         if self.stopping.is_some() {
             return;
         }
-        let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()));
+        let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()) && !self.leaving(j.id()));
         for id in book::to_start(ready, self.config.max_active, &self.streamed) {
             self.start(id);
         }
@@ -1832,6 +1832,7 @@ impl Owner {
         self.check_idle(now);
         self.save_progress(now);
         self.finish_deletions();
+        self.leave();
         self.tend_plays(now);
     }
 

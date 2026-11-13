@@ -89,8 +89,9 @@ pub struct Tending {
     /// The folder and the files of each download taken off the list that the engine has yet to
     /// let go of.
     pub(super) letting_go: BTreeMap<TorrentId, (PathBuf, Vec<PathBuf>)>,
-    /// Plays leaving the plays folder, on the list until the engine lets go of them.
-    leaving: BTreeSet<TorrentId>,
+    /// Plays leaving the plays folder, on the list until the engine lets go of them, and when
+    /// each may leave.
+    leaving: BTreeMap<TorrentId, Instant>,
     /// `rm`s that answer once their deletions are done.
     removals: Vec<Removal>,
     tended_at: Option<Instant>,
@@ -104,7 +105,7 @@ impl Tending {
             viewers: BTreeMap::new(),
             deleter,
             letting_go: BTreeMap::new(),
-            leaving: BTreeSet::new(),
+            leaving: BTreeMap::new(),
             removals: Vec::new(),
             tended_at: None,
             refused: None,
@@ -366,7 +367,7 @@ impl Owner {
 
     /// Whether `id` is leaving the plays folder.
     pub(super) fn leaving(&self, id: TorrentId) -> bool {
-        self.tending.leaving.contains(&id)
+        self.tending.leaving.contains_key(&id)
     }
 
     /// `space` as the check for room counts it: what the plays leaving the plays folder take up on
@@ -375,7 +376,7 @@ impl Owner {
         if !self.disk.space(&self.config.plays.root).is_ok_and(|plays| plays.device == space.device) {
             return space;
         }
-        let leaving = self.tending.leaving.iter().filter_map(|id| self.jobs.get(id)).map(|job| self.play_bytes(job));
+        let leaving = self.tending.leaving.keys().filter_map(|id| self.jobs.get(id)).map(|job| self.play_bytes(job));
         Space { free: space.free + leaving.sum::<u64>() + self.tending.deleter.play_bytes(), ..space }
     }
 
@@ -384,7 +385,7 @@ impl Owner {
     fn tended(&self, job: &JobEntry, saved: &BTreeSet<TitleId>) -> bool {
         let Home::Plays(play) = job.record.home else { return false };
         let in_library = job.record.title.as_ref().is_some_and(|linked| saved.contains(&linked.link.title));
-        !play.by_hand && !in_library && !self.tending.leaving.contains(&job.id())
+        !play.by_hand && !in_library && !self.leaving(job.id())
     }
 
     /// Someone streams `id`, or a title play is testing it.
@@ -400,7 +401,7 @@ impl Owner {
         let mut shares: Vec<Share> = incoming.into_iter().collect();
         for job in self.jobs.values() {
             let Home::Plays(play) = job.record.home else { continue };
-            if self.tending.leaving.contains(&job.id()) {
+            if self.leaving(job.id()) {
                 going += self.play_bytes(job);
             } else if self.tended(job, saved) {
                 let id = job.id();
@@ -444,7 +445,7 @@ impl Owner {
                     pause.waiting.remove(&id);
                 }
             }
-            self.tending.leaving.insert(id);
+            self.tending.leaving.insert(id, Instant::now() + self.config.deletion_pause);
             self.publish(id);
         }
         self.finish_pauses();
@@ -456,8 +457,14 @@ impl Owner {
     /// saved at any point before now stays. So does one someone streams, or one the person got
     /// by hand, since it started leaving.
     pub(super) fn leave(&mut self) {
-        let ready: Vec<TorrentId> =
-            self.tending.leaving.iter().copied().filter(|id| !self.draining.contains(id)).collect();
+        let now = Instant::now();
+        let ready: Vec<TorrentId> = self
+            .tending
+            .leaving
+            .iter()
+            .filter(|(id, at)| !self.draining.contains(id) && **at <= now)
+            .map(|(id, _)| *id)
+            .collect();
         if ready.is_empty() {
             return;
         }
@@ -495,7 +502,7 @@ impl Owner {
         let kept: Vec<TorrentId> = self
             .tending
             .leaving
-            .iter()
+            .keys()
             .copied()
             .filter(|id| {
                 self.jobs.get(id).and_then(|job| job.record.title.as_ref()).is_some_and(|l| l.link.title == card.id)
