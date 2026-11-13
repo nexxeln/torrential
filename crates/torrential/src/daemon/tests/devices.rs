@@ -376,39 +376,26 @@ async fn a_connection_from_the_network_that_sends_no_whole_request_closes_within
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn one_address_holds_at_most_16_connections_before_a_request_on_them_shows_a_cookie() {
+async fn a_paired_phone_gets_in_while_strangers_hold_every_connection_they_may() {
     let Some(ip) = lan() else { return };
     let h = Harness::new();
-    devices(&h, Request::AddDevice).await;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
     listening(&h, ip, true).await;
     let port = h.running.ctx.http_port;
-    let mut idle = Vec::new();
+    let mut phone = Browser::on(ip, &h);
+    phone.pair(&offer.code).await;
+    let mut held = Vec::new();
     for _ in 0..16 {
-        idle.push(TcpStream::connect((ip, port)).await.unwrap());
+        held.push(TcpStream::connect((ip, port)).await.unwrap());
     }
-    let mut over = TcpStream::connect((ip, port)).await.unwrap();
+    let me = phone.get("/api/me").await;
+    assert_eq!((me.status, &me.json()["asker"]), (200, &serde_json::json!("device")));
     let mut rest = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), over.read_to_end(&mut rest))
+    tokio::time::timeout(Duration::from_secs(2), held[0].read_to_end(&mut rest))
         .await
-        .expect("the engine closes a 17th connection at once")
+        .expect("the oldest stranger closes to make room")
         .unwrap();
     assert_eq!(mac_again(port).get("/api/me").await.json(), serde_json::json!({ "asker": "mac" }), "the Mac gets in");
-    drop(idle);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let mut stream = TcpStream::connect((ip, port)).await.unwrap();
-        stream
-            .write_all(format!("GET /pair HTTP/1.1\r\nHost: {ip}:{port}\r\nConnection: close\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        let mut answer = Vec::new();
-        let _ = stream.read_to_end(&mut answer).await;
-        if answer.starts_with(b"HTTP/1.1 200 OK") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the address gets in again once its connections close");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 /// Another program on `port` of the home network, so the engine cannot listen there. macOS lets

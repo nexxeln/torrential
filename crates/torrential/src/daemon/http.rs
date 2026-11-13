@@ -3,7 +3,7 @@
 //! for bytes that have not arrived asks the engine for their pieces first and waits for them, so a
 //! player can start and seek while the rest of the file downloads.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::{self, SeekFrom};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use torrential_core::TorrentId;
 
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
@@ -148,30 +148,28 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
     }
 }
 
-/// Serves one connection in a task of its own. One from the network that `strangers` has no room
-/// for closes at once.
+/// Serves one connection in a task of its own.
 fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: SocketAddr) {
     let Ok(local) = stream.local_addr() else { return };
     let peer = Peer::of(local, remote);
     let stranger = match peer {
         Peer::Loopback => None,
-        Peer::Network { remote, .. } => match strangers.admit(remote) {
-            Some(stranger) => Some(stranger),
-            None => return,
-        },
+        Peer::Network { remote, .. } => Some(strangers.admit(remote)),
     };
     let ctx = ctx.clone();
     tokio::spawn(async move {
         ctx.owner.tell(Command::Connected);
         let _ = stream.set_nodelay(true);
         let (rd, wr) = stream.into_split();
-        let serve = Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false, stranger }.serve();
-        // Once the engine stops listening on the network, nothing from it stays open.
-        match peer {
-            Peer::Loopback => drop(serve.await),
-            Peer::Network { .. } => tokio::select! {
-                _ = serve => {}
+        let connection =
+            |stranger| Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false, stranger };
+        match stranger {
+            None => drop(connection(None).serve().await),
+            Some((stranger, closed)) => tokio::select! {
+                _ = connection(Some(stranger)).serve() => {}
+                // Once the engine stops listening on the network, nothing from it stays open.
                 () = ctx.devices.closed() => {}
+                Ok(()) = closed => {}
             },
         }
         ctx.owner.tell(Command::Disconnected { keep_until: None });
@@ -179,46 +177,65 @@ fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: 
 }
 
 /// The connections from the network that no request has shown a device's cookie or a cast grant
-/// on yet, by address. Idle sockets from one machine cannot crowd out the others, nor use up the
-/// engine's file descriptors.
+/// on yet, oldest first. A new one always gets in, so strangers never turn away a paired phone or
+/// a TV. To make room, the oldest from its address closes once that address holds
+/// `STRANGERS_PER_ADDRESS`, or else the oldest of all once there are `STRANGERS`. Idle sockets
+/// cannot use up the engine's file descriptors, and one address cannot crowd out the others.
 #[derive(Default)]
 struct Strangers {
-    open: Mutex<HashMap<IpAddr, usize>>,
+    open: Mutex<Open>,
 }
 
+#[derive(Default)]
+struct Open {
+    connections: VecDeque<Waiting>,
+    next: u64,
+}
+
+struct Waiting {
+    id: u64,
+    ip: IpAddr,
+    close: oneshot::Sender<()>,
+}
+
+/// Resolves when a newer stranger needs the room. It fails instead once the connection stops
+/// counting, so a device's connection never closes for it.
+type Closed = oneshot::Receiver<()>;
+
 impl Strangers {
-    fn open(&self) -> MutexGuard<'_, HashMap<IpAddr, usize>> {
+    fn open(&self) -> MutexGuard<'_, Open> {
         self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Counts one more connection from `ip`, or `None` when that address or every address
-    /// together holds as many as they may.
-    fn admit(self: &Arc<Self>, ip: IpAddr) -> Option<Stranger> {
+    fn admit(self: &Arc<Self>, ip: IpAddr) -> (Stranger, Closed) {
         let mut open = self.open();
-        let all: usize = open.values().sum();
-        if open.get(&ip).copied().unwrap_or(0) >= STRANGERS_PER_ADDRESS || all >= STRANGERS {
-            return None;
+        let connections = &mut open.connections;
+        let oldest = if connections.iter().filter(|waiting| waiting.ip == ip).count() >= STRANGERS_PER_ADDRESS {
+            connections.iter().position(|waiting| waiting.ip == ip)
+        } else {
+            (connections.len() >= STRANGERS).then_some(0)
+        };
+        if let Some(waiting) = oldest.and_then(|at| connections.remove(at)) {
+            let _ = waiting.close.send(());
         }
-        *open.entry(ip).or_default() += 1;
-        Some(Stranger { strangers: self.clone(), ip })
+        let (close, closed) = oneshot::channel();
+        let id = open.next;
+        open.next += 1;
+        open.connections.push_back(Waiting { id, ip, close });
+        (Stranger { strangers: self.clone(), id }, closed)
     }
 }
 
 /// A connection that counts in `Strangers` until it is dropped.
 struct Stranger {
     strangers: Arc<Strangers>,
-    ip: IpAddr,
+    id: u64,
 }
 
 impl Drop for Stranger {
     fn drop(&mut self) {
         let mut open = self.strangers.open();
-        if let Some(count) = open.get_mut(&self.ip) {
-            *count -= 1;
-            if *count == 0 {
-                open.remove(&self.ip);
-            }
-        }
+        open.connections.retain(|waiting| waiting.id != self.id);
     }
 }
 
@@ -918,18 +935,24 @@ mod tests {
     }
 
     #[test]
-    fn strangers_get_16_connections_an_address_and_64_in_all() {
+    fn a_new_stranger_closes_the_oldest_of_its_address_or_else_the_oldest_of_all() {
         let strangers = Arc::new(Strangers::default());
         let address = |n: u8| IpAddr::V4(Ipv4Addr::new(192, 168, 1, n));
-        let first: Vec<Stranger> = (0..16).map(|_| strangers.admit(address(40)).unwrap()).collect();
-        assert!(strangers.admit(address(40)).is_none(), "a 17th from one address");
-        let mut rest: Vec<Stranger> = (0..48).map(|n| strangers.admit(address(100 + n / 4)).unwrap()).collect();
-        assert!(strangers.admit(address(99)).is_none(), "a 65th from any address");
-        rest.pop();
-        assert!(strangers.admit(address(99)).is_some(), "a connection that ends makes room");
-        drop(first);
-        assert!(strangers.admit(address(40)).is_some());
-        assert_eq!(strangers.open().get(&address(41)), None, "an address that never got in leaves nothing behind");
+        let mut open: Vec<_> = (0..64).map(|n| strangers.admit(address(40 + n / 16))).collect();
+        let closed = |open: &mut Vec<(Stranger, Closed)>| -> Vec<usize> {
+            let closed = open.iter_mut().map(|(_, closed)| closed.try_recv().is_ok());
+            closed.enumerate().filter_map(|(n, closed)| closed.then_some(n)).collect()
+        };
+        assert!(closed(&mut open).is_empty());
+        let phone = strangers.admit(address(50));
+        assert_eq!(closed(&mut open), [0], "a 65th from another address");
+        let more = strangers.admit(address(43));
+        assert_eq!(closed(&mut open), [48], "a 17th from one address");
+        drop(open.remove(5));
+        let tv = strangers.admit(address(51));
+        assert!(closed(&mut open).is_empty(), "a connection that shows a cookie makes room");
+        drop((phone, more, tv, open));
+        assert_eq!(strangers.open().connections.len(), 0, "nothing stays behind");
     }
 
     #[test]
