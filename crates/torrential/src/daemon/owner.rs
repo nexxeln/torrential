@@ -26,8 +26,8 @@ pub struct OwnerConfig {
     pub default_dir: PathBuf,
     pub probe_dir: PathBuf,
     pub max_active: usize,
+    /// Only tests set one. Every other engine runs until it is stopped.
     pub idle_timeout: Option<Duration>,
-    pub resume_on_start: bool,
     pub save_resume_every: Duration,
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
@@ -315,11 +315,7 @@ impl Owner {
                 })?)),
                 None => None,
             };
-            let observed = match stored.record.intent {
-                Intent::Running if !config.resume_on_start => Observed::Parked,
-                _ => Observed::Absent,
-            };
-            jobs.insert(stored.record.id, JobEntry::new(stored.record, metainfo, observed));
+            jobs.insert(stored.record.id, JobEntry::new(stored.record, metainfo, Observed::Absent));
         }
         let now = now();
         let (updates, _) = broadcast::channel(256);
@@ -669,11 +665,6 @@ impl Owner {
         {
             self.job_metadata(id, metainfo);
         }
-        if !dry_run && self.jobs[&id].observed == Observed::Parked {
-            self.jobs.get_mut(&id).expect("found above").observed = Observed::Absent;
-            self.schedule();
-            self.publish(id);
-        }
         let job = &self.jobs[&id];
         let too_large = matches!(&job.record.intent, Intent::Failed { error } if error.code == ErrorCode::TooLarge);
         let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none() && self.lost_files(job);
@@ -840,7 +831,7 @@ impl Owner {
             (Some(_), Some(_)) => {}
         }
         let job = &self.jobs[&id];
-        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
+        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) {
             self.resume(&[id.to_hex()], false)?;
         }
         if let Some(play) = title {
@@ -922,7 +913,7 @@ impl Owner {
         }
         let settled = match job.observed {
             Observed::InEngine(phase) => phase == Phase::Paused,
-            Observed::Absent | Observed::Parked => !self.draining.contains(&job.id()),
+            Observed::Absent => !self.draining.contains(&job.id()),
         };
         if !settled {
             return OnDisk::Unsettled;
@@ -1031,7 +1022,7 @@ impl Owner {
                             job.observed = Observed::InEngine(Phase::Pausing);
                             self.engine.send(EngineCommand::Pause(id));
                         }
-                        Observed::Absent | Observed::Parked => job.observed = Observed::Absent,
+                        Observed::Absent => {}
                     }
                     self.publish(id);
                     "paused"
@@ -1057,10 +1048,7 @@ impl Owner {
     }
 
     fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
-        let resumable = |j: &JobEntry| {
-            matches!(j.record.intent, Intent::Paused | Intent::Failed { .. })
-                || (j.record.intent == Intent::Running && j.observed == Observed::Parked)
-        };
+        let resumable = |j: &JobEntry| matches!(j.record.intent, Intent::Paused | Intent::Failed { .. });
         let fits = |j: &JobEntry| {
             j.selected_size().map_or(Ok(()), |size| admission::check_size(size, j.record.cap, Some(j.id())))
         };
@@ -1078,18 +1066,10 @@ impl Owner {
             let job = &self.jobs[&id];
             let result = match (&job.record.intent, job.observed) {
                 (Intent::Done { .. }, _) => "already_done",
-                (Intent::Running, Observed::Parked) => {
-                    self.jobs.get_mut(&id).expect("resolved above").observed = Observed::Absent;
-                    "resumed"
-                }
                 (Intent::Running, _) => "already_running",
-                (Intent::Paused | Intent::Failed { .. }, observed) => {
+                (Intent::Paused | Intent::Failed { .. }, _) => {
                     self.store.set_intent(id, &Intent::Running)?;
-                    let job = self.jobs.get_mut(&id).expect("resolved above");
-                    job.record.intent = Intent::Running;
-                    if observed == Observed::Parked {
-                        job.observed = Observed::Absent;
-                    }
+                    self.jobs.get_mut(&id).expect("resolved above").record.intent = Intent::Running;
                     "resumed"
                 }
             };
@@ -1402,7 +1382,7 @@ impl Owner {
                 }
                 Observed::Absent
             }
-            outside @ (Observed::Absent | Observed::Parked) => outside,
+            Observed::Absent => Observed::Absent,
         };
         self.publish(id);
     }
@@ -1440,7 +1420,7 @@ impl Owner {
             Observed::InEngine(Phase::Finishing { writes_stopped: true }) => return,
             Observed::InEngine(Phase::Checking) if job.verify.is_some() => return,
             Observed::InEngine(_) => job.observed = Observed::InEngine(Phase::Paused),
-            Observed::Absent | Observed::Parked => return,
+            Observed::Absent => return,
         }
         self.engine.send(EngineCommand::SaveResume(id));
         for pause in &mut self.pauses {
@@ -1755,7 +1735,7 @@ impl Owner {
                     self.engine.send(EngineCommand::Pause(id));
                     waiting.insert(id);
                 }
-                Observed::Absent | Observed::Parked => {}
+                Observed::Absent => {}
             }
         }
         self.stopping = Some(Stopping {

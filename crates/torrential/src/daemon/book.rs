@@ -22,7 +22,6 @@ pub enum Intent {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Observed {
     Absent,
-    Parked,
     InEngine(Phase),
 }
 
@@ -49,7 +48,6 @@ pub fn status(intent: &Intent, observed: Observed) -> JobStatus {
         (Intent::Failed { error }, _) => JobStatus::Error { error: error.clone() },
         (Intent::Paused, _) => JobStatus::Paused,
         (Intent::Running, Observed::Absent | Observed::InEngine(Phase::Paused)) => JobStatus::Queued,
-        (Intent::Running, Observed::Parked) => JobStatus::Interrupted,
         (Intent::Running, Observed::InEngine(Phase::Metadata)) => JobStatus::Metadata,
         (Intent::Running, Observed::InEngine(Phase::Downloading | Phase::Pausing | Phase::Finishing { .. })) => {
             JobStatus::Downloading
@@ -271,9 +269,8 @@ mod tests {
         let failed = Intent::Failed { error: Error::new(ErrorCode::DiskFull, "disk full") };
         let done = Intent::Done { finished_at: 7 };
         let engine = Observed::InEngine;
-        let table: [(&Intent, Observed, &str); 20] = [
+        let table: [(&Intent, Observed, &str); 17] = [
             (&Intent::Running, Observed::Absent, "queued"),
-            (&Intent::Running, Observed::Parked, "interrupted"),
             (&Intent::Running, engine(Phase::Metadata), "metadata"),
             (&Intent::Running, engine(Phase::Checking), "checking"),
             (&Intent::Running, engine(Phase::Downloading), "downloading"),
@@ -281,12 +278,10 @@ mod tests {
             (&Intent::Running, engine(Phase::Paused), "queued"),
             (&Intent::Running, engine(Phase::Finishing { writes_stopped: false }), "downloading"),
             (&Intent::Paused, Observed::Absent, "paused"),
-            (&Intent::Paused, Observed::Parked, "paused"),
             (&Intent::Paused, engine(Phase::Pausing), "paused"),
             (&Intent::Paused, engine(Phase::Paused), "paused"),
             (&Intent::Paused, engine(Phase::Checking), "checking"),
             (&done, Observed::Absent, "done"),
-            (&done, Observed::Parked, "done"),
             (&done, engine(Phase::Checking), "checking"),
             (&done, engine(Phase::Paused), "done"),
             (&failed, Observed::Absent, "error"),
@@ -380,7 +375,6 @@ mod tests {
             entry(2, 30, Intent::Running, Observed::Absent),
             entry(3, 20, Intent::Running, Observed::Absent),
             entry(4, 5, Intent::Paused, Observed::Absent),
-            entry(5, 1, Intent::Running, Observed::Parked),
             entry(6, 40, Intent::Running, Observed::InEngine(Phase::Paused)),
         ];
         let none = BTreeSet::new();

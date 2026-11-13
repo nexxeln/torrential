@@ -41,7 +41,6 @@ use search_port::SearchPort;
 use server::{Ctx, OwnerHandle};
 use store::Store;
 
-const DEFAULT_IDLE: Duration = Duration::from_secs(120);
 const SAVE_RESUME_EVERY: Duration = Duration::from_secs(5 * 60);
 /// Longer than libtorrent's 15-minute DHT announce, so a new source gets a round of discovery.
 const STALL_AFTER: Duration = Duration::from_secs(20 * 60);
@@ -197,12 +196,12 @@ pub fn log(message: &str) {
     eprintln!("{} {message}", crate::output::format::timestamp(owner::now()));
 }
 
-pub fn run(env: &Env, service: bool) -> u8 {
+pub fn run(env: &Env) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
-    match serve(env, &paths, service) {
+    match serve(env, &paths) {
         Ok(()) => 0,
         Err(Startup::AlreadyRunning(message)) => {
             log(&message);
@@ -231,7 +230,7 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     error.code.exit_code()
 }
 
-fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
+fn serve(env: &Env, paths: &Paths) -> Result<(), Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
     std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
@@ -248,10 +247,6 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
     if seed {
         fixture::seed(&mut store, &default_dir, owner::now())?;
     }
-    let idle_timeout = env
-        .var("TORRENTIAL_TEST_IDLE_TIMEOUT")
-        .and_then(torrential_core::units::parse_duration)
-        .unwrap_or(DEFAULT_IDLE);
     let save_resume_every = env
         .var("TORRENTIAL_TEST_SAVE_RESUME_EVERY")
         .and_then(torrential_core::units::parse_duration)
@@ -266,8 +261,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         default_dir,
         probe_dir: paths.cache.join("probes"),
         max_active: MAX_ACTIVE,
-        idle_timeout: (!service).then_some(idle_timeout),
-        resume_on_start: service || seed,
+        idle_timeout: env.var("TORRENTIAL_TEST_IDLE_TIMEOUT").and_then(torrential_core::units::parse_duration),
         save_resume_every,
         stall_after,
         writes_stop_within: WRITES_STOP_WITHIN,

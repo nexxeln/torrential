@@ -493,7 +493,7 @@ fn a_paused_download_keeps_its_file_progress_across_an_engine_restart() {
 }
 
 #[test]
-fn a_killed_engine_resumes_without_downloading_verified_pieces_again() {
+fn a_killed_engine_resumes_by_itself_without_downloading_verified_pieces_again() {
     let fixture = Fixture::new("big", &BIG, 5);
     let seeder = Seeder::start(&fixture, SLOW);
     let home = Home::new(&seeder);
@@ -505,9 +505,8 @@ fn a_killed_engine_resumes_without_downloading_verified_pieces_again() {
     home.kill_engine();
     let sent_before_restart = seeder.uploaded_once_alone();
 
-    assert_eq!(state(&home.job(&fixture.id())), "interrupted");
+    assert_eq!(home.ok(&["resume", &fixture.short()])["changes"][0]["result"], "already_running");
     assert_eq!(home.logged_addrs().last(), Some(&addr), "the new engine listens on the same port");
-    assert_eq!(home.ok(&["resume", &fixture.short()])["changes"][0]["result"], "resumed");
     let wait = home.run(&["wait", &fixture.short()]);
     assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
     let resent = seeder.uploaded() - sent_before_restart;
@@ -540,10 +539,8 @@ fn a_killed_engine_trusts_its_last_periodic_save_instead_of_hashing_the_files() 
         }
     }
 
-    let job = home.job(&fixture.id());
-    assert_eq!((state(&job), verified(&job)), ("interrupted", saved), "the save outlived the engine");
-    assert_eq!(home.ok(&["resume", &fixture.short()])["changes"][0]["result"], "resumed");
-    home.until(&fixture.id(), "the engine has it again", |j| state(j) == "downloading");
+    let job = home.until(&fixture.id(), "the engine has it again", |j| state(j) == "downloading");
+    assert_eq!(verified(&job), saved, "the save outlived the engine");
     let files = home.ok(&["files", &fixture.short()]);
     let in_engine: u64 =
         files["files"]["files"].as_array().unwrap().iter().map(|f| f["verified"].as_u64().unwrap()).sum();

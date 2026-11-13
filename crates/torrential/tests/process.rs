@@ -397,20 +397,17 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
 }
 
 #[test]
-fn a_killed_engine_comes_back_with_the_download_interrupted() {
+fn a_killed_engine_comes_back_with_the_download_running() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let (pid, _) = home.engine().unwrap();
     unsafe { libc::kill(pid, libc::SIGKILL) };
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    let status = home.run(&["status", "9b5212"]);
-    assert_eq!(status.code, 0, "{}", status.stderr);
-    assert!(status.stdout.contains("state:    interrupted"), "{}", status.stdout);
-    assert!(status.stdout.ends_with("next:     torrential resume 9b5212\n"), "{}", status.stdout);
     let resume = home.run(&["resume", "9b5212"]);
+    assert_eq!(resume.code, 0, "{}", resume.stderr);
     assert_eq!(
         resume.stdout,
-        "ID\tRESULT\tNAME\n9b5212\tresumed\tarchlinux-2026.10.01-x86_64.iso\nnext: torrential wait 9b5212\n"
+        "ID\tRESULT\tNAME\n9b5212\talready_running\tarchlinux-2026.10.01-x86_64.iso\nnext: torrential wait 9b5212\n"
     );
 }
 
@@ -428,7 +425,8 @@ fn a_new_fake_installation_starts_with_downloads_that_survive_a_restart() {
     assert!(["6f2c81 checking", "6f2c81 downloading"].contains(&first[4].as_str()), "{first:?}");
     assert_eq!(home.run(&["daemon", "stop"]).code, 0);
     let again: Vec<String> = states();
-    assert_eq!(again, ["c7b9e3 done", "5e02c8 done", "91fd3b paused", "a90d44 error", "6f2c81 interrupted"]);
+    assert_eq!(again[..4], ["c7b9e3 done", "5e02c8 done", "91fd3b paused", "a90d44 error"]);
+    assert!(["6f2c81 checking", "6f2c81 downloading"].contains(&again[4].as_str()), "{again:?}");
 }
 
 #[test]

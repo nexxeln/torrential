@@ -67,7 +67,6 @@ fn config(dir: &std::path::Path) -> OwnerConfig {
         probe_dir: dir.join("probes"),
         max_active: super::MAX_ACTIVE,
         idle_timeout: None,
-        resume_on_start: false,
         save_resume_every: Duration::from_millis(100),
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
@@ -436,7 +435,7 @@ async fn every_command_answers_usage_for_a_title() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_crash_after_the_intent_commit_leaves_one_interrupted_download() {
+async fn a_download_running_at_a_crash_carries_on_when_the_engine_starts_again() {
     let h = Harness::new();
     let film = torrent(1, "film", &[("film.mkv", GIB)]);
     let reply = h.get(magnet(&film), &[]).await.unwrap();
@@ -444,23 +443,22 @@ async fn a_crash_after_the_intent_commit_leaves_one_interrupted_download() {
     let h = h.crash_and_restart().await;
     let jobs = h.status().await;
     assert_eq!(jobs.len(), 1);
-    assert_eq!((jobs[0].id, jobs[0].status.name()), (film.info_hash.id(), "interrupted"));
+    assert_eq!((jobs[0].id, jobs[0].status.name()), (film.info_hash.id(), "metadata"));
     assert_eq!(
         h.changes(Request::Resume { refs: vec![prefix(&film)], all: false }).await.unwrap(),
-        [("010101".into(), "resumed".into())]
+        [("010101".into(), "already_running".into())]
     );
-    assert_eq!(h.states().await, ["metadata"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_get_brings_back_an_interrupted_download() {
+async fn crashes_in_a_row_bring_back_running_downloads_and_leave_paused_ones_paused() {
     let h = Harness::new();
-    let film = torrent(2, "film", &[("film.mkv", GIB)]);
+    let (film, show) = (torrent(2, "film", &[("film.mkv", GIB)]), torrent(3, "show", &[("show.mkv", GIB)]));
     h.get(magnet(&film), &[]).await.unwrap();
-    let h = h.crash_and_restart().await;
-    assert_eq!(h.states().await, ["interrupted"]);
-    assert_eq!(h.get(magnet(&film), &[]).await.unwrap().outcome, GetOutcome::Existing);
-    assert_eq!(h.states().await, ["metadata"]);
+    h.get(magnet(&show), &[]).await.unwrap();
+    h.changes(Request::Pause { refs: vec![prefix(&show)] }).await.unwrap();
+    let h = h.crash_and_restart().await.crash_and_restart().await;
+    assert_eq!(h.states().await, ["metadata", "paused"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -980,8 +978,8 @@ async fn a_crash_keeps_the_progress_of_the_last_periodic_save() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let before = h.status().await[0].progress.verified;
     let h = h.crash_and_restart().await;
-    let jobs = h.status().await;
-    assert_eq!((jobs[0].status.name(), jobs[0].progress.verified), ("interrupted", before));
+    let jobs = h.until("back in the engine", |jobs| jobs[0].status.name() == "downloading").await;
+    assert_eq!(jobs[0].progress.verified, before);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -996,10 +994,9 @@ async fn a_crash_keeps_the_piece_map_of_the_last_save_and_done_drops_it() {
     let map = h.status().await[0].progress.piece_map.expect("a running download has a piece map").to_string();
     assert_eq!(map[32..], "-".repeat(32), "b.bin is not selected");
     let h = h.crash_and_restart().await;
-    let jobs = h.status().await;
-    assert_eq!((jobs[0].status.name(), jobs[0].progress.piece_map.map(|m| m.to_string())), ("interrupted", Some(map)));
+    let jobs = h.until("back in the engine", |jobs| jobs[0].status.name() == "downloading").await;
+    assert_eq!(jobs[0].progress.piece_map.map(|m| m.to_string()), Some(map));
     h.swarm.set_rate(100 * GIB);
-    h.changes(Request::Resume { refs: vec![prefix(&set)], all: false }).await.unwrap();
     let jobs = h.until("done", |jobs| jobs[0].status.name() == "done").await;
     assert_eq!(jobs[0].progress.piece_map, None);
 }
@@ -1034,19 +1031,16 @@ fn assert_files_agree(job: &Job, reply: &FilesReply) {
 #[tokio::test(flavor = "multi_thread")]
 async fn each_unfinished_test_download_reports_file_bytes_that_match_its_progress() {
     let h = Harness::seeded();
+    let jobs =
+        h.until("wikipedia is in the engine", |jobs| jobs.iter().any(|j| j.status.name() == "downloading")).await;
     let mut checked = Vec::new();
-    for job in h.status().await.iter().filter(|j| !matches!(j.status, JobStatus::Done { .. })) {
+    for job in jobs.iter().filter(|j| !matches!(j.status, JobStatus::Done { .. })) {
         assert_files_agree(job, &h.files(&job.id.to_hex()[..6]).await);
         checked.push((job.name.clone().unwrap(), job.status.name()));
     }
     let expected =
-        [("stackexchange", "paused"), ("openwebtext-2019", "error"), ("wikipedia-en-2026-09-text", "interrupted")];
+        [("stackexchange", "paused"), ("openwebtext-2019", "error"), ("wikipedia-en-2026-09-text", "downloading")];
     assert_eq!(checked, expected.map(|(name, state)| (name.to_string(), state)));
-    h.changes(Request::Resume { refs: vec!["6f2c81".into()], all: false }).await.unwrap();
-    let jobs =
-        h.until("wikipedia is in the engine", |jobs| jobs.iter().any(|j| j.status.name() == "downloading")).await;
-    let running = jobs.iter().find(|j| j.status.name() == "downloading").unwrap();
-    assert_files_agree(running, &h.files("6f2c81").await);
 }
 
 #[tokio::test(flavor = "multi_thread")]

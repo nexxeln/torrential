@@ -60,7 +60,6 @@ pub fn unit(manager: Manager, exe: &Path, log: &Path, torrential_home: Option<&s
     <string>{exe}</string>
     <string>daemon</string>
     <string>run</string>
-    <string>--service</string>
   </array>
 {env}  <key>RunAtLoad</key>
   <true/>
@@ -84,7 +83,7 @@ pub fn unit(manager: Manager, exe: &Path, log: &Path, torrential_home: Option<&s
             let env =
                 torrential_home.map_or_else(String::new, |home| format!("Environment=\"TORRENTIAL_HOME={home}\"\n"));
             format!(
-                "[Unit]\nDescription=torrential engine\n\n[Service]\nExecStart=\"{exe}\" daemon run --service\n{env}Restart=on-failure\n\n[Install]\nWantedBy=default.target\n"
+                "[Unit]\nDescription=torrential engine\n\n[Service]\nExecStart=\"{exe}\" daemon run\n{env}Restart=on-failure\n\n[Install]\nWantedBy=default.target\n"
             )
         }
     }
