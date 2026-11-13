@@ -16,7 +16,8 @@
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
 //   POST /api/files       { ref }                       FileListing
-//   POST /api/pause | /api/resume | /api/remove  { refs }   { changes: Change[] }
+//   POST /api/pause | /api/resume  { refs }               { changes: Change[] }
+//   POST /api/remove      { refs, delete? }              { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
 //
 // Films and series, by IMDb ID:
@@ -24,7 +25,7 @@
 //   GET  /api/titles?q=                                    TitleSearch
 //   GET  /api/title?id=                                    TitlePage
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
-//   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
+//   GET  /api/title/sources?video=[&width=&height=&scale=&playback=]   NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
 //   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
 //   POST /api/library        { title, saved }              { saved: boolean }
@@ -149,6 +150,11 @@ export interface Job {
   added_at: number;
   /** The title this download was made for, when it was made by playing a title. */
   title?: { title: string; span: Span; release: string | null };
+  /**
+   * `plays`: a play in torrential's own folder, whose files go when it is removed.
+   * `folder`: a download in a folder the person chose, whose files stay unless they delete them.
+   */
+  place: "plays" | "folder";
 }
 
 export type JobEvent =
@@ -178,6 +184,12 @@ export interface Change {
   id: string;
   name: string | null;
   result: string;
+  /** What a remove deleted from disk: a play's folder. */
+  deleted?: string[];
+  /** What a remove with `delete` moved to the Trash: the files of a download in a folder the person chose. */
+  trashed?: string[];
+  /** What a remove was to delete or move to the Trash and left, and why. */
+  kept?: { path: string; reason: string }[];
 }
 
 /** A file the engine serves while it downloads. */
@@ -316,6 +328,15 @@ export type Kind = "film" | "series";
 export type Span = string;
 /** What the browser decodes, from MediaSource.isTypeSupported. */
 export type Playback = "h264" | "hevc" | "hevc-hdr";
+/** The screen a title plays on and what its browser decodes. The engine ranks the title's sources for it. */
+export interface Viewer {
+  /** The screen in device pixels. */
+  width: number;
+  height: number;
+  /** Device pixels to a CSS pixel. */
+  scale: number;
+  playback: Playback;
+}
 /**
  * How likely a release's swarm is to send data now: `strong` is 20 or more seeders or a lawful catalog that does not
  * count them, `fair` 5 to 19, `weak` 1 to 4, and `unknown` uncounted, or 0 in a lawful catalog.
@@ -399,7 +420,8 @@ export interface TitlePage extends TitleCard {
 export interface PlayTitle {
   /** `tt0063350`, `tt0903747:3:5`, or a series ID for its next episode. */
   video: string;
-  playback?: Playback;
+  /** The engine ranks for what this browser decodes, on this screen from another device and on the Mac's display from the Mac. */
+  viewer?: Viewer;
   /** Play only this release, with no fallback. */
   source?: string;
   /** The download that stalled. The engine plays another source, then pauses this one. */
@@ -648,8 +670,9 @@ export function removeDevice(id: string): Promise<DeviceList> {
   return post("/api/devices/remove", { id });
 }
 
-export function change(action: "pause" | "resume" | "remove", refs: string[]): Promise<Change[]> {
-  return post<{ changes: Change[] }>(`/api/${action}`, { refs }).then((body) => body.changes);
+/** With `remove`, `deleteFiles` moves the files of a download in a folder the person chose to the Trash too. */
+export function change(action: "pause" | "resume" | "remove", refs: string[], deleteFiles = false): Promise<Change[]> {
+  return post<{ changes: Change[] }>(`/api/${action}`, { refs, delete: deleteFiles }).then((body) => body.changes);
 }
 
 /**
@@ -685,10 +708,10 @@ export function artUrl(id: string, kind: "poster" | "background" | "logo" | { se
   return `/api/title/art?${params}`;
 }
 
-/** The releases of one film or episode, ranked for playing here, as each source answers. The last message is `done` or `error`. */
-export async function* sources(video: string, playback?: Playback, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
+/** The releases of one film or episode, ranked for playing in this browser, as each source answers. The last message is `done` or `error`. */
+export async function* sources(video: string, viewer?: Viewer, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
   const params = new URLSearchParams({ video });
-  if (playback) params.set("playback", playback);
+  if (viewer) for (const [name, value] of Object.entries(viewer)) params.set(name, String(value));
   yield* searchMessages(`/api/title/sources?${params}`, { signal });
 }
 

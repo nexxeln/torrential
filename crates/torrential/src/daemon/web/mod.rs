@@ -117,8 +117,8 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, a
         (Method::Get, "events") => return watch::events(conn, request).await,
         (Method::Get, "stream") => return watch::stream(conn, request).await,
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
-        (Method::Get, "title/sources") => return titles::sources(conn, request).await,
-        (Method::Post, "title/play") => return titles::play(conn, request).await,
+        (Method::Get, "title/sources") => return titles::sources(conn, request, asker).await,
+        (Method::Post, "title/play") => return titles::play(conn, request, asker).await,
         (Method::Get, "title/art") => return titles::art(conn, request).await,
         _ => {}
     }
@@ -173,14 +173,14 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
             value(server::files(ctx, target(&reference)?, METADATA_WAIT).await?)
         }
         (Method::Post, "pause" | "resume" | "remove") => {
-            let Refs { refs } = body(request)?;
+            let Refs { refs, delete } = body(request)?;
             if refs.is_empty() {
                 return Err(Error::new(ErrorCode::Usage, "refs names no download"));
             }
             let changes = match route {
                 "pause" => owner.ask(|reply| Command::Pause { refs, reply }).await?,
                 "resume" => owner.ask(|reply| Command::Resume { refs, all: false, reply }).await?,
-                _ => owner.ask(|reply| Command::Remove { refs, reply }).await?,
+                _ => owner.ask(|reply| Command::Remove { refs, delete, reply }).await?,
             };
             Ok(json!({ "changes": changes }))
         }
@@ -191,6 +191,9 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
 #[derive(Deserialize)]
 struct Refs {
     refs: Vec<String>,
+    /// With `remove`, deletes the files of a download in a folder the person chose too.
+    #[serde(default)]
+    delete: bool,
 }
 
 #[derive(Deserialize)]
@@ -312,8 +315,8 @@ async fn results(
     let ctx = conn.ctx;
     conn.begin(NDJSON, request).await?;
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let preferences = query.profile.preferences;
-    let rank_for = || ctx.machine.profile(preferences);
+    let Profile { preferences, player, .. } = query.profile;
+    let rank_for = || ctx.machine.profile(preferences, player);
     let search = ctx.search.search_stream(query, &rank_for, progress_tx);
     tokio::pin!(search);
     let result = loop {

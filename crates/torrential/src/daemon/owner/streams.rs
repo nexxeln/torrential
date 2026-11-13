@@ -135,7 +135,8 @@ fn decide(before: Others, readings: impl IntoIterator<Item = Reading>, now: Inst
 
 #[derive(Default)]
 pub struct Streams {
-    /// The answers streaming each download. A lease holds each reading for as long as it lasts.
+    /// The answers streaming each download. A lease holds each reading for as long as it lasts,
+    /// and a download stays until the owner notes that its last stream closed.
     readers: BTreeMap<TorrentId, Vec<Weak<Mutex<Reading>>>>,
     others: Others,
     /// The downloads the engine holds to a trickle.
@@ -152,9 +153,31 @@ fn downloading(job: &JobEntry) -> bool {
 impl Owner {
     /// Someone starts streaming `id`, until they drop the lease.
     pub(super) fn lease(&mut self, id: TorrentId) -> Lease {
+        let first = !self.streamed_now(id);
         let reading = Arc::default();
         self.streams.readers.entry(id).or_default().push(Arc::downgrade(&reading));
+        if first {
+            self.first_stream(id);
+        }
         Lease { reading }
+    }
+
+    /// Whether someone holds a lease on `id`.
+    pub(super) fn streamed_now(&self, id: TorrentId) -> bool {
+        self.streams.readers.get(&id).is_some_and(|readers| readers.iter().any(|reading| reading.strong_count() > 0))
+    }
+
+    /// The downloads whose last stream closed since this was last asked, which it forgets.
+    pub(super) fn forget_closed_streams(&mut self) -> Vec<TorrentId> {
+        let mut closed = Vec::new();
+        self.streams.readers.retain(|id, readers| {
+            readers.retain(|reading| reading.strong_count() > 0);
+            if readers.is_empty() {
+                closed.push(*id);
+            }
+            !readers.is_empty()
+        });
+        closed
     }
 
     /// Holds every download no one is watching to a trickle, from when a film being watched is
@@ -165,10 +188,6 @@ impl Owner {
             return;
         }
         streams.decided_at = Some(now);
-        streams.readers.retain(|_, readers| {
-            readers.retain(|reading| reading.strong_count() > 0);
-            !readers.is_empty()
-        });
         let readings = |id: &TorrentId| -> Vec<Reading> {
             let readers = streams.readers.get(id).into_iter().flatten().filter_map(Weak::upgrade);
             readers.map(|reading| *reading.lock().expect("no holder panics")).collect()

@@ -13,7 +13,7 @@ import {
   type Skip,
   type TitleCard,
 } from "../api";
-import { playback } from "./plan";
+import { viewer } from "./plan";
 
 /** A source the engine passed over, with its name when the engine had named it. */
 export interface Passed {
@@ -106,7 +106,7 @@ export async function attempt(
   let now = beginning(request.video);
   let outcome: { started: Started; attempt: Attempt } | { error: ApiError; tried: Passed[]; attempt: Attempt } | null = null;
   try {
-    for await (const message of playTitle({ ...request, playback: playback() }, signal)) {
+    for await (const message of playTitle({ ...request, viewer: viewer() }, signal)) {
       if (outcome) continue;
       if (message.type === "playing") {
         const started = { video: message.video, release: message.release, play: message.play, resumeAt: message.resume_at };

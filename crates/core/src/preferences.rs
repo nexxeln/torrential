@@ -1,6 +1,8 @@
 //! The `preferences` block of `config.yaml`, which `torrential setup` writes. Each field
 //! overrides what torrential detects about the machine, for someone who watches on another
-//! screen or player. An absent field leaves the detected value.
+//! screen or player. An absent field leaves the detected value. `screen` and `playback` rank
+//! only for this machine: a browser plays what it decodes, and another device's browser
+//! ranks for its own screen.
 
 use serde::{Deserialize, Serialize};
 

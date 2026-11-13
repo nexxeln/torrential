@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use torrential_core::error::{Details, EXIT_PENDING};
 use torrential_core::protocol::{
-    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream, TitlePlayed,
+    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, Kept, PlayReply, Response, Stream, TitlePlayed,
 };
 use torrential_core::{
     Error, ErrorCode, FileRisk, Flag, InfoHash, Job, JobStatus, LocatorId, Progress, Release, ReleaseId, SearchQuery,
@@ -306,6 +306,7 @@ fn job(hex: &str, name: Option<&str>, status: JobStatus, progress: Progress) -> 
         selection: Selection::All,
         added_at: NOW - 3600,
         title: None,
+        place: torrential_core::Place::Folder,
     }
 }
 
@@ -511,7 +512,13 @@ fn status_of_one_download() {
 }
 
 fn change(hex: &str, name: &str, result: &str, path: Option<&str>) -> Change {
-    Change { id: tid(hex).to_hex(), name: Some(name.into()), result: result.into(), path: path.map(PathBuf::from) }
+    Change {
+        id: tid(hex).to_hex(),
+        name: Some(name.into()),
+        result: result.into(),
+        path: path.map(PathBuf::from),
+        ..Change::default()
+    }
 }
 
 #[test]
@@ -534,13 +541,32 @@ fn pause_resume_rm_and_verify() {
         (
             ChangeCommand::Remove,
             vec![
-                change(
-                    ARCH,
-                    "archlinux-2026.10.01-x86_64.iso",
-                    "removed",
-                    Some("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"),
-                ),
+                Change {
+                    trashed: vec![PathBuf::from("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso")],
+                    kept: vec![Kept {
+                        path: "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso.sig".into(),
+                        reason: "another download uses it".into(),
+                    }],
+                    ..change(
+                        ARCH,
+                        "archlinux-2026.10.01-x86_64.iso",
+                        "removed",
+                        Some("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"),
+                    )
+                },
                 change("c32cdd", "stackexchange", "already_removed", Some("/Users/ada/datasets/stackexchange")),
+                Change {
+                    deleted: vec![PathBuf::from("/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0")],
+                    ..change(
+                        "6bc1af",
+                        "night_of_the_living_dead_dvd",
+                        "removed",
+                        Some(
+                            "/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0/night_of_the_living_dead_dvd",
+                        ),
+                    )
+                },
+                change("d4d4d4", "pioneer_one", "removed", Some("/Users/ada/Downloads/torrential/pioneer_one")),
             ],
         ),
         (ChangeCommand::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", "checking", None)]),

@@ -123,7 +123,8 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             changes(engine()?, request, ChangeCommand::Resume, mode)
         }
         Command::Rm(args) => {
-            changes(engine()?, Request::Remove { refs: job_refs(&args.references, &cwd)? }, ChangeCommand::Remove, mode)
+            let request = Request::Remove { refs: job_refs(&args.references, &cwd)?, delete: args.delete };
+            changes(engine()?, request, ChangeCommand::Remove, mode)
         }
         Command::Verify(args) => {
             let reference = job_refs(std::slice::from_ref(&args.reference), &cwd)?.remove(0);
@@ -502,9 +503,11 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         Err(error) => checks.push(check("skill", CheckStatus::Fail, error.message)),
     }
     let profile = match (&settings, crate::machine::detect(env)) {
-        (Ok(settings), Ok(machine)) => {
-            views::profile_check(&Profile { detected: Some(machine), preferences: settings.preferences, room: None })
-        }
+        (Ok(settings), Ok(machine)) => views::profile_check(&Profile {
+            detected: Some(machine),
+            preferences: settings.preferences,
+            ..Profile::default()
+        }),
         (Err(_), _) => check("profile", CheckStatus::Skipped, "the config has an error".into()),
         (_, Err(error)) => check("profile", CheckStatus::Fail, error.message),
     };
