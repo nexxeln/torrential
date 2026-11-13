@@ -1,13 +1,14 @@
 import { ArrowDownIcon, ArrowLeftIcon, CheckIcon } from "@heroicons/react/16/solid";
 import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
 import type { ApiError, Job, PlayInfo } from "../api";
-import { count, percent, rate, sentence } from "../lib/format";
+import { bytes, count, percent, rate, sentence } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { isTv } from "../lib/tv";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { usePlayer } from "./context";
+import type { Fetching } from "./ffmpeg";
 import type { Heading } from "./Playback";
 import { useVideo } from "./video";
 
@@ -139,6 +140,16 @@ export function Starting({ step, name, readout }: StartingProps) {
         </ol>
         <div className="min-h-5 text-sm text-soft">{readout}</div>
       </div>
+    </div>
+  );
+}
+
+/** How far the engine's ffmpeg download is, while it fetches the ffmpeg this file needs. */
+export function FfmpegReadout({ fetching: { done, size } }: { fetching: Fetching }) {
+  if (done >= size) return <div>Unpacking ffmpeg</div>;
+  return (
+    <div className="tabular-nums">
+      Fetching ffmpeg, which converts this file for the browser · {bytes(done)} of {bytes(size)}
     </div>
   );
 }

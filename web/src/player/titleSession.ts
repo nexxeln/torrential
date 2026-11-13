@@ -5,7 +5,6 @@ import {
   type Check,
   type EpisodeInfo,
   type MediaInfo,
-  media,
   type PlayInfo,
   type PlayMessage,
   playTitle,
@@ -13,6 +12,7 @@ import {
   type Skip,
   type TitleCard,
 } from "../api";
+import { type Fetching, readMedia } from "./ffmpeg";
 import { viewer } from "./plan";
 
 /** A source the engine passed over, with its name when the engine had named it. */
@@ -50,8 +50,11 @@ export interface Started {
 /** The steps between asking for a title and having something to play. */
 export type TitleSession =
   | { stage: "starting"; attempt: Attempt }
-  /** A source plays. Waiting for its first pieces to see what is in the file. */
-  | { stage: "reading"; attempt: Attempt; started: Started }
+  /**
+   * A source plays. Waiting for its first pieces to see what is in the file, and for ffmpeg while
+   * the engine fetches it to convert the file.
+   */
+  | { stage: "reading"; attempt: Attempt; started: Started; ffmpeg: Fetching | null }
   | { stage: "ready"; attempt: Attempt; started: Started; media: MediaInfo }
   | { stage: "failed"; attempt: Attempt; error: ApiError; tried: Passed[] };
 
@@ -136,9 +139,10 @@ export function useTitleSession(video: string, source: string | null): TitleSess
       const ended = await attempt({ video, source: source ?? undefined }, stop.signal, (now) => setSession({ stage: "starting", attempt: now }));
       if ("error" in ended) return setSession({ stage: "failed", attempt: ended.attempt, error: ended.error, tried: ended.tried });
       const { started } = ended;
-      setSession({ stage: "reading", attempt: ended.attempt, started });
+      setSession({ stage: "reading", attempt: ended.attempt, started, ffmpeg: null });
       try {
-        const details = await media(started.play.id, started.play.video.index, stop.signal);
+        const fetching = (ffmpeg: Fetching) => setSession({ stage: "reading", attempt: ended.attempt, started, ffmpeg });
+        const details = await readMedia(started.play.id, started.play.video.index, stop.signal, fetching);
         setSession({ stage: "ready", attempt: ended.attempt, started, media: details });
       } catch (thrown) {
         if (!stop.signal.aborted) setSession({ stage: "failed", attempt: ended.attempt, error: asApiError(thrown), tried: ended.attempt.passed });

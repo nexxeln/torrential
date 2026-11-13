@@ -1,9 +1,11 @@
 //! The web app's side of the engine's HTTP server: its pages, its API, and what it asks ffmpeg for.
 
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -18,7 +20,8 @@ use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
 use super::super::search_port::{self, BoxFuture, FakeSource, SearchPort, fake_catalog};
 use super::super::titles::catalog_port::{self, CatalogPort};
-use super::super::web::ffmpeg::Tools;
+use super::super::web::fetch::{Build, Fetch};
+use super::super::web::ffmpeg::{INSTALL, Tools};
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
 
 /// Where a browser in a test runs.
@@ -424,7 +427,7 @@ async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
         media,
         json!({
             "duration": 7.0, "container": "mp4", "video": null, "audio": [], "subtitles": [],
-            "direct": "video/mp4", "remux": false, "chapters": [],
+            "direct": "video/mp4", "ffmpeg": "missing", "chapters": [],
         })
     );
     let (_, media) = get(&h, &format!("/api/media?id={id}&file=1")).await;
@@ -437,6 +440,8 @@ async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
     for answer in &needs_ffmpeg {
         assert_eq!(error(answer), (404, "not_found", "ffmpeg is not installed, and this needs it"));
     }
+    let fetch = post(&h, "/api/ffmpeg", json!({})).await;
+    assert_eq!(error(&fetch), (404, "not_found", "ffmpeg is not installed, and this needs it"));
     let not_playing = [
         get(&h, &format!("/api/media?id={id}&file=7")).await,
         get(&h, &format!("/api/media?id={}&file=0", "ab".repeat(20))).await,
@@ -511,9 +516,9 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
             media["container"],
             media["video"]["mime"],
             media["audio"][0]["codec"],
-            media["remux"]
+            media["ffmpeg"]
         ]),
-        json!([5400.0, "matroska", "hvc1.2.4.L120.B0", "eac3", true])
+        json!([5400.0, "matroska", "hvc1.2.4.L120.B0", "eac3", "ready"])
     );
     assert_eq!(get(&h, &format!("/api/media?id={id}&file=0")).await.1, media);
     assert_eq!(
@@ -567,6 +572,327 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
         ]
     );
     assert_eq!(tools.calls().len(), 3, "a refused request runs nothing");
+}
+
+/// The version of the stand-in build, which names the folder it unpacks into.
+const VERSION: &str = "8.1-test";
+/// Where the stand-in build's archive keeps its programs, as BtbN's Linux builds do.
+const BIN: &str = "ffmpeg-8.1-test/bin";
+
+/// A .tar.xz holding stand-ins for ffmpeg and ffprobe in `BIN`, as a pinned build does. The
+/// stand-in ffprobe prints `probe`, and each appends its arguments to `calls`.
+fn archive(calls: &Path, probe: &str, ffmpeg: &str) -> Vec<u8> {
+    let script = |name: &str, body: &str| format!("#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n", calls.display());
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, body) in
+        [("ffmpeg", script("ffmpeg", ffmpeg)), ("ffprobe", script("ffprobe", &format!("cat <<'END'\n{probe}\nEND")))]
+    {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        tar.append_data(&mut header, format!("{BIN}/{name}"), body.as_bytes()).unwrap();
+    }
+    let mut xz = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::default()).unwrap();
+    std::io::Write::write_all(&mut xz, &tar.into_inner().unwrap()).unwrap();
+    xz.finish().unwrap()
+}
+
+/// Serves `body` to every request, in two halves half a second apart, and counts the requests.
+async fn serve(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let url = format!("http://{}/ffmpeg.tar.xz", listener.local_addr().unwrap());
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    if socket.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let (first, second) = body.split_at(body.len() / 2);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(first).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = socket.write_all(second).await;
+            });
+        }
+    });
+    (url, asked)
+}
+
+fn build(url: String, archive: &[u8]) -> Build {
+    use sha2::Digest;
+    Build {
+        version: VERSION.into(),
+        url,
+        bin: BIN.into(),
+        sha256: format!("{:x}", sha2::Sha256::digest(archive)),
+        size: archive.len() as u64,
+    }
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn mode(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+const FETCH: [&str; 1] = ["Content-Type: application/json"];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "printf 'ftyp'; printf 'moof'");
+    let (url, asked) = serve(archive.clone()).await;
+    let outside = Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() };
+    let h = Harness::with_outside(search_port::Fake::new(fake_catalog()), outside);
+    // Without ffprobe the engine reads the file's header and its end for the duration.
+    h.swarm.set_rate(100 * GIB);
+    let id = playing(&h, 65).await;
+    let (media_path, stream) =
+        (format!("/api/media?id={id}&file=0"), format!("/api/stream?id={id}&file=0&t=0&video=copy"));
+    let (_, media) = get(&h, &media_path).await;
+    assert_eq!(json!([media["container"], media["ffmpeg"]]), json!(["matroska", "fetch"]));
+    let early = get(&h, &stream).await;
+    assert_eq!(error(&early), (404, "not_found", "torrential has not fetched ffmpeg yet, and this needs it"));
+
+    let mut first = Page::open(&h).await;
+    first.send("POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let (status, headers) = first.head().await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
+    let size = archive.len();
+    assert_eq!(first.line().await, Some(json!({ "type": "progress", "done": 0, "size": size })));
+    let (_, _, second) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let mut seen = Vec::new();
+    while let Some(line) = first.line().await {
+        seen.push(line);
+    }
+    for seen in [seen, lines(&second)] {
+        let (last, before) = seen.split_last().unwrap();
+        assert_eq!(last, &json!({ "type": "ready" }));
+        assert!(before.iter().all(|line| line["type"] == "progress" && line["size"] == size), "{before:?}");
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "both requests followed one download");
+    let folder = h.dir.path().join("ffmpeg");
+    assert_eq!(
+        (names(&folder), names(&folder.join(VERSION))),
+        (vec![VERSION.to_string()], vec!["ffmpeg".into(), "ffprobe".into(), "manifest.json".into()])
+    );
+    let fetched = folder.join(VERSION);
+    assert_eq!(
+        [&folder, &fetched, &fetched.join("ffmpeg"), &fetched.join("ffprobe"), &fetched.join("manifest.json")]
+            .map(|path| mode(path)),
+        [0o700, 0o700, 0o700, 0o700, 0o600],
+        "only this user can change what the engine runs"
+    );
+
+    let (_, media) = get(&h, &media_path).await;
+    assert_eq!(json!([media["video"]["mime"], media["ffmpeg"]]), json!(["hvc1.2.4.L120.B0", "ready"]));
+    let (status, _, body) = fetch(&h, "GET", &stream, &[], "").await;
+    assert_eq!((status, body.as_slice()), (200, &b"ftypmoof"[..]));
+    let (_, _, again) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!(lines(&again), [json!({ "type": "ready" })]);
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "a fetched ffmpeg is not fetched again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_whose_file_the_browser_cannot_read_starts_the_ffmpeg_fetch_as_it_starts() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let film = torrent(0xb1, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264", &[("Night.1968.1080p.mkv", 2 * GIB)]);
+    let listed = vec![titles::listed(&film, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(listed, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let h = Harness::with_outside(search, Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() });
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    let (_, _, body) = fetch(&h, "POST", "/api/title/play", &FETCH, r#"{"video":"tt0063350"}"#).await;
+    let steps: Vec<String> = lines(&body).iter().map(titles::step).collect();
+    assert_eq!(steps.last().map(String::as_str), Some("playing tt0063350 b1b1b1 file 0 at null"), "{steps:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while asked.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the play never began the fetch");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_, _, followed) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!(lines(&followed).last(), Some(&json!({ "type": "ready" })));
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the player follows the fetch the play began");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_device_may_fetch_ffmpeg_and_a_stranger_may_not() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let Some(phone) = On::pair(&h).await else { return };
+    let (status, _, body) = exchange(Page::to(&h, phone.ip()).await, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"].clone();
+    assert_eq!((status, code), (401, json!("not_paired")));
+    let (status, _, _) = fetch(&h, "POST", "/api/ffmpeg", &["Content-Type: text/plain"], "{}").await;
+    assert_eq!(status, 415, "a form another website can send is refused");
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "neither starts a download");
+
+    let (status, _, body) = fetch_on(&h, &phone, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!((status, lines(&body).pop()), (200, Some(json!({ "type": "ready" }))));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let pinned = Build { sha256: "0".repeat(64), ..build(url, &archive) };
+    let h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(pinned.clone()), ..Outside::default() },
+    );
+    for tries in 1..=2 {
+        let (status, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+        let last = lines(&body).pop().unwrap();
+        assert_eq!(
+            (status, last),
+            (
+                200,
+                json!({
+                    "type": "error",
+                    "error": {
+                        "code": "verification_failed",
+                        "message": "the ffmpeg download is not the build torrential pins, so it was deleted",
+                        "hint": format!("try again later, or {INSTALL}"),
+                    },
+                })
+            )
+        );
+        assert!(!h.dir.path().join("ffmpeg").exists(), "nothing is left after try {tries}");
+        assert_eq!(asked.load(Ordering::SeqCst), tries, "each try downloads again");
+    }
+
+    let off = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Off(pinned), ..Outside::default() },
+    );
+    let refused = post(&off, "/api/ffmpeg", json!({})).await;
+    assert_eq!(error(&refused), (404, "not_found", "ffmpeg is not installed, and config.yaml turns off fetching it"));
+}
+
+/// The last line of `POST /api/ffmpeg`.
+async fn fetch_ffmpeg(h: &Harness) -> Value {
+    let (_, _, body) = fetch(h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    lines(&body).pop().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetched_ffmpeg_that_changed_on_disk_is_fetched_again() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let mut h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let fetched = h.dir.path().join("ffmpeg").join(VERSION);
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    let ffprobe = std::fs::read(fetched.join("ffprobe")).unwrap();
+
+    std::fs::write(fetched.join("ffprobe"), "#!/bin/sh\necho changed\n").unwrap();
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "a changed ffprobe is fetched again");
+    assert_eq!(std::fs::read(fetched.join("ffprobe")).unwrap(), ffprobe);
+
+    let copy = h.dir.path().join("ffmpeg-copy");
+    std::fs::copy(fetched.join("ffmpeg"), &copy).unwrap();
+    std::fs::remove_file(fetched.join("ffmpeg")).unwrap();
+    std::os::unix::fs::symlink(&copy, fetched.join("ffmpeg")).unwrap();
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    assert_eq!(asked.load(Ordering::SeqCst), 3, "a link to the same ffmpeg is fetched again");
+
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, json!({ "type": "ready" }));
+    assert_eq!(asked.load(Ordering::SeqCst), 3, "an ffmpeg as it was fetched is used again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_that_does_not_run_here_is_fetched_once_for_each_engine_run() {
+    let calls = tempfile::tempdir().unwrap();
+    let ffmpeg = "echo 'error while loading shared libraries: libmvec.so.1' >&2; exit 127";
+    let archive = archive(&calls.path().join("calls"), FILM, ffmpeg);
+    let (url, asked) = serve(archive.clone()).await;
+    let mut h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let message = "the ffmpeg torrential fetched does not run on this machine: error while loading shared libraries: libmvec.so.1";
+    let refused = json!({
+        "type": "error",
+        "error": { "code": "fetch_failed", "message": message, "hint": format!("{INSTALL}, then try again") },
+    });
+    assert_eq!(fetch_ffmpeg(&h).await, refused);
+    let (status, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the engine does not download it again");
+    assert_eq!(error(&(status, serde_json::from_slice(&body).unwrap())), (502, "fetch_failed", message));
+    assert!(!h.dir.path().join("ffmpeg").exists(), "nothing is kept");
+
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, refused);
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "a new engine run tries once more");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ffmpeg_is_not_fetched_into_a_folder_other_users_can_change() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let refused = |folder: &Path, why: &str, hint: String| {
+        json!({
+            "type": "error",
+            "error": {
+                "code": "storage_error",
+                "message": format!("torrential will not keep ffmpeg in {}: {why}", folder.display()),
+                "hint": hint,
+            },
+        })
+    };
+    let state = h.dir.path();
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let (_, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let hint = format!("run chmod go-w {}, then try again", state.display());
+    assert_eq!(lines(&body).pop(), Some(refused(state, "other users can write to it", hint)));
+
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), state.join("ffmpeg")).unwrap();
+    let (_, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let hint = "make it a real folder, not a link, then try again".to_string();
+    assert_eq!(lines(&body).pop(), Some(refused(&state.join("ffmpeg"), "it is a symbolic link", hint)));
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing is downloaded");
+    assert!(names(elsewhere.path()).is_empty(), "nothing is written through the link");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1604,6 +1930,21 @@ async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg
     assert_eq!(first_tried(&h, &phone, &phone_screen).await, remux.name, "ffmpeg without ffprobe converts nothing");
     StandIns::install(&h, FILM, "");
     assert_eq!(first_tried(&h, &phone, &phone_screen).await, hdr.name, "ffmpeg converts it for the phone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_plays_first_where_the_ffmpeg_that_converts_it_can_still_be_fetched() {
+    let hdr = torrent(0xb1, "Night.of.the.Living.Dead.1968.2160p.UHD.BluRay.REMUX.HDR.HEVC", &[("Night.mp4", MIB)]);
+    let h264 = json!({ "width": 1920, "height": 1080, "scale": 1, "playback": "h264" });
+    let pinned = build("http://127.0.0.1:9/ffmpeg.tar.xz".into(), b"");
+    let (fetches, _) = titles::night_with(Outside { fetch: Fetch::Build(pinned.clone()), ..Outside::default() });
+    let (off, night) = titles::night_with(Outside { fetch: Fetch::Off(pinned), ..Outside::default() });
+    for h in [&fetches, &off] {
+        h.swarm.publish(hdr.clone());
+        h.play_for(&hdr, &[0], Some("tt0063350")).await.unwrap();
+    }
+    assert_eq!(first_tried(&fetches, &On::Mac, &h264).await, hdr.name, "fetching ffmpeg costs less than a download");
+    assert_eq!(first_tried(&off, &On::Mac, &h264).await, night[0].name, "config.yaml turns fetching off");
 }
 
 /// A Torznab indexer on this machine that answers every search with `releases`, each a torrent
