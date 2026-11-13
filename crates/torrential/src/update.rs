@@ -3,9 +3,9 @@ use std::fs::OpenOptions;
 use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -255,22 +255,25 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
         return Ok(Outcome::Latest(latest));
     }
     let (exe, target) = installed()?;
-    put_release(releases, env, latest, &exe, target, || true).await?;
+    let installed = match put_release(releases, env, latest, &exe, target, || true).await? {
+        Put::Installed | Put::NotWanted => latest,
+        Put::Current(installed) => installed,
+    };
     let _ = Command::new(&exe)
         .args(["skill", "refresh"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    Ok(Outcome::Updated(latest))
+    Ok(Outcome::Updated(installed))
 }
 
 /// What `put_release` found or did.
 enum Put {
     Installed,
-    /// Another torrential that runs from the same executable, such as the engine of another home,
-    /// installed the release first.
-    AlreadyInstalled,
+    /// This release or a newer one is installed already, by another torrential that runs from the
+    /// same executable, such as the engine of another home.
+    Current(Version),
     /// `wanted` said no before the download or before the binary went in.
     NotWanted,
 }
@@ -288,8 +291,8 @@ async fn put_release(
     wanted: impl Fn() -> bool,
 ) -> Result<Put, Error> {
     let _lock = FolderLock::take(exe.parent().unwrap_or(Path::new("/"))).await?;
-    if confirm(exe, version).is_ok() {
-        return Ok(Put::AlreadyInstalled);
+    if let Some(installed) = version_of(exe).filter(|installed| *installed >= version) {
+        return Ok(Put::Current(installed));
     }
     let writes = Writes::new(env, "torrential update".into());
     let partial = Partial::create(exe, &writes)?;
@@ -360,39 +363,58 @@ async fn fetch(releases: &Releases, version: Version, target: &str) -> Result<Ve
 /// for another system, a damaged one, or one from another release fails here, before it replaces
 /// anything.
 fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
-    let refused = |why: String| {
-        Error::new(
-            ErrorCode::VerificationFailed,
-            format!("the binary of torrential {version} {why}, so the installed torrential is unchanged"),
-        )
-        .with_hint(format!("report it at {ISSUES}"))
-    };
+    match says(binary) {
+        Ok(said) if said == format!("torrential {version}") => Ok(()),
+        Ok(said) => Err(refused(version, format!("says it is {said}"))),
+        Err(why) => Err(refused(version, why)),
+    }
+}
+
+/// The torrential version `binary --version` says it is.
+fn version_of(binary: &Path) -> Option<Version> {
+    Version::parse(says(binary).ok()?.strip_prefix("torrential ")?)
+}
+
+/// What `binary --version` prints, or why it prints nothing.
+fn says(binary: &Path) -> Result<String, String> {
     let mut child = Command::new(binary)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| refused(format!("does not run here ({e})")))?;
-    let deadline = std::time::Instant::now() + CONFIRM_WITHIN;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(refused("does not answer --version".into()));
-            }
-        }
-    };
+        .map_err(|e| format!("does not run here ({e})"))?;
+    let status = exited(&mut child, CONFIRM_WITHIN).ok_or("does not answer --version")?;
     let mut said = String::new();
     let _ = child.stdout.take().map(|mut out| out.read_to_string(&mut said));
     match said.trim() {
-        said if status.success() && said == format!("torrential {version}") => Ok(()),
-        "" => Err(refused(format!("does not run here ({status})"))),
-        said => Err(refused(format!("says it is {said}"))),
+        said if status.success() && !said.is_empty() => Ok(said.to_string()),
+        _ => Err(format!("does not run here ({status})")),
     }
+}
+
+/// Waits up to `within` for `child` to exit, and kills it after that.
+fn exited(child: &mut Child, within: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + within;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn refused(version: Version, why: String) -> Error {
+    Error::new(
+        ErrorCode::VerificationFailed,
+        format!("the binary of torrential {version} {why}, so the installed torrential is unchanged"),
+    )
+    .with_hint(format!("report it at {ISSUES}"))
 }
 
 static EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -575,9 +597,9 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                             );
                             return switch(&ctx, latest, service).await;
                         }
-                        Ok(Put::AlreadyInstalled) => {
-                            crate::daemon::log(&format!("torrential {latest} is already installed"));
-                            return switch(&ctx, latest, service).await;
+                        Ok(Put::Current(installed)) => {
+                            crate::daemon::log(&format!("torrential {installed} is already installed"));
+                            return switch(&ctx, installed, service).await;
                         }
                         Ok(Put::NotWanted) => {
                             crate::daemon::log(&format!(

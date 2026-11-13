@@ -491,6 +491,39 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
     assert!(log.contains("says it is torrential 0.1.0"), "{log}");
 }
 
+#[test]
+fn an_engine_that_aims_at_an_older_release_than_the_installed_one_leaves_the_newer_in_place() {
+    if target().is_none() {
+        return;
+    }
+    let (answer, gate) = mpsc::channel();
+    let built = Built::new();
+    let server = Server::gated("0.1.1", &built.release("0.1.1"), None, Some(("/latest", gate)));
+    let mut install = Install::agent_with_engine(&server);
+    let port = free_port();
+    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    eventually("the engine asks for the latest release", || server.asked() == ["/latest"]);
+    // Meanwhile another home's engine installs 0.1.2 over the shared executable.
+    let newer = built.release("0.1.2");
+    let partial = install.bin().join(".torrential.other.update");
+    std::fs::write(&partial, &newer).unwrap();
+    std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&partial, install.exe()).unwrap();
+
+    answer.send(()).unwrap();
+    let log = || std::fs::read_to_string(install.state().join("engine.log")).unwrap();
+    eventually("the engine found 0.1.2 installed", || log().contains("torrential 0.1.2 is already installed"));
+
+    assert_eq!(std::fs::read(install.exe()).unwrap(), newer, "0.1.2 stays installed");
+    assert_eq!(server.asked(), ["/latest"], "the engine fetched no release");
+    assert!(!log().contains("installed torrential 0.1.1"), "{}", log());
+    assert_eq!(
+        Install::news(port).unwrap()["notice"],
+        "torrential 0.1.2 is installed and starts the next time the engine starts."
+    );
+}
+
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
