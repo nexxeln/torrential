@@ -16,6 +16,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{oneshot, watch};
 use torrential_core::TorrentId;
 
+use super::cast::Dlna;
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, StreamFile};
 use super::server::Ctx;
@@ -445,7 +446,10 @@ impl Connection<'_> {
             Asker::Cast(_) if request.method == Method::Post => {
                 return self.empty("405 Method Not Allowed", "", request.keep_alive).await;
             }
-            Asker::Cast(granted) => return self.file(request, granted.id, granted.index).await,
+            Asker::Cast(granted) => {
+                let dlna = self.ctx.casts.served(&request.path);
+                return self.file(request, granted.id, granted.index, dlna.as_ref()).await;
+            }
             Asker::Local | Asker::Device(_) => {}
         }
         if let Some(route) = request.path.strip_prefix("/api/") {
@@ -458,7 +462,7 @@ impl Connection<'_> {
             return self.empty("303 See Other", "Location: /\r\n", request.keep_alive).await;
         }
         match route(&request.path) {
-            Some((id, index)) => self.file(request, id, index).await,
+            Some((id, index)) => self.file(request, id, index, None).await,
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
                     let mut headers = format!("Cache-Control: {}\r\n", asset.cache);
@@ -574,7 +578,9 @@ impl Connection<'_> {
         }
     }
 
-    async fn file(&mut self, request: Request, id: TorrentId, index: u32) -> io::Result<bool> {
+    /// Serves a download's file, with the type and headers a TV playing a cast reads when `dlna`
+    /// says them.
+    async fn file(&mut self, request: Request, id: TorrentId, index: u32, dlna: Option<&Dlna>) -> io::Result<bool> {
         let keep = request.keep_alive;
         let Ok((file, _lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
             return self.empty("404 Not Found", "", keep).await;
@@ -591,9 +597,10 @@ impl Connection<'_> {
             ),
             None => ("200 OK", (0, file.size), String::new()),
         };
+        let content_type = dlna.map_or(content_type(&file.path), |dlna| dlna.mime.as_str());
+        let dlna = dlna.map(Dlna::headers).unwrap_or_default();
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}{}\r\n",
-            content_type(&file.path),
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}{dlna}{}\r\n",
             end - start,
             if keep { "" } else { "Connection: close\r\n" },
         );

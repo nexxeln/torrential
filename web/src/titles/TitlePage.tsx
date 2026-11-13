@@ -3,6 +3,7 @@ import { Fragment, type ReactNode, useEffect } from "react";
 import { artUrl, type Next, setSaved, type TitlePage as Title } from "../api";
 import { count, list, minutes, sentence } from "../lib/format";
 import { Link, navigate, playPath, titlePath } from "../router";
+import { CastButton } from "../cast/CastButton";
 import { Button, buttonClass } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Spinner } from "../ui/Spinner";
@@ -177,6 +178,7 @@ function Details({ page, season, sources, onChange }: { page: Title; season: num
           ) : (
             <p className="text-sm text-pencil">No episode has aired yet.</p>
           )}
+          {primary && <CastButton look="page" start={{ video: primary.video }} />}
           <SaveButton page={page} onChange={onChange} />
         </div>
       </section>

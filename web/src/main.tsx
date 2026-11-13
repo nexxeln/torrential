@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { CastBar } from "./cast/CastBar";
 import { DevicesPage } from "./devices/DevicesPage";
 import { DownloadsPage } from "./downloads/DownloadsPage";
 import { Home } from "./home/Home";
@@ -47,5 +48,6 @@ document.documentElement.toggleAttribute("data-tv", isTv());
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App />
+    <CastBar />
   </StrictMode>,
 );

@@ -13,8 +13,8 @@ use torrential_core::protocol::{
 use torrential_core::text::sanitize;
 use torrential_core::watching::next;
 use torrential_core::{
-    AttemptEvent, Error, ErrorCode, HexPrefix, Next, Player, Profile, Release, ReleaseId, SearchQuery, SearchResult,
-    Target, TitleCard, TitleId, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, CastRequest, Error, ErrorCode, HexPrefix, Next, Player, Profile, Release, ReleaseId, SearchQuery,
+    SearchResult, Target, TitleCard, TitleId, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::engine_port::{EngineHandle, Metainfo, ParseTorrent};
@@ -68,8 +68,10 @@ pub struct Ctx {
     pub http_port: u16,
     pub web: super::web::State,
     pub titles: super::titles::Titles,
-    /// The phones and TVs this Mac let in, and the casts playing.
+    /// The phones and TVs this Mac let in, and the grants casts play from.
     pub devices: Arc<super::devices::Devices>,
+    /// The TVs on the home network, and the casts playing on them.
+    pub casts: super::cast::Casts,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
@@ -121,6 +123,16 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             ctx.devices.add(ctx.http_port, super::owner::now()).map(|list| Response::Devices { list })
         }
         Request::RemoveDevice { id } => ctx.devices.remove(&id, ctx.http_port).map(|list| Response::Devices { list }),
+        Request::Tvs { fresh } => Ok(Response::Tvs { list: ctx.casts.search(fresh).await }),
+        Request::Cast(request) => match ctx.casts.start(request).await {
+            Ok((mut view, _)) => {
+                super::cast::playing(&mut view).await.map(|cast| Response::Cast { cast: Box::new(cast) })
+            }
+            Err(error) => Err(error),
+        },
+        Request::CastControl { tv, action } => {
+            ctx.casts.control(tv.as_deref(), action).await.map(|cast| Response::Cast { cast: Box::new(cast) })
+        }
         Request::Home => home(ctx).await.map(|home| Response::Home { home: Box::new(home) }),
     };
     result.unwrap_or_else(|error| Response::Error { error })
@@ -354,13 +366,13 @@ async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
 }
 
 /// The release among `video`'s sources whose ID starts with `prefix`.
-async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<ReleaseId, Error> {
+pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<Release, Error> {
     let parsed: HexPrefix = prefix.parse()?;
     let sources = sources(ctx, video.clone()).await?;
     let name = title_name(&sources.title, sources.video.episode);
     let matching: Vec<&Release> = sources.result.releases.iter().filter(|r| parsed.matches(&r.id)).collect();
     match matching.as_slice() {
-        [one] => Ok(one.id),
+        [one] => Ok((*one).clone()),
         [] => Err(Error::new(ErrorCode::NotFound, format!("no source of {name} has an ID that starts with {prefix}"))
             .with_hint(format!("run torrential sources {video} to list them"))
             .with_next(format!("torrential sources {video}"))),
@@ -404,7 +416,7 @@ async fn play_title(
 ) -> Result<Response, Error> {
     let TitleRequest { video, source } = request;
     let pin = match source {
-        Some(prefix) => Some(pinned(ctx, &video, &prefix).await?),
+        Some(prefix) => Some(pinned(ctx, &video, &prefix).await?.id),
         None => None,
     };
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
@@ -472,6 +484,30 @@ async fn title_frames(
         wire::write_async(wr, &TitleFrame::Step { step: Box::new(step) }).await?;
     }
     wire::write_async(wr, &reply.unwrap_or_else(|error| Response::Error { error })).await
+}
+
+/// A cast over the socket: a frame for each step of finding a title's source, then the cast once
+/// the TV plays it. The cast goes on after the client leaves.
+async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
+    let (mut view, mut steps) = match ctx.casts.start(request).await {
+        Ok(started) => started,
+        Err(error) => return wire::write_async(wr, &Response::Error { error }).await,
+    };
+    let playing = super::cast::playing(&mut view);
+    tokio::pin!(playing);
+    let reply = loop {
+        tokio::select! {
+            biased;
+            step = steps.recv() => match step {
+                Ok(step) => wire::write_async(wr, &TitleFrame::Step { step: Box::new(step) }).await?,
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break (&mut playing).await,
+            },
+            cast = &mut playing => break cast,
+        }
+    };
+    let reply = reply.map_or_else(|error| Response::Error { error }, |cast| Response::Cast { cast: Box::new(cast) });
+    wire::write_async(wr, &reply).await
 }
 
 pub(super) async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesReply, Error> {
@@ -555,6 +591,7 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
             Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,
             Request::PlayTitle(request) => title_frames(ctx, request, Finish::Stream, &mut rd, &mut wr).await?,
             Request::GetTitle(request) => title_frames(ctx, request, Finish::Keep, &mut rd, &mut wr).await?,
+            Request::Cast(request) => cast_frames(ctx, request, &mut wr).await?,
             request => {
                 let response = handle(ctx, request).await;
                 wire::write_async(&mut wr, &response).await?;

@@ -210,6 +210,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     };
     return {
       kind,
+      video: started.video,
       heading,
       ...neighbors(page, started.video),
       memory,

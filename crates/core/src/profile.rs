@@ -105,15 +105,21 @@ impl Player {
         !matches!(self, Self::External)
     }
 
+    /// Whether the player decodes a video of `quality`, as far as its name tells. One that did not
+    /// say what it decodes plays any.
+    pub const fn plays(self, quality: Quality) -> bool {
+        match self.decodes() {
+            Some(playback) => playback.plays(quality),
+            None => true,
+        }
+    }
+
     /// Whether a download already on this machine, of `quality`, plays before anything a search
     /// finds: in a browser that decodes it or that `ffmpeg` converts it for, and in the player this
     /// machine opens always, as before. Size and bitrate do not count, since the file costs no
     /// download.
     pub const fn reuses(self, quality: Quality, ffmpeg: bool) -> bool {
-        match self.decodes() {
-            Some(playback) => ffmpeg || playback.plays(quality),
-            None => true,
-        }
+        ffmpeg || self.plays(quality)
     }
 }
 

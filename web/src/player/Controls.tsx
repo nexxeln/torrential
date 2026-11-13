@@ -81,6 +81,8 @@ interface Props {
   nextLabel: string;
   /** Safari can send this video to an AirPlay screen. */
   airPlay: (() => void) | null;
+  /** Play on TV. */
+  cast: ReactNode;
   /** The timeline, above the buttons. */
   seekBar: ReactNode;
   /** The settings popover, when open. */
@@ -149,6 +151,7 @@ export function Controls(props: Props) {
           </ControlButton>
           {props.settings}
         </div>
+        {props.cast}
         {props.airPlay && (
           <ControlButton label="AirPlay" onClick={props.airPlay}>
             <TvIcon />

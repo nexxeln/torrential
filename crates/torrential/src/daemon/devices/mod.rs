@@ -473,7 +473,6 @@ impl Devices {
 
     /// A grant that serves file `index` of download `id` to whoever has its URL, until it is
     /// dropped. `name` gives the URL a file name a TV can show.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the cast pull request mints grants"))]
     pub fn grant(self: &Arc<Self>, id: TorrentId, index: u32, name: &str) -> Result<CastGrant, Error> {
         let token = Token::new()?;
         let path = format!("{CAST}{}/{}", token.hex(), super::http::url_name(name));
@@ -493,7 +492,6 @@ impl Devices {
         Some(Granted { id: grant.id, index: grant.index, key })
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "the cast pull request mints grants"))]
     fn drop_grant(&self, key: Key) {
         let mut state = self.state();
         if state.grants.remove(&key).is_some() {
@@ -523,7 +521,6 @@ impl Devices {
 }
 
 /// Lets whoever has its URL fetch one file, until it is dropped. A TV plays a cast from one.
-#[cfg_attr(not(test), expect(dead_code, reason = "the cast pull request mints grants"))]
 pub struct CastGrant {
     devices: Weak<Devices>,
     key: Key,
@@ -533,7 +530,6 @@ pub struct CastGrant {
 impl CastGrant {
     /// The path the file is served at, such as `/cast/5f0c…/Sintel.mkv`, to put after the address
     /// the TV reaches this Mac by.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the cast pull request mints grants"))]
     pub fn path(&self) -> &str {
         &self.path
     }

@@ -6,15 +6,16 @@
 //! waits for a preflight the engine never grants.
 
 pub mod assets;
+mod cast;
 pub mod devices;
 pub mod fetch;
 pub mod ffmpeg;
 pub mod media;
 mod online;
-mod play;
+pub mod play;
 mod thumbnail;
 mod titles;
-mod watch;
+pub mod watch;
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -148,6 +149,10 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         (Method::Get, "devices") => devices::list(ctx, asker),
         (Method::Post, "devices/add") => devices::add(ctx, asker),
         (Method::Post, "devices/remove") => devices::remove(ctx, asker, body(request)?),
+        (Method::Get, "tvs") => value(ctx.casts.list()),
+        (Method::Post, "tvs") => cast::search(ctx, body(request)?).await,
+        (Method::Post, "cast") => cast::start(ctx, body(request)?).await,
+        (Method::Post, "cast/control") => cast::control(ctx, body(request)?).await,
         (Method::Post, "play") => value(play::play(ctx, body(request)?).await?),
         (Method::Get, "titles") => titles::search(ctx, request).await,
         (Method::Get, "title") => titles::page(ctx, request).await,

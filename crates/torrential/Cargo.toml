@@ -35,6 +35,7 @@ serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+socket2 = "0.6"
 tar = { version = "0.4", default-features = false }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "signal", "macros", "io-util", "fs", "process"] }
 url = "2.5"

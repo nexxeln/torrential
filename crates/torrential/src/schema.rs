@@ -237,6 +237,7 @@ mod tests {
                 "play",
                 "web",
                 "devices",
+                "tv",
                 "status",
                 "wait",
                 "pause",

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cast::{Cast, CastAction, CastRequest, TvList};
 use crate::catalog::{EpisodeInfo, TitleCard, TitleDetails, TitleId, VideoRef};
 use crate::device::DeviceList;
 use crate::error::Error;
@@ -17,7 +18,7 @@ use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
-pub const WIRE_VERSION: u32 = 7;
+pub const WIRE_VERSION: u32 = 8;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -97,6 +98,20 @@ pub enum Request {
     /// Locks a device out at once.
     RemoveDevice {
         id: String,
+    },
+    /// The TVs on the home network and the casts playing. `fresh` searches the network again even
+    /// when the last search was moments ago.
+    Tvs {
+        fresh: bool,
+    },
+    /// Plays a film, an episode, or a torrent's video on a TV. A title sends a `TitleFrame::Step`
+    /// for each step of finding its source. The reply comes once the TV plays, or the cast fails.
+    Cast(CastRequest),
+    /// Pauses, resumes, seeks, stops, or sets the volume of the cast on a TV: its ID or a part of
+    /// its name, or `None` for the only cast playing.
+    CastControl {
+        tv: Option<String>,
+        action: CastAction,
     },
     /// The films and episodes to go on with, and the saved titles.
     Home,
@@ -187,6 +202,13 @@ pub enum Response {
     Devices {
         #[serde(flatten)]
         list: DeviceList,
+    },
+    Tvs {
+        #[serde(flatten)]
+        list: TvList,
+    },
+    Cast {
+        cast: Box<Cast>,
     },
     Home {
         home: Box<Home>,
@@ -446,6 +468,7 @@ mod tests {
         ),
         (6, &["devices", "add_device", "remove_device"]),
         (7, &["home"]),
+        (8, &["tvs", "cast", "cast_control"]),
     ];
 
     #[test]
