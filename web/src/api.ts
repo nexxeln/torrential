@@ -26,7 +26,8 @@
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
 //   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
-//   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
+//   POST /api/watched/session { video }                    { session: number }
+//   POST /api/watched        { video, position, duration, release?, session? }   { watched: Watched, kept: boolean }
 //   POST /api/library        { title, saved }              { saved: boolean }
 //   GET  /api/home                                         Home
 //
@@ -711,8 +712,22 @@ export async function* playTitle(request: PlayTitle, signal?: AbortSignal): Asyn
   yield* lines<PlayMessage>(response);
 }
 
+/**
+ * Starts this player's turn at a film or an episode, when it starts or resumes playing. Saves that
+ * carry the session outrank those of a TV or another tab that played the video before.
+ */
+export function watchSession(video: string): Promise<number> {
+  return post<{ session: number }>("/api/watched/session", { video }).then((body) => body.session);
+}
+
 /** Kept alive past the page, since the player saves when the page hides. */
-export function saveWatched(entry: { video: string; position: number; duration: number | null; release?: string }): Promise<Watched> {
+export function saveWatched(entry: {
+  video: string;
+  position: number;
+  duration: number | null;
+  release?: string;
+  session?: number | null;
+}): Promise<Watched> {
   const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(entry), keepalive: true };
   return fetch("/api/watched", init)
     .then(json<{ watched: Watched }>)

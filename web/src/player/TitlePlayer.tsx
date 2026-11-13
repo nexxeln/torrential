@@ -1,5 +1,5 @@
 import { type Dispatch, type RefObject, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { artUrl, asApiError, type MediaInfo, media, type PlayInfo, saveWatched, type TitlePage } from "../api";
+import { artUrl, asApiError, type MediaInfo, media, type PlayInfo, saveWatched, type TitlePage, watchSession } from "../api";
 import { useJob } from "../lib/jobs";
 import { goBack, navigate, playPath, titlePath } from "../router";
 import { useTitle } from "../titles/useTitle";
@@ -201,11 +201,20 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     const { started } = current;
     const heading: Heading = { title: naming.title ?? "", detail: naming.detail };
     const duration = current.media.duration;
+    let session: number | null = null;
     const memory: Memory = {
       start: current.start,
       resumed: current.resumed,
-      save: (time, length) => void saveWatched({ video: started.video, position: time, duration: length, release: started.release.id }).catch(() => {}),
-      forget: () => void saveWatched({ video: started.video, position: 0, duration, release: started.release.id }).catch(() => {}),
+      save: (time, length) =>
+        void saveWatched({ video: started.video, position: time, duration: length, release: started.release.id, session }).catch(() => {}),
+      forget: () => void saveWatched({ video: started.video, position: 0, duration, release: started.release.id, session }).catch(() => {}),
+      claim: () =>
+        void watchSession(started.video).then(
+          (claimed) => {
+            session = claimed;
+          },
+          () => {},
+        ),
     };
     return {
       kind,

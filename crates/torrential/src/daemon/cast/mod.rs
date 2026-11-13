@@ -25,6 +25,7 @@ use super::devices::names::Names;
 use super::owner::{Finish, MetaTarget, now};
 use super::server::{self, Ctx, METADATA_WAIT};
 use super::titles::attempt::{self, Containers, PlayTitle};
+use super::titles::shelf::Session;
 use super::web::{play, watch as web_watch};
 use crate::output::views::title_name;
 pub use ssdp::Find;
@@ -559,6 +560,9 @@ impl Run {
         control: &mut mpsc::UnboundedReceiver<Control>,
     ) -> Result<(), Error> {
         let tv = &self.tv.tv;
+        let shelf = &self.ctx.titles.shelf;
+        // The TV's turn at the video, which outranks a browser tab that played it before.
+        let mut session = found.video.as_ref().map(|video| shelf.play(video));
         let mut contact = Contact::new(Instant::now());
         let mut saved = Instant::now();
         let mut resume = found.start_at.filter(|at| *at > WORTH_SAVING).map(|at| (at, RESUME_TRIES));
@@ -570,16 +574,18 @@ impl Run {
                 _ = tick.tick() => {}
                 message = control.recv() => {
                     let Some(Control::Act(action, reply)) = message else {
-                        self.save(found);
+                        self.save(found, session);
                         return Ok(());
                     };
                     let done = self.act(action).await;
                     let stop = action == CastAction::Stop;
                     if stop {
-                        self.save(found);
+                        self.save(found, session);
                         self.view.send_modify(|cast| cast.state = CastState::Ended { error: None });
-                    } else if matches!(action, CastAction::Pause) && done.is_ok() {
-                        self.save(found);
+                    } else if action == CastAction::Pause && done.is_ok() {
+                        self.save(found, session);
+                    } else if action == CastAction::Resume && done.is_ok() {
+                        session = found.video.as_ref().map(|video| shelf.play(video));
                     }
                     let _ = reply.send(done.map(|()| self.view.borrow().clone()));
                     if stop {
@@ -615,11 +621,11 @@ impl Run {
                             }
                         }
                         _ if contact.played && elsewhere => {
-                            self.save(found);
+                            self.save(found, session);
                             return Ok(());
                         }
                         Transport::Stopped if contact.played => {
-                            self.save(found);
+                            self.save(found, session);
                             return Ok(());
                         }
                         _ => {}
@@ -629,11 +635,11 @@ impl Run {
                 Err(Failed::Gone(_)) => {}
             }
             if let Some(error) = contact.lost(now, &tv.name) {
-                self.save(found);
+                self.save(found, session);
                 return Err(error);
             }
             if saved.elapsed() >= SAVE_EVERY {
-                self.save(found);
+                self.save(found, session);
                 saved = Instant::now();
             }
         }
@@ -721,8 +727,9 @@ impl Run {
         upnp::call(&self.ctx.casts.http, service, action, args, &self.tv.tv.name).await
     }
 
-    /// Keeps where the TV is in the watch history, as the web player keeps it.
-    fn save(&self, found: &Found) {
+    /// Keeps where the TV is in the watch history, as the web player keeps it, unless another
+    /// screen has played the video since `session` started.
+    fn save(&self, found: &Found, session: Option<Session>) {
         let cast = self.view.borrow().clone();
         let (Some(video), Some(position), Some(duration)) = (&found.video, cast.position, cast.duration) else {
             return;
@@ -737,7 +744,7 @@ impl Run {
             release: found.release,
             at: now(),
         };
-        if let Err(error) = self.ctx.titles.shelf.watch(&watched) {
+        if let Err(error) = self.ctx.titles.shelf.watch_in(session, &watched) {
             super::log(&format!("cannot keep where {} stopped: {error}", found.name));
         }
     }

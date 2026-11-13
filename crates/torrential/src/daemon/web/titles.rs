@@ -18,6 +18,7 @@ use super::super::owner::{Command, Finish, now};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::super::titles::catalog_port::label;
+use super::super::titles::shelf::Session;
 use super::{NDJSON, fail, line, number, required};
 use crate::output::views::title_name;
 
@@ -176,17 +177,32 @@ pub struct Position {
     position: f64,
     duration: Option<f64>,
     release: Option<ReleaseId>,
+    /// The player's session, from `POST /api/watched/session`.
+    #[serde(default)]
+    session: Option<Session>,
 }
 
 /// `POST /api/watched`: where a film or episode stopped. The player sends it every few seconds.
+/// `kept` is false when another screen has started or resumed the video since the player did.
 pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
-    let Position { video, position, duration, release } = request;
+    let Position { video, position, duration, release, session } = request;
     check_times(position, duration)?;
     let now = now();
     watchable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
     let watched = Watched { video, position, duration, release, at: now };
-    ctx.titles.shelf.watch(&watched)?;
-    Ok(json!({ "watched": watched }))
+    let kept = ctx.titles.shelf.watch_in(session, &watched)?;
+    Ok(json!({ "watched": watched, "kept": kept }))
+}
+
+#[derive(Deserialize)]
+pub struct Playing {
+    video: VideoRef,
+}
+
+/// `POST /api/watched/session`: a session for a player that starts or resumes a film or an
+/// episode. Its saves outrank those of every screen that played the video before.
+pub fn session(ctx: &Ctx, request: Playing) -> Value {
+    json!({ "session": ctx.titles.shelf.play(&request.video) })
 }
 
 /// No video runs longer, in seconds.

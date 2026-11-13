@@ -80,6 +80,8 @@ export interface Memory {
   resumed: boolean;
   save: (time: number, duration: number) => void;
   forget: () => void;
+  /** The video starts or resumes playing here, so this screen's saves outrank another's. */
+  claim: () => void;
 }
 
 /** A video before or after this one. */
@@ -170,6 +172,7 @@ function torrentMemory(play: PlayInfo): Memory {
     resumed: start > 0,
     save: (time, duration) => savePosition({ id, file: file.index, name, path: file.path, time, duration }),
     forget: () => forgetPosition(id, file.index),
+    claim: () => {},
   };
 }
 
@@ -272,6 +275,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     const stop = new AbortController();
     for (const name of ["timeupdate", "ended"]) element.addEventListener(name, follow, { signal: stop.signal });
     for (const name of ["pause", "ended"]) element.addEventListener(name, remember, { signal: stop.signal });
+    element.addEventListener("play", memory.claim, { signal: stop.signal });
     addEventListener("pagehide", remember, { signal: stop.signal });
     const timer = setInterval(remember, SAVE_EVERY_MS);
     return () => {
@@ -279,7 +283,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
       clearInterval(timer);
       remember();
     };
-  }, [element, video, duration, remember]);
+  }, [element, video, duration, remember, memory]);
   useEffect(() => {
     if (!resumeNotice) return;
     const timer = setTimeout(() => setResumeNotice(false), 8000);
