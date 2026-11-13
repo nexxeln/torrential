@@ -2,6 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -12,7 +13,7 @@ use torrential_core::{Display, Playback, Preferences, Screen, Target};
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
 use super::super::http;
-use super::super::search_port::{self, FakeSource, fake_catalog};
+use super::super::search_port::{self, FakeSource, SearchPort, fake_catalog};
 use super::super::web::ffmpeg::Tools;
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
 
@@ -1423,4 +1424,90 @@ async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg
     assert_eq!(first_tried(&h, "192.168.1.30", &tv).await, hdr.name);
     StandIns::install(&h, FILM, "");
     assert_eq!(first_tried(&h, "192.168.1.20", &phone).await, hdr.name, "ffmpeg converts it for the phone");
+}
+
+/// A Torznab indexer on this machine that answers every search with `releases`, each a torrent
+/// with the size and seeders it claims.
+async fn indexer(releases: &[(&FakeTorrentFile, u64, u32)]) -> String {
+    let items: String = releases
+        .iter()
+        .map(|(t, size, seeders)| {
+            format!(
+                "<item><title>{}</title><size>{size}</size><category>2000</category>\
+                 <torznab:attr name=\"seeders\" value=\"{seeders}\" />\
+                 <torznab:attr name=\"infohash\" value=\"{}\" /></item>",
+                t.name,
+                t.info_hash.id().to_hex()
+            )
+        })
+        .collect();
+    let feed = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <rss version=\"2.0\" xmlns:torznab=\"http://torznab.com/schemas/2015/feed\"><channel>{items}</channel></rss>"
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/api", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let feed = feed.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{feed}",
+                    feed.len()
+                );
+                let _ = socket.write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_and_a_tv_on_the_home_network_each_get_the_copy_for_their_screen() {
+    let uhd = torrent(0xc1, "Night of the Living Dead 1968 2160p UHD BluRay x265 HDR", &[("Night.mp4", MIB)]);
+    let hd = torrent(0xc2, "Night of the Living Dead 1968 1080p BluRay x264", &[("Night.mp4", MIB)]);
+    let sd = torrent(0xc3, "Night Of The Living Dead 1968 720p BRRip x264", &[("Night.mp4", MIB)]);
+    let url = indexer(&[(&uhd, 12 * GIB, 50), (&hd, 4 * GIB, 232), (&sd, 1700 * MIB, 22)]).await;
+    let builtin = ["archlinux", "ubuntu", "debian", "archive.org", "academictorrents", "knaben", "apibay", "nyaa"];
+    let config = torrential_search::SearchConfig {
+        cache_dir: None,
+        torznab: vec![torrential_search::TorznabConfig { name: "home".into(), url, api_key: None }],
+        endpoints: std::collections::BTreeMap::new(),
+        disabled: builtin.map(String::from).to_vec(),
+    };
+    let search: Arc<dyn SearchPort> = Arc::new(search_port::Live::new(&config).unwrap());
+    let phone_screen = Preferences { screen: Some(Screen::Phone), playback: Some(Playback::H264), max_size: None };
+    let outside = Outside { preferences: phone_screen, search: Some(search), ..Outside::default() };
+    let h = Harness::with_outside(search_port::Fake::default(), outside);
+    h.play_for(&uhd, &[0], Some("tt0063350")).await.unwrap();
+
+    let listed = |from: &'static str, viewer: &'static str| {
+        let h = &h;
+        async move {
+            let path = format!("/api/title/sources?video=tt0063350&{viewer}");
+            let (status, _, body) = fetch_from(h, from, "GET", &path, &[], "").await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            let done = lines(&body).pop().unwrap();
+            let names = done["result"]["releases"].as_array().unwrap().iter();
+            names.map(|r| r["name"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        listed("192.168.1.20", "width=1170&height=2532&scale=3&playback=h264").await,
+        [sd.name.as_str(), &hd.name, &uhd.name],
+        "the 4K copy here neither plays on the phone nor fits it"
+    );
+    assert_eq!(
+        listed("192.168.1.30", "width=3840&height=2160&scale=1&playback=hevc-hdr").await,
+        [uhd.name.as_str(), &hd.name, &sd.name],
+        "phone and h264 in config.yaml are for this Mac"
+    );
 }

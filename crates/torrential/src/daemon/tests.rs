@@ -13,7 +13,7 @@ use super::engine_port::{
     parse_fake,
 };
 use super::owner::OwnerConfig;
-use super::search_port::{self, fake_catalog};
+use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
@@ -52,6 +52,8 @@ struct Outside {
     preferences: Preferences,
     /// The display the engine detected. None, as on a server.
     display: Option<Display>,
+    /// A search in place of the harness's fake, which keeps its catalog's order.
+    search: Option<Arc<dyn SearchPort>>,
 }
 
 impl Default for Outside {
@@ -63,6 +65,7 @@ impl Default for Outside {
             timing: TIMING,
             preferences: Preferences::default(),
             display: None,
+            search: None,
         }
     }
 }
@@ -138,7 +141,7 @@ impl Harness {
         let ports = Ports {
             engine,
             parse,
-            search: Arc::new(search.clone()),
+            search: outside.search.clone().unwrap_or_else(|| Arc::new(search.clone())),
             disk: Box::new(disk.clone()),
             machine: crate::machine::Detector::detected(
                 torrential_core::Machine {
