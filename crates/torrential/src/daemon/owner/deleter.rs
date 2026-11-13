@@ -240,7 +240,8 @@ pub struct Deleter {
 impl Deleter {
     /// Opens the plays folder at `plays` and picks up the deletions a stop cut short. When the
     /// folder there is not the one the engine used before, the plays it had stay where they are,
-    /// stopped, as downloads in a folder the person chose.
+    /// stopped, as downloads in a folder the person chose. When it cannot be used, its plays stop
+    /// and say why.
     pub fn open(plays: &Path, trash: Trash, trash_pause: Duration, store: &mut Store) -> Result<Deleter, Error> {
         let root = Root::open(plays);
         let stopped = Error::new(
@@ -249,6 +250,12 @@ impl Deleter {
         )
         .with_hint("resume it to go on downloading where it was, or remove it");
         match &root {
+            Err(why) => {
+                log(why);
+                let unusable = Error::new(ErrorCode::PathConflict, format!("{why}, so torrential stopped it"))
+                    .with_hint("make the plays folder a folder of its own again and resume it, or remove it");
+                store.stop_plays(&unusable)?;
+            }
             Ok(root) => match store.plays_folder()? {
                 Some(identity) if identity == root.identity => {}
                 Some(_) => {
@@ -261,7 +268,6 @@ impl Deleter {
                 }
                 None => store.use_plays_folder(root.identity, &stopped)?,
             },
-            Err(why) => log(why),
         }
         let pending = store
             .deletions()?

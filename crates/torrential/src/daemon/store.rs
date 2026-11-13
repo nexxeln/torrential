@@ -569,12 +569,7 @@ impl Store {
                 .query_row("SELECT device, inode FROM plays_folder", [], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
             if before.is_some_and(|before| before != (identity.device as i64, identity.inode as i64)) {
-                let (intent, _, error) = intent_columns(&Intent::Failed { error: stopped.clone() });
-                tx.execute(
-                    "UPDATE jobs SET intent = ?1, finished_at = NULL, error = ?2 \
-                     WHERE intent != 'done' AND id IN (SELECT job FROM plays)",
-                    params![intent, error],
-                )?;
+                stop_plays(tx, stopped)?;
                 tx.execute("DELETE FROM plays", [])?;
                 tx.execute("DELETE FROM deletions", [])?;
             }
@@ -584,6 +579,11 @@ impl Store {
             )
             .map(drop)
         })
+    }
+
+    /// Stops every play not done with `stopped`, as when the plays folder cannot be used.
+    pub fn stop_plays(&mut self, stopped: &Error) -> Result<(), Error> {
+        self.write(|tx| stop_plays(tx, stopped))
     }
 
     /// Notes that someone pressed play on a play, or streamed it, at `at`.
@@ -778,6 +778,16 @@ fn intent_columns(intent: &Intent) -> (&'static str, Option<i64>, Option<String>
         Intent::Done { finished_at } => ("done", Some(*finished_at), None),
         Intent::Failed { error } => ("failed", None, Some(json(error))),
     }
+}
+
+fn stop_plays(tx: &Transaction, stopped: &Error) -> rusqlite::Result<()> {
+    let (intent, _, error) = intent_columns(&Intent::Failed { error: stopped.clone() });
+    tx.execute(
+        "UPDATE jobs SET intent = ?1, finished_at = NULL, error = ?2 \
+         WHERE intent != 'done' AND id IN (SELECT job FROM plays)",
+        params![intent, error],
+    )
+    .map(drop)
 }
 
 fn insert_link(tx: &Transaction, id: TorrentId, link: &TitleLink, now: i64) -> rusqlite::Result<()> {

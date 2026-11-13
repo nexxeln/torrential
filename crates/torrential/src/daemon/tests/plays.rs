@@ -692,3 +692,32 @@ async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to
     let trashed = std::fs::read_dir(h.dir.path().join("trash/files")).map_or(0, Iterator::count);
     assert_eq!(trashed, 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plays_folder_replaced_by_a_link_while_the_engine_is_stopped_stops_every_play_and_says_why() {
+    let h = Harness::new();
+    h.swarm.set_rate(20 * MIB);
+    let film = torrent(0x13, "film", &[("film.mp4", 2 * GIB)]);
+    h.play_web(&film).await;
+    h.until("the film downloads", |jobs| jobs[0].status.name() == "downloading").await;
+    let (plays, moved, decoys) = (h.plays(), h.dir.path().join("plays.old"), h.dir.path().join("decoys"));
+    let h = h
+        .restart_after(|| {
+            std::fs::rename(&plays, &moved).unwrap();
+            std::fs::create_dir_all(&decoys).unwrap();
+            symlink(&decoys, &plays).unwrap();
+        })
+        .await;
+
+    let jobs = h.until("the film stops", |jobs| jobs[0].status.name() == "error").await;
+    let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
+    let why = format!(
+        "torrential cannot use the plays folder {}: it is a link, and torrential deletes plays only in a folder of its \
+         own, so torrential stopped it",
+        plays.display()
+    );
+    assert_eq!((error.code, error.message.as_str()), (ErrorCode::PathConflict, why.as_str()));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(h.states().await, ["error"], "it stays stopped");
+    assert_eq!(std::fs::read_dir(&decoys).unwrap().count(), 0, "nothing goes through the link");
+}
