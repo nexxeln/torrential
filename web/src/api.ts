@@ -15,7 +15,8 @@
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
 //   GET  /api/files?ref=                                FileListing
-//   POST /api/pause | /api/resume | /api/remove  { refs }   { changes: Change[] }
+//   POST /api/pause | /api/resume  { refs }               { changes: Change[] }
+//   POST /api/remove      { refs, delete? }              { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
 //
 // Films and series, by IMDb ID:
@@ -140,6 +141,11 @@ export interface Job {
   added_at: number;
   /** The title this download was made for, when it was made by playing a title. */
   title?: { title: string; span: Span; release: string | null };
+  /**
+   * `plays`: a play in torrential's own folder, whose files go when it is removed.
+   * `folder`: a download in a folder the person chose, whose files stay unless they delete them.
+   */
+  place: "plays" | "folder";
 }
 
 export type JobEvent =
@@ -169,6 +175,8 @@ export interface Change {
   id: string;
   name: string | null;
   result: string;
+  /** What a remove deleted from disk. */
+  deleted?: string[];
 }
 
 /** A file the engine serves while it downloads. */
@@ -584,8 +592,9 @@ export function files(ref: string, signal?: AbortSignal): Promise<FileListing> {
   return fetch(`/api/files?ref=${encodeURIComponent(ref)}`, { signal }).then(json<FileListing>);
 }
 
-export function change(action: "pause" | "resume" | "remove", refs: string[]): Promise<Change[]> {
-  return post<{ changes: Change[] }>(`/api/${action}`, { refs }).then((body) => body.changes);
+/** With `remove`, `deleteFiles` deletes the files of a download in a folder the person chose too. */
+export function change(action: "pause" | "resume" | "remove", refs: string[], deleteFiles = false): Promise<Change[]> {
+  return post<{ changes: Change[] }>(`/api/${action}`, { refs, delete: deleteFiles }).then((body) => body.changes);
 }
 
 /**

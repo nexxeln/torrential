@@ -39,13 +39,16 @@ type Action = "pause" | "resume" | "remove";
 
 function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void }) {
   const [busy, setBusy] = useState<Action | null>(null);
+  // A download in the person's own folder asks what becomes of its files before it goes.
+  const [asking, setAsking] = useState(false);
   const name = readable(job.name ?? job.id.slice(0, 8));
   const { progress } = job;
   const fraction = job.state === "done" ? 1 : progress.size ? progress.verified / progress.size : 0;
   const stopped = job.state === "paused" || job.state === "interrupted" || job.state === "error";
-  const act = (action: Action) => {
+  const act = (action: Action, deleteFiles = false) => {
     setBusy(action);
-    change(action, [job.id])
+    setAsking(false);
+    change(action, [job.id], deleteFiles)
       .catch((thrown) => onFailed(asApiError(thrown)))
       .finally(() => setBusy(null));
   };
@@ -70,31 +73,47 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
           )}
         </div>
       </div>
-      <div className="flex items-center gap-1 sm:justify-end">
-        <Link
-          href={watchPath(job.id)}
-          className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink inset-ring inset-ring-white/15 hover:bg-white/10"
-        >
-          Watch
-        </Link>
-        {job.state !== "done" &&
-          (stopped ? (
-            <Button variant="quiet" disabled={busy !== null} onClick={() => act("resume")}>
-              {job.state === "error" ? "Retry" : "Resume"}
+      <div className="flex items-center gap-1 whitespace-nowrap sm:justify-end">
+        {asking ? (
+          <>
+            <Button variant="quiet" disabled={busy !== null} onClick={() => act("remove")}>
+              Keep files
             </Button>
-          ) : (
-            <Button variant="quiet" disabled={busy !== null} onClick={() => act("pause")}>
-              Pause
+            <Button variant="quiet" disabled={busy !== null} onClick={() => act("remove", true)}>
+              Delete files
             </Button>
-          ))}
-        <Button
-          variant="quiet"
-          disabled={busy !== null}
-          title="Takes it off this list. The files stay on disk."
-          onClick={() => act("remove")}
-        >
-          Remove
-        </Button>
+            <Button variant="quiet" disabled={busy !== null} onClick={() => setAsking(false)}>
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            <Link
+              href={watchPath(job.id)}
+              className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink inset-ring inset-ring-white/15 hover:bg-white/10"
+            >
+              Watch
+            </Link>
+            {job.state !== "done" &&
+              (stopped ? (
+                <Button variant="quiet" disabled={busy !== null} onClick={() => act("resume")}>
+                  {job.state === "error" ? "Retry" : "Resume"}
+                </Button>
+              ) : (
+                <Button variant="quiet" disabled={busy !== null} onClick={() => act("pause")}>
+                  Pause
+                </Button>
+              ))}
+            <Button
+              variant="quiet"
+              disabled={busy !== null}
+              title={job.place === "plays" ? "Takes it off this list and deletes its files." : "Takes it off this list. Asks whether to delete its files."}
+              onClick={() => (job.place === "plays" ? act("remove") : setAsking(true))}
+            >
+              Remove
+            </Button>
+          </>
+        )}
       </div>
     </li>
   );
@@ -113,7 +132,7 @@ export function DownloadsPage() {
       <main className="flex flex-col gap-2 pt-[min(8vh,--spacing(16))]">
         <div className="flex items-baseline justify-between gap-4">
           <h1 className="text-lg font-medium text-ink">Downloads</h1>
-          <p className="text-sm text-pencil">Removing a download keeps its files.</p>
+          <p className="text-sm text-pencil">Removing a play deletes it. A download in your own folder asks first.</p>
         </div>
         {problem && (
           <p role="alert" className="text-sm text-pretty text-error">
