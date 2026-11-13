@@ -116,7 +116,6 @@ export type JobState =
   | "downloading"
   | "paused"
   | "done"
-  | "interrupted"
   | "error";
 
 export interface Progress {

@@ -15,7 +15,6 @@ const STATES: Record<Job["state"], string> = {
   downloading: "Downloading",
   paused: "Paused",
   done: "Done",
-  interrupted: "Interrupted",
   error: "Failed",
 };
 
@@ -42,7 +41,7 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
   const name = readable(job.name ?? job.id.slice(0, 8));
   const { progress } = job;
   const fraction = job.state === "done" ? 1 : progress.size ? progress.verified / progress.size : 0;
-  const stopped = job.state === "paused" || job.state === "interrupted" || job.state === "error";
+  const stopped = job.state === "paused" || job.state === "error";
   const act = (action: Action) => {
     setBusy(action);
     change(action, [job.id])

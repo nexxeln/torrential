@@ -298,7 +298,7 @@ pub struct ResumeArgs {
     /// Download IDs from torrential status
     #[arg(value_name = "ID", required_unless_present = "all", add = ArgValueCandidates::new(complete_download_ids))]
     pub references: Vec<String>,
-    /// Resume every paused, interrupted, or failed download
+    /// Resume every paused or failed download
     #[arg(long, conflicts_with = "references")]
     pub all: bool,
 }

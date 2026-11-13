@@ -38,8 +38,7 @@ pub fn evaluate(watched: &[Watched], until: Until) -> Option<WaitEnd> {
             Until::Metadata => WaitEnd::Metadata,
         });
     }
-    named(&|j| !met(j) && matches!(j.status, JobStatus::Paused | JobStatus::Interrupted))
-        .map(|id| WaitEnd::Stopped { id })
+    named(&|j| !met(j) && j.status == JobStatus::Paused).map(|id| WaitEnd::Stopped { id })
 }
 
 pub struct Printer {

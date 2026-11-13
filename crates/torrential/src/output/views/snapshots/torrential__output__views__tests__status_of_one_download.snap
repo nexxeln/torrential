@@ -46,15 +46,16 @@ next:     torrential wait 9b5212
   ],
   "next": "torrential wait 9b5212"
 }
-=== interrupted
+=== checking
 id:       c32cdd0000000000000000000000000000000000
 name:     stackexchange
-state:    interrupted
+state:    checking
 progress: 79.4% (73.7 GiB of 92.7 GiB)
+peers:    0 (0 seeds)
 files:    all
 path:     /Users/ada/Downloads/torrential/stackexchange
 added:    2026-10-18T08:12:03Z
-next:     torrential resume c32cdd
+next:     torrential wait c32cdd
 
 --- json
 {
@@ -69,7 +70,7 @@ next:     torrential resume c32cdd
       "name": "stackexchange",
       "dir": "/Users/ada/Downloads/torrential",
       "path": "/Users/ada/Downloads/torrential/stackexchange",
-      "state": "interrupted",
+      "state": "checking",
       "progress": {
         "size": 99535000000,
         "verified": 79130000000,
@@ -85,7 +86,7 @@ next:     torrential resume c32cdd
       "added_at": 1792311123
     }
   ],
-  "next": "torrential resume c32cdd"
+  "next": "torrential wait c32cdd"
 }
 === done
 id:       6bc1af0000000000000000000000000000000000

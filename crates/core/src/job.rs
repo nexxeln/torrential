@@ -44,8 +44,6 @@ pub enum JobStatus {
     Done {
         finished_at: i64,
     },
-    /// The engine stopped while the download was active, for example at a reboot.
-    Interrupted,
     Error {
         error: Error,
     },
@@ -60,14 +58,13 @@ impl JobStatus {
             Self::Downloading => "downloading",
             Self::Paused => "paused",
             Self::Done { .. } => "done",
-            Self::Interrupted => "interrupted",
             Self::Error { .. } => "error",
         }
     }
 
     /// No further progress happens without a user action.
     pub const fn is_stopped(&self) -> bool {
-        matches!(self, Self::Paused | Self::Done { .. } | Self::Interrupted | Self::Error { .. })
+        matches!(self, Self::Paused | Self::Done { .. } | Self::Error { .. })
     }
 }
 
