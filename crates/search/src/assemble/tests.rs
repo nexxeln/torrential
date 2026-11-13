@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use torrential_core::error::Details;
 use torrential_core::{
-    Arch, Category, Display, ErrorCode, Flag, Language, Machine, Os, Playback, Preferences, Profile, Release,
+    Arch, Category, Display, ErrorCode, Flag, Language, Machine, Os, Playback, Player, Preferences, Profile, Release,
     ReleaseId, Screen, SearchQuery, Sort, SourceOutcome, SourceReport, Viewer,
 };
 
@@ -936,7 +936,7 @@ fn a_remux_ranks_after_an_encode_in_its_band() {
 }
 
 fn watching_on(width: u32, height: u32, scale: f64) -> Profile {
-    Profile { viewer: Some(Viewer::measured(width, height, scale, Playback::Hevc)), ..mac() }
+    Profile { player: Player::Device(Viewer::measured(width, height, scale, Playback::Hevc)), ..mac() }
 }
 
 #[test]

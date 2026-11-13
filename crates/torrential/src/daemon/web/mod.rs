@@ -294,8 +294,8 @@ async fn results(
     let ctx = conn.ctx;
     conn.begin(NDJSON, request).await?;
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let Profile { preferences, viewer, .. } = query.profile;
-    let rank_for = || ctx.machine.profile(preferences, viewer);
+    let Profile { preferences, player, .. } = query.profile;
+    let rank_for = || ctx.machine.profile(preferences, player);
     let search = ctx.search.search_stream(query, &rank_for, progress_tx);
     tokio::pin!(search);
     let result = loop {

@@ -65,6 +65,47 @@ impl Viewer {
     }
 }
 
+/// What a title plays in, which decides whose screen and formats its sources are ranked for.
+/// config.yaml's `screen` and `playback` describe this machine's display and the player it opens,
+/// so they rank for nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Player {
+    /// The player `torrential play` and the terminal UI open on this machine, which searches rank
+    /// for too: config.yaml's `screen` and `playback`, else what the engine detected.
+    #[default]
+    External,
+    /// A browser on this machine. It shows this machine's display, or the screen in config.yaml,
+    /// and plays what it decodes.
+    Browser { playback: Playback },
+    /// A browser on another device, such as a phone or a TV: the screen and formats it reported.
+    Device(Viewer),
+}
+
+impl Player {
+    /// The screen ranking aims for, when the player reported the one that decides.
+    const fn screen(self) -> Option<Resolution> {
+        match self {
+            Self::Device(viewer) => Some(viewer.screen),
+            Self::External | Self::Browser { .. } => None,
+        }
+    }
+
+    /// What the player decodes, when it reported that.
+    const fn decodes(self) -> Option<Playback> {
+        match self {
+            Self::Browser { playback } | Self::Device(Viewer { playback, .. }) => Some(playback),
+            Self::External => None,
+        }
+    }
+
+    /// Whether the player streams the file as it downloads, so a bitrate its screen cannot show
+    /// only makes the download take longer.
+    const fn streams(self) -> bool {
+        !matches!(self, Self::External)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Os {
@@ -196,7 +237,7 @@ impl Language {
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Detected,
-    /// What the device that pressed play reported.
+    /// What the browser that pressed play reported.
     Viewer,
     /// A preference from `torrential setup`.
     Override,
@@ -221,33 +262,33 @@ pub struct Profile {
     /// `get` keeps. `None` when unknown.
     #[serde(default)]
     pub room: Option<u64>,
-    /// The device that pressed play in the web app. `None` for a search, or a play from the
-    /// terminal, which rank for this machine's own display.
     #[serde(default)]
-    pub viewer: Option<Viewer>,
+    pub player: Player,
 }
 
 impl Profile {
-    /// The resolution ranking aims for: the preferred screen's, else the viewer's, else the
-    /// detected display's.
+    /// The resolution ranking aims for: another device's screen, else the preferred screen's,
+    /// else the detected display's.
     pub fn screen(&self) -> Option<Setting<Resolution>> {
-        match (self.preferences.screen, self.viewer, self.display()) {
-            (Some(screen), ..) => Some(Setting { value: screen.target(), source: Source::Override }),
-            (None, Some(viewer), _) => Some(Setting { value: viewer.screen, source: Source::Viewer }),
-            (None, None, Some(display)) => Some(Setting { value: display.target(), source: Source::Detected }),
-            (None, None, None) => None,
+        if let Some(screen) = self.player.screen() {
+            return Some(Setting { value: screen, source: Source::Viewer });
+        }
+        match (self.preferences.screen, self.display()) {
+            (Some(screen), _) => Some(Setting { value: screen.target(), source: Source::Override }),
+            (None, Some(display)) => Some(Setting { value: display.target(), source: Source::Detected }),
+            (None, None) => None,
         }
     }
 
-    /// An explicit playback preference wins, then what the viewer decodes. Otherwise the
-    /// detected display chooses HEVC with or without HDR. A screen override leaves playback
-    /// unknown.
+    /// What a browser decodes. For the player this machine opens, an explicit playback
+    /// preference wins, and otherwise the detected display chooses HEVC with or without HDR. A
+    /// screen override leaves its playback unknown.
     pub fn playback(&self) -> Option<Setting<Playback>> {
+        if let Some(playback) = self.player.decodes() {
+            return Some(Setting { value: playback, source: Source::Viewer });
+        }
         if let Some(playback) = self.preferences.playback {
             return Some(Setting { value: playback, source: Source::Override });
-        }
-        if let Some(viewer) = self.viewer {
-            return Some(Setting { value: viewer.playback, source: Source::Viewer });
         }
         let display = self.display().filter(|_| self.preferences.screen.is_none())?;
         let value = if display.hdr { Playback::HevcHdr } else { Playback::Hevc };
@@ -267,7 +308,7 @@ impl Profile {
     }
 
     /// False only for a release known to be larger than `max_size` or the room on disk, known
-    /// to need a codec or HDR the player may not handle, or known to stream to a viewer at more
+    /// to need a codec or HDR the player may not handle, or known to stream to a browser at more
     /// `mbps` than its screen shows. Unknown values fit.
     pub fn fits(&self, size: Option<u64>, quality: Quality, mbps: Option<f64>) -> bool {
         let within = |cap: Option<u64>| size.zip(cap).is_none_or(|(size, cap)| size <= cap);
@@ -277,13 +318,15 @@ impl Profile {
             && mbps.zip(self.most_mbps()).is_none_or(|(mbps, most)| mbps <= most)
     }
 
-    /// The most Mbit/s a play may stream to a viewer: the top of the band of the resolution its
+    /// The most Mbit/s a play may stream to a browser: the top of the band of the resolution its
     /// screen wants, where remuxes start. So a phone takes up to 8, about 6 GB for a film of 100
     /// minutes, a 1080p screen up to 16, and a 4K TV up to 40. More shows the screen nothing new
-    /// and only makes the download take longer. A play for this machine's own display keeps
-    /// the rules it had.
+    /// and only makes the download take longer. The player this machine opens keeps the rules it
+    /// had.
     fn most_mbps(&self) -> Option<f64> {
-        self.viewer?;
+        if !self.player.streams() {
+            return None;
+        }
         Some(*band(Some(self.screen()?.value)).end())
     }
 
@@ -395,7 +438,7 @@ const fn screen_label(resolution: Resolution) -> &'static str {
 }
 
 /// The values ranking used, each with where it came from, then what was detected, the
-/// preferences, and the viewer when there is one. Reading it back keeps only the last three
+/// preferences, and the player when it is a browser. Reading it back keeps only the last three
 /// and the room.
 impl Serialize for Profile {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -410,7 +453,7 @@ impl Serialize for Profile {
             detected: &'a Option<Machine>,
             preferences: &'a Preferences,
             #[serde(skip_serializing_if = "Option::is_none")]
-            viewer: Option<Viewer>,
+            player: Option<Player>,
         }
         Fields {
             screen: self.screen(),
@@ -421,7 +464,7 @@ impl Serialize for Profile {
             language: self.language(),
             detected: &self.detected,
             preferences: &self.preferences,
-            viewer: self.viewer,
+            player: (self.player != Player::External).then_some(self.player),
         }
         .serialize(serializer)
     }
@@ -446,7 +489,7 @@ mod tests {
     }
 
     fn profile(detected: Option<Machine>, preferences: Preferences) -> Profile {
-        Profile { detected, preferences, room: None, viewer: None }
+        Profile { detected, preferences, ..Profile::default() }
     }
 
     fn phone() -> Viewer {
@@ -457,8 +500,12 @@ mod tests {
         Viewer::measured(3840, 2160, 1.0, Playback::HevcHdr)
     }
 
+    fn playing_in(player: Player, preferences: Preferences) -> Profile {
+        Profile { player, ..profile(Some(mac()), preferences) }
+    }
+
     fn watching_on(viewer: Viewer, preferences: Preferences) -> Profile {
-        Profile { viewer: Some(viewer), ..profile(Some(mac()), preferences) }
+        playing_in(Player::Device(viewer), preferences)
     }
 
     #[test]
@@ -503,47 +550,51 @@ mod tests {
     }
 
     #[test]
-    fn the_viewer_wins_over_this_machine_and_each_preference_wins_over_the_viewer() {
-        let tv = Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() };
-        let h264 = Preferences { playback: Some(Playback::H264), ..Preferences::default() };
-        let read = |p: &Profile| (p.screen().map(|s| (s.value, s.source)), p.playback().map(|p| (p.value, p.source)));
+    fn another_device_ranks_for_its_own_screen_a_browser_for_what_it_decodes_and_config_for_this_machine() {
+        let tv_h264 =
+            Preferences { screen: Some(Screen::Tv4k), playback: Some(Playback::H264), ..Preferences::default() };
+        let read = |p: Profile| (p.screen().map(|s| (s.value, s.source)), p.playback().map(|p| (p.value, p.source)));
+        let browser = |playback| Player::Browser { playback };
 
         assert_eq!(
-            read(&watching_on(phone(), Preferences::default())),
+            read(playing_in(Player::External, tv_h264)),
+            (Some((Resolution::P2160, Source::Override)), Some((Playback::H264, Source::Override)))
+        );
+        assert_eq!(
+            read(playing_in(browser(Playback::Hevc), tv_h264)),
+            (Some((Resolution::P2160, Source::Override)), Some((Playback::Hevc, Source::Viewer))),
+            "a browser here shows the screen in config.yaml"
+        );
+        assert_eq!(
+            read(playing_in(browser(Playback::H264), Preferences::default())),
+            (Some((Resolution::P1080, Source::Detected)), Some((Playback::H264, Source::Viewer))),
+            "a browser here shows the detected display"
+        );
+        assert_eq!(
+            read(watching_on(phone(), tv_h264)),
             (Some((Resolution::P720, Source::Viewer)), Some((Playback::Hevc, Source::Viewer)))
         );
         assert_eq!(
-            read(&watching_on(tv_4k(), Preferences::default())),
+            read(watching_on(tv_4k(), Preferences::default())),
             (Some((Resolution::P2160, Source::Viewer)), Some((Playback::HevcHdr, Source::Viewer)))
-        );
-        assert_eq!(
-            read(&watching_on(phone(), tv)),
-            (Some((Resolution::P2160, Source::Override)), Some((Playback::Hevc, Source::Viewer)))
-        );
-        assert_eq!(
-            read(&watching_on(phone(), h264)),
-            (Some((Resolution::P720, Source::Viewer)), Some((Playback::H264, Source::Override)))
         );
     }
 
     #[test]
-    fn a_viewer_takes_no_more_mbit_than_the_band_of_its_screen() {
+    fn a_browser_takes_no_more_mbit_than_the_band_of_its_screen() {
         let fits = |p: &Profile, mbps: [f64; 4]| mbps.map(|mbps| p.fits(Some(1), Quality::default(), Some(mbps)));
         let tv = Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() };
+        let rates = [8.0, 8.1, 22.0, 41.0];
+        assert_eq!(fits(&watching_on(phone(), tv), rates), [true, false, false, false], "a phone");
+        assert_eq!(fits(&watching_on(tv_4k(), Preferences::default()), rates), [true, true, true, false], "a 4K TV");
+        let here = |preferences| playing_in(Player::Browser { playback: Playback::Hevc }, preferences);
+        assert_eq!(fits(&here(Preferences::default()), rates), [true, true, false, false], "this Mac's browser");
         assert_eq!(
-            fits(&watching_on(phone(), Preferences::default()), [8.0, 8.1, 22.0, 41.0]),
-            [true, false, false, false]
-        );
-        assert_eq!(
-            fits(&watching_on(tv_4k(), Preferences::default()), [8.0, 8.1, 22.0, 41.0]),
-            [true, true, true, false]
-        );
-        assert_eq!(
-            fits(&watching_on(phone(), tv), [8.0, 8.1, 22.0, 41.0]),
+            fits(&here(tv), rates),
             [true, true, true, false],
-            "the screen preference"
+            "this Mac's browser on the screen in config.yaml"
         );
-        assert_eq!(fits(&profile(Some(mac()), Preferences::default()), [8.0, 8.1, 22.0, 41.0]), [true; 4], "this Mac");
+        assert_eq!(fits(&playing_in(Player::External, Preferences::default()), rates), [true; 4], "this Mac's player");
         assert!(
             watching_on(phone(), Preferences::default()).fits(Some(1), Quality::default(), None),
             "an unknown bitrate"
@@ -700,11 +751,11 @@ mod tests {
         let on_phone = watching_on(phone(), Preferences::default());
         let json = serde_json::to_value(&on_phone).unwrap();
         assert_eq!(
-            (&json["screen"], &json["playback"], &json["viewer"]),
+            (&json["screen"], &json["playback"], &json["player"]),
             (
                 &serde_json::json!({"value": "720p", "source": "viewer"}),
                 &serde_json::json!({"value": "hevc", "source": "viewer"}),
-                &serde_json::json!({"screen": "720p", "playback": "hevc"})
+                &serde_json::json!({"kind": "device", "screen": "720p", "playback": "hevc"})
             )
         );
         assert_eq!(serde_json::from_value::<Profile>(json).unwrap(), on_phone);

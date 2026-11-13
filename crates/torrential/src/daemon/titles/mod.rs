@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use torrential_core::watching::next;
 use torrential_core::{
-    Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Preferences, Profile, Release, ReleaseId, SearchQuery, Skip,
-    TitleDetails, TorrentId, VideoRef, Viewer,
+    Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Player, Preferences, Profile, Release, ReleaseId, SearchQuery,
+    Skip, TitleDetails, TorrentId, VideoRef,
 };
 
 use catalog_port::{CatalogPort, label, season_episodes, wanted};
@@ -100,7 +100,7 @@ impl Titles {
         Ok(Resolved { video, details, episode })
     }
 
-    /// The search for `title`'s releases, ranked for playing now with `preferences` on `viewer`.
+    /// The search for `title`'s releases, ranked for playing now in `player` with `preferences`.
     /// It asks the catalog which titles share the name, which takes the catalog's search. So a
     /// play asks for this only when it is about to search, and a title whose download is here
     /// plays without it.
@@ -108,14 +108,14 @@ impl Titles {
         &self,
         title: &Resolved,
         preferences: Preferences,
-        viewer: Option<Viewer>,
+        player: Player,
     ) -> Result<SearchQuery, Error> {
         let namesakes = self.catalog.namesakes(&title.details.card).await?;
         let wanted = wanted(&title.details, &namesakes, title.video.episode)?;
         let text = wanted.queries().into_iter().next().unwrap_or_else(|| wanted.name.clone());
         Ok(SearchQuery {
             category: Some(Category::Video),
-            profile: Profile { preferences, viewer, ..Profile::default() },
+            profile: Profile { preferences, player, ..Profile::default() },
             wanted: Some(wanted),
             ..SearchQuery::new(text)
         })

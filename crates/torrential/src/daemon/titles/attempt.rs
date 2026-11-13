@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Release, ReleaseId, SearchResult, Skip,
-    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef, Viewer,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Release, ReleaseId, SearchResult, Skip,
+    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
@@ -43,9 +43,8 @@ pub struct PlayTitle {
     pub pin: Option<ReleaseId>,
     /// The download that stalled. It is never tried, and once another source plays it is paused.
     pub replace: Option<TorrentId>,
-    /// The device that pressed play, which sources are ranked for. `None` ranks for this
-    /// machine's display.
-    pub viewer: Option<Viewer>,
+    /// What the title plays in, which its sources are ranked for.
+    pub player: Player,
     pub containers: Containers,
     pub finish: Finish,
 }
@@ -104,8 +103,8 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     }
 
     let preferences = (ctx.web.preferences)();
-    let rank_for = || ctx.machine.profile(preferences, ask.viewer);
-    let query = match ctx.titles.query(&title, preferences, ask.viewer).await {
+    let rank_for = || ctx.machine.profile(preferences, ask.player);
+    let query = match ctx.titles.query(&title, preferences, ask.player).await {
         Ok(query) => query,
         Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
     };
@@ -567,7 +566,7 @@ mod tests {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|n| release(n).id),
             replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
-            viewer: None,
+            player: Player::External,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };

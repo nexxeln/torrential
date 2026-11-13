@@ -7,13 +7,14 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use torrential_core::Target;
+use torrential_core::{Display, Playback, Preferences, Screen, Target};
 
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
+use super::super::http;
 use super::super::search_port::{self, FakeSource, fake_catalog};
 use super::super::web::ffmpeg::Tools;
-use super::{Harness, magnet, prefix, titles, torrent, written};
+use super::{Harness, Outside, magnet, prefix, titles, torrent, written};
 
 /// One HTTP/1.1 connection from a browser, or from curl.
 struct Page(BufReader<TcpStream>);
@@ -21,6 +22,15 @@ struct Page(BufReader<TcpStream>);
 impl Page {
     async fn open(h: &Harness) -> Self {
         Self(BufReader::new(TcpStream::connect(("127.0.0.1", h.running.ctx.http_port)).await.unwrap()))
+    }
+
+    /// A connection the engine takes as from `remote`, as it takes a phone's on the home network.
+    async fn open_from(h: &Harness, remote: &str) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        http::spawn(h.running.ctx.clone(), stream, remote.parse().unwrap());
+        Self(BufReader::new(client))
     }
 
     async fn send(&mut self, method: &str, path: &str, headers: &[&str], body: &str) {
@@ -90,7 +100,22 @@ impl Page {
 
 /// One request on its own connection: the status, the headers, and the whole body.
 async fn fetch(h: &Harness, method: &str, path: &str, headers: &[&str], body: &str) -> (u16, String, Vec<u8>) {
-    let mut page = Page::open(h).await;
+    exchange(Page::open(h).await, method, path, headers, body).await
+}
+
+/// `fetch`, on a connection the engine takes as from `remote`.
+async fn fetch_from(
+    h: &Harness,
+    remote: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> (u16, String, Vec<u8>) {
+    exchange(Page::open_from(h, remote).await, method, path, headers, body).await
+}
+
+async fn exchange(mut page: Page, method: &str, path: &str, headers: &[&str], body: &str) -> (u16, String, Vec<u8>) {
     page.send(method, path, headers, body).await;
     let (status, headers) = page.head().await;
     let body = if method == "HEAD" { Vec::new() } else { page.body(&headers).await };
@@ -1086,7 +1111,7 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     assert_eq!(error(&get(&h, "/api/title/art?id=tt0063350&kind=banner").await).0, 400);
 
     let phone = "/api/title/sources?video=tt0063350&width=1170&height=2532&scale=3&playback=hevc";
-    let (status, headers, body) = fetch(&h, "GET", phone, &[], "").await;
+    let (status, headers, body) = fetch_from(&h, "192.168.1.20", "GET", phone, &[], "").await;
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
     let done = lines(&body).pop().unwrap();
@@ -1167,18 +1192,6 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
     };
     let streams: Vec<&str> = reply.streams.iter().map(|s| s.path.as_str()).collect();
     assert_eq!((reply.job.id, streams, title.tried), (film.info_hash.id(), vec!["Night.1968.1080p.mkv"], vec![]));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_title_play_ranks_its_sources_for_the_screen_that_pressed_play() {
-    use torrential_core::{Playback, Resolution, Viewer};
-    let (h, _) = titles::night();
-    let tv = json!({ "width": 3840, "height": 2160, "scale": 1, "playback": "hevc-hdr" });
-    let ask = json!({ "video": "tt0063350", "viewer": tv }).to_string();
-    let (status, _, body) = fetch(&h, "POST", "/api/title/play", &["Content-Type: application/json"], &ask).await;
-    assert_eq!((status, &lines(&body).pop().unwrap()["type"]), (200, &json!("playing")));
-    let viewer = h.search.ranked_for().and_then(|profile| profile.viewer);
-    assert_eq!(viewer, Some(Viewer { screen: Resolution::P2160, playback: Playback::HevcHdr }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1301,4 +1314,62 @@ async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_wo
         (status, &done["type"], &done["result"]["releases"][0]["name"]),
         (200, &json!("done"), &json!("ubuntu-24.04.5-desktop-amd64.iso"))
     );
+}
+
+/// A MacBook's panel. In its More Space mode the desktop lays out 1800x1169 at 2x, so a browser
+/// measures a frame of 3600x2338, larger than the panel.
+const PANEL: Display = Display { width: 3024, height: 1964, hdr: true };
+/// An iPhone's screen, as the web app measures it.
+const PHONE: &str = "width=1170&height=2532&scale=3&playback=hevc";
+
+/// What the sources listed at `path` for a browser at `from` were ranked for: the screen and the
+/// playback, each with where it came from.
+async fn listed_for(h: &Harness, from: &str, path: &str) -> (Value, Value) {
+    let (status, _, body) = fetch_from(h, from, "GET", path, &[], "").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let profile = lines(&body).pop().unwrap()["result"]["query"]["profile"].clone();
+    (profile["screen"].clone(), profile["playback"].clone())
+}
+
+/// What the last search of a play was ranked for, as `listed_for` reads it.
+fn played_for(h: &Harness) -> (Value, Value) {
+    let profile = serde_json::to_value(h.search.ranked_for().expect("the play searched")).unwrap();
+    (profile["screen"].clone(), profile["playback"].clone())
+}
+
+async fn play_from(h: &Harness, from: &str, ask: Value) -> Vec<Value> {
+    let headers = ["Content-Type: application/json"];
+    let (status, _, body) = fetch_from(h, from, "POST", "/api/title/play", &headers, &ask.to_string()).await;
+    let lines = lines(&body);
+    assert_eq!((status, &lines.last().unwrap()["type"]), (200, &json!("playing")), "{lines:#?}");
+    lines
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn this_mac_ranks_for_its_own_panel_and_its_browser_for_what_it_decodes_whatever_config_yaml_says() {
+    let hevc_hdr = Preferences { playback: Some(Playback::HevcHdr), ..Preferences::default() };
+    let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: hevc_hdr, ..Outside::default() });
+    let scaled = "/api/title/sources?video=tt0063350&width=3600&height=2338&scale=2&playback=h264";
+    let mac = (json!({ "value": "1080p", "source": "detected" }), json!({ "value": "h264", "source": "viewer" }));
+    assert_eq!(listed_for(&h, "127.0.0.1", scaled).await, mac);
+    let viewer = json!({ "width": 3600, "height": 2338, "scale": 2, "playback": "h264" });
+    play_from(&h, "127.0.0.1", json!({ "video": "tt0063350", "viewer": viewer })).await;
+    assert_eq!(played_for(&h), mac);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_device_ranks_for_the_screen_it_reports_and_config_yaml_only_for_this_mac() {
+    let tv = Preferences { screen: Some(Screen::Tv4k), playback: Some(Playback::H264), ..Preferences::default() };
+    let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: tv, ..Outside::default() });
+    let phone = format!("/api/title/sources?video=tt0063350&{PHONE}");
+    let on_phone = (json!({ "value": "720p", "source": "viewer" }), json!({ "value": "hevc", "source": "viewer" }));
+    assert_eq!(listed_for(&h, "192.168.1.20", &phone).await, on_phone);
+    assert_eq!(
+        listed_for(&h, "127.0.0.1", &phone).await,
+        (json!({ "value": "2160p", "source": "override" }), json!({ "value": "hevc", "source": "viewer" })),
+        "the same numbers from this Mac rank for the screen in config.yaml"
+    );
+    let viewer = json!({ "width": 1170, "height": 2532, "scale": 3, "playback": "hevc" });
+    play_from(&h, "192.168.1.20", json!({ "video": "tt0063350", "viewer": viewer })).await;
+    assert_eq!(played_for(&h), on_phone);
 }

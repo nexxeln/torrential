@@ -3,12 +3,13 @@
 //! and waits for them, so a player can start and seek while the rest of the file downloads.
 
 use std::io::{self, SeekFrom};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use torrential_core::TorrentId;
 
@@ -66,16 +67,20 @@ pub fn route_of(id: TorrentId, index: u32, path: &str) -> String {
 }
 
 pub async fn accept(ctx: Arc<Ctx>, listener: tokio::net::TcpListener) {
-    while let Ok((stream, _)) = listener.accept().await {
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            ctx.owner.tell(Command::Connected);
-            let _ = stream.set_nodelay(true);
-            let (rd, wr) = stream.into_split();
-            let _ = Connection { ctx: &ctx, rd, wr, pending: Vec::new(), chunked: false }.serve().await;
-            ctx.owner.tell(Command::Disconnected { keep_until: None });
-        });
+    while let Ok((stream, remote)) = listener.accept().await {
+        spawn(ctx.clone(), stream, remote.ip());
     }
+}
+
+/// Serves one connection from `remote` in a task of its own.
+pub fn spawn(ctx: Arc<Ctx>, stream: TcpStream, remote: IpAddr) {
+    tokio::spawn(async move {
+        ctx.owner.tell(Command::Connected);
+        let _ = stream.set_nodelay(true);
+        let (rd, wr) = stream.into_split();
+        let _ = Connection { ctx: &ctx, remote, rd, wr, pending: Vec::new(), chunked: false }.serve().await;
+        ctx.owner.tell(Command::Disconnected { keep_until: None });
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,6 +123,8 @@ enum Head {
 
 pub struct Connection<'a> {
     pub ctx: &'a Ctx,
+    /// Where the connection comes from.
+    pub remote: IpAddr,
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     /// Bytes read past the end of the request being answered.

@@ -399,7 +399,7 @@ export interface TitlePage extends TitleCard {
 export interface PlayTitle {
   /** `tt0063350`, `tt0903747:3:5`, or a series ID for its next episode. */
   video: string;
-  /** Without it, the engine ranks sources for the Mac's own display. */
+  /** The engine ranks for what this browser decodes, on this screen from another device and on the Mac's display from the Mac. */
   viewer?: Viewer;
   /** Play only this release, with no fallback. */
   source?: string;
@@ -627,7 +627,7 @@ export function artUrl(id: string, kind: "poster" | "background" | "logo" | { se
   return `/api/title/art?${params}`;
 }
 
-/** The releases of one film or episode, ranked for playing on `viewer`, as each source answers. The last message is `done` or `error`. */
+/** The releases of one film or episode, ranked for playing in this browser, as each source answers. The last message is `done` or `error`. */
 export async function* sources(video: string, viewer?: Viewer, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
   const params = new URLSearchParams({ video });
   if (viewer) for (const [name, value] of Object.entries(viewer)) params.set(name, String(value));
