@@ -75,7 +75,8 @@ function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiErro
           )}
         </div>
       </div>
-      <div className="flex items-center gap-1 whitespace-nowrap sm:justify-end">
+      {/* The three choices are wider than the column for the buttons, so on a wide screen they take a line of their own. */}
+      <div className={`flex items-center gap-1 whitespace-nowrap sm:justify-end ${asking ? "sm:col-span-2" : ""}`}>
         {asking ? (
           <>
             <Button variant="quiet" disabled={busy !== null} onClick={() => act("remove")}>
