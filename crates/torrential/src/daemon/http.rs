@@ -594,10 +594,10 @@ enum Refusal {
 /// Who sent `request`. A cast URL is let in by its grant alone, anything else over loopback is
 /// this Mac, and from the network a paired device's cookie lets it in.
 fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
+    let name = devices.local_name();
     match peer {
-        Peer::Loopback if !request.from.loopback_allowed(port) => return Err(Refusal::Forbidden),
+        Peer::Loopback if !request.from.loopback_allowed(port, name.as_deref()) => return Err(Refusal::Forbidden),
         Peer::Network { local, .. } => {
-            let name = devices.local_name();
             if !request.from.home_allowed(port, local, name.as_deref()) {
                 let host = name.unwrap_or_else(|| local.to_string());
                 return Err(Refusal::Elsewhere(format!("{host}:{port}")));
@@ -626,10 +626,11 @@ struct Sender {
 
 impl Sender {
     /// For a request over loopback, false when another website made it through the person's
-    /// browser. Players, curl, and agents send none of these headers but `Host`.
-    fn loopback_allowed(&self, port: u16) -> bool {
-        let local =
-            |host: &str| matches!(host.rsplit_once(':').map_or(host, |(name, _)| name), "127.0.0.1" | "localhost");
+    /// browser. Players, curl, and agents send none of these headers but `Host`. A Mac reaches its
+    /// own .local `name` over loopback too, and no web page elsewhere can make it resolve that.
+    fn loopback_allowed(&self, port: u16, name: Option<&str>) -> bool {
+        let ours = |host: &str| matches!(host, "127.0.0.1" | "localhost") || Some(host) == name;
+        let local = |host: &str| ours(host.rsplit_once(':').map_or(host, |(host, _)| host));
         // A web page that rebinds its own hostname to 127.0.0.1 still names that hostname.
         if self.host.as_deref().is_some_and(|host| !local(host)) {
             return false;
@@ -638,9 +639,10 @@ impl Sender {
             return false;
         }
         let own = |origin: &str| {
-            origin.strip_prefix("http://").and_then(|host| host.rsplit_once(':')).is_some_and(|(name, origin_port)| {
-                matches!(name, "127.0.0.1" | "localhost") && origin_port == port.to_string()
-            })
+            origin
+                .strip_prefix("http://")
+                .and_then(|host| host.rsplit_once(':'))
+                .is_some_and(|(host, origin_port)| ours(host) && origin_port == port.to_string())
         };
         self.origin.as_deref().is_none_or(own)
     }
@@ -723,12 +725,16 @@ mod tests {
         let allowed = |host: &str, site: Option<&str>, origin: Option<&str>| {
             let from =
                 Sender { host: Some(host.into()), site: site.map(String::from), origin: origin.map(String::from) };
-            from.loopback_allowed(47919)
+            from.loopback_allowed(47919, Some("studio-mac.local"))
         };
         // A player, curl, or an agent.
         assert!(allowed("127.0.0.1:47919", None, None));
         assert!(allowed("localhost", None, None));
-        assert!(Sender { host: None, site: None, origin: None }.loopback_allowed(47919), "HTTP/1.0 has no Host");
+        assert!(Sender { host: None, site: None, origin: None }.loopback_allowed(47919, None), "HTTP/1.0 has no Host");
+        // This Mac's browser at the address its QR code holds, which resolves to 127.0.0.1 here.
+        assert!(allowed("studio-mac.local:47919", Some("same-origin"), Some("http://studio-mac.local:47919")));
+        assert!(!allowed("other-mac.local:47919", None, None));
+        assert!(!allowed("127.0.0.1:47919", None, Some("http://other-mac.local:47919")));
         // The web app itself, and its address typed into the browser.
         assert!(allowed("127.0.0.1:47919", Some("same-origin"), Some("http://127.0.0.1:47919")));
         assert!(allowed("localhost:47919", Some("same-origin"), Some("http://localhost:47919")));

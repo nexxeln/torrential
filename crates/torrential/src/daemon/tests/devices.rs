@@ -357,6 +357,10 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
     assert_eq!(cross.status, 403);
     let form = mac_again(port).send("POST", "/api/devices/add", &["Content-Type: text/plain"], "").await;
     assert_eq!(form.status, 415);
+    if let Some(name) = h.running.ctx.devices.local_name() {
+        let by_name = Browser { host: format!("{name}:{port}"), ..mac_again(port) };
+        assert_eq!(by_name.get("/api/me").await.json(), serde_json::json!({ "asker": "mac" }), "its own .local name");
+    }
     assert_eq!(ErrorCode::LocalOnly.exit_code(), 6);
 }
 
