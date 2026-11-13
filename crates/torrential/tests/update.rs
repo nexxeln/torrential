@@ -465,3 +465,28 @@ fn an_update_waits_until_no_stream_is_open_then_installs_and_restarts() {
     let [tarball, sum] = assets(target);
     assert_eq!(server.asked(), ["/latest".to_string(), "/latest".into(), tarball, sum]);
 }
+
+#[test]
+fn an_engine_on_a_fallback_port_keeps_it_across_the_restart_into_an_update() {
+    if target().is_none() {
+        return;
+    }
+    let server = Server::start("0.1.1", &std::fs::read(env!("CARGO_BIN_EXE_torrential")).unwrap(), None);
+    let mut install = Install::agent_with_engine(&server);
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    install.set("TORRENTIAL_TEST_HTTP_PORT", &taken.local_addr().unwrap().port().to_string());
+    install.configure("updates: auto\n");
+    install.found("0.1.1");
+    let address = |install: &Install| -> serde_json::Value {
+        let web: serde_json::Value = serde_json::from_str(&install.run(&["web", "--json"]).stdout).unwrap();
+        web["url"].clone()
+    };
+
+    let before = address(&install);
+    let (pid, _) = install.engine();
+    eventually("the engine restarted into 0.1.1", || install.running() == Some((pid, "0.1.1".into())));
+    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+
+    assert_ne!(before, format!("http://127.0.0.1:{}", taken.local_addr().unwrap().port()));
+    assert_eq!(address(&install), before, "open pages keep reaching the engine");
+}

@@ -162,10 +162,11 @@ pub fn start(
     config: OwnerConfig,
     timing: titles::Timing,
     version: String,
-    http_port: u16,
+    players: std::net::TcpListener,
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
-    let players = http::bind(http_port)
+    let players = players
+        .try_clone()
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
@@ -209,28 +210,27 @@ pub fn run(env: &Env) -> u8 {
     };
     // Linux names a replaced binary "(deleted)", so the path is read before an update replaces it.
     let exe = update::executable();
-    match serve(env, &paths) {
-        Ok(None) => 0,
+    let held = match Held::take(env, &paths) {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            log(&format!("another engine owns {}", paths.state.display()));
+            return ErrorCode::DaemonUnavailable.exit_code();
+        }
+        Err(e) => return fail_start(Some(&paths), &e),
+    };
+    match serve(env, &paths, &held) {
+        Ok(None) => {
+            let _ = std::fs::remove_file(paths.socket());
+            0
+        }
         Ok(Some(to)) => match exe {
-            Ok(exe) => restart(env, &exe, to),
+            Ok(exe) => restart(env, &held, &exe, to),
             Err(e) => fail_start(Some(&paths), &e),
         },
-        Err(Startup::AlreadyRunning(message)) => {
-            log(&message);
-            ErrorCode::DaemonUnavailable.exit_code()
+        Err(e) => {
+            let _ = std::fs::remove_file(paths.socket());
+            fail_start(Some(&paths), &e)
         }
-        Err(Startup::Failed(e)) => fail_start(Some(&paths), &e),
-    }
-}
-
-enum Startup {
-    AlreadyRunning(String),
-    Failed(Error),
-}
-
-impl From<Error> for Startup {
-    fn from(e: Error) -> Self {
-        Self::Failed(e)
     }
 }
 
@@ -244,10 +244,11 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
 
 /// Replaces this process with the binary an update installed. The process ID stays, so launchd
 /// and systemd keep watching it. A test engine's made-up version follows the update.
-fn restart(env: &Env, exe: &Path, to: Version) -> u8 {
+fn restart(env: &Env, held: &Held, exe: &Path, to: Version) -> u8 {
     log(&format!("restarting into torrential {to}"));
     let mut engine = std::process::Command::new(exe);
     engine.args(["daemon", "run"]).env("TORRENTIAL_UPDATED_FROM", env.version());
+    held.hand_over(&mut engine);
     if env.var("TORRENTIAL_TEST_VERSION").is_some() {
         engine.env("TORRENTIAL_TEST_VERSION", to.to_string());
     }
@@ -257,22 +258,13 @@ fn restart(env: &Env, exe: &Path, to: Version) -> u8 {
 }
 
 /// Returns the version an update installed, when that is why the engine stopped.
-fn serve(env: &Env, paths: &Paths) -> Result<Option<Version>, Startup> {
+fn serve(env: &Env, paths: &Paths, held: &Held) -> Result<Option<Version>, Error> {
     let settings = Config::load(paths, env)?;
-    let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
-    std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
-    paths::check_state_filesystem(&paths.state)?;
-    let _lock = match OwnerLock::acquire(&paths.lock())? {
-        Some(lock) => lock,
-        None => return Err(Startup::AlreadyRunning(format!("another engine owns {}", paths.state.display()))),
-    };
-    let _ = std::fs::remove_file(paths.startup_error());
     match crate::client::service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
         Ok(None) => {}
         Err(e) => log(&format!("cannot add a login service: {}", e.message)),
     }
-    prepare_runtime_dir(&paths.runtime)?;
     let seed = fake(env) && !paths.database().exists();
     let mut store = Store::open(&paths.database())?;
     let default_dir = settings.downloads_dir(paths);
@@ -306,15 +298,18 @@ fn serve(env: &Env, paths: &Paths) -> Result<Option<Version>, Startup> {
     let ports = Ports::from_env(env, paths, &settings, runtime.handle())?;
     let (engine, updated) = runtime.block_on(async {
         let socket = paths.socket();
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).map_err(|e| {
-            Error::new(ErrorCode::DaemonUnavailable, format!("cannot listen on {}: {e}", socket.display()))
-        })?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
-        let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
-        let running =
-            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
+        let listener = held
+            .socket
+            .try_clone()
+            .and_then(|listener| {
+                listener.set_nonblocking(true)?;
+                UnixListener::from_std(listener)
+            })
+            .map_err(|e| {
+                Error::new(ErrorCode::DaemonUnavailable, format!("cannot listen on {}: {e}", socket.display()))
+            })?;
+        let http = held.http.try_clone().map_err(|e| Error::internal(format!("cannot listen for players: {e}")))?;
+        let running = start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
@@ -341,7 +336,6 @@ fn serve(env: &Env, paths: &Paths) -> Result<Option<Version>, Startup> {
         running.http.abort();
         signals.abort();
         updates.abort();
-        let _ = std::fs::remove_file(&socket);
         Ok::<_, Error>((running.engine, updated))
     })?;
     drop(runtime);
@@ -380,30 +374,102 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), Error> {
         .map_err(|e| refuse(format!("cannot protect {}: {e}", dir.display())))
 }
 
-pub struct OwnerLock {
-    _file: File,
+/// The lock on the engine's state and its two listeners. A restart into an update hands them to the
+/// binary it execs, so no other engine starts meanwhile, and commands and pages that arrive then
+/// wait on the same socket and port for the new engine instead of finding none.
+struct Held {
+    lock: File,
+    socket: std::os::unix::net::UnixListener,
+    http: std::net::TcpListener,
 }
 
-impl OwnerLock {
-    pub fn acquire(path: &Path) -> Result<Option<Self>, Error> {
-        use std::os::fd::AsRawFd;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot open {}: {e}", path.display())))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Ok(None);
-            }
-            return Err(Error::new(ErrorCode::StateCorrupt, format!("cannot lock {}: {e}", path.display())));
+/// Names the descriptors of a `Held` that survive the exec, as `lock,socket,http`.
+const HANDOVER: &str = "TORRENTIAL_HANDOVER";
+
+impl Held {
+    /// Takes over what the engine that exec'd this one held, or else takes the lock and binds both
+    /// listeners. Nothing when another engine holds the lock.
+    fn take(env: &Env, paths: &Paths) -> Result<Option<Held>, Error> {
+        let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
+        std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
+        paths::check_state_filesystem(&paths.state)?;
+        if let Some(held) = env.var(HANDOVER).and_then(|fds| Held::inherited(fds, paths)) {
+            return Ok(Some(held));
         }
-        let mut file = file;
-        let _ = file.set_len(0).and_then(|()| writeln!(file, "{}", std::process::id()));
-        Ok(Some(Self { _file: file }))
+        let Some(lock) = lock(&paths.lock())? else { return Ok(None) };
+        let _ = std::fs::remove_file(paths.startup_error());
+        prepare_runtime_dir(&paths.runtime)?;
+        let socket = paths.socket();
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).map_err(|e| {
+            Error::new(ErrorCode::DaemonUnavailable, format!("cannot listen on {}: {e}", socket.display()))
+        })?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
+        let port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        let http =
+            http::bind(port).map_err(|e| Error::internal(format!("cannot listen for players on 127.0.0.1: {e}")))?;
+        Ok(Some(Held { lock, socket: listener, http }))
     }
+
+    /// The descriptors in `fds`, when the first is this state's lock file and the others are sockets.
+    fn inherited(fds: &str, paths: &Paths) -> Option<Held> {
+        use std::os::fd::FromRawFd;
+        let fds: Vec<i32> = fds.split(',').map(|fd| fd.parse().ok()).collect::<Option<_>>()?;
+        let [lock, socket, http] = fds[..] else { return None };
+        let lock_file = std::fs::metadata(paths.lock()).ok()?;
+        let is = |fd: i32, kind: libc::mode_t| {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            (unsafe { libc::fstat(fd, &mut stat) } == 0 && stat.st_mode & libc::S_IFMT == kind).then_some(stat)
+        };
+        let ours = is(lock, libc::S_IFREG)
+            .is_some_and(|stat| stat.st_dev as u64 == lock_file.dev() && stat.st_ino as u64 == lock_file.ino());
+        if !ours || is(socket, libc::S_IFSOCK).is_none() || is(http, libc::S_IFSOCK).is_none() {
+            return None;
+        }
+        for fd in [lock, socket, http] {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        // SAFETY: the engine that exec'd this one opened these and handed them over, and nothing
+        // else in this process owns them.
+        unsafe {
+            Some(Held {
+                lock: File::from_raw_fd(lock),
+                socket: std::os::unix::net::UnixListener::from_raw_fd(socket),
+                http: std::net::TcpListener::from_raw_fd(http),
+            })
+        }
+    }
+
+    /// Keeps the descriptors open across the exec of `engine`, and names them for it.
+    fn hand_over(&self, engine: &mut std::process::Command) {
+        use std::os::fd::AsRawFd;
+        let fds = [self.lock.as_raw_fd(), self.socket.as_raw_fd(), self.http.as_raw_fd()];
+        for fd in fds {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        }
+        engine.env(HANDOVER, fds.map(|fd| fd.to_string()).join(","));
+    }
+}
+
+/// Locks the engine's state for this process, or nothing when another engine holds it.
+fn lock(path: &Path) -> Result<Option<File>, Error> {
+    use std::os::fd::AsRawFd;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot open {}: {e}", path.display())))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(None);
+        }
+        return Err(Error::new(ErrorCode::StateCorrupt, format!("cannot lock {}: {e}", path.display())));
+    }
+    let _ = file.set_len(0).and_then(|()| writeln!(file, "{}", std::process::id()));
+    Ok(Some(file))
 }

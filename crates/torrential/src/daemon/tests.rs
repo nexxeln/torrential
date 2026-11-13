@@ -153,7 +153,8 @@ impl Harness {
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, store, ports, config(dir.path()), outside.timing, "0.1.0".into(), 0).unwrap()
+        let players = super::http::bind(0).unwrap();
+        start(&handle, store, ports, config(dir.path()), outside.timing, "0.1.0".into(), players).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
