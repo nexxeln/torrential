@@ -81,9 +81,10 @@ fn offer_doc(offer: &PairingOffer, now: i64) -> Doc {
     }
 }
 
-/// A QR code in half blocks, two rows to a line, dark on light whatever the terminal's colors.
+/// A QR code in half blocks, two rows to a line, dark on light whatever the terminal's colors,
+/// inside the four modules of light a camera needs to find it.
 fn blocks(rows: &[String]) -> String {
-    const MARGIN: isize = 2;
+    const MARGIN: isize = 4;
     let size = rows.len() as isize;
     let dark = |x: isize, y: isize| {
         (0..size).contains(&x) && (0..size).contains(&y) && rows[y as usize].as_bytes()[x as usize] == b'1'
@@ -160,9 +161,9 @@ mod tests {
         let rows = qr("http://studio-mac.local:47919/pair#482913");
         let text = blocks(&rows);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), (rows.len() + 4).div_ceil(2));
-        let blank = format!("\x1b[30;107m{}\x1b[0m", " ".repeat(rows.len() + 4));
-        assert_eq!(lines[0], blank, "the margin above is light");
-        assert!(lines[1].starts_with("\x1b[30;107m  █▀▀▀▀▀█"), "a finder pattern after the margin: {}", lines[1]);
+        assert_eq!(lines.len(), (rows.len() + 8).div_ceil(2));
+        let blank = format!("\x1b[30;107m{}\x1b[0m", " ".repeat(rows.len() + 8));
+        assert_eq!(lines[..2], [blank.as_str(), blank.as_str()], "the margin above is light");
+        assert!(lines[2].starts_with("\x1b[30;107m    █▀▀▀▀▀█"), "a finder pattern after the margin: {}", lines[2]);
     }
 }
