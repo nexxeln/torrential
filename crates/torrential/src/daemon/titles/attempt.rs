@@ -100,7 +100,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
     // ffmpeg converts nothing for a TV, which fetches the file as it is.
-    let ffmpeg = !matches!(ask.containers, Containers::Tv(_)) && (ctx.web.tools)().both().is_some();
+    let ffmpeg = !matches!(ask.containers, Containers::Tv(_)) && ctx.web.ffmpeg.converts();
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
     if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
@@ -359,8 +359,12 @@ impl Trial<'_> {
         {
             return Err(Skip::Stalled.into());
         }
-        let remux = (ctx.web.tools)().both().is_some();
+        let remux = ctx.web.ffmpeg.converts();
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
+        // ffmpeg comes while the download starts, when the browser cannot read this file itself.
+        if !ask.containers.open(&metainfo.files[playable.video as usize].path, false) {
+            let _ = ctx.web.ffmpeg.fetch();
+        }
 
         report(AttemptEvent::Check { check: Check::Start });
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));

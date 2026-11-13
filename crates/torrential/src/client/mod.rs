@@ -513,9 +513,10 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         (Err(_), _) => check("profile", CheckStatus::Skipped, "the config has an error".into()),
         (_, Err(error)) => check("profile", CheckStatus::Fail, error.message),
     };
+    let fetch_ffmpeg = settings.as_ref().map_or(true, |settings| settings.ffmpeg.fetch);
     checks.extend(probe::checks(&paths, settings, network));
     checks.push(profile);
-    checks.push(web::check(env));
+    checks.push(web::check(env, &paths, fetch_ffmpeg));
     emit(mode, &views::doctor(&checks, fix), &Typed { kind: "doctor", body: Checks { checks: &checks } })
 }
 

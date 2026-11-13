@@ -8,6 +8,7 @@
 pub mod assets;
 mod cast;
 pub mod devices;
+pub mod fetch;
 pub mod ffmpeg;
 pub mod media;
 mod online;
@@ -34,7 +35,7 @@ use super::owner::Command;
 use super::search_port::Progress;
 use super::server::{self, Ctx, METADATA_WAIT};
 use super::subtitle_port::SubtitlePort;
-use ffmpeg::Tools;
+use fetch::{Fetching, Ffmpeg, Stage};
 use media::Media;
 
 const NDJSON: &str = "application/x-ndjson";
@@ -51,8 +52,8 @@ type Made = Arc<Vec<u8>>;
 pub struct State {
     /// The preferences in config.yaml now, which rank searches and cap new downloads.
     pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
-    /// Where ffmpeg and ffprobe are now. A person can install them while the engine runs.
-    pub tools: Arc<dyn Fn() -> Tools + Send + Sync>,
+    /// ffmpeg and ffprobe, installed or fetched.
+    pub ffmpeg: Ffmpeg,
     probes: Mutex<HashMap<(TorrentId, u32), Arc<Media>>>,
     pub subtitles: Arc<dyn SubtitlePort>,
     /// What the online sources have for each file asked about, with where each subtitle is.
@@ -67,12 +68,12 @@ pub struct State {
 impl State {
     pub fn new(
         preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
-        tools: Arc<dyn Fn() -> Tools + Send + Sync>,
+        ffmpeg: Ffmpeg,
         subtitles: Arc<dyn SubtitlePort>,
     ) -> Self {
         Self {
             preferences,
-            tools,
+            ffmpeg,
             probes: Mutex::default(),
             subtitles,
             found: Mutex::default(),
@@ -121,6 +122,7 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, a
         (Method::Get, "title/sources") => return titles::sources(conn, request, asker).await,
         (Method::Post, "title/play") => return titles::play(conn, request, asker).await,
         (Method::Get, "title/art") => return titles::art(conn, request).await,
+        (Method::Post, "ffmpeg") => return ffmpeg(conn, request).await,
         _ => {}
     }
     let ctx = conn.ctx;
@@ -346,6 +348,44 @@ async fn results(
     };
     line(conn, &last).await?;
     conn.end().await
+}
+
+/// `POST /api/ffmpeg`: fetches ffmpeg when the engine has none, with a line of JSON as the download
+/// goes and a last line `ready` or `error`. The fetch carries on when the browser leaves.
+async fn ffmpeg(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+    let running = match conn.ctx.web.ffmpeg.fetch() {
+        Ok(Fetching::Running(stage)) => Some(stage),
+        Ok(Fetching::Here) => None,
+        Err(error) => return fail(conn, request, &error).await,
+    };
+    conn.begin(NDJSON, request).await?;
+    let last = match running {
+        Some(stage) => follow(conn, stage).await?,
+        None => json!({ "type": "ready" }),
+    };
+    line(conn, &last).await?;
+    conn.end().await
+}
+
+/// Sends a line for each step of a fetch, and answers its last line.
+async fn follow(conn: &mut Connection<'_>, mut stage: tokio::sync::watch::Receiver<Stage>) -> io::Result<Value> {
+    loop {
+        let now = stage.borrow_and_update().clone();
+        match now {
+            Stage::Downloading { done, size } => {
+                line(conn, &json!({ "type": "progress", "done": done, "size": size })).await?;
+            }
+            Stage::Done(Ok(())) => return Ok(json!({ "type": "ready" })),
+            Stage::Done(Err(error)) => return Ok(json!({ "type": "error", "error": error })),
+        }
+        tokio::select! {
+            changed = stage.changed() => if changed.is_err() {
+                let error = Error::internal("the ffmpeg fetch stopped before it finished");
+                return Ok(json!({ "type": "error", "error": error }));
+            },
+            gone = conn.gone() => return Err(gone),
+        }
+    }
 }
 
 /// What `POST /api/search` takes. A search can fetch .torrent files and keep fetching after it
