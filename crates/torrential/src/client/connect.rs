@@ -158,8 +158,8 @@ pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
 }
 
 /// Stops the engine as the person asks, and returns the process ID of the last engine it stopped.
-/// An engine that switches to an update keeps its socket, which refuses connections until the login
-/// service starts the new engine, so this waits across that gap and stops the new one too.
+/// An engine that exits for the login service to start an update says so in its state folder, so
+/// this waits across the gap until the new engine starts and stops that one too.
 pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
     let deadline = Instant::now() + BACK_WITHIN;
     let mut stopped = None;
@@ -169,7 +169,7 @@ pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
                 if let Some(conn) = found {
                     stopped = Some(stop(conn, Stop::Asked)?);
                 }
-                if !paths.socket().exists() {
+                if !crate::daemon::switching(paths, crate::daemon::owner::now()) {
                     return Ok(stopped);
                 }
                 None

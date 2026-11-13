@@ -205,6 +205,29 @@ pub fn log(message: &str) {
 /// clean stop exits 0, which neither restarts.
 const RESTART: u8 = 75;
 
+/// What an engine that exits for the login service leaves, so `engine stop` waits for the next
+/// engine to stop it too. The next engine removes it once it is up.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Switching {
+    pid: u32,
+    at: i64,
+}
+
+/// How long a stop waits for the login service to start the next engine.
+const SWITCH_WITHIN: i64 = 60;
+
+fn leave_switching(paths: &Paths, at: i64) {
+    let switching = Switching { pid: std::process::id(), at };
+    let _ = crate::skill::write_atomic(&paths.switching(), &serde_json::to_vec(&switching).expect("records serialize"));
+}
+
+/// Whether an engine exited for the login service under a minute before `now`, and no engine has
+/// started since.
+pub fn switching(paths: &Paths, now: i64) -> bool {
+    let Ok(bytes) = std::fs::read(paths.switching()) else { return false };
+    serde_json::from_slice::<Switching>(&bytes).is_ok_and(|switching| now - switching.at < SWITCH_WITHIN)
+}
+
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
 /// systemd started it, a switch to an installed update.
 pub fn run(env: &Env, service: bool) -> u8 {
@@ -312,6 +335,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
             socket.display()
         ));
+        let _ = std::fs::remove_file(paths.switching());
         let ctx = running.ctx.clone();
         let accept = tokio::spawn(async move {
             let uid = paths::uid();
@@ -324,6 +348,10 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), service));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
+        // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
+        if ended == Ended::Restart && service {
+            leave_switching(paths, owner::now());
+        }
         accept.abort();
         running.http.abort();
         signals.abort();

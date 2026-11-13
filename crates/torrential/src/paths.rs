@@ -95,6 +95,11 @@ impl Paths {
     pub fn http_port(&self) -> PathBuf {
         self.state.join("http-port")
     }
+
+    /// Left by an engine that exits for the login service to start the next one.
+    pub fn switching(&self) -> PathBuf {
+        self.state.join("engine.switching")
+    }
 }
 
 pub fn uid() -> u32 {

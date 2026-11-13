@@ -909,6 +909,23 @@ fn daemon_stop_is_idempotent() {
 }
 
 #[test]
+fn an_engine_stop_after_the_engine_crashed_says_already_stopped_at_once() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
+    let left_its_socket = home.dir.path().join("th/run/engine.sock").exists();
+
+    let started = Instant::now();
+    let stop = home.run(&["engine", "stop"]);
+
+    assert!(left_its_socket, "the crashed engine left its socket");
+    assert_eq!((stop.code, stop.stdout.as_str()), (0, "result: already_stopped\n"));
+    assert!(started.elapsed() < Duration::from_secs(5), "the stop took {:?}", started.elapsed());
+}
+
+#[test]
 fn an_engine_stop_whose_engine_exits_before_it_answers_stops_the_engine_that_starts_next() {
     use std::process::Stdio;
     let home = Home::new();

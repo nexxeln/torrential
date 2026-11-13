@@ -1714,5 +1714,27 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
 }
 
+#[test]
+fn an_engine_that_exits_for_the_login_service_counts_as_switching_for_a_minute() {
+    let dir = tempfile::tempdir().unwrap();
+    let at = |name: &str| dir.path().join(name);
+    let paths = crate::paths::Paths {
+        config: at("config"),
+        state: at("state"),
+        cache: at("cache"),
+        runtime: at("run"),
+        downloads: at("downloads"),
+    };
+    std::fs::create_dir_all(&paths.state).unwrap();
+    let before = super::switching(&paths, 1_000);
+
+    super::leave_switching(&paths, 1_000);
+
+    assert_eq!(
+        (before, super::switching(&paths, 1_000), super::switching(&paths, 1_059), super::switching(&paths, 1_060)),
+        (false, true, true, false)
+    );
+}
+
 mod titles;
 mod web;
