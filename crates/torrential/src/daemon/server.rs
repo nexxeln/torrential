@@ -21,6 +21,7 @@ use super::engine_port::{EngineHandle, Metainfo, ParseTorrent};
 use super::files;
 use super::http;
 use super::magnet::{self, Magnet};
+use super::owner::plays::Destination;
 use super::owner::{
     Command, FileBytes, FilesInfo, Finish, GetCommand, MetaTarget, Origin, PlayCommand, Reply, Resolved, Source, Update,
 };
@@ -95,9 +96,10 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         Request::Resume { refs, all } => {
             owner.ask(|reply| Command::Resume { refs, all, reply }).await.map(|changes| Response::Changed { changes })
         }
-        Request::Remove { refs } => {
-            owner.ask(|reply| Command::Remove { refs, reply }).await.map(|changes| Response::Changed { changes })
-        }
+        Request::Remove { refs, delete } => owner
+            .ask(|reply| Command::Remove { refs, delete, reply })
+            .await
+            .map(|changes| Response::Changed { changes }),
         Request::Verify { reference, repair } => owner
             .ask(|reply| Command::Verify { reference, repair, reply })
             .await
@@ -282,7 +284,8 @@ async fn get(ctx: &Ctx, request: GetRequest) -> Result<torrential_core::protocol
 async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
     let PlayRequest { target, dir, files, setup_max_size } = request;
     let source = resolve(ctx, target, "play").await?;
-    let play = PlayCommand { source, dir, files: files.clone(), setup_max_size, title: None, finish: Finish::Stream };
+    let to = Destination::Folder(dir);
+    let play = PlayCommand { source, to, files: files.clone(), setup_max_size, title: None, finish: Finish::Stream };
     let (job, metainfo) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let streams = streams(ctx, job.id, &metainfo, files);
     Ok(PlayReply { job, streams })

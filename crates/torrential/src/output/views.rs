@@ -563,10 +563,37 @@ pub fn changes(command: ChangeCommand, changes: &[Change]) -> Doc {
         .collect();
     let next = (!next_ids.is_empty()).then(|| format!("torrential {verb} {}", next_ids.join(" ")));
     let summary = match command {
-        ChangeCommand::Remove => vec!["files were kept".to_string()],
+        ChangeCommand::Remove => removed_files(changes, &ids),
         _ => Vec::new(),
     };
     Doc { body: Body::Table { header, rows }, summary, next }
+}
+
+/// What `rm` did with the files of the downloads it removed, and what it left and why.
+fn removed_files(changes: &[Change], ids: &[String]) -> Vec<String> {
+    // Each fate, and the downloads it was, in the order they come.
+    let mut fates: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (change, id) in changes.iter().zip(ids).filter(|(c, _)| c.result == "removed") {
+        let fate = match (change.deleted.is_empty(), change.trashed.is_empty()) {
+            (false, _) => "deleted",
+            (true, false) => "moved to the Trash",
+            (true, true) => "kept",
+        };
+        match fates.iter_mut().find(|(f, _)| *f == fate) {
+            Some((_, of)) => of.push(id),
+            None => fates.push((fate, vec![id])),
+        }
+    }
+    let done = match &fates[..] {
+        [] => "files were kept".to_string(),
+        [(fate, _)] => format!("files were {fate}"),
+        [rest @ .., last] => {
+            let said = |(fate, of): &(&str, Vec<&str>)| format!("files of {} were {fate}", of.join(", "));
+            format!("{}, and {}", rest.iter().map(said).collect::<Vec<_>>().join(", "), said(last))
+        }
+    };
+    let left = changes.iter().flat_map(|c| &c.kept).map(|k| format!("kept {}: {}", k.path.display(), k.reason));
+    std::iter::once(done).chain(left).collect()
 }
 
 #[derive(Clone, PartialEq, Debug)]

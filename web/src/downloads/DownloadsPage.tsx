@@ -7,6 +7,7 @@ import { Link, watchPath } from "../router";
 import { Button, buttonClass } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Meter } from "../ui/Meter";
+import { trashed } from "./trashed";
 
 const STATES: Record<Job["state"], string> = {
   queued: "Queued",
@@ -36,15 +37,19 @@ function facts(job: Job): string {
 
 type Action = "pause" | "resume" | "remove";
 
-function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void }) {
+function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiError) => void; onTrashed: (said: string) => void }) {
   const [busy, setBusy] = useState<Action | null>(null);
+  // A download in the person's own folder asks what becomes of its files before it goes.
+  const [asking, setAsking] = useState(false);
   const name = readable(job.name ?? job.id.slice(0, 8));
   const { progress } = job;
   const fraction = job.state === "done" ? 1 : progress.size ? progress.verified / progress.size : 0;
   const stopped = job.state === "paused" || job.state === "error";
-  const act = (action: Action) => {
+  const act = (action: Action, deleteFiles = false) => {
     setBusy(action);
-    change(action, [job.id])
+    setAsking(false);
+    change(action, [job.id], deleteFiles)
+      .then(([removed]) => deleteFiles && removed && onTrashed(trashed(name.title, removed)))
       .catch((thrown) => onFailed(asApiError(thrown)))
       .finally(() => setBusy(null));
   };
@@ -69,28 +74,45 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
           )}
         </div>
       </div>
-      <div className="flex items-center gap-1 sm:justify-end">
-        <Link href={watchPath(job.id)} className={buttonClass({})}>
-          Watch
-        </Link>
-        {job.state !== "done" &&
-          (stopped ? (
-            <Button variant="quiet" disabled={busy !== null} onClick={() => act("resume")}>
-              {job.state === "error" ? "Retry" : "Resume"}
+      {/* The three choices are wider than the column for the buttons, so on a wide screen they take a line of their own. */}
+      <div className={`flex items-center gap-1 whitespace-nowrap sm:justify-end ${asking ? "sm:col-span-2" : ""}`}>
+        {asking ? (
+          <>
+            <Button variant="quiet" disabled={busy !== null} onClick={() => act("remove")}>
+              Keep files
             </Button>
-          ) : (
-            <Button variant="quiet" disabled={busy !== null} onClick={() => act("pause")}>
-              Pause
+            <Button variant="quiet" disabled={busy !== null} title="Moves its files to the Trash." onClick={() => act("remove", true)}>
+              Delete files
             </Button>
-          ))}
-        <Button
-          variant="quiet"
-          disabled={busy !== null}
-          title="Takes it off this list. The files stay on disk."
-          onClick={() => act("remove")}
-        >
-          Remove
-        </Button>
+            <Button variant="quiet" disabled={busy !== null} onClick={() => setAsking(false)}>
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            <Link href={watchPath(job.id)} className={buttonClass({})}>
+              Watch
+            </Link>
+            {job.state !== "done" &&
+              (stopped ? (
+                <Button variant="quiet" disabled={busy !== null} onClick={() => act("resume")}>
+                  {job.state === "error" ? "Retry" : "Resume"}
+                </Button>
+              ) : (
+                <Button variant="quiet" disabled={busy !== null} onClick={() => act("pause")}>
+                  Pause
+                </Button>
+              ))}
+            <Button
+              variant="quiet"
+              disabled={busy !== null}
+              title={job.place === "plays" ? "Takes it off this list and deletes its files." : "Takes it off this list. Asks whether to move its files to the Trash."}
+              onClick={() => (job.place === "plays" ? act("remove") : setAsking(true))}
+            >
+              Remove
+            </Button>
+          </>
+        )}
       </div>
     </li>
   );
@@ -99,6 +121,7 @@ function Row({ job, onFailed }: { job: Job; onFailed: (error: ApiError) => void 
 export function DownloadsPage() {
   const { jobs, link } = useJobs();
   const [problem, setProblem] = useState<ApiError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     document.title = "Downloads · torrential";
   }, []);
@@ -109,7 +132,7 @@ export function DownloadsPage() {
       <main className="flex flex-col gap-2 pt-[min(8vh,--spacing(16))]">
         <div className="flex items-baseline justify-between gap-4">
           <h1 className="text-lg font-medium text-ink">Downloads</h1>
-          <p className="text-sm text-pencil">Removing a download keeps its files.</p>
+          <p className="text-sm text-pencil">Removing a play deletes it. A download in your own folder asks first.</p>
         </div>
         {problem && (
           <p role="alert" className="text-sm text-pretty text-error">
@@ -117,10 +140,15 @@ export function DownloadsPage() {
             {problem.hint && <span className="text-pencil"> {sentence(problem.hint)}</span>}
           </p>
         )}
+        {notice && (
+          <p role="status" className="text-sm text-pretty text-pencil">
+            {notice}
+          </p>
+        )}
         {jobs.length > 0 ? (
           <ul role="list" className="divide-y divide-white/8">
             {jobs.map((job) => (
-              <Row key={job.id} job={job} onFailed={setProblem} />
+              <Row key={job.id} job={job} onFailed={setProblem} onTrashed={setNotice} />
             ))}
           </ul>
         ) : (

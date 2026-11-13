@@ -589,7 +589,7 @@ impl Connection<'_> {
             }
         };
         let keep = request.keep_alive;
-        let Ok(file) = self.ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await else {
+        let Ok((file, _lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
             return self.empty("404 Not Found", "", keep).await;
         };
         let Ok(range) = range(request.range.as_deref(), file.size) else {

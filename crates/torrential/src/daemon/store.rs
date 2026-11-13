@@ -2,10 +2,13 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
+use torrential_core::{
+    Error, ErrorCode, InfoHash, Kind, PieceMap, Release, Selection, TitleCard, TitleId, TitleLink, TorrentId,
+};
 
 use super::admission::Cap;
-use super::book::{Intent, JobRecord, Linked};
+use super::book::{Home, Intent, JobRecord, Linked, Play};
+use super::owner::deleter::{Identity, PlayName};
 use super::search_port::SavedLink;
 
 const MIGRATIONS: &[&str] = &[
@@ -93,6 +96,27 @@ CREATE TABLE devices (
     seen_at INTEGER NOT NULL
 ) STRICT;
 "#,
+    r#"
+CREATE TABLE plays (
+    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    watched_at INTEGER NOT NULL,
+    by_hand INTEGER NOT NULL DEFAULT 0 CHECK (by_hand IN (0, 1)),
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL
+) STRICT;
+CREATE TABLE plays_folder (
+    one INTEGER PRIMARY KEY CHECK (one = 1),
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL
+) STRICT;
+CREATE TABLE deletions (
+    job TEXT NOT NULL,
+    play TEXT NOT NULL,
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL,
+    bytes INTEGER NOT NULL
+) STRICT;
+"#,
 ];
 
 #[derive(Clone, PartialEq, Debug)]
@@ -107,6 +131,18 @@ pub const TOMBSTONE_SECS: i64 = 86_400;
 pub const RESULTS_SECS: i64 = 7 * 86_400;
 pub const METAINFO_SECS: i64 = RESULTS_SECS;
 pub const METAINFO_BYTES: i64 = 64 << 20;
+
+/// The deletion of a play's folder in the plays folder, on record until it is done.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Recorded {
+    pub key: i64,
+    pub job: TorrentId,
+    pub play: PlayName,
+    /// The folder torrential made for the play, the only one this deletes.
+    pub folder: Identity,
+    /// The most it takes up on disk.
+    pub bytes: u64,
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct StoredJob {
@@ -194,9 +230,10 @@ impl Store {
             .prepare(
                 "SELECT j.id, j.info_hash, j.name, j.dir, j.selection, j.max_size, j.magnet, j.intent, j.finished_at, \
                  j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup, \
-                 t.title, t.span, t.release, t.played FROM jobs j \
+                 t.title, t.span, t.release, t.played, p.watched_at, p.by_hand, p.device, p.inode FROM jobs j \
                  LEFT JOIN metainfo m ON m.id = j.id \
                  LEFT JOIN job_titles t ON t.job = j.id \
+                 LEFT JOIN plays p ON p.job = j.id \
                  ORDER BY j.added_at",
             )
             .map_err(|e| self.fail(e))?;
@@ -225,6 +262,12 @@ impl Store {
                         r.get::<_, Option<String>>(18)?,
                         r.get::<_, Option<bool>>(19)?,
                     ),
+                    (
+                        r.get::<_, Option<i64>>(20)?,
+                        r.get::<_, Option<bool>>(21)?,
+                        r.get::<_, Option<i64>>(22)?,
+                        r.get::<_, Option<i64>>(23)?,
+                    ),
                 ))
             })
             .map_err(|e| self.fail(e))?;
@@ -248,6 +291,7 @@ impl Store {
                 bytes,
                 from_setup,
                 title,
+                play,
             ) = row.map_err(|e| self.fail(e))?;
             let bad = |what: &str| corrupt(&self.path, &format!("job {id} has an unreadable {what}"));
             let intent = match (intent.as_str(), finished_at, error) {
@@ -276,6 +320,12 @@ impl Store {
                     .transpose()
                     .map_err(|_| bad("file progress"))?,
                 title: linked(title).map_err(|_| bad("title link"))?,
+                home: match play {
+                    (Some(watched_at), Some(by_hand), Some(device), Some(inode)) => {
+                        Home::Plays(Play { watched_at, by_hand, folder: identity(device, inode) })
+                    }
+                    _ => Home::Folder,
+                },
             };
             jobs.push(StoredJob { record, metainfo: bytes });
         }
@@ -313,6 +363,18 @@ impl Store {
             }
             if let Some(linked) = &record.title {
                 insert_link(tx, record.id, &linked.link, now)?;
+            }
+            if let Home::Plays(play) = record.home {
+                tx.execute(
+                    "INSERT INTO plays (job, watched_at, by_hand, device, inode) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        record.id.to_hex(),
+                        play.watched_at,
+                        play.by_hand,
+                        play.folder.device as i64,
+                        play.folder.inode as i64
+                    ],
+                )?;
             }
             tx.execute("DELETE FROM tombstones WHERE id = ?1", [record.id.to_hex()])?;
             Ok(())
@@ -429,10 +491,27 @@ impl Store {
         })
     }
 
-    pub fn remove(&mut self, tombstone: &Tombstone) -> Result<(), Error> {
+    /// Removes a download, and puts on record that its play's folder, the one with that identity
+    /// and taking up at most that many bytes, is to be deleted, both or neither. Answers the
+    /// deletion's key.
+    pub fn remove(
+        &mut self,
+        tombstone: &Tombstone,
+        play: Option<(&PlayName, Identity, u64)>,
+    ) -> Result<Option<i64>, Error> {
         self.write(|tx| {
             let id = tombstone.id.to_hex();
             tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
+            let key = match play {
+                Some((play, folder, bytes)) => {
+                    tx.execute(
+                        "INSERT INTO deletions (job, play, device, inode, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![id, play.as_str(), folder.device as i64, folder.inode as i64, bytes as i64],
+                    )?;
+                    Some(tx.last_insert_rowid())
+                }
+                None => None,
+            };
             tx.execute(
                 "INSERT OR REPLACE INTO tombstones (id, name, path, removed_at) VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -443,8 +522,124 @@ impl Store {
                 ],
             )?;
             tx.execute("DELETE FROM tombstones WHERE removed_at < ?1", [tombstone.removed_at - TOMBSTONE_SECS])?;
-            evict_metainfo(tx, tombstone.removed_at)
+            evict_metainfo(tx, tombstone.removed_at)?;
+            Ok(key)
         })
+    }
+
+    /// The deletions on record that are not done, oldest first.
+    pub fn deletions(&self) -> Result<Vec<Recorded>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rowid, job, play, device, inode, bytes FROM deletions ORDER BY rowid")
+            .map_err(|e| self.fail(e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                let names = (r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?);
+                Ok((names, r.get(3)?, r.get(4)?, r.get::<_, i64>(5)?))
+            })
+            .map_err(|e| self.fail(e))?;
+        let mut recorded = Vec::new();
+        for row in rows {
+            let ((key, job, play), device, inode, bytes) = row.map_err(|e| self.fail(e))?;
+            let bad = || corrupt(&self.path, &format!("deletion {key} is unreadable"));
+            let play = PlayName::parse(&play).ok_or_else(bad)?;
+            let job = job.parse().map_err(|_| bad())?;
+            recorded.push(Recorded { key, job, play, folder: identity(device, inode), bytes: bytes as u64 });
+        }
+        Ok(recorded)
+    }
+
+    /// Notes that what is left of a deletion's folder takes up `bytes`.
+    pub fn left_to_delete(&mut self, key: i64, bytes: u64) -> Result<(), Error> {
+        self.write(|tx| {
+            tx.execute("UPDATE deletions SET bytes = ?2 WHERE rowid = ?1", params![key, bytes as i64]).map(drop)
+        })
+    }
+
+    pub fn deleted(&mut self, key: i64) -> Result<(), Error> {
+        self.write(|tx| tx.execute("DELETE FROM deletions WHERE rowid = ?1", [key]).map(drop))
+    }
+
+    /// The plays folder the engine used last.
+    pub fn plays_folder(&self) -> Result<Option<Identity>, Error> {
+        self.conn
+            .query_row("SELECT device, inode FROM plays_folder", [], |r| Ok(identity(r.get(0)?, r.get(1)?)))
+            .optional()
+            .map_err(|e| self.fail(e))
+    }
+
+    /// Notes the plays folder the engine uses. When it used another before, the plays it had
+    /// become downloads in a folder the person chose, and their folders are no longer deleted.
+    /// Those not done stop with `stopped`, since their paths may now lead into the new folder.
+    pub fn use_plays_folder(&mut self, identity: Identity, stopped: &Error) -> Result<(), Error> {
+        self.write(|tx| {
+            let before: Option<(i64, i64)> = tx
+                .query_row("SELECT device, inode FROM plays_folder", [], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            if before.is_some_and(|before| before != (identity.device as i64, identity.inode as i64)) {
+                stop_plays(tx, stopped)?;
+                tx.execute("DELETE FROM plays", [])?;
+                tx.execute("DELETE FROM deletions", [])?;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO plays_folder (one, device, inode) VALUES (1, ?1, ?2)",
+                params![identity.device as i64, identity.inode as i64],
+            )
+            .map(drop)
+        })
+    }
+
+    /// Stops every play not done with `stopped`, as when the plays folder cannot be used.
+    pub fn stop_plays(&mut self, stopped: &Error) -> Result<(), Error> {
+        self.write(|tx| stop_plays(tx, stopped))
+    }
+
+    /// Notes that someone pressed play on a play, or streamed it, at `at`.
+    pub fn watched(&mut self, id: TorrentId, at: i64) -> Result<(), Error> {
+        self.write(|tx| {
+            tx.execute("UPDATE plays SET watched_at = ?2 WHERE job = ?1", params![id.to_hex(), at]).map(drop)
+        })
+    }
+
+    /// Notes that the person asked for a play by hand, so it never leaves the plays folder by itself.
+    pub fn by_hand(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("UPDATE plays SET by_hand = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
+    }
+
+    /// The titles saved to the library.
+    pub fn saved_titles(&self) -> Result<std::collections::BTreeSet<TitleId>, Error> {
+        let mut stmt = self.conn.prepare("SELECT title FROM library").map_err(|e| self.fail(e))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| self.fail(e))?;
+        let mut saved = std::collections::BTreeSet::new();
+        for row in rows {
+            let title = row.map_err(|e| self.fail(e))?;
+            saved
+                .insert(title.parse().map_err(|_| corrupt(&self.path, &format!("saved title {title} is unreadable")))?);
+        }
+        Ok(saved)
+    }
+
+    /// Saves `card` in the library, keeping when it was first saved, so the library lists the
+    /// title even when the catalog cannot be reached.
+    pub fn save_title(&mut self, card: &TitleCard, now: i64) -> Result<(), Error> {
+        let kind = match card.kind {
+            Kind::Film => "film",
+            Kind::Series => "series",
+        };
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO library (title, kind, name, year, rating, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT (title) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
+                 year = excluded.year, rating = excluded.rating",
+                params![card.id.as_str(), kind, card.name, card.year, card.rating, now],
+            )
+            .map(drop)
+        })
+    }
+
+    pub fn unsave_title(&mut self, title: &TitleId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("DELETE FROM library WHERE title = ?1", [title.as_str()]).map(drop))
     }
 
     /// Links a download that already existed to the title a play joined it for.
@@ -546,6 +741,11 @@ pub(super) fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
     }
 }
 
+/// A file's identity as the store keeps it, in two signed columns.
+fn identity(device: i64, inode: i64) -> Identity {
+    Identity { device: device as u64, inode: inode as u64 }
+}
+
 fn corrupt(path: &Path, reason: &str) -> Error {
     Error::new(ErrorCode::StateCorrupt, format!("the state database {} is damaged: {reason}", path.display()))
         .with_hint(format!(
@@ -587,6 +787,16 @@ fn intent_columns(intent: &Intent) -> (&'static str, Option<i64>, Option<String>
         Intent::Done { finished_at } => ("done", Some(*finished_at), None),
         Intent::Failed { error } => ("failed", None, Some(json(error))),
     }
+}
+
+fn stop_plays(tx: &Transaction, stopped: &Error) -> rusqlite::Result<()> {
+    let (intent, _, error) = intent_columns(&Intent::Failed { error: stopped.clone() });
+    tx.execute(
+        "UPDATE jobs SET intent = ?1, finished_at = NULL, error = ?2 \
+         WHERE intent != 'done' AND id IN (SELECT job FROM plays)",
+        params![intent, error],
+    )
+    .map(drop)
 }
 
 fn insert_link(tx: &Transaction, id: TorrentId, link: &TitleLink, now: i64) -> rusqlite::Result<()> {
@@ -670,7 +880,10 @@ fn save_resume(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::daemon::devices::Devices;
     use torrential_core::ReleaseId;
 
     fn record(n: u8) -> JobRecord {
@@ -688,6 +901,7 @@ mod tests {
             piece_map: None,
             files_verified: None,
             title: None,
+            home: Home::Folder,
         }
     }
 
@@ -740,7 +954,7 @@ mod tests {
         assert_eq!(titles, [Some(made), Some(Linked { link, played: true })]);
 
         let gone = Tombstone { id: TorrentId::from_bytes([1; 20]), name: None, path: None, removed_at: 120 };
-        store.remove(&gone).unwrap();
+        store.remove(&gone, None).unwrap();
         let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
         assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
         let links: i64 = store.conn.query_row("SELECT count(*) FROM job_titles", [], |r| r.get(0)).unwrap();
@@ -784,10 +998,62 @@ mod tests {
             path: Some("/dl/job 1".into()),
             removed_at: 1_000,
         };
-        store.remove(&tomb).unwrap();
+        store.remove(&tomb, None).unwrap();
         assert!(store.jobs().unwrap().is_empty());
         assert_eq!(store.tombstones(1_000 + 60).unwrap(), [tomb]);
         assert!(store.tombstones(1_000 + TOMBSTONE_SECS + 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_play_keeps_its_place_and_its_deletion_outlives_the_engine_until_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        let folder = Identity { device: u64::MAX, inode: 7 };
+        let play = JobRecord {
+            dir: "/th/data/plays/0101010101010101-0".into(),
+            home: Home::Plays(Play { watched_at: 100, by_hand: false, folder }),
+            ..record(1)
+        };
+        store.insert(&play, None, 100).unwrap();
+        store.insert(&record(2), None, 100).unwrap();
+        store.watched(play.id, 250).unwrap();
+        store.by_hand(play.id).unwrap();
+        let homes: Vec<Home> = store.jobs().unwrap().into_iter().map(|j| j.record.home).collect();
+        assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true, folder }), Home::Folder]);
+        let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
+        let name = PlayName::parse("0101010101010101-0").unwrap();
+        let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
+        store.left_to_delete(key, 200).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder, bytes: 200 }]);
+        assert_eq!(store.jobs().unwrap().len(), 1);
+        store.deleted(key).unwrap();
+        assert_eq!(store.deletions().unwrap(), []);
+    }
+
+    #[test]
+    fn a_plays_folder_other_than_the_one_used_before_turns_its_plays_into_downloads_in_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let first = Identity { device: 1, inode: 2 };
+        let stopped = Error::new(ErrorCode::PathConflict, "the plays folder it was in was moved");
+        assert_eq!(store.plays_folder().unwrap(), None);
+        store.use_plays_folder(first, &stopped).unwrap();
+        let home = Home::Plays(Play { watched_at: 100, by_hand: false, folder: Identity { device: 1, inode: 9 } });
+        let done = Intent::Done { finished_at: 150 };
+        store.insert(&JobRecord { home, ..record(1) }, None, 100).unwrap();
+        store.insert(&JobRecord { home, intent: done.clone(), ..record(2) }, None, 100).unwrap();
+        store.use_plays_folder(first, &stopped).unwrap();
+        let jobs = |store: &Store| -> Vec<(Home, Intent)> {
+            store.jobs().unwrap().into_iter().map(|job| (job.record.home, job.record.intent)).collect()
+        };
+        assert_eq!(jobs(&store), [(home, Intent::Running), (home, done.clone())], "the same folder keeps its plays");
+        let moved = Identity { device: 1, inode: 3 };
+        store.use_plays_folder(moved, &stopped).unwrap();
+        assert_eq!(store.plays_folder().unwrap(), Some(moved));
+        assert_eq!(jobs(&store), [(Home::Folder, Intent::Failed { error: stopped }), (Home::Folder, done)]);
     }
 
     #[test]
@@ -806,7 +1072,7 @@ mod tests {
         for n in 5..10 {
             store.cache_metainfo(id([n; 20]), &largest, later + i64::from(n)).unwrap();
         }
-        store.remove(&Tombstone { id: id([3; 20]), name: None, path: None, removed_at: later + 10 }).unwrap();
+        store.remove(&Tombstone { id: id([3; 20]), name: None, path: None, removed_at: later + 10 }, None).unwrap();
 
         let kept: Vec<u8> = (1..10).filter(|n| store.metainfo(id([*n; 20])).unwrap().is_some()).collect();
         assert_eq!(kept, [1, 6, 7, 8, 9]);
@@ -837,6 +1103,39 @@ mod tests {
         let rows: i64 = backup.query_row("SELECT count(*) FROM jobs", [], |r| r.get(0)).unwrap();
         let backup_version: i64 = backup.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!((rows, backup_version), (1, shipped));
+    }
+
+    #[tokio::test]
+    async fn a_database_from_0_4_0_gains_devices_and_plays_and_keeps_its_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut old = Store { conn: Connection::open(&path).unwrap(), path: path.clone() };
+        old.configure().unwrap();
+        old.migrate(&MIGRATIONS[..6]).unwrap();
+        old.insert(&record(1), Some(b"torrent"), 100).unwrap();
+        drop(old);
+
+        let mut store = Store::open(&path).unwrap();
+        let version: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 8);
+        assert!(dir.path().join("state.v6.bak").is_file());
+        let jobs = store.jobs().unwrap();
+        assert_eq!(jobs[0].record, record(1));
+        assert_eq!(jobs[0].metainfo.as_deref(), Some(&b"torrent"[..]));
+
+        let folder = Identity { device: 1, inode: 9 };
+        let play = JobRecord { home: Home::Plays(Play { watched_at: 200, by_hand: false, folder }), ..record(3) };
+        store.insert(&play, None, 200).unwrap();
+        let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
+        let name = PlayName::parse("0303030303030303-0").unwrap();
+        let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
+        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder, bytes: 300 }]);
+
+        let devices = Arc::new(Devices::open(&path).unwrap());
+        let code = devices.add(47919, 1_800_000_000).unwrap().offer.unwrap().code;
+        let phone = std::net::IpAddr::from([192, 168, 1, 40]);
+        let (device, _) = devices.pair(&code, Some("iPhone"), phone, 1_800_000_000).unwrap();
+        assert_eq!(Devices::open(&path).unwrap().list(47919).devices, [device]);
     }
 
     #[test]

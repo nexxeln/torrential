@@ -974,9 +974,12 @@ impl State {
                     JobAction::Resume => format!("Resumed {name}"),
                     JobAction::Verify => format!("Verifying {name}"),
                     JobAction::Remove => {
-                        let dir = self.job(id).map(|j| home_path(&j.dir, self.home.as_deref()));
+                        let job = self.job(id);
+                        let play = job.is_some_and(|j| j.place == torrential_core::Place::Plays);
+                        let dir = job.map(|j| home_path(&j.dir, self.home.as_deref()));
                         self.forget(id);
                         match dir {
+                            _ if play => "Removed from the list, and its files were deleted.".into(),
                             Some(dir) => format!("Removed from the list. Files are kept in {dir}."),
                             None => "Removed from the list. Files are kept on disk.".into(),
                         }

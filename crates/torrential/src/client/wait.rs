@@ -363,6 +363,7 @@ mod tests {
             selection: Selection::All,
             added_at: 0,
             title: None,
+            place: torrential_core::Place::Folder,
         }
     }
 

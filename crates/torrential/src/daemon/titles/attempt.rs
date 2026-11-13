@@ -16,6 +16,7 @@ use torrential_core::{
 
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
+use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
@@ -363,9 +364,11 @@ impl Trial<'_> {
         let hold = Hold::fresh();
         // Held before the owner is asked, so a play that goes away at any point after gives it up.
         self.hold = Some(hold);
+        // A film played to keep goes where `get` puts it. One played to watch goes to the plays folder.
+        let to = if ask.finish == Finish::Keep { Destination::Folder(None) } else { Destination::Plays };
         let play = PlayCommand {
             source,
-            dir: None,
+            to,
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
             setup_max_size: (ctx.web.preferences)().max_size,
             title: Some(TitlePlay { link, hold }),

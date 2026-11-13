@@ -33,7 +33,7 @@ nix develop -c cargo install --path crates/torrential
 torrential web
 ```
 
-Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. A torrent that gets no data is taken off your downloads again. One that got some, or that you watched part of, is kept. Playing a title never deletes a file or writes over one you already have.
+Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. What you play downloads into a folder of torrential's own, which holds 20 GiB. When it is full, the plays you watched longest ago leave first. The titles you saved stay, and so does the film you watched last, even when it alone is larger. A play no one has watched for 10 minutes stops downloading until you play it again. Playing never deletes or writes over a file of yours.
 
 <p align="center">
   <img src="docs/web-title.png" alt="The page of Night of the Living Dead in the web app, with its poster, synopsis, and a Play button" width="800">
@@ -89,6 +89,8 @@ Film and show details come from Cinemeta and IMDb. Everything else is in `~/.con
 ```yaml
 downloads:
   dir: ~/Downloads/torrents   # default: a torrential folder in Downloads
+plays:
+  max: 50GiB                  # what plays may take up, default 20GiB
 player: mpv                   # for torrential play: iina, mpv, vlc, or a path
 subtitles:
   online: false               # do not look for subtitles online

@@ -7,11 +7,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::protocol::{Change, GetOutcome, GetReply};
 use torrential_core::{
-    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleLink, TorrentId,
+    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleCard, TitleId, TitleLink,
+    TorrentId,
 };
 
 use super::admission::{self, Cap, Disk};
-use super::book::{self, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
+use super::book::{self, Home, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
 use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
 };
@@ -20,6 +21,12 @@ use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use deleter::Deleter;
+use plays::{Destination, Lease, Plays, Tending};
+
+pub mod deleter;
+pub mod plays;
+pub mod trash;
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -31,6 +38,15 @@ pub struct OwnerConfig {
     pub save_resume_every: Duration,
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
+    pub plays: Plays,
+    /// Where the files of a download in a folder the person chose go when they delete them.
+    pub trash: trash::Trash,
+    /// How long a play leaving the plays folder waits before it goes: no time, except in a test
+    /// that does something in between.
+    pub deletion_pause: Duration,
+    /// How long a file waits between the check that it is the file to move to the Trash and the
+    /// move: no time, except in a test that changes it in between.
+    pub trash_pause: Duration,
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T, Error>>;
@@ -104,7 +120,8 @@ pub struct GetCommand {
 
 pub struct PlayCommand {
     pub source: Source,
-    pub dir: Option<PathBuf>,
+    /// Where the download goes, if the play starts one.
+    pub to: Destination,
     /// Indexes into the torrent's file list.
     pub files: Vec<u32>,
     pub setup_max_size: Option<u64>,
@@ -155,6 +172,12 @@ pub struct StreamFile {
     pub complete: bool,
 }
 
+/// A change to the library.
+pub enum Shelving {
+    Save(TitleCard),
+    Unsave(TitleId),
+}
+
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
@@ -166,10 +189,12 @@ pub enum Command {
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
     Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
-    Remove { refs: Vec<String>, reply: Reply<Vec<Change>> },
+    Remove { refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>> },
     Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
     StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
+    Stream { id: TorrentId, index: u32, reply: Reply<(StreamFile, Lease)> },
+    Library { shelving: Shelving, reply: Reply<()> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
     Disconnected { keep_until: Option<Instant> },
@@ -293,6 +318,7 @@ pub struct Owner {
     under_test: BTreeMap<TorrentId, UnderTest>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
+    tending: Tending,
     stopping: Option<Stopping>,
     ended: Option<Ended>,
     engine: EngineHandle,
@@ -312,12 +338,14 @@ pub fn now() -> i64 {
 
 impl Owner {
     pub fn new(
-        store: Store,
+        mut store: Store,
         engine: EngineHandle,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
+        // Opened first, for a plays folder other than the one used before changes what the plays are.
+        let deleter = Deleter::open(&config.plays.root, config.trash.clone(), config.trash_pause, &mut store)?;
         let mut jobs = BTreeMap::new();
         for stored in store.jobs()? {
             let metainfo = match &stored.metainfo {
@@ -335,6 +363,7 @@ impl Owner {
         let (updates, _) = broadcast::channel(256);
         let mut owner = Self {
             tombstones: store.tombstones(now)?,
+            tending: Tending::new(deleter),
             store,
             jobs,
             probes: BTreeSet::new(),
@@ -355,6 +384,8 @@ impl Owner {
             keep_until: None,
             resume_saved_at: Instant::now(),
         };
+        // Nothing is in the engine yet, so what a removal cut short by a crash left goes now.
+        owner.finish_deletions();
         owner.schedule();
         Ok(owner)
     }
@@ -423,11 +454,13 @@ impl Owner {
             }
             Command::Resume { refs, all, reply } => {
                 self.adopt(&refs, "resume");
-                let _ = reply.send(self.resume(&refs, all));
+                let resumed = self.resume(&refs, all);
+                if let Ok(changes) = &resumed {
+                    self.touch_plays(changes);
+                }
+                let _ = reply.send(resumed);
             }
-            Command::Remove { refs, reply } => {
-                let _ = reply.send(self.remove(&refs));
-            }
+            Command::Remove { refs, delete, reply } => self.rm(refs, delete, reply),
             Command::Verify { reference, repair, reply } => {
                 self.adopt(std::slice::from_ref(&reference), "verify");
                 let _ = reply.send(self.verify(&reference, repair));
@@ -438,6 +471,13 @@ impl Owner {
             }
             Command::StreamFile { id, index, reply } => {
                 let _ = reply.send(self.stream_file(id, index));
+            }
+            Command::Stream { id, index, reply } => {
+                let file = self.stream_file(id, index);
+                let _ = reply.send(file.map(|file| (file, self.lease(id))));
+            }
+            Command::Library { shelving, reply } => {
+                let _ = reply.send(self.library(shelving));
             }
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Connected => self.connections += 1,
@@ -552,7 +592,7 @@ impl Owner {
         let Ok(space) = self.disk.space(dir) else { return 0 };
         self.jobs
             .values()
-            .filter(|j| j.id() != except && j.record.intent == Intent::Running)
+            .filter(|j| j.id() != except && j.record.intent == Intent::Running && !self.leaving(j.id()))
             .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
             .map(|job| self.space_needed(job))
             .sum()
@@ -571,9 +611,10 @@ impl Owner {
     /// `get` as a person runs it, which makes a download under test theirs.
     fn get_by_hand(&mut self, get: GetCommand) -> Result<GetReply, Error> {
         let dry_run = get.dry_run;
-        let reply = self.get(get, None)?;
+        let reply = self.get(get, None, Home::Folder)?;
         if !dry_run {
             self.adopt(&[reply.job.id.to_hex()], "get");
+            self.keep_play(reply.job.id)?;
         }
         Ok(reply)
     }
@@ -591,8 +632,8 @@ impl Owner {
         }
     }
 
-    /// `title` links a download this creates to the title it is for.
-    fn get(&mut self, get: GetCommand, title: Option<Linked>) -> Result<GetReply, Error> {
+    /// `title` links a download this creates to the title it is for, and `home` says where its files live.
+    fn get(&mut self, get: GetCommand, title: Option<Linked>, home: Home) -> Result<GetReply, Error> {
         let GetCommand { source, dir, files, max_size, setup_max_size, dry_run } = get;
         if !files.is_empty() {
             super::files::compile(&files)?;
@@ -617,6 +658,9 @@ impl Owner {
         };
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
+        if home == Home::Folder {
+            self.tending.deleter.outside_plays(&dir)?;
+        }
         let cap = Cap::new(max_size, setup_max_size);
         let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
         if let (Some(plan), Some(metainfo)) = (&plan, metainfo.as_deref()) {
@@ -625,7 +669,16 @@ impl Owner {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
-            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
+            // A new play makes room in the plays folder only once nothing but the disk refuses it.
+            // The plays the engine did not hold are gone by then, so the disk is measured again.
+            let space = match home {
+                Home::Plays(_) if !dry_run => {
+                    self.make_room_for(id, plan.selected_size);
+                    self.disk.space(&dir).unwrap_or(plan.space)
+                }
+                _ => plan.space,
+            };
+            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(&dir, id))?;
         }
         let record = JobRecord {
             id,
@@ -641,6 +694,7 @@ impl Owner {
             piece_map: None,
             files_verified: None,
             title,
+            home,
         };
         if dry_run {
             let job = JobEntry::new(record, metainfo, Observed::Absent).view();
@@ -715,6 +769,7 @@ impl Owner {
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
         let needed = plan.needed(if recheck { 0 } else { job.verified() });
+        // A running download gets the files at once, so only room the disk has now counts.
         admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
@@ -782,7 +837,7 @@ impl Owner {
     }
 
     fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>), Error> {
-        let PlayCommand { source, dir, files, setup_max_size, title, finish } = play;
+        let PlayCommand { source, to, files, setup_max_size, title, finish } = play;
         let id = match &source {
             Source::Download(id) if self.jobs.contains_key(id) => *id,
             Source::Download(id) => return Err(no_download(&id.to_hex())),
@@ -831,13 +886,26 @@ impl Owner {
                 patterns.push(pattern);
             }
         }
-        if title.is_some() && matches!(before, Before::Absent) {
-            let into = dir.as_deref().unwrap_or(&self.config.default_dir);
-            admission::check_free(&files::footprint(&metainfo, into), id)?;
-        }
-        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false });
-        let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
-        let id = self.get(get, made.filter(|_| matches!(before, Before::Absent)))?.job.id;
+        let absent = matches!(before, Before::Absent);
+        let (dir, home) = if absent { self.destination(id, to)? } else { (None, Home::Folder) };
+        let free = match &title {
+            Some(_) if absent => {
+                let into = dir.as_deref().unwrap_or(&self.config.default_dir);
+                admission::check_free(&files::footprint(&metainfo, into), id)
+            }
+            _ => Ok(()),
+        };
+        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false }).filter(|_| absent);
+        let get =
+            GetCommand { source, dir: dir.clone(), files: patterns, max_size: None, setup_max_size, dry_run: false };
+        let id = match free.and_then(|()| self.get(get, made, home)) {
+            Ok(reply) => reply.job.id,
+            Err(error) => {
+                self.unmade(dir.as_deref(), home);
+                return Err(error);
+            }
+        };
+        self.pressed_play(id, finish)?;
         match (&title, &self.jobs[&id].record.title) {
             // A download played by hand is being watched, so no title play puts it back.
             (None, _) => self.played(id)?,
@@ -912,7 +980,7 @@ impl Owner {
             Some(PutBack::Pause) => self.pause(vec![id.to_hex()], oneshot::channel().0),
             Some(PutBack::Fail(error)) => self.fail(id, error),
             Some(PutBack::Remove) => {
-                if let Err(error) = self.remove(&[id.to_hex()]) {
+                if let Err(error) = self.remove(&[id.to_hex()], false) {
                     super::log(&format!("{id} stays, for it could not be removed: {}", error.message));
                 }
             }
@@ -1062,7 +1130,7 @@ impl Owner {
 
     fn change(&self, id: TorrentId, result: &str) -> Change {
         let job = &self.jobs[&id];
-        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), path: None }
+        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), ..Change::default() }
     }
 
     fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
@@ -1102,7 +1170,10 @@ impl Owner {
         Ok(changes)
     }
 
-    fn remove(&mut self, refs: &[String]) -> Result<Vec<Change>, Error> {
+    /// Takes downloads off the list. What of them to delete is put on record with each removal,
+    /// and deleted once the engine lets go of it: a play's folder always, and the files of a
+    /// download in a folder the person chose only with `delete`.
+    fn remove(&mut self, refs: &[String], delete: bool) -> Result<Vec<Change>, Error> {
         let mut targets = Vec::new();
         for reference in refs {
             match self.resolve_job(reference, "rm") {
@@ -1123,6 +1194,7 @@ impl Owner {
                     name: tomb.name,
                     result: "already_removed".into(),
                     path: tomb.path,
+                    ..Change::default()
                 }),
                 Ok(id) if !self.jobs.contains_key(&id) => {}
                 Ok(id) => {
@@ -1130,13 +1202,17 @@ impl Owner {
                     let view = job.view();
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
-                    self.store.remove(&tomb)?;
+                    let doom = self.doom(job, delete);
+                    self.tending.deleter.remove(&mut self.store, &tomb, doom)?;
                     let job = self.jobs.remove(&id).expect("resolved above");
                     self.streamed.remove(&id);
                     self.under_test.remove(&id);
                     if job.observed.in_engine() {
                         self.engine.send(EngineCommand::Remove(id));
                         self.draining.insert(id);
+                    }
+                    if self.draining.contains(&id) {
+                        self.tending.letting_go.insert(id, Self::writes(&job));
                     }
                     self.pauses.iter_mut().for_each(|p| {
                         p.waiting.remove(&id);
@@ -1152,6 +1228,7 @@ impl Owner {
                         name: job.record.name,
                         result: "removed".into(),
                         path: view.path,
+                        ..Change::default()
                     });
                 }
             }
@@ -1289,7 +1366,10 @@ impl Owner {
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
+                self.tending.letting_go.remove(&id);
+                self.leave();
                 self.put_back(id);
+                self.finish_deletions();
             }
         }
         self.finish_stop_if_done();
@@ -1321,6 +1401,7 @@ impl Owner {
             admission::check_size(plan.selected_size, cap, Some(id))?;
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
+            // The engine gets the files at once, so only room the disk has now counts.
             admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
             Ok(plan)
         });
@@ -1605,7 +1686,7 @@ impl Owner {
         if self.stopping.is_some() {
             return;
         }
-        let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()));
+        let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()) && !self.leaving(j.id()));
         for id in book::to_start(ready, self.config.max_active, &self.streamed) {
             self.start(id);
         }
@@ -1629,7 +1710,10 @@ impl Owner {
             && let Err(error) =
                 admission::check_disk(space, self.space_needed(job), self.others_remaining(&job.record.dir, id))
         {
-            self.fail(id, error);
+            // Plays leaving the plays folder make room: it is checked again once they are gone.
+            if !self.reclaiming(space) {
+                self.fail(id, error);
+            }
             return;
         }
         let resume_data = self.store.resume(id).ok().flatten();
@@ -1711,6 +1795,9 @@ impl Owner {
         self.finish_stop_if_done();
         self.check_idle(now);
         self.save_progress(now);
+        self.finish_deletions();
+        self.leave();
+        self.tend_plays(now);
     }
 
     fn save_progress(&mut self, now: Instant) {

@@ -16,7 +16,8 @@
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
 //   POST /api/files       { ref }                       FileListing
-//   POST /api/pause | /api/resume | /api/remove  { refs }   { changes: Change[] }
+//   POST /api/pause | /api/resume  { refs }               { changes: Change[] }
+//   POST /api/remove      { refs, delete? }              { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
 //
 // Films and series, by IMDb ID:
@@ -152,6 +153,11 @@ export interface Job {
   added_at: number;
   /** The title this download was made for, when it was made by playing a title. */
   title?: { title: string; span: Span; release: string | null };
+  /**
+   * `plays`: a play in torrential's own folder, whose files go when it is removed.
+   * `folder`: a download in a folder the person chose, whose files stay unless they delete them.
+   */
+  place: "plays" | "folder";
 }
 
 export type JobEvent =
@@ -181,6 +187,12 @@ export interface Change {
   id: string;
   name: string | null;
   result: string;
+  /** What a remove deleted from disk: a play's folder. */
+  deleted?: string[];
+  /** What a remove with `delete` moved to the Trash: the files of a download in a folder the person chose. */
+  trashed?: string[];
+  /** What a remove was to delete or move to the Trash and left, and why. */
+  kept?: { path: string; reason: string }[];
 }
 
 /** A file the engine serves while it downloads. */
@@ -661,8 +673,9 @@ export function removeDevice(id: string): Promise<DeviceList> {
   return post("/api/devices/remove", { id });
 }
 
-export function change(action: "pause" | "resume" | "remove", refs: string[]): Promise<Change[]> {
-  return post<{ changes: Change[] }>(`/api/${action}`, { refs }).then((body) => body.changes);
+/** With `remove`, `deleteFiles` moves the files of a download in a folder the person chose to the Trash too. */
+export function change(action: "pause" | "resume" | "remove", refs: string[], deleteFiles = false): Promise<Change[]> {
+  return post<{ changes: Change[] }>(`/api/${action}`, { refs, delete: deleteFiles }).then((body) => body.changes);
 }
 
 /**

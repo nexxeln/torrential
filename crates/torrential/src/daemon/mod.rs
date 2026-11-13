@@ -23,7 +23,7 @@ mod tests;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -146,6 +146,50 @@ fn test_peers(env: &Env) -> Result<Vec<std::net::SocketAddr>, Error> {
 
 fn fake(env: &Env) -> bool {
     env.var("TORRENTIAL_TEST_ENGINE") == Some("fake")
+}
+
+/// The settings of an engine a test started, the one with the fake engine or on the loopback
+/// network, and `None` for any other. Every setting that lets a test reach into what the engine
+/// does is read through it.
+fn test_engine(env: &Env) -> Option<&Env> {
+    (fake(env) || env.var("TORRENTIAL_TEST_NETWORK") == Some("loopback")).then_some(env)
+}
+
+/// How long a play leaving the plays folder waits before it goes: no time, unless a test engine
+/// asks for up to a minute, to do something in between.
+fn deletion_pause(env: &Env) -> Duration {
+    test_pause(env, "TORRENTIAL_TEST_DELETION_PAUSE")
+}
+
+/// How long a file waits between the check that it is still the file to move to the Trash and
+/// the move: no time, unless a test engine asks for up to a minute, to change it in between.
+fn trash_pause(env: &Env) -> Duration {
+    test_pause(env, "TORRENTIAL_TEST_TRASH_PAUSE")
+}
+
+fn test_pause(env: &Env, name: &str) -> Duration {
+    let asked = test_engine(env).and_then(|test| test.var(name));
+    asked.and_then(torrential_core::units::parse_duration).map_or(Duration::ZERO, |pause| pause.min(MAX_TEST_PAUSE))
+}
+
+const MAX_TEST_PAUSE: Duration = Duration::from_secs(60);
+
+/// How long a play no one streams keeps downloading. A test engine may ask for less.
+fn plays_idle(env: &Env) -> Duration {
+    let asked = test_engine(env).and_then(|test| test.var("TORRENTIAL_TEST_PLAYS_IDLE"));
+    asked.and_then(torrential_core::units::parse_duration).unwrap_or(owner::plays::IDLE_AFTER)
+}
+
+/// Where the files of a download in a folder the person chose go when they delete them. A test
+/// engine never uses the person's Trash: `TORRENTIAL_TEST_TRASH` names its own, or it keeps one
+/// beside its state.
+fn trash(env: &Env, paths: &Paths) -> owner::trash::Trash {
+    if let Some(test) = test_engine(env) {
+        let dir = test.var("TORRENTIAL_TEST_TRASH").map_or_else(|| paths.state.join("trash"), PathBuf::from);
+        return owner::trash::Trash::At(dir);
+    }
+    let home = || Path::new(env.var("HOME").unwrap_or("/")).join(".local/share");
+    owner::trash::Trash::system(&env.var("XDG_DATA_HOME").map_or_else(home, PathBuf::from))
 }
 
 pub struct Running {
@@ -311,6 +355,10 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         save_resume_every,
         stall_after,
         writes_stop_within: WRITES_STOP_WITHIN,
+        plays: owner::plays::Plays { root: paths.plays(), max: settings.plays_max.0, idle_after: plays_idle(env) },
+        trash: trash(env, paths),
+        deletion_pause: deletion_pause(env),
+        trash_pause: trash_pause(env),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
