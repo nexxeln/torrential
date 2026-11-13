@@ -113,7 +113,7 @@ impl<K: Clone + Eq + Hash, V: Clone> Kept<K, V> {
 /// Answers the request for `/api/{route}` from this Mac or a paired device.
 pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, asker: &Asker) -> io::Result<bool> {
     match (request.method, route) {
-        (Method::Get, "search") => return search(conn, request).await,
+        (Method::Post, "search") => return search(conn, request).await,
         (Method::Get, "events") => return watch::events(conn, request).await,
         (Method::Get, "stream") => return watch::stream(conn, request).await,
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
@@ -340,10 +340,24 @@ async fn results(
     conn.end().await
 }
 
+/// What `POST /api/search` takes. A search can fetch .torrent files and keep fetching after it
+/// answers, so it is a JSON POST, which another website cannot make without a preflight.
+#[derive(Deserialize)]
+struct Search {
+    q: String,
+    category: Option<String>,
+    limit: Option<u16>,
+    #[serde(default)]
+    fresh: bool,
+}
+
 fn search_query(ctx: &Ctx, request: &Request) -> Result<SearchQuery, Error> {
-    let text = request.param("q").map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
-    let text = text.ok_or_else(|| Error::new(ErrorCode::Usage, "the search has no words: the q parameter is empty"))?;
-    let category = match request.param("category") {
+    let Search { q, category, limit, fresh } = body(request)?;
+    let text = q.trim();
+    if text.is_empty() {
+        return Err(Error::new(ErrorCode::Usage, "the search has no words: q is empty"));
+    }
+    let category = match category {
         Some(name) => Some(
             Category::ALL
                 .into_iter()
@@ -354,10 +368,10 @@ fn search_query(ctx: &Ctx, request: &Request) -> Result<SearchQuery, Error> {
     };
     Ok(SearchQuery {
         category,
-        limit: number(request, "limit")?.unwrap_or(SEARCH_LIMIT).clamp(1, MOST_RESULTS),
-        fresh: request.param("fresh").is_some_and(|fresh| fresh != "0" && fresh != "false"),
+        limit: limit.unwrap_or(SEARCH_LIMIT).clamp(1, MOST_RESULTS),
+        fresh,
         profile: Profile { preferences: (ctx.web.preferences)(), ..Profile::default() },
-        ..SearchQuery::new(text)
+        ..SearchQuery::new(text.to_string())
     })
 }
 

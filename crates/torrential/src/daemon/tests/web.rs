@@ -107,6 +107,11 @@ async fn post(h: &Harness, path: &str, body: Value) -> (u16, Value) {
     (status, serde_json::from_slice(&body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&body))))
 }
 
+/// A search as the web app sends it.
+async fn search(h: &Harness, query: Value) -> (u16, String, Vec<u8>) {
+    fetch(h, "POST", "/api/search", &["Content-Type: application/json"], &query.to_string()).await
+}
+
 /// The error an answer carries, as its status, code, and message.
 fn error((status, body): &(u16, Value)) -> (u16, &str, &str) {
     (*status, body["error"]["code"].as_str().unwrap_or_default(), body["error"]["message"].as_str().unwrap_or_default())
@@ -204,7 +209,7 @@ async fn a_search_sends_a_line_each_time_a_source_answers() {
     let catalog = vec![listed("aa", "dead \u{1b}[31mred", "slow"), listed("bb", "dead fast", "quick")];
     let script = vec![FakeSource::answers("quick", 0), FakeSource::answers("slow", 60)];
     let h = Harness::with_search(search_port::Fake::scripted(catalog, script, Default::default()));
-    let (status, headers, body) = fetch(&h, "GET", "/api/search?q=dead&limit=5", &[], "").await;
+    let (status, headers, body) = search(&h, json!({ "q": "dead", "limit": 5 })).await;
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
     let lines: Vec<String> = String::from_utf8(body)
@@ -219,10 +224,27 @@ async fn a_search_sends_a_line_each_time_a_source_answers() {
         .collect();
     assert_eq!(lines, [r#"update ["dead fast"] pending ["slow"]"#, r#"done ["dead red", "dead fast"] pending null"#,]);
     assert_eq!(
-        error(&get(&h, "/api/search?q=%20").await),
-        (400, "usage", "the search has no words: the q parameter is empty")
+        error(&post(&h, "/api/search", json!({ "q": " " })).await),
+        (400, "usage", "the search has no words: q is empty")
     );
-    assert_eq!(error(&get(&h, "/api/search?q=dead&category=films").await), (400, "usage", "films is not a category"));
+    assert_eq!(
+        error(&post(&h, "/api/search", json!({ "q": "dead", "category": "films" })).await),
+        (400, "usage", "films is not a category")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_takes_a_json_post_so_another_website_cannot_start_one() {
+    let source = search_port::Fake::new(fake_catalog());
+    let h = Harness::with_search(source.clone());
+    assert_eq!(
+        error(&get(&h, "/api/search?q=debian&fresh=1").await),
+        (404, "not_found", "the engine has no GET /api/search")
+    );
+    let form = fetch(&h, "POST", "/api/search", &["Content-Type: text/plain"], r#"{"q":"debian"}"#).await;
+    assert_eq!((form.0, source.searches()), (415, 0), "a page that navigates here or posts a form searches nothing");
+    let (status, _, body) = search(&h, json!({ "q": "debian", "fresh": true })).await;
+    assert_eq!((status, &lines(&body).pop().unwrap()["type"], source.searches()), (200, &json!("done"), 1));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1136,7 +1158,7 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     assert_eq!(done["result"]["query"]["profile"]["preferences"]["playback"], json!("h264"));
     assert_eq!(error(&get(&h, "/api/title/sources?video=tt9999901:2:2").await).0, 400, "it has not aired");
 
-    let (_, _, raw) = fetch(&h, "GET", "/api/search?q=night", &[], "").await;
+    let (_, _, raw) = search(&h, json!({ "q": "night" })).await;
     let raw = lines(&raw).pop().unwrap();
     let raw = &raw["result"]["releases"][0];
     assert!(raw.get("span").is_none() && raw.get("swarm").is_none(), "a torrent search names no span or swarm");
@@ -1284,7 +1306,7 @@ async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_wo
     assert_eq!(post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await.0, 200);
     let (_, jobs) = get(&h, "/api/jobs").await;
     assert!(jobs["jobs"][0].get("title").is_none(), "a download made by playing a torrent names no title");
-    let (status, _, body) = fetch(&h, "GET", "/api/search?q=ubuntu", &[], "").await;
+    let (status, _, body) = search(&h, json!({ "q": "ubuntu" })).await;
     let done = lines(&body).pop().unwrap();
     assert_eq!(
         (status, &done["type"], &done["result"]["releases"][0]["name"]),

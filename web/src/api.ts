@@ -4,7 +4,7 @@
 // Every JSON type here mirrors a Rust type in crates/core or crates/torrential/src/daemon/web.
 // A failed request answers with a 4xx or 5xx status and `{ "error": ApiError }`.
 //
-//   GET  /api/search?q=&category=&limit=&fresh=1        NDJSON stream of SearchMessage
+//   POST /api/search      { q, category?, limit?, fresh? }   NDJSON stream of SearchMessage
 //   POST /api/play        { ref, file? }                PlayInfo
 //   GET  /api/media?id=&file=                           MediaInfo
 //   GET  /api/stream?id=&file=&t=&audio=&video=         fragmented MP4, see streamUrl
@@ -495,8 +495,8 @@ async function* lines<T>(response: Response): AsyncGenerator<T> {
 }
 
 /** A search stream. A failed request becomes its `error` message. */
-async function* searchMessages(path: string, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
-  const response = await fetch(path, { signal });
+async function* searchMessages(path: string, init: RequestInit): AsyncGenerator<SearchMessage> {
+  const response = await fetch(path, init);
   if (!response.ok || !response.body) {
     yield { type: "error", error: await json<never>(response).catch((e: EngineError) => e.error) };
     return;
@@ -514,11 +514,9 @@ export async function* search(
   query: string,
   options: { category?: Category; limit?: number; fresh?: boolean; signal?: AbortSignal } = {},
 ): AsyncGenerator<SearchMessage> {
-  const params = new URLSearchParams({ q: query });
-  if (options.category) params.set("category", options.category);
-  if (options.limit) params.set("limit", String(options.limit));
-  if (options.fresh) params.set("fresh", "1");
-  yield* searchMessages(`/api/search?${params}`, options.signal);
+  const { signal, ...rest } = options;
+  const body = JSON.stringify({ q: query, ...rest });
+  yield* searchMessages("/api/search", { method: "POST", headers: { "content-type": "application/json" }, body, signal });
 }
 
 /**
@@ -692,7 +690,7 @@ export function artUrl(id: string, kind: "poster" | "background" | "logo" | { se
 export async function* sources(video: string, playback?: Playback, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
   const params = new URLSearchParams({ video });
   if (playback) params.set("playback", playback);
-  yield* searchMessages(`/api/title/sources?${params}`, signal);
+  yield* searchMessages(`/api/title/sources?${params}`, { signal });
 }
 
 /**
