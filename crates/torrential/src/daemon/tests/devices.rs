@@ -398,6 +398,41 @@ async fn a_paired_phone_gets_in_while_strangers_hold_every_connection_they_may()
     assert_eq!(mac_again(port).get("/api/me").await.json(), serde_json::json!({ "asker": "mac" }), "the Mac gets in");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_phone_whose_first_request_is_slow_stays_open_while_strangers_come() {
+    let Some(ip) = lan() else { return };
+    let h = Harness::new();
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let port = h.running.ctx.http_port;
+    let mut phone = Browser::on(ip, &h);
+    phone.pair(&offer.code).await;
+    let body = r#"{"id":"0badf00d"}"#;
+    let head = format!(
+        "POST /api/devices/remove HTTP/1.1\r\nHost: {ip}:{port}\r\nCookie: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        phone.cookie.as_deref().unwrap(),
+        body.len()
+    );
+    let mut slow = TcpStream::connect((ip, port)).await.unwrap();
+    slow.write_all(head.as_bytes()).await.unwrap();
+    // Time for the engine to read the head before the strangers come.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut strangers = Vec::new();
+    for byte in body.bytes() {
+        for _ in 0..4 {
+            strangers.push(TcpStream::connect((ip, port)).await.unwrap());
+        }
+        let _ = slow.write_all(&[byte]).await;
+    }
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut answer)).await;
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(
+        answer.starts_with("HTTP/1.1 403 Forbidden\r\n") && answer.contains(r#""code":"local_only""#),
+        "the phone's request is answered as the phone's, not closed for 68 strangers: {answer:?}"
+    );
+}
+
 /// Another program on `port` of the home network, so the engine cannot listen there. macOS lets
 /// it sit on every address beside the engine's 127.0.0.1, and Linux on the home address.
 fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {

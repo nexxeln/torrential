@@ -232,6 +232,16 @@ struct Stranger {
     id: u64,
 }
 
+impl Stranger {
+    /// Stops counting a connection whose request showed a device's cookie or a cast grant, so no
+    /// newer stranger can close it. False when one already has.
+    fn trust(self) -> bool {
+        let mut open = self.strangers.open();
+        let at = open.connections.iter().position(|waiting| waiting.id == self.id);
+        at.and_then(|at| open.connections.remove(at)).is_some()
+    }
+}
+
 impl Drop for Stranger {
     fn drop(&mut self) {
         let mut open = self.strangers.open();
@@ -337,8 +347,8 @@ pub struct Connection<'a> {
     pending: Vec<u8>,
     /// The streamed answer in progress is chunked, not ended by closing the connection.
     chunked: bool,
-    /// Counts against the limit on strangers until a request on this connection shows a paired
-    /// device's cookie or a cast grant.
+    /// Counts against the limit on strangers until a request head on this connection shows a
+    /// paired device's cookie or a cast grant.
     stranger: Option<Stranger>,
 }
 
@@ -357,20 +367,26 @@ impl Connection<'_> {
                         self.empty("413 Content Too Large", "", false).await?;
                         return Ok(());
                     }
+                    let ctx = self.ctx;
+                    let asked = ask(self.peer, &request, ctx.http_port, &ctx.devices, super::owner::now());
+                    // Before the body, so strangers that come while a slow body arrives cannot
+                    // close a paired device's connection.
+                    if let Ok(Asker::Device(_) | Asker::Cast(_)) = asked
+                        && let Some(stranger) = self.stranger.take()
+                        && !stranger.trust()
+                    {
+                        return Ok(());
+                    }
                     // Read before any refusal, since closing on an unread body resets the
                     // connection before the browser reads the answer.
                     request.body = self.read_body(request.length, by).await?;
-                    let ctx = self.ctx;
-                    let asker = match ask(self.peer, &request, ctx.http_port, &ctx.devices, super::owner::now()) {
+                    let asker = match asked {
                         Ok(asker) => asker,
                         Err(refusal) => {
                             self.refuse(refusal).await?;
                             return Ok(());
                         }
                     };
-                    if matches!(asker, Asker::Device(_) | Asker::Cast(_)) {
-                        self.stranger = None;
-                    }
                     // A removed device or a dropped cast loses what it was still receiving.
                     tokio::select! {
                         keep = self.answer(*request, &asker) => keep?,
@@ -952,6 +968,24 @@ mod tests {
         let tv = strangers.admit(address(51));
         assert!(closed(&mut open).is_empty(), "a connection that shows a cookie makes room");
         drop((phone, more, tv, open));
+        assert_eq!(strangers.open().connections.len(), 0, "nothing stays behind");
+    }
+
+    #[test]
+    fn a_trusted_connection_never_closes_for_strangers_and_one_already_closed_stays_closed() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        let strangers = Arc::new(Strangers::default());
+        let (phone_ip, tv_ip) =
+            (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40)), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 41)));
+        let (phone, mut phone_closed) = strangers.admit(phone_ip);
+        assert!(phone.trust(), "a cookie shown before any stranger needs the room");
+        let crowd: Vec<_> = (0..80).map(|_| strangers.admit(phone_ip)).collect();
+        assert_eq!(phone_closed.try_recv(), Err(TryRecvError::Closed), "80 strangers from its address later");
+        let (tv, mut tv_closed) = strangers.admit(tv_ip);
+        let more: Vec<_> = (0..16).map(|_| strangers.admit(tv_ip)).collect();
+        assert!(!tv.trust(), "a grant shown after a 17th stranger from its address took the room");
+        assert_eq!(tv_closed.try_recv(), Ok(()));
+        drop((crowd, more));
         assert_eq!(strangers.open().connections.len(), 0, "nothing stays behind");
     }
 
