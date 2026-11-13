@@ -92,7 +92,7 @@ export function Episodes({ page, season, onSeason, next }: Props) {
             aria-label="Season"
             value={shown.number}
             onChange={(event) => onSeason(Number(event.target.value))}
-            className="col-span-full row-start-1 appearance-none rounded-lg bg-raised py-2 pr-8 pl-3 text-base font-medium [color-scheme:dark] inset-ring inset-ring-white/10 hover:bg-white/10 focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-action sm:py-1.5 sm:text-sm"
+            className="col-span-full row-start-1 appearance-none rounded-lg bg-raised py-2 pr-8 pl-3 text-base font-medium [color-scheme:dark] inset-ring inset-ring-white/10 hover:bg-white/10 focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-action sm:py-1.5 sm:text-sm pointer-coarse:min-h-11 tv:focus:outline-[0.1875rem] tv:focus:outline-ink"
           >
             {seasonOrder(page).map((number) => (
               <option key={number} value={number}>

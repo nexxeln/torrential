@@ -8,7 +8,7 @@ import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { PlayingReadout, Readout, TopBar } from "./Chrome";
 import { usePlayer } from "./context";
-import { command } from "./keys";
+import { leaveOnBack } from "./keys";
 import { type Heading, type Memory, type Neighbor, Playback, type Titled } from "./Playback";
 import { type Recovery, type RecoveryEvent, recover, WATCHING } from "./recovery";
 import { type Naming, TitleFailed, TitleStarting } from "./TitleScreens";
@@ -234,9 +234,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
   const ready = titled !== null;
   useEffect(() => {
     if (ready) return;
-    const pressed = (event: KeyboardEvent) => {
-      if (command(event)?.kind === "leave") back();
-    };
+    const pressed = leaveOnBack(back);
     addEventListener("keydown", pressed);
     return () => removeEventListener("keydown", pressed);
   }, [ready, back]);

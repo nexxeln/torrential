@@ -57,7 +57,10 @@ fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, 
     }
     let request = Request::Cast(CastRequest { tv, target, source, file, video: None, subtitle, start_at: at });
     let reply = match &video {
-        Some(video) => titles::steps(&mut conn, &request, video, mode, "Casting")?,
+        Some(video) => {
+            let shown = titles::Shown::new(mode);
+            titles::steps(&mut conn, &request, video, |step| shown.step(step, "Casting"))?
+        }
         None => answer(conn.call_within(&request, CAST_WITHIN)?)?,
     };
     match reply {

@@ -6,7 +6,7 @@ use std::time::Duration;
 use torrential_core::protocol::{GetReply, TitlePage, TitleSources};
 use torrential_core::text::sanitize;
 use torrential_core::title::Episode;
-use torrential_core::{AttemptEvent, Check, Kind, Release, Skip, TitleCard, Watched};
+use torrential_core::{AttemptEvent, Check, Kind, Release, TitleCard, Watched};
 
 use super::super::format::{self, NONE, UNKNOWN};
 use super::super::theme::Token;
@@ -236,7 +236,7 @@ pub fn sources(sources: &TitleSources, now: i64) -> Doc {
     }
     for (release, id) in result.releases.iter().zip(&ids) {
         if let Some(why) = &release.failed {
-            summary.push(format!("{id} failed lately, so play tries it last: {}", skip(why)));
+            summary.push(format!("{id} failed lately, so play tries it last: {why}"));
         }
     }
     summary.push(format!("ranked for {}", ranked_for(&result.query.profile)));
@@ -259,7 +259,7 @@ pub fn step(step: &AttemptEvent, started: &str) -> Option<String> {
         AttemptEvent::Searched { found, .. } => Some(format!("Found {}", format::count(*found as usize, "source"))),
         AttemptEvent::Trying { rank, of, release } => Some(format!("Trying {rank} of {of}: {}", described(release))),
         AttemptEvent::Skipped { release, reason } => {
-            Some(format!("Skipped {}: {}", short_ref(&release.to_ref()), skip(reason)))
+            Some(format!("Skipped {}: {reason}", short_ref(&release.to_ref())))
         }
         AttemptEvent::Playing { release, .. } => Some(format!("{started} {}", described(release))),
         AttemptEvent::Check { .. } | AttemptEvent::Failed { .. } => None,
@@ -283,19 +283,6 @@ fn described(release: &Release) -> String {
     }
     parts.push(format::size(release.size));
     parts.join(", ")
-}
-
-/// Why a title play moved past a source, in plain words.
-fn skip(reason: &Skip) -> String {
-    match reason {
-        Skip::NoFileList { waited_s } => format!("no peer sent its file list in {waited_s}s"),
-        Skip::NoVideo => "none of its files is the video".to_string(),
-        Skip::Unplayable { container } => format!("its .{container} file needs ffmpeg, which is not installed"),
-        Skip::NotOnTv { container } => format!("the TV does not play its .{container} file"),
-        Skip::TooLarge { error } | Skip::Failed { error } => sanitize(&error.message),
-        Skip::NoData { waited_s } => format!("no data arrived in {waited_s}s"),
-        Skip::Stalled => "it stalled".to_string(),
-    }
 }
 
 /// A download a title play started, as `get` shows one, under the title's name.

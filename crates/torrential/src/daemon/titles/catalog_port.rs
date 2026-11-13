@@ -17,6 +17,8 @@ pub trait CatalogPort: Send + Sync {
     /// Films and series named like `words`, exact names first. Empty when lookups are off.
     fn search<'a>(&'a self, words: &'a str) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>>;
     fn title<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Result<TitleDetails, Error>>;
+    /// The copy of `id`'s details kept on this machine, however old, without the network.
+    fn kept<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Option<TitleDetails>>;
     /// The titles of `card`'s kind under its normalized name, `card` among them, in the order the
     /// catalog lists them.
     fn namesakes<'a>(&'a self, card: &'a TitleCard) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>>;
@@ -96,6 +98,10 @@ impl CatalogPort for Live {
 
     fn title<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Result<TitleDetails, Error>> {
         Box::pin(self.0.title(id))
+    }
+
+    fn kept<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Option<TitleDetails>> {
+        Box::pin(self.0.kept_title(id))
     }
 
     fn namesakes<'a>(&'a self, card: &'a TitleCard) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>> {
@@ -247,6 +253,11 @@ impl CatalogPort for Fake {
 
     fn title<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Result<TitleDetails, Error>> {
         let found = self.find(id).cloned();
+        Box::pin(async move { found })
+    }
+
+    fn kept<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Option<TitleDetails>> {
+        let found = self.find(id).ok().cloned();
         Box::pin(async move { found })
     }
 

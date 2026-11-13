@@ -6,7 +6,7 @@ pub fn width(s: &str) -> usize {
     Span::raw(s).width()
 }
 
-fn char_width(c: char) -> usize {
+pub fn char_width(c: char) -> usize {
     width(c.encode_utf8(&mut [0; 4]))
 }
 

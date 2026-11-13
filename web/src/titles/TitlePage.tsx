@@ -131,7 +131,7 @@ export function TitlePage({ id, season, sources }: Props) {
   return (
     <div className="relative isolate min-h-dvh">
       {page && <Backdrop page={page} />}
-      <div className="mx-auto flex max-w-4xl flex-col px-4 pb-24 sm:px-6">
+      <div className="mx-auto flex max-w-4xl flex-col px-page pb-24">
         <Header current={null} />
         {state.kind === "loading" && (
           <div className="flex justify-center pt-[30vh]">
@@ -143,7 +143,7 @@ export function TitlePage({ id, season, sources }: Props) {
             <h1 className="text-lg font-medium text-ink">This title cannot be shown</h1>
             <p className="text-base text-pretty text-soft sm:text-sm">{sentence(state.error.message)}</p>
             {state.error.hint && <p className="text-base text-pretty text-pencil sm:text-sm">{sentence(state.error.hint)}</p>}
-            <Link href="/" className="mt-2 rounded-sm text-sm text-action hover:text-ink">
+            <Link href="/" className="relative hit-area mt-2 rounded-sm text-sm text-action hover:text-ink">
               Search for a film or a show
             </Link>
           </main>
