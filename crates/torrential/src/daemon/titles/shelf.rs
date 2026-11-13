@@ -1,12 +1,10 @@
 //! Where a person stopped each film and episode, and the titles they saved.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode, Kind, ReleaseId, TitleCard, TitleId, VideoRef, Watched};
 
 use super::super::store::sql_error;
@@ -19,21 +17,6 @@ const WATCHED: &str = "SELECT video, position, duration, release, updated_at FRO
 pub struct Shelf {
     conn: Mutex<Connection>,
     path: PathBuf,
-    sessions: Mutex<Sessions>,
-}
-
-/// One screen's turn at playing a film or an episode, from when it starts or resumes playing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Session(u64);
-
-/// The newest session of each video played since the engine started. Only that session's saves
-/// are kept, so a TV and a browser tab playing the same film do not overwrite each other.
-struct Sessions {
-    newest: HashMap<VideoRef, Session>,
-    /// Starts at the engine's start in milliseconds, so a page left open across a restart never
-    /// holds the number of a new session.
-    last: u64,
 }
 
 impl Shelf {
@@ -41,39 +24,11 @@ impl Shelf {
         let conn = Connection::open(path).map_err(|e| sql_error(path, e))?;
         conn.execute_batch("PRAGMA synchronous = FULL;").map_err(|e| sql_error(path, e))?;
         conn.busy_timeout(Duration::from_secs(1)).map_err(|e| sql_error(path, e))?;
-        let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
-        let sessions = Mutex::new(Sessions { newest: HashMap::new(), last: started });
-        Ok(Shelf { conn: Mutex::new(conn), path: path.to_path_buf(), sessions })
+        Ok(Shelf { conn: Mutex::new(conn), path: path.to_path_buf() })
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn sessions(&self) -> MutexGuard<'_, Sessions> {
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Starts a session of playing `video`. Saves from every session before it are dropped.
-    pub fn play(&self, video: &VideoRef) -> Session {
-        let mut sessions = self.sessions();
-        sessions.last += 1;
-        let session = Session(sessions.last);
-        sessions.newest.insert(video.clone(), session);
-        session
-    }
-
-    /// Saves where a film or episode stopped, as `watch` does, unless a session other than
-    /// `session` has started playing it since. A save with no session is kept. Returns whether
-    /// it saved.
-    pub fn watch_in(&self, session: Option<Session>, watched: &Watched) -> Result<bool, Error> {
-        let sessions = self.sessions();
-        let newest = sessions.newest.get(&watched.video);
-        if session.is_some_and(|session| newest.is_some_and(|newest| *newest != session)) {
-            return Ok(false);
-        }
-        self.watch(watched)?;
-        Ok(true)
     }
 
     fn fail(&self, e: rusqlite::Error) -> Error {
@@ -227,23 +182,6 @@ mod tests {
 
     fn rows(watched: Vec<Watched>) -> Vec<(String, f64, i64)> {
         watched.into_iter().map(|w| (w.video.to_string(), w.position, w.at)).collect()
-    }
-
-    #[test]
-    fn only_the_newest_session_of_a_video_saves_where_it_stopped() {
-        let dir = tempfile::tempdir().unwrap();
-        let shelf = shelf(&dir);
-        let film = "tt0063350".parse().unwrap();
-        let tab = shelf.play(&film);
-        let tv = shelf.play(&film);
-        let episode = shelf.play(&"tt9999901:1:1".parse().unwrap());
-        assert!(!shelf.watch_in(Some(tab), &at("tt0063350", 100.0, None, 10)).unwrap());
-        assert!(shelf.watch_in(Some(tv), &at("tt0063350", 600.0, None, 20)).unwrap());
-        assert!(shelf.watch_in(Some(episode), &at("tt9999901:1:1", 60.0, None, 30)).unwrap());
-        assert!(shelf.watch_in(None, &at("tt0063350", 610.0, None, 40)).unwrap(), "a save that names no session");
-        let unknown = shelf.play(&"tt0100258".parse().unwrap());
-        assert!(shelf.watch_in(Some(unknown), &at("tt0063350", 620.0, None, 50)).is_ok_and(|kept| !kept));
-        assert_eq!(rows(shelf.watched(&"tt0063350".parse().unwrap()).unwrap()), [("tt0063350".into(), 610.0, 40)]);
     }
 
     #[test]

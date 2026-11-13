@@ -104,7 +104,7 @@ async fn get(h: &Harness, path: &str) -> (u16, Value) {
     (status, serde_json::from_slice(&body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&body))))
 }
 
-pub(super) async fn post(h: &Harness, path: &str, body: Value) -> (u16, Value) {
+async fn post(h: &Harness, path: &str, body: Value) -> (u16, Value) {
     let (status, _, body) = fetch(h, "POST", path, &["Content-Type: application/json"], &body.to_string()).await;
     (status, serde_json::from_slice(&body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&body))))
 }

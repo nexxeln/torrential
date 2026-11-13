@@ -155,7 +155,6 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         (Method::Get, "titles") => titles::search(ctx, request).await,
         (Method::Get, "title") => titles::page(ctx, request).await,
         (Method::Post, "watched") => titles::watched(ctx, body(request)?).await,
-        (Method::Post, "watched/session") => Ok(titles::session(ctx, body(request)?)),
         (Method::Post, "library") => titles::library(ctx, body(request)?).await,
         (Method::Get, "home") => titles::home(ctx).await,
         (Method::Get, "media") => {
