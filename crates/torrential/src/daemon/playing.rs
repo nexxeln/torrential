@@ -1,5 +1,5 @@
-//! The streams the engine is sending to players now. An update waits until there are none, and
-//! then lets none start until it restarts the engine, so a restart never cuts a film off.
+//! The streams the engine is sending to players now. A switch to a newer version waits until there
+//! are none, and then lets none start until the engine stops, so a switch never cuts a film off.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use torrential_core::{Error, ErrorCode};
 #[derive(Clone, Copy, Default)]
 struct Admission {
     open: usize,
-    /// An update found nothing playing and is restarting the engine.
+    /// The engine found nothing playing and is stopping for a newer version.
     updating: bool,
 }
 
@@ -27,7 +27,7 @@ impl Playing {
         Self(Arc::new(watch::Sender::new(Admission::default())))
     }
 
-    /// Counts a stream, unless an update is restarting the engine.
+    /// Counts a stream, unless the engine is stopping for a newer version.
     pub fn open(&self) -> Result<Open, Error> {
         let mut admitted = false;
         self.0.send_if_modified(|admission| {
@@ -45,18 +45,23 @@ impl Playing {
         self.0.borrow().open > 0
     }
 
-    /// Waits until no stream is open, then refuses new ones in the same step, so none starts
-    /// between the last one ending and the restart.
+    /// Refuses new streams when none is open, in the same step as it looks, so none starts between
+    /// the last one ending and the restart. Nothing while a stream is open.
+    pub fn try_close(&self) -> Option<Closed> {
+        let closed = self.0.send_if_modified(|admission| {
+            let quiet = admission.open == 0 && !admission.updating;
+            admission.updating |= quiet;
+            quiet
+        });
+        closed.then(|| Closed(self.clone()))
+    }
+
+    /// Waits until no stream is open, then refuses new ones as `try_close` does.
     pub async fn close(&self) -> Closed {
         let mut changes = self.0.subscribe();
         loop {
-            let closed = self.0.send_if_modified(|admission| {
-                let quiet = admission.open == 0 && !admission.updating;
-                admission.updating |= quiet;
-                quiet
-            });
-            if closed {
-                return Closed(self.clone());
+            if let Some(closed) = self.try_close() {
+                return closed;
             }
             let _ = changes.wait_for(|admission| admission.open == 0 && !admission.updating).await;
         }
@@ -64,7 +69,7 @@ impl Playing {
 }
 
 impl Closed {
-    /// Keeps streams refused for as long as this process runs, which ends in the restart.
+    /// Keeps streams refused for as long as this process runs, which ends in the switch.
     pub fn keep(self) {
         std::mem::forget(self);
     }

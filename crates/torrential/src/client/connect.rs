@@ -96,22 +96,25 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
 }
 
 pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
-    let usable = |conn: &Conn| conn.wire == WIRE_VERSION && (conn.engine_version == env.version() || newer(conn, env));
-    if let Some(conn) = existing(paths, env)? {
-        if usable(&conn) {
-            return Ok(conn);
-        }
-        // A client never stops a newer engine. It would be one from before an update, stopping the
-        // engine that update started.
-        if newer(&conn, env) {
-            return Err(Error::new(
-                ErrorCode::DaemonVersion,
-                format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
-            ));
-        }
-        stop(conn, Stop::Replace)?;
+    let Some(conn) = existing(paths, env)? else { return launch::start(paths, env) };
+    // A client never uses or stops a newer engine. It would be one from before an update, which
+    // the person restarts to run the new version too.
+    if newer(&conn, env) {
+        return Err(Error::new(
+            ErrorCode::DaemonVersion,
+            format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
+        ));
     }
-    launch::start(paths, env)
+    if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
+        return Ok(conn);
+    }
+    let speaks = conn.wire == WIRE_VERSION;
+    match stop(conn, Stop::Switch) {
+        Ok(_) => launch::start(paths, env),
+        // The engine keeps its version while a film plays. A client that speaks its protocol uses it.
+        Err(staying) if speaks => existing(paths, env)?.ok_or(staying),
+        Err(staying) => Err(staying),
+    }
 }
 
 fn newer(conn: &Conn, env: &Env) -> bool {
@@ -126,13 +129,18 @@ fn newer(conn: &Conn, env: &Env) -> bool {
 pub enum Stop {
     /// The person asked.
     Asked,
-    /// The engine is older than this client, which starts its own.
-    Replace,
+    /// The engine is older than this client, which starts its own version once the engine stops.
+    /// The engine stays while a film plays.
+    Switch,
 }
 
+/// Asks the engine to stop and waits until it exits, or returns why the engine stays.
 pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
     let pid = conn.pid;
-    let _ = conn.call_within(&Request::Shutdown { asked: why == Stop::Asked }, Duration::from_secs(20));
+    let request = Request::Shutdown { asked: why == Stop::Asked };
+    if let Ok(Response::Error { error }) = conn.call_within(&request, Duration::from_secs(20)) {
+        return Err(error);
+    }
     let deadline = Instant::now() + Duration::from_secs(20);
     while alive(pid) {
         if Instant::now() > deadline {

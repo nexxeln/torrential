@@ -65,9 +65,10 @@ pub enum Request {
     Watch {
         refs: Vec<String>,
     },
-    /// Asks the engine to save resume data and exit, for example before an upgrade. `asked` says
-    /// the person asked for it. Clients before 0.5 leave it out, and also sent this when they met an
-    /// engine of another version, so an engine newer than such a client stays up.
+    /// Asks the engine to save resume data and exit. `asked` says the person asked for it. Without
+    /// it, a newer client asks the engine to make way for its version, which the engine does only
+    /// when nothing plays. Clients before 0.5 leave it out, and also send it to an engine of any
+    /// other version, so an engine newer than the client stays up.
     Shutdown {
         #[serde(default)]
         asked: bool,

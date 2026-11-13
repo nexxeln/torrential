@@ -502,14 +502,8 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     };
     wire::write_async(&mut wr, &hello).await?;
     while let Some(request) = wire::read_async::<Request>(&mut rd).await? {
-        if request == (Request::Shutdown { asked: false }) && older(&client_version, &ctx.version) {
-            super::log(&format!("torrential {client_version} asked the engine to stop for its own version"));
-            let error = Error::new(
-                ErrorCode::DaemonVersion,
-                format!("the engine runs the newer torrential {}, so it keeps running", ctx.version),
-            )
-            .with_hint("restart this torrential");
-            wire::write_async(&mut wr, &Response::Error { error }).await?;
+        if request == (Request::Shutdown { asked: false }) {
+            wire::write_async(&mut wr, &switch(ctx, &client_version).await).await?;
             continue;
         }
         if client_wire != WIRE_VERSION && !matches!(request, Request::Shutdown { .. }) {
@@ -544,6 +538,32 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Answers a stop that a client sends without the person asking, to run its own version instead. An
+/// engine newer than the client keeps running, since torrential 0.4 sends this stop to an engine of
+/// any other version. Any other engine stops only when nothing plays and every download is saved.
+async fn switch(ctx: &Ctx, client: &str) -> Response {
+    if older(client, &ctx.version) {
+        super::log(&format!("torrential {client} asked the engine to stop for its own version"));
+        let error = Error::new(
+            ErrorCode::DaemonVersion,
+            format!("the engine runs the newer torrential {}, so it keeps running", ctx.version),
+        )
+        .with_hint("restart this torrential");
+        return Response::Error { error };
+    }
+    let Some(closed) = ctx.playing.try_close() else {
+        let error = Error::new(ErrorCode::DaemonVersion, format!("torrential switches to {client} when the film ends"));
+        return Response::Error { error };
+    };
+    match ctx.owner.ask(|reply| Command::Restart { reply }).await {
+        Ok(()) => {
+            closed.keep();
+            Response::Ok
+        }
+        Err(error) => Response::Error { error },
+    }
 }
 
 fn older(client: &str, engine: &str) -> bool {

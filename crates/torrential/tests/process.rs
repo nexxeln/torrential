@@ -171,15 +171,20 @@ fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json:
 }
 
 #[test]
-fn a_client_that_finds_a_newer_engine_uses_it_and_leaves_it_running() {
+fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves_it_running() {
     let mut home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
     home.unset("TORRENTIAL_TEST_VERSION");
 
-    let run = home.run(&["status"]);
+    let runs = [home.run(&["status"]), home.run(&["status"])];
 
-    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    for run in runs {
+        assert_eq!(
+            (run.code, run.stderr.as_str()),
+            (6, "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n")
+        );
+    }
     assert_eq!(home.engine(), Some((pid, "9.0.0".into())));
 }
 
@@ -207,7 +212,51 @@ fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_ru
 }
 
 #[test]
-fn a_client_that_cannot_talk_to_a_newer_engine_says_to_restart_it_and_leaves_it_running() {
+fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film_ends() {
+    use std::io::{Read, Write};
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let mut home = Home::with(&[
+        ("TORRENTIAL_TEST_ENGINE", "fake"),
+        ("TORRENTIAL_TEST_FAKE_RATE", "0"),
+        ("TORRENTIAL_TEST_HTTP_PORT", &port),
+        ("TORRENTIAL_TEST_VERSION", "0.1.0"),
+    ]);
+    let jobs: serde_json::Value = serde_json::from_str(&home.run(&["status", "--json"]).stdout).unwrap();
+    let jobs = jobs["jobs"].as_array().unwrap();
+    let id = jobs.iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap()["id"].as_str().unwrap();
+    let (pid, _) = home.engine().unwrap();
+    // A player asks for the end of a file that has not arrived, so its stream stays open.
+    let mut player = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    let ask = format!("GET /{id}/0/enwiki.xml.bz2 HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=23514217000-\r\n\r\n");
+    player.write_all(ask.as_bytes()).unwrap();
+    let mut head = [0; 12];
+    player.read_exact(&mut head).unwrap();
+
+    let mut newer = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    newer.write_all(&frame(r#"{"op":"hello","client_version":"0.1.1","wire":5}"#)).unwrap();
+    read_frame(&mut newer).unwrap();
+    newer.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
+    let answer = read_frame(&mut newer).unwrap();
+    home.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    let during = home.run(&["status", "--json"]);
+    let kept = home.engine();
+    drop(player);
+    eventually("the next command switches the engine", Duration::from_secs(20), || {
+        home.run(&["status", "--json"]).code == 0 && home.engine().is_some_and(|(_, version)| version == "0.1.1")
+    });
+
+    assert_eq!(&head, b"HTTP/1.1 206");
+    assert_eq!(
+        (answer["error"]["code"].as_str(), answer["error"]["message"].as_str()),
+        (Some("daemon_version"), Some("torrential switches to 0.1.1 when the film ends"))
+    );
+    assert_eq!((during.code, during.stderr.as_str()), (0, ""), "the newer client used the engine meanwhile");
+    assert_eq!(kept, Some((pid, "0.1.0".into())), "the engine kept its version while the film played");
+    assert_ne!(home.engine().unwrap().0, pid);
+}
+
+#[test]
+fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_switches() {
     use std::io::Write;
     let home = Home::new();
     let socket = home.dir.path().join("th/run/engine.sock");
@@ -218,12 +267,16 @@ fn a_client_that_cannot_talk_to_a_newer_engine_says_to_restart_it_and_leaves_it_
         for stream in listener.incoming().take(1) {
             let mut stream = stream.unwrap();
             while let Some(request) = read_frame(&mut stream) {
-                ops.push(request["op"].as_str().unwrap().to_string());
-                let hello = format!(
-                    r#"{{"type":"hello","engine_version":"9.0.0","wire":99,"pid":{},"http_port":0}}"#,
-                    std::process::id()
-                );
-                stream.write_all(&frame(&hello)).unwrap();
+                let op = request["op"].as_str().unwrap().to_string();
+                let reply = match op.as_str() {
+                    "hello" => format!(
+                        r#"{{"type":"hello","engine_version":"0.1.0","wire":99,"pid":{},"http_port":0}}"#,
+                        std::process::id()
+                    ),
+                    _ => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
+                };
+                ops.push(op);
+                stream.write_all(&frame(&reply)).unwrap();
             }
         }
         ops
@@ -233,9 +286,9 @@ fn a_client_that_cannot_talk_to_a_newer_engine_says_to_restart_it_and_leaves_it_
 
     assert_eq!(
         (run.code, run.stderr.as_str()),
-        (6, "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n")
+        (6, "error[daemon_version]: torrential switches to 0.4.0 when the film ends\n")
     );
-    assert_eq!(asked.join().unwrap(), ["hello"], "it asked nothing else of the engine");
+    assert_eq!(asked.join().unwrap(), ["hello", "shutdown"]);
 }
 
 #[test]
