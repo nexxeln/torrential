@@ -226,11 +226,6 @@ lt::session_params make_params(SessionSettings const& s) {
   // waits behind up to 16 MiB of others. libtorrent raises this to the piece
   // size, so a seed picks one piece, or 1 MiB, at a time.
   p.set_int(lt::settings_pack::urlseed_max_request_bytes, 1024 * 1024);
-  // libtorrent sends a piece a reader waits for only to a peer whose queued
-  // requests take under 2 s, and by default it keeps 3 s queued with every
-  // peer. A web seed then never qualifies, and a slow peer that took blocks
-  // of the piece holds them for seconds before another peer is asked.
-  p.set_int(lt::settings_pack::request_queue_time, 1);
   p.set_int(lt::settings_pack::alert_queue_size, 10000);
   p.set_int(lt::settings_pack::alert_mask, lt::alert_category::status | lt::alert_category::error |
                                                lt::alert_category::storage | lt::alert_category::dht);
