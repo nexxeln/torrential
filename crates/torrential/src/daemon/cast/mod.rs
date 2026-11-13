@@ -207,9 +207,10 @@ impl Casts {
             }
             chosen => chosen?,
         };
-        let name = match &request.target {
-            Target::Title(video) => video.to_string(),
-            _ => "the video".to_string(),
+        // A title's name comes once its lookup answers, and a torrent's once its file is chosen.
+        let (name, state) = match &request.target {
+            Target::Title(video) => (video.to_string(), CastState::Finding),
+            _ => ("the video".to_string(), CastState::Loading),
         };
         let cast = Cast {
             tv: tv.tv.id.clone(),
@@ -219,7 +220,7 @@ impl Casts {
             download: None,
             file: None,
             subtitle: None,
-            state: CastState::Finding,
+            state,
             position: None,
             duration: None,
             volume: None,

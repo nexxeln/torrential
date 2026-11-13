@@ -13,6 +13,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { MediaInfo, PlayInfo } from "../api";
+import { CastButton } from "../cast/CastButton";
 import { clock } from "../lib/format";
 import { fileName, isVideoFile, readable } from "../lib/release";
 import {
@@ -90,6 +91,8 @@ export interface Neighbor {
 /** A film or an episode played by title, instead of a file of a torrent. */
 export interface Titled {
   kind: "film" | "episode";
+  /** The film or episode, such as `tt0903747:3:5`. */
+  video: string;
   heading: Heading;
   /** The episodes N and P move to, and the one the end of the video counts down to. */
   previous: Neighbor | null;
@@ -645,6 +648,17 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
             hasNext={next !== null}
             nextLabel={titled ? "Next episode (N)" : "Next video (N)"}
             airPlay={airPlay}
+            cast={
+              <CastButton
+                look="player"
+                start={{ ref: id, file: file.index, video: titled?.video, subtitle: chosen?.source?.kind === "file" ? chosen.source.index : undefined }}
+                at={() => element.currentTime}
+                onCast={() => {
+                  element.pause();
+                  onBack();
+                }}
+              />
+            }
             onNext={goNext ?? onBack}
             onMenu={openMenu}
             onFiles={() => setFilesOpen((open) => !open)}
