@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Playback, Release, ReleaseId, SearchResult, Skip,
-    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Playback, Plays, Release, ReleaseId, SearchResult,
+    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
@@ -56,6 +56,8 @@ pub enum Containers {
     Browser,
     /// Any, as mpv, IINA, and VLC open. A download kept with `get` takes any too.
     Any,
+    /// A TV's, which plays these as they are and no other.
+    Tv(Plays),
 }
 
 impl Containers {
@@ -65,6 +67,7 @@ impl Containers {
         match self {
             Containers::Any => true,
             Containers::Browser => remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str())),
+            Containers::Tv(plays) => plays.takes(path),
         }
     }
 }
@@ -489,7 +492,11 @@ fn video_of(
         Ok(playable)
     } else {
         let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
-        Err(Skip::Unplayable { container }.into())
+        let skip = match containers {
+            Containers::Tv(_) => Skip::NotOnTv { container },
+            Containers::Browser | Containers::Any => Skip::Unplayable { container },
+        };
+        Err(skip.into())
     }
 }
 
@@ -515,6 +522,10 @@ fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error 
     if every(|s| matches!(s, Skip::Unplayable { .. })) {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} plays in the browser without ffmpeg"))
             .with_hint("install ffmpeg, then play it again");
+    }
+    if every(|s| matches!(s, Skip::NotOnTv { .. })) {
+        return Error::new(ErrorCode::NoSource, format!("no source of {name} comes in a container the TV plays"))
+            .with_hint("play it on this Mac, or choose a source in MKV or MP4");
     }
     if every(|s| matches!(s, Skip::TooLarge { .. }))
         && let Some(Skip::TooLarge { error }) = tried.first().map(|t| &t.reason)

@@ -1,3 +1,4 @@
+pub mod cast;
 pub mod catalog;
 pub mod device;
 pub mod error;
@@ -16,6 +17,7 @@ pub mod title;
 pub mod units;
 pub mod watching;
 
+pub use cast::{Cast, CastAction, CastRequest, CastState, Container, Plays, Tv, TvList};
 pub use catalog::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetails, TitleId, VideoRef};
 pub use device::{Device, DeviceList, PairingOffer};
 pub use error::{Error, ErrorCode};

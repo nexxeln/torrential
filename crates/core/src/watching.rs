@@ -182,6 +182,10 @@ pub enum Skip {
     Unplayable {
         container: String,
     },
+    /// The video plays on a TV, which does not take its container.
+    NotOnTv {
+        container: String,
+    },
     TooLarge {
         error: Error,
     },

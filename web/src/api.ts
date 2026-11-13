@@ -411,7 +411,7 @@ export type Check = "file_list" | "start" | "first_bytes";
 export type Skip =
   | { reason: "no_file_list" | "no_data"; waited_s: number }
   | { reason: "no_video" | "stalled" }
-  | { reason: "unplayable"; container: string }
+  | { reason: "unplayable" | "not_on_tv"; container: string }
   | { reason: "too_large" | "failed"; error: ApiError };
 
 /** One line of the /api/title/play stream. The last is `playing` or `failed`. */

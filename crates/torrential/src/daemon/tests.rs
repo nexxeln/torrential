@@ -48,6 +48,8 @@ struct Outside {
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     timing: Timing,
+    /// Where searches for TVs go: nowhere that answers, unless a test runs a fake TV.
+    tvs: super::cast::Find,
 }
 
 impl Default for Outside {
@@ -57,6 +59,7 @@ impl Default for Outside {
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
+            tvs: super::cast::Find::At(std::net::SocketAddr::from(([127, 0, 0, 1], 9))),
         }
     }
 }
@@ -151,6 +154,7 @@ impl Harness {
             }),
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
+            tvs: outside.tvs,
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
@@ -1630,6 +1634,7 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
 }
 
+mod cast;
 mod devices;
 mod titles;
 mod web;

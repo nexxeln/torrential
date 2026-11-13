@@ -70,6 +70,8 @@ export function skipReason(skip: Skip, kind: Kind): string {
       return "It stopped sending video.";
     case "unplayable":
       return `Its ${skip.container.toUpperCase()} file needs ffmpeg to play here.`;
+    case "not_on_tv":
+      return `The TV does not play its ${skip.container.toUpperCase()} file.`;
     case "too_large":
     case "failed":
       return sentence(skip.error.message);

@@ -291,6 +291,7 @@ fn skip(reason: &Skip) -> String {
         Skip::NoFileList { waited_s } => format!("no peer sent its file list in {waited_s}s"),
         Skip::NoVideo => "none of its files is the video".to_string(),
         Skip::Unplayable { container } => format!("its .{container} file needs ffmpeg, which is not installed"),
+        Skip::NotOnTv { container } => format!("the TV does not play its .{container} file"),
         Skip::TooLarge { error } | Skip::Failed { error } => sanitize(&error.message),
         Skip::NoData { waited_s } => format!("no data arrived in {waited_s}s"),
         Skip::Stalled => "it stalled".to_string(),
