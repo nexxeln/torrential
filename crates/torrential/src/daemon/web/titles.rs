@@ -3,14 +3,13 @@
 
 use std::io;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use torrential_core::title::Episode;
-use torrential_core::watching::next;
 use torrential_core::{
-    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Kind, Next, Playback, Player, ReleaseId, TitleCard,
-    TitleDetails, TitleId, TorrentId, VideoRef, Viewer, Watched,
+    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, ReleaseId, TitleDetails, TitleId, TorrentId,
+    VideoRef, Viewer, Watched,
 };
 
 use super::super::devices::Asker;
@@ -24,8 +23,6 @@ use crate::output::views::title_name;
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
 const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
-/// Titles listed under Continue on the home page.
-const CONTINUE_MOST: usize = 20;
 
 /// `GET /api/titles?q=`: films and series named like the words. With title lookups off in
 /// config.yaml it finds none, and says it is offline.
@@ -303,39 +300,7 @@ pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
     Ok(json!({ "saved": request.saved }))
 }
 
-/// A film or episode to go on with.
-#[derive(Serialize)]
-struct Continue {
-    title: TitleCard,
-    video: VideoRef,
-    episode: Option<EpisodeInfo>,
-    /// `None` when the video has not been started, as the episode after a finished one.
-    resume_at: Option<f64>,
-    duration: Option<f64>,
-}
-
-#[derive(Serialize)]
-struct Home {
-    /// The most recently watched first.
-    #[serde(rename = "continue")]
-    going_on: Vec<Continue>,
-    saved: Vec<TitleCard>,
-}
-
 /// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.
-/// A finished film, and a series the person has caught up with, are left out.
 pub async fn home(ctx: &Ctx) -> Result<Value, Error> {
-    let now = now();
-    let mut going_on = Vec::new();
-    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
-        let Ok(details) = ctx.titles.catalog.title(&recent.video.title).await else { continue };
-        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
-        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
-        let episode = video
-            .episode
-            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
-        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
-        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
-    }
-    super::value(Home { going_on, saved: ctx.titles.shelf.saved()? })
+    super::value(server::home(ctx).await?)
 }

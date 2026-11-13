@@ -28,6 +28,7 @@ const TIMING: Timing = Timing {
     file_list: Duration::from_millis(500),
     first_bytes: Duration::from_millis(500),
     budget: Duration::from_secs(20),
+    home: Duration::from_millis(300),
 };
 
 struct Harness {
@@ -1644,4 +1645,5 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
 
 mod devices;
 mod titles;
+mod tui;
 mod web;

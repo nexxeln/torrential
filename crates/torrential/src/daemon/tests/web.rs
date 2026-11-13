@@ -9,11 +9,15 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use torrential_core::{Display, Playback, Preferences, Screen, Target};
+use torrential_core::{
+    ArtKind, Display, Error, Playback, Preferences, Screen, Target, TitleCard, TitleDetails, TitleId,
+};
+use torrential_search::catalog::Picture;
 
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
-use super::super::search_port::{self, FakeSource, SearchPort, fake_catalog};
+use super::super::search_port::{self, BoxFuture, FakeSource, SearchPort, fake_catalog};
+use super::super::titles::catalog_port::{self, CatalogPort};
 use super::super::web::ffmpeg::Tools;
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
 
@@ -1042,6 +1046,7 @@ async fn closing_the_connection_while_a_source_sends_nothing_pauses_its_download
 
 #[tokio::test(flavor = "multi_thread")]
 async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes_next() {
+    use torrential_core::protocol::{Request, Response};
     let h = Harness::new();
     let watch = |video: &str, position: f64, duration: f64| json!({ "video": video, "position": position, "duration": duration });
     let (status, saved) = post(&h, "/api/watched", watch("tt9999901:1:1", 2630.0, 2640.0)).await;
@@ -1068,6 +1073,8 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
             "saved": [],
         })
     );
+    let Response::Home { home: socket } = h.ask(Request::Home).await else { panic!("the socket answers home") };
+    assert_eq!(serde_json::to_value(socket).unwrap(), home, "the terminal UI reads the home the web app reads");
     let (_, page) = get(&h, "/api/title?id=tt9999901").await;
     assert_eq!(
         json!([
@@ -1108,6 +1115,88 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
         post(&h, "/api/watched", json!({ "video": "night", "position": 1.0, "duration": null })).await,
     ];
     assert_eq!(refused.iter().map(|r| error(r).0).collect::<Vec<_>>(), [400, 400]);
+}
+
+/// The fake catalog's titles kept on this machine, behind a network that drops every packet: no
+/// lookup ever answers.
+struct Unanswered(catalog_port::Fake);
+
+impl CatalogPort for Unanswered {
+    fn online(&self) -> bool {
+        true
+    }
+
+    fn search<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn title<'a>(&'a self, _: &'a TitleId) -> BoxFuture<'a, Result<TitleDetails, Error>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn kept<'a>(&'a self, id: &'a TitleId) -> BoxFuture<'a, Option<TitleDetails>> {
+        self.0.kept(id)
+    }
+
+    fn namesakes<'a>(&'a self, _: &'a TitleCard) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn art<'a>(&'a self, _: &'a TitleId, _: ArtKind) -> BoxFuture<'a, Result<Picture, Error>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn home_answers_at_once_from_the_details_kept_here_when_the_catalog_never_does() {
+    use torrential_core::protocol::{Request, Response};
+    use torrential_core::{Kind, Watched};
+    let h = Harness::with_titles(std::sync::Arc::new(Unanswered(Default::default())));
+    let shelf = &h.running.ctx.titles.shelf;
+    let watched = |video: &str, position, at| Watched {
+        video: video.parse().unwrap(),
+        position,
+        duration: Some(5760.0),
+        release: None,
+        at,
+    };
+    shelf.watch(&watched("tt0063350", 1834.2, 30)).unwrap();
+    shelf.watch(&watched("tt1727587", 60.0, 20)).unwrap();
+    shelf.watch(&watched("tt9999901:1:1", 5760.0, 10)).unwrap();
+    let sintel = TitleCard {
+        id: "tt1727587".parse().unwrap(),
+        kind: Kind::Film,
+        name: "Sintel".into(),
+        year: Some(2010),
+        rating: Some(7.4),
+    };
+    shelf.save(&sintel, 1).unwrap();
+
+    let started = Instant::now();
+    let home = tokio::time::timeout(Duration::from_secs(10), get(&h, "/api/home")).await.expect("home answers");
+    let took = started.elapsed();
+    let harbor = json!({ "id": "tt9999901", "kind": "series", "name": "Harbor Lights", "year": 2019, "rating": 8.1 });
+    let night =
+        json!({ "id": "tt0063350", "kind": "film", "name": "Night of the Living Dead", "year": 1968, "rating": 7.8 });
+    let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "overview": null, "thumbnail": true });
+    assert_eq!(
+        home,
+        (
+            200,
+            json!({
+                "continue": [
+                    { "title": night, "video": "tt0063350", "episode": null, "resume_at": 1834.2, "duration": 5760.0 },
+                    { "title": harbor, "video": "tt9999901:1:2", "episode": undertow, "resume_at": null, "duration": null },
+                ],
+                "saved": [{ "id": "tt1727587", "kind": "film", "name": "Sintel", "year": 2010, "rating": 7.4 }],
+            })
+        ),
+        "Sintel's details are kept nowhere, so it is not listed to go on with"
+    );
+    assert!(took < Duration::from_secs(2), "home took {took:?}");
+    let socket = tokio::time::timeout(Duration::from_secs(10), h.ask(Request::Home)).await.expect("home answers");
+    let Response::Home { home: socket } = socket else { panic!("the socket answers home") };
+    assert_eq!(serde_json::to_value(socket).unwrap(), home.1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

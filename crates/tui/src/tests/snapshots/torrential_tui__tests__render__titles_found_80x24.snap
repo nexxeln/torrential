@@ -1,0 +1,28 @@
+---
+source: crates/tui/src/tests/render.rs
+expression: shot(&scenario(size))
+---
+" torrential                                                       ↓ 10.0 MiB/s  "
+"                                                                                "
+"     search │ night of the living dead                                3 titles  "
+"            │                                                                   "
+"     titles ● Night of the Living Dead                                    1968  "
+"            │ Night of the Living Dead                                    1990  "
+"            │ Night of the Living Dead: The Series               2024 · series  "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"                                                                                "
+"                         enter open   P play   / search   d downloads   ? keys  "
