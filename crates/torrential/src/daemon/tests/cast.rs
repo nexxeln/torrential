@@ -18,6 +18,7 @@ use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode
 use super::super::cast::Find;
 use super::super::devices::names::Names;
 use super::super::search_port::{self, FakeSource};
+use super::super::web::ffmpeg::Tools;
 use super::devices::listening;
 use super::titles::listed;
 use super::web::post;
@@ -643,6 +644,31 @@ async fn a_title_cast_passes_over_a_source_the_tv_cannot_play_and_plays_the_next
     assert!(uri.ends_with("/Night.1968.720p.mkv"), "{uri}");
     tv.until("a fetch of the video", |screen| !screen.fetches.is_empty()).await;
     assert!(tv.screen.lock().unwrap().fetches[0].starts_with("HEAD whole -> 200 video/x-mkv"));
+    control(&h, CastAction::Stop).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_cast_passes_over_a_download_here_the_tv_cannot_decode_though_ffmpeg_is_there() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let hevc = torrent(0xb3, "Night.of.the.Living.Dead.1968.2160p.UHD.HEVC", &[("Night.1968.2160p.mkv", 2 * MIB)]);
+    let avc = torrent(0xb4, "Night.of.the.Living.Dead.1968.1080p.x264", &[("Night.1968.1080p.mkv", 2 * MIB)]);
+    let catalog = vec![listed(&avc, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let h = harness(&tv, search);
+    for t in [&hevc, &avc] {
+        h.swarm.publish(t.clone());
+    }
+    h.swarm.set_rate(100 * GIB);
+    h.play_for(&hevc, &[0], Some("tt0063350")).await.unwrap();
+    *h.outside.tools.lock().unwrap() = Tools { ffmpeg: Some("/bin/true".into()), ffprobe: Some("/bin/true".into()) };
+
+    let playing = cast(&h, by_hand(Target::Title(night()))).await.unwrap();
+    assert_eq!(
+        playing.download.as_deref(),
+        Some(avc.info_hash.id().to_hex().as_str()),
+        "ffmpeg converts nothing for a TV, which takes the file as it is"
+    );
     control(&h, CastAction::Stop).await.unwrap();
 }
 

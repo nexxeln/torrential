@@ -99,7 +99,8 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    let ffmpeg = (ctx.web.tools)().both().is_some();
+    // ffmpeg converts nothing for a TV, which fetches the file as it is.
+    let ffmpeg = !matches!(ask.containers, Containers::Tv(_)) && (ctx.web.tools)().both().is_some();
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
     if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
