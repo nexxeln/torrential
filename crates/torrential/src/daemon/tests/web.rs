@@ -518,6 +518,10 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
+fn mode(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
 const FETCH: [&str; 1] = ["Content-Type: application/json"];
 
 #[tokio::test(flavor = "multi_thread")]
@@ -559,6 +563,12 @@ async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
     assert_eq!(
         (names(&folder), names(&folder.join(VERSION))),
         (vec![VERSION.to_string()], vec!["ffmpeg".into(), "ffprobe".into()])
+    );
+    let fetched = folder.join(VERSION);
+    assert_eq!(
+        [&folder, &fetched, &fetched.join("ffmpeg"), &fetched.join("ffprobe")].map(|path| mode(path)),
+        [0o700; 4],
+        "only this user can change what the engine runs"
     );
 
     let (_, media) = get(&h, &media_path).await;
@@ -631,6 +641,41 @@ async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
     );
     let refused = post(&off, "/api/ffmpeg", json!({})).await;
     assert_eq!(error(&refused), (404, "not_found", "ffmpeg is not installed, and config.yaml turns off fetching it"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ffmpeg_is_not_fetched_into_a_folder_other_users_can_change() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let refused = |folder: &Path, why: &str, hint: String| {
+        json!({
+            "type": "error",
+            "error": {
+                "code": "storage_error",
+                "message": format!("torrential will not keep ffmpeg in {}: {why}", folder.display()),
+                "hint": hint,
+            },
+        })
+    };
+    let state = h.dir.path();
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let (_, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let hint = format!("run chmod go-w {}, then try again", state.display());
+    assert_eq!(lines(&body).pop(), Some(refused(state, "other users can write to it", hint)));
+
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), state.join("ffmpeg")).unwrap();
+    let (_, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let hint = "make it a real folder, not a link, then try again".to_string();
+    assert_eq!(lines(&body).pop(), Some(refused(&state.join("ffmpeg"), "it is a symbolic link", hint)));
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing is downloaded");
+    assert!(names(elsewhere.path()).is_empty(), "nothing is written through the link");
 }
 
 #[tokio::test(flavor = "multi_thread")]

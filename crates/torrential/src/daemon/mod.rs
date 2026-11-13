@@ -235,7 +235,7 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
 fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
-    std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
+    paths.make_state().map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
     paths::check_state_filesystem(&paths.state)?;
     let _lock = match OwnerLock::acquire(&paths.lock())? {
         Some(lock) => lock,

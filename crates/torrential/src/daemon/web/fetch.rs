@@ -1,9 +1,9 @@
 //! The engine's own ffmpeg: a pinned build it fetches the first time a file needs converting and
 //! none is installed.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, BufReader};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -299,7 +299,13 @@ async fn download(build: &Build, to: &Path, report: &watch::Sender<Stage>) -> Re
         return Err(Error::new(ErrorCode::FetchFailed, format!("cannot fetch ffmpeg: the server answered {status}"))
             .with_hint(format!("try again later, or {INSTALL}")));
     }
-    let mut file = tokio::fs::File::create(to).await.map_err(|e| unwritable(to, &e))?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)
+        .await
+        .map_err(|e| unwritable(to, &e))?;
     let (mut hash, mut done, mut reported) = (Sha256::new(), 0, Instant::now());
     while let Some(chunk) = response.chunk().await.map_err(|e| unreachable(&e))? {
         done += chunk.len() as u64;
@@ -340,7 +346,7 @@ fn unpack(archive: &Path, into: &Path) -> io::Result<()> {
         let path = path.strip_prefix(".").unwrap_or(&path);
         let program = PROGRAMS.into_iter().find(|program| path == Path::new(program));
         if let Some(program) = program.filter(|_| entry.header().entry_type().is_file()) {
-            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o755).open(into.join(program))?;
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o700).open(into.join(program))?;
             io::copy(&mut entry, &mut file)?;
         }
     }
@@ -387,15 +393,21 @@ struct Partial {
 impl Partial {
     /// Empties `root` of what earlier fetches left, other versions included, and makes the folder.
     fn create(root: &Path) -> Result<Partial, Error> {
+        private(root.parent().unwrap_or(root))?;
+        let mut folder = DirBuilder::new();
+        folder.mode(0o700);
+        match folder.create(root) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(unwritable(root, &e)),
+            _ => private(root)?,
+        }
         let made = (|| {
-            if root.exists() {
-                for entry in std::fs::read_dir(root)? {
-                    let path = entry?.path();
-                    if path.is_dir() { std::fs::remove_dir_all(&path)? } else { std::fs::remove_file(&path)? }
-                }
+            for entry in std::fs::read_dir(root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_dir() { std::fs::remove_dir_all(&path)? } else { std::fs::remove_file(&path)? }
             }
             let path = root.join(PARTIAL);
-            std::fs::create_dir_all(&path)?;
+            folder.create(&path)?;
             Ok(Partial { path })
         })();
         made.map_err(|e: io::Error| unwritable(root, &e))
@@ -416,6 +428,25 @@ impl Drop for Partial {
             let _ = std::fs::remove_dir(root);
         }
     }
+}
+
+/// Refuses a folder that another user could change between the engine checking a program in it and
+/// running it.
+fn private(folder: &Path) -> Result<(), Error> {
+    let meta = folder.symlink_metadata().map_err(|e| unwritable(folder, &e))?;
+    let (why, hint) = if meta.file_type().is_symlink() {
+        ("it is a symbolic link", "make it a real folder, not a link, then try again".to_string())
+    } else if !meta.is_dir() {
+        ("it is not a folder", "move it away, then try again".to_string())
+    } else if meta.uid() != crate::paths::uid() {
+        ("it belongs to another user", "make it yours with chown, then try again".to_string())
+    } else if meta.mode() & 0o022 != 0 {
+        ("other users can write to it", format!("run chmod go-w {}, then try again", folder.display()))
+    } else {
+        return Ok(());
+    };
+    Err(Error::new(ErrorCode::StorageError, format!("torrential will not keep ffmpeg in {}: {why}", folder.display()))
+        .with_hint(hint))
 }
 
 /// Clears the quarantine mark macOS can put on a downloaded program, which stops it running. A
