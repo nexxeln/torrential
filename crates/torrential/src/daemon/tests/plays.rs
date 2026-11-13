@@ -1,18 +1,20 @@
 //! Where plays download, how they leave the plays folder, and what `rm` deletes.
 
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::json;
-use torrential_core::protocol::{Change, PlayRequest, Request, Response};
+use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
 use torrential_core::{Place, Target};
 
 use super::super::admission::GIB;
-use super::super::engine_port::FakeTorrentFile;
-use super::super::owner::plays::Deletion;
+use super::super::engine_port::{EngineEvent, FakeTorrentFile};
+use super::super::owner::deleter::PlayName;
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
-use super::{Harness, MIB, Outside, Player, prefix, torrent, written};
+use super::{Gate, Harness, MIB, Outside, Player, prefix, torrent, written};
 
 impl Harness {
     async fn rm(&self, refs: Vec<String>, delete: bool) -> Vec<Change> {
@@ -32,6 +34,18 @@ impl Harness {
         self.swarm.publish(t.clone());
         let (status, body) = post(self, "/api/play", json!({ "ref": magnet_link(t) })).await;
         assert_eq!(status, 200, "{body}");
+    }
+
+    /// Gets `t` into `dir`, as `torrential get --dir` does.
+    async fn get_into(&self, t: &FakeTorrentFile, dir: PathBuf) -> Result<(), torrential_core::Error> {
+        let target = self.torrent_file(t);
+        let request =
+            GetRequest { target, dir: Some(dir), files: vec![], max_size: None, setup_max_size: None, dry_run: false };
+        self.get_with(request).await.map(drop)
+    }
+
+    fn plays(&self) -> PathBuf {
+        self.dir.path().join("plays")
     }
 }
 
@@ -108,7 +122,8 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
         .restart_after(|| {
             let mut store = Store::open(&database).unwrap();
             let tomb = Tombstone { id: film.info_hash.id(), name: None, path: None, removed_at: 1 };
-            store.remove(&tomb, Some(&Deletion::Play { folder: folder.clone() })).unwrap();
+            let name = PlayName::parse(folder.file_name().unwrap().to_str().unwrap()).unwrap();
+            store.remove(&tomb, Some(&name)).unwrap();
         })
         .await;
     assert_eq!((h.status().await.len(), folder.exists()), (0, false));
@@ -175,6 +190,76 @@ async fn a_play_no_one_streams_pauses_and_streaming_it_again_resumes_it_but_a_sa
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_plays_folder_moved_away_and_replaced_by_a_link_while_the_engine_runs_has_nothing_deleted() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let film = torrent(0x11, "film", &[("film.mp4", MIB)]);
+    h.play_web(&film).await;
+    let folder = h.play_folder(&film);
+    written(&folder.join("film/film.mp4"), MIB);
+    h.until("the film is done", |jobs| jobs[0].status.name() == "done").await;
+    let (moved, decoys) = (h.dir.path().join("plays.old"), h.dir.path().join("decoys"));
+    std::fs::rename(h.plays(), &moved).unwrap();
+    let decoy = decoys.join(folder.file_name().unwrap()).join("film/film.mp4");
+    written(&decoy, 4);
+    symlink(&decoys, h.plays()).unwrap();
+
+    let removed = h.rm(vec![prefix(&film)], false).await;
+    let refused = "the plays folder was moved or replaced since the engine started";
+    assert_eq!(
+        (removed[0].deleted.clone(), removed[0].kept.clone()),
+        (vec![], vec![Kept { path: folder.clone(), reason: refused.into() }])
+    );
+    assert_eq!(std::fs::read(&decoy).unwrap().len(), 4, "the decoy behind the link stays");
+    assert!(
+        moved.join(folder.file_name().unwrap()).join("film/film.mp4").exists(),
+        "and so does the folder moved away"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let (theirs, ours) = (torrent(0x31, "set", &[("a.bin", MIB)]), torrent(0x32, "set", &[("a.bin", MIB)]));
+    let alias = h.dir.path().join("alias");
+    std::fs::create_dir_all(h.downloads()).unwrap();
+    symlink(h.downloads(), &alias).unwrap();
+    h.get_into(&theirs, h.downloads()).await.unwrap();
+    h.get_into(&ours, alias.clone()).await.unwrap();
+    let file = h.downloads().join("set/a.bin");
+    written(&file, MIB);
+    h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let kept = Kept { path: alias.join("set/a.bin"), reason: "another download uses it".into() };
+    assert_eq!((removed[0].deleted.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
+    assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names_after() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { gate: Some(gate.clone()), ..Outside::default() },
+    );
+    let iso = torrent(0x41, "iso", &[("disc.iso", 4 * GIB)]);
+    h.swarm.publish(iso.clone());
+    h.get_into(&iso, h.downloads()).await.unwrap();
+    let disc = h.downloads().join("iso/disc.iso");
+    written(&disc, MIB);
+    h.until("it downloads", |jobs| jobs[0].status.name() == "downloading").await;
+    gate.close();
+    h.rm(vec![prefix(&iso)], true).await;
+    gate.until_held(1).await;
+
+    let h = h.restart_after(|| std::fs::write(&disc, "the person's own file").unwrap()).await;
+    h.until("the engine is back", |jobs| jobs.is_empty()).await;
+    assert_eq!(std::fs::read_to_string(&disc).unwrap(), "the person's own file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_and_still_keeps_it() {
     let h = Harness::with_outside(
         super::search_port::Fake::new(vec![]),
@@ -217,4 +302,40 @@ async fn resume_all_starts_the_idle_clock_again_for_the_plays_it_resumes() {
     assert!(matches!(h.ask(Request::Resume { refs: vec![], all: true }).await, Response::Changed { .. }));
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert_eq!(h.states().await, ["downloading"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_goes_once_it_can() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 4 * MIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let stuck = torrent(0x91, "stuck", &[("stuck.mp4", 3 * MIB)]);
+    h.play_web(&stuck).await;
+    let inner = h.play_folder(&stuck).join("stuck");
+    written(&inner.join("stuck.mp4"), 3 * MIB);
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    let shut = |mode| std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(mode)).unwrap();
+    shut(0o555);
+    h.rm(vec![prefix(&stuck)], false).await;
+    assert!(inner.join("stuck.mp4").exists());
+
+    h.play_web(&torrent(0x92, "older", &[("older.mp4", MIB)])).await;
+    h.until("older is done", |jobs| jobs.len() == 1 && jobs[0].status.name() == "done").await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.play_web(&torrent(0x93, "newer", &[("newer.mp4", MIB)])).await;
+    h.until("the play watched longest ago leaves, for what is left to delete counts", |jobs| {
+        jobs.len() == 1 && jobs[0].name.as_deref() == Some("newer")
+    })
+    .await;
+    shut(0o755);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while h.play_folder(&stuck).exists() {
+        assert!(std::time::Instant::now() < deadline, "the folder goes once it can be deleted");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

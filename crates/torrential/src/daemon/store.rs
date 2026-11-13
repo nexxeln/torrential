@@ -6,7 +6,7 @@ use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, 
 
 use super::admission::Cap;
 use super::book::{Home, Intent, JobRecord, Linked, Play};
-use super::owner::plays::Deletion;
+use super::owner::deleter::{Identity, PlayName, QuarantineName};
 use super::search_port::SavedLink;
 
 const MIGRATIONS: &[&str] = &[
@@ -91,9 +91,20 @@ CREATE TABLE plays (
     watched_at INTEGER NOT NULL,
     by_hand INTEGER NOT NULL DEFAULT 0 CHECK (by_hand IN (0, 1))
 ) STRICT;
+CREATE TABLE plays_folder (
+    one INTEGER PRIMARY KEY CHECK (one = 1),
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL
+) STRICT;
 CREATE TABLE deletions (
     job TEXT NOT NULL,
-    what TEXT NOT NULL
+    play TEXT,
+    dir BLOB,
+    quarantine TEXT,
+    device INTEGER,
+    inode INTEGER,
+    CHECK ((play IS NULL) = (quarantine IS NOT NULL)),
+    CHECK (quarantine IS NULL OR (dir IS NOT NULL AND device IS NOT NULL AND inode IS NOT NULL))
 ) STRICT;
 "#,
 ];
@@ -111,12 +122,21 @@ pub const RESULTS_SECS: i64 = 7 * 86_400;
 pub const METAINFO_SECS: i64 = RESULTS_SECS;
 pub const METAINFO_BYTES: i64 = 64 << 20;
 
-/// A deletion a removal asked for and that is not yet done.
+/// A deletion on record that is not yet done.
 #[derive(Clone, PartialEq, Debug)]
-pub struct Pending {
+pub struct Recorded {
     pub key: i64,
     pub job: TorrentId,
-    pub deletion: Deletion,
+    pub what: Journaled,
+}
+
+/// What a deletion on record deletes.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Journaled {
+    /// A play's folder in the plays folder.
+    Play(PlayName),
+    /// A folder made in `dir` to hold only files moved there to delete.
+    Quarantine { dir: PathBuf, name: QuarantineName, identity: Identity },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -453,16 +473,16 @@ impl Store {
         })
     }
 
-    /// Removes a download and puts on record what of it to delete, both or neither.
-    pub fn remove(&mut self, tombstone: &Tombstone, deletion: Option<&Deletion>) -> Result<Option<Pending>, Error> {
+    /// Removes a download, and puts on record that its play's folder is to be deleted, both or
+    /// neither. Answers the deletion's key.
+    pub fn remove(&mut self, tombstone: &Tombstone, play: Option<&PlayName>) -> Result<Option<i64>, Error> {
         self.write(|tx| {
             let id = tombstone.id.to_hex();
             tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
-            let pending = match deletion {
-                Some(deletion) => {
-                    tx.execute("INSERT INTO deletions (job, what) VALUES (?1, ?2)", [&id, &json(deletion)])?;
-                    let key = tx.last_insert_rowid();
-                    Some(Pending { key, job: tombstone.id, deletion: deletion.clone() })
+            let key = match play {
+                Some(play) => {
+                    tx.execute("INSERT INTO deletions (job, play) VALUES (?1, ?2)", [&id, play.as_str()])?;
+                    Some(tx.last_insert_rowid())
                 }
                 None => None,
             };
@@ -477,29 +497,102 @@ impl Store {
             )?;
             tx.execute("DELETE FROM tombstones WHERE removed_at < ?1", [tombstone.removed_at - TOMBSTONE_SECS])?;
             evict_metainfo(tx, tombstone.removed_at)?;
-            Ok(pending)
+            Ok(key)
         })
     }
 
-    /// The deletions removals asked for that are not done, oldest first.
-    pub fn deletions(&self) -> Result<Vec<Pending>, Error> {
-        let mut stmt =
-            self.conn.prepare("SELECT rowid, job, what FROM deletions ORDER BY rowid").map_err(|e| self.fail(e))?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+    /// Puts on record a folder made in `dir` to move `job`'s files into and delete. Answers the
+    /// deletion's key.
+    pub fn quarantined(
+        &mut self,
+        job: TorrentId,
+        dir: &Path,
+        name: &QuarantineName,
+        identity: Identity,
+    ) -> Result<i64, Error> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO deletions (job, dir, quarantine, device, inode) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    job.to_hex(),
+                    dir.as_os_str().as_bytes(),
+                    name.as_str(),
+                    identity.device as i64,
+                    identity.inode as i64
+                ],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+    }
+
+    /// The deletions on record that are not done, oldest first.
+    pub fn deletions(&self) -> Result<Vec<Recorded>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rowid, job, play, dir, quarantine, device, inode FROM deletions ORDER BY rowid")
             .map_err(|e| self.fail(e))?;
-        let mut pending = Vec::new();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<Vec<u8>>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                ))
+            })
+            .map_err(|e| self.fail(e))?;
+        let mut recorded = Vec::new();
         for row in rows {
-            let (key, job, what) = row.map_err(|e| self.fail(e))?;
+            let (key, job, play, dir, quarantine, device, inode) = row.map_err(|e| self.fail(e))?;
             let bad = || corrupt(&self.path, &format!("deletion {key} is unreadable"));
-            let deletion = serde_json::from_str(&what).map_err(|_| bad())?;
-            pending.push(Pending { key, job: job.parse().map_err(|_| bad())?, deletion });
+            let what = match (play, dir, quarantine, device, inode) {
+                (Some(play), None, None, None, None) => Journaled::Play(PlayName::parse(&play).ok_or_else(bad)?),
+                (None, Some(dir), Some(name), Some(device), Some(inode)) => Journaled::Quarantine {
+                    dir: PathBuf::from(std::ffi::OsString::from_vec(dir)),
+                    name: QuarantineName::parse(&name).ok_or_else(bad)?,
+                    identity: Identity { device: device as u64, inode: inode as u64 },
+                },
+                _ => return Err(bad()),
+            };
+            recorded.push(Recorded { key, job: job.parse().map_err(|_| bad())?, what });
         }
-        Ok(pending)
+        Ok(recorded)
     }
 
     pub fn deleted(&mut self, key: i64) -> Result<(), Error> {
         self.write(|tx| tx.execute("DELETE FROM deletions WHERE rowid = ?1", [key]).map(drop))
+    }
+
+    /// The plays folder the engine used last.
+    pub fn plays_folder(&self) -> Result<Option<Identity>, Error> {
+        self.conn
+            .query_row("SELECT device, inode FROM plays_folder", [], |r| {
+                Ok(Identity { device: r.get::<_, i64>(0)? as u64, inode: r.get::<_, i64>(1)? as u64 })
+            })
+            .optional()
+            .map_err(|e| self.fail(e))
+    }
+
+    /// Notes the plays folder the engine uses. When it used another before, the plays it had
+    /// become downloads in a folder the person chose, and their folders are no longer deleted.
+    pub fn use_plays_folder(&mut self, identity: Identity) -> Result<(), Error> {
+        self.write(|tx| {
+            let before: Option<(i64, i64)> = tx
+                .query_row("SELECT device, inode FROM plays_folder", [], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            if before.is_some_and(|before| before != (identity.device as i64, identity.inode as i64)) {
+                tx.execute("DELETE FROM plays", [])?;
+                tx.execute("DELETE FROM deletions WHERE play IS NOT NULL", [])?;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO plays_folder (one, device, inode) VALUES (1, ?1, ?2)",
+                params![identity.device as i64, identity.inode as i64],
+            )
+            .map(drop)
+        })
     }
 
     /// Notes that someone pressed play on a play, or streamed it, at `at`.
@@ -888,15 +981,41 @@ mod tests {
         let homes: Vec<Home> = store.jobs().unwrap().into_iter().map(|j| j.record.home).collect();
         assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true }), Home::Folder]);
         let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
-        let deletion = Deletion::Play { folder: play.dir.clone() };
-        let pending = store.remove(&tomb, Some(&deletion)).unwrap().unwrap();
-        assert_eq!(pending.deletion, deletion);
+        let name = PlayName::parse("0101010101010101-0").unwrap();
+        let key = store.remove(&tomb, Some(&name)).unwrap().unwrap();
+        let aside = QuarantineName::parse(".torrential-deleting-00000000000000ff").unwrap();
+        let identity = Identity { device: u64::MAX, inode: 7 };
+        let other = store.quarantined(record(2).id, Path::new("/dl/Set"), &aside, identity).unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.deletions().unwrap(), std::slice::from_ref(&pending));
+        let quarantine = Journaled::Quarantine { dir: "/dl/Set".into(), name: aside, identity };
+        assert_eq!(
+            store.deletions().unwrap(),
+            [
+                Recorded { key, job: play.id, what: Journaled::Play(name) },
+                Recorded { key: other, job: record(2).id, what: quarantine }
+            ]
+        );
         assert_eq!(store.jobs().unwrap().len(), 1);
-        store.deleted(pending.key).unwrap();
+        store.deleted(key).unwrap();
+        store.deleted(other).unwrap();
         assert_eq!(store.deletions().unwrap(), []);
+    }
+
+    #[test]
+    fn a_plays_folder_other_than_the_one_used_before_turns_its_plays_into_downloads_in_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let first = Identity { device: 1, inode: 2 };
+        assert_eq!(store.plays_folder().unwrap(), None);
+        store.use_plays_folder(first).unwrap();
+        let play = JobRecord { home: Home::Plays(Play { watched_at: 100, by_hand: false }), ..record(1) };
+        store.insert(&play, None, 100).unwrap();
+        store.use_plays_folder(first).unwrap();
+        assert_eq!(store.jobs().unwrap()[0].record.home, play.home, "the same folder keeps its plays");
+        let moved = Identity { device: 1, inode: 3 };
+        store.use_plays_folder(moved).unwrap();
+        assert_eq!((store.plays_folder().unwrap(), store.jobs().unwrap()[0].record.home), (Some(moved), Home::Folder));
     }
 
     #[test]

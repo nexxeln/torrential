@@ -279,6 +279,10 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
                 .and_then(torrential_core::units::parse_duration)
                 .unwrap_or(owner::plays::IDLE_AFTER),
         },
+        deletion_pause: env
+            .var("TORRENTIAL_TEST_DELETION_PAUSE")
+            .and_then(torrential_core::units::parse_duration)
+            .unwrap_or_default(),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

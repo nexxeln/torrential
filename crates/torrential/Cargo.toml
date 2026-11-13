@@ -27,6 +27,7 @@ indicatif = "0.18"
 libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 serde_json = { version = "1", features = ["preserve_order"] }

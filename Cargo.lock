@@ -3228,6 +3228,7 @@ dependencies = [
  "libc",
  "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",

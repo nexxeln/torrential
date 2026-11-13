@@ -81,6 +81,7 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
         plays: Plays { root: dir.join("plays"), max: outside.plays_max, idle_after: outside.idle_after },
+        deletion_pause: Duration::ZERO,
     }
 }
 

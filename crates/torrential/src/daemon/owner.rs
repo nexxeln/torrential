@@ -20,8 +20,10 @@ use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use deleter::Deleter;
 use plays::{Destination, Plays, Tending};
 
+pub mod deleter;
 pub mod plays;
 
 #[derive(Clone, Debug)]
@@ -35,6 +37,9 @@ pub struct OwnerConfig {
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
     pub plays: Plays,
+    /// How long files moved aside wait before they are deleted: no time, except in a test that
+    /// stops the engine in between.
+    pub deletion_pause: Duration,
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T, Error>>;
@@ -305,12 +310,14 @@ pub fn now() -> i64 {
 
 impl Owner {
     pub fn new(
-        store: Store,
+        mut store: Store,
         engine: EngineHandle,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
+        // Opened first, for a plays folder other than the one used before changes what the plays are.
+        let deleter = Deleter::open(&config.plays.root, &mut store, config.deletion_pause)?;
         let mut jobs = BTreeMap::new();
         for stored in store.jobs()? {
             let metainfo = match &stored.metainfo {
@@ -332,7 +339,7 @@ impl Owner {
         let (updates, _) = broadcast::channel(256);
         let mut owner = Self {
             tombstones: store.tombstones(now)?,
-            tending: Tending::new(store.deletions()?),
+            tending: Tending::new(deleter),
             store,
             jobs,
             probes: BTreeSet::new(),
@@ -1164,9 +1171,8 @@ impl Owner {
                     let view = job.view();
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
-                    let deletion = plays::deletion(job, delete);
-                    let pending = self.store.remove(&tomb, deletion.as_ref())?;
-                    self.tending.doomed.extend(pending);
+                    let doom = self.doom(job, delete);
+                    self.tending.deleter.remove(&mut self.store, &tomb, doom)?;
                     let job = self.jobs.remove(&id).expect("resolved above");
                     self.streamed.remove(&id);
                     self.under_test.remove(&id);
