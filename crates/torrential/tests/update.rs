@@ -575,3 +575,43 @@ fn without_the_login_service_an_installed_update_starts_with_the_next_command() 
     assert_ne!(pid, old_pid);
     assert_eq!(server.asked(), assets(target), "a release found within the day needs no new check");
 }
+
+#[test]
+fn two_engines_that_share_one_executable_install_an_update_once() {
+    if target().is_none() {
+        return;
+    }
+    let (answer, gate) = mpsc::channel();
+    let built = Built::new();
+    let release = built.release("0.1.1", Some("0.1.1"));
+    let server = Server::gated("0.1.1", &release, None, Some((".tar.gz", gate)));
+    let homes = [Install::agent_with_engine(&server), Install::agent_with_engine(&server)];
+    std::fs::remove_dir_all(homes[1].dir.path().join("bin")).unwrap();
+    std::os::unix::fs::symlink(homes[0].bin(), homes[1].dir.path().join("bin")).unwrap();
+    let mut pids = Vec::new();
+    for home in &homes {
+        home.found("0.1.1");
+        assert_eq!(home.run(&["status", "--json"]).code, 0);
+        pids.push(home.engine().0);
+    }
+
+    eventually("one engine downloads the release", || Install::downloads_of_the_release(&server) == 1);
+    std::thread::sleep(Duration::from_secs(2));
+    let while_downloading = Install::downloads_of_the_release(&server);
+    answer.send(()).unwrap();
+    let logs = || homes.each_ref().map(|home| std::fs::read_to_string(home.state().join("engine.log")).unwrap());
+    eventually("both engines know 0.1.1 is installed", || {
+        logs()
+            .iter()
+            .all(|log| log.contains("installed torrential 0.1.1") || log.contains("0.1.1 is already installed"))
+    });
+    let installed = logs().iter().filter(|log| log.contains("installed torrential 0.1.1")).count();
+    let running = homes.each_ref().map(|home| home.running());
+
+    assert_eq!(while_downloading, 1, "the second engine waited for the first instead of downloading too");
+    assert_eq!(installed, 1);
+    assert_eq!(Install::downloads_of_the_release(&server), 1);
+    assert_eq!(std::fs::read(homes[0].exe()).unwrap(), release);
+    assert_eq!(homes[0].files_in_bin(), ["torrential"], "no partial file is left behind");
+    assert_eq!(running, [Some((pids[0], "0.1.0".into())), Some((pids[1], "0.1.0".into()))]);
+}

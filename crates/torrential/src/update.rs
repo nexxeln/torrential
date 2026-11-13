@@ -267,7 +267,8 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
     if !latest.newer_than(&env.version()) {
         return Ok(Outcome::Latest(latest));
     }
-    let exe = put_release(releases, env, latest).await?;
+    let (exe, target) = installed()?;
+    put_release(releases, env, latest, &exe, target).await?;
     let _ = Command::new(&exe)
         .args(["skill", "refresh"])
         .stdin(Stdio::null())
@@ -277,14 +278,49 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
     Ok(Outcome::Updated(latest))
 }
 
-/// Downloads release `version` and puts its binary in place of the installed torrential, once that
-/// binary says it is the release. Returns where it put it.
-async fn put_release(releases: &Releases, env: &Env, version: Version) -> Result<PathBuf, Error> {
-    let (exe, target) = installed()?;
+/// What `put_release` found or did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Put {
+    Installed,
+    /// Another torrential that runs from the same executable, such as the engine of another home,
+    /// installed the release first.
+    AlreadyInstalled,
+}
+
+/// Downloads release `version` for `target` and puts its binary in place of `exe`, once that binary
+/// says it is the release. It holds the lock on the folder of `exe` throughout, so torrentials that
+/// share the executable install one release at a time.
+async fn put_release(releases: &Releases, env: &Env, version: Version, exe: &Path, target: &str) -> Result<Put, Error> {
+    let _lock = FolderLock::take(exe.parent().unwrap_or(Path::new("/"))).await?;
+    if confirm(exe, version).is_ok() {
+        return Ok(Put::AlreadyInstalled);
+    }
     let writes = Writes::new(env, "torrential update".into());
-    let partial = Partial::create(&exe, &writes)?;
-    partial.put(&fetch(releases, version, target).await?, version, &exe, &writes)?;
-    Ok(exe)
+    let partial = Partial::create(exe, &writes)?;
+    partial.put(&fetch(releases, version, target).await?, version, exe, &writes)?;
+    Ok(Put::Installed)
+}
+
+/// An exclusive lock on a folder, held until it drops.
+struct FolderLock {
+    _folder: std::fs::File,
+}
+
+impl FolderLock {
+    async fn take(dir: &Path) -> Result<FolderLock, Error> {
+        use std::os::fd::AsRawFd;
+        let failed =
+            |e: std::io::Error| Error::new(ErrorCode::StorageError, format!("cannot lock {}: {e}", dir.display()));
+        let folder = std::fs::File::open(dir).map_err(failed)?;
+        while unsafe { libc::flock(folder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(failed(e));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(FolderLock { _folder: folder })
+    }
 }
 
 /// Where this torrential is installed and which release asset fits this machine, or why it cannot
@@ -411,7 +447,8 @@ impl Partial {
         Ok(Partial { path })
     }
 
-    /// Writes `binary`, checks that it is torrential `version`, and moves it to `at`.
+    /// Writes `binary`, checks that it is torrential `version`, and moves it to `at`, syncing the file
+    /// and then its folder so the move outlasts a power cut.
     fn put(self, binary: &[u8], version: Version, at: &Path, writes: &Writes) -> Result<(), Error> {
         OpenOptions::new()
             .write(true)
@@ -424,7 +461,9 @@ impl Partial {
             })
             .map_err(|e| writes.error(at, e))?;
         confirm(&self.path, version)?;
-        std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))
+        std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))?;
+        let dir = at.parent().unwrap_or(Path::new("/"));
+        std::fs::File::open(dir).and_then(|folder| folder.sync_all()).map_err(|e| writes.error(dir, e))
     }
 }
 
@@ -512,13 +551,21 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                     && checked.install_due(&current, now)
                     && let Some(latest) = checked.newer(&current)
                 {
-                    match put_release(&releases, &env, latest).await {
-                        Ok(_) => {
+                    let put = match installed() {
+                        Ok((exe, target)) => put_release(&releases, &env, latest, &exe, target).await,
+                        Err(e) => Err(e),
+                    };
+                    match put {
+                        Ok(Put::Installed) => {
                             crate::daemon::log(&format!("installed torrential {latest}"));
                             write_json(
                                 &paths.state.join(UPDATED),
                                 &Updated { from: current.clone(), to: latest.to_string() },
                             );
+                            return switch(&ctx, latest, service).await;
+                        }
+                        Ok(Put::AlreadyInstalled) => {
+                            crate::daemon::log(&format!("torrential {latest} is already installed"));
                             return switch(&ctx, latest, service).await;
                         }
                         Err(e) => {
