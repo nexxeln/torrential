@@ -24,7 +24,7 @@ export function ControlButton({ label, className = "", ...rest }: ButtonHTMLAttr
       type="button"
       aria-label={label}
       title={label}
-      className={`relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15 aria-expanded:bg-white/15 *:[svg]:size-5 *:[svg]:fill-ink ${className}`}
+      className={`relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15 aria-expanded:bg-white/15 pointer-coarse:size-11 *:[svg]:size-5 *:[svg]:fill-ink ${className}`}
       {...rest}
     />
   );
@@ -34,7 +34,7 @@ function Volume({ actions }: { actions: PlayerActions }) {
   const { video } = usePlayer();
   const volume = useVideo(video, (state) => (state.muted ? 0 : state.volume));
   return (
-    <div className="group/volume flex items-center">
+    <div className="group/volume flex items-center pointer-coarse:max-sm:hidden tv:hidden">
       <ControlButton label={volume === 0 ? "Unmute (M)" : "Mute (M)"} onClick={actions.toggleMute}>
         {volume === 0 ? <SpeakerXMarkIcon /> : <SpeakerWaveIcon />}
       </ControlButton>
@@ -71,6 +71,8 @@ interface Props {
   subtitled: boolean;
   /** The open popover's first page, to mark its button. */
   menu: "subtitles" | "main" | null;
+  /** Null where the browser has no way to fill the screen. */
+  onFullscreen: (() => void) | null;
   filesOpen: boolean;
   /** More than one video in the torrent. */
   hasFiles: boolean;
@@ -85,7 +87,6 @@ interface Props {
   onNext: () => void;
   onMenu: (page: "subtitles" | "main") => void;
   onFiles: () => void;
-  onFullscreen: () => void;
 }
 
 /** The bar of controls along the bottom of the picture. */
@@ -94,9 +95,9 @@ export function Controls(props: Props) {
   const paused = useVideo(usePlayer().video, (state) => state.paused || state.ended);
 
   return (
-    <div className="flex flex-col px-[max(--spacing(3),2vw)] pb-[max(--spacing(3),1.5vh)]">
+    <div className="relative flex flex-col pr-(--edge-right) pb-(--edge-bottom) pl-(--edge-left)">
       {props.seekBar}
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 max-sm:gap-0">
         <ControlButton label={paused ? "Play (Space)" : "Pause (Space)"} onClick={() => actions.toggle()} className="*:[svg]:size-6">
           {paused ? <PlayIcon /> : <PauseIcon />}
         </ControlButton>
@@ -115,7 +116,8 @@ export function Controls(props: Props) {
             <QueueListIcon />
           </ControlButton>
         )}
-        <div className="relative flex items-center gap-1" data-menu-root>
+        {/* On a phone the menu hangs from the whole bar, as the buttons are too near the left edge for its width. */}
+        <div className="flex items-center gap-1 max-sm:gap-0 sm:relative" data-menu-root>
           <ControlButton
             label="Subtitles (C turns them on or off)"
             aria-haspopup="menu"
@@ -140,9 +142,11 @@ export function Controls(props: Props) {
             <ArrowTopRightOnSquareIcon />
           </ControlButton>
         )}
-        <ControlButton label={props.fullscreen ? "Leave fullscreen (F)" : "Fullscreen (F)"} onClick={props.onFullscreen}>
-          {props.fullscreen ? <ArrowsPointingInIcon /> : <ArrowsPointingOutIcon />}
-        </ControlButton>
+        {props.onFullscreen && (
+          <ControlButton label={props.fullscreen ? "Leave fullscreen (F)" : "Fullscreen (F)"} onClick={props.onFullscreen}>
+            {props.fullscreen ? <ArrowsPointingInIcon /> : <ArrowsPointingOutIcon />}
+          </ControlButton>
+        )}
       </div>
     </div>
   );

@@ -28,7 +28,7 @@ export function TimeLabel({ duration }: { duration: number | null }) {
         savePreferences({ showRemaining: !remaining });
         setRemaining(!remaining);
       }}
-      className="shrink-0 rounded-lg px-2 py-1.5 text-sm font-medium whitespace-nowrap text-ink tabular-nums hover:bg-white/15"
+      className="shrink-0 rounded-lg px-2 py-1.5 text-sm font-medium whitespace-nowrap text-ink tabular-nums hover:bg-white/15 pointer-coarse:min-h-11"
     >
       <span ref={text}>0:00</span>
       <span className="font-normal text-ink/60 max-sm:hidden"> / {duration ? clock(duration) : "–:––"}</span>

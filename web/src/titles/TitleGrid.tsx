@@ -60,7 +60,7 @@ export function TitleGrid({ titles, label, stale = false, onLeaveTop, list }: Pr
           <Link
             href={titlePath(card.id)}
             aria-label={[card.name, cardFacts(card)].filter(Boolean).join(", ")}
-            className="group/card flex flex-col gap-2 rounded-lg"
+            className="group/card flex flex-col gap-2 rounded-lg tv:transition-transform tv:focus:scale-105 motion-reduce:tv:transition-none"
           >
             <Poster card={card} />
             <div className="flex min-w-0 flex-col px-0.5">

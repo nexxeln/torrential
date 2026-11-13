@@ -46,7 +46,7 @@ export function FilesPanel({ id, videos, current, onClose }: Props) {
           type="button"
           aria-label="Close"
           onClick={onClose}
-          className="relative flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
+          className="relative hit-area flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
         >
           <XMarkIcon className="size-4 fill-soft" />
         </button>
@@ -62,7 +62,7 @@ export function FilesPanel({ id, videos, current, onClose }: Props) {
                 href={watchPath(id, file.index)}
                 replace
                 aria-current={file.index === current ? "true" : undefined}
-                className="group/file flex items-start gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10 aria-current:bg-white/10"
+                className="group/file flex items-start gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10 aria-current:bg-white/10 pointer-coarse:py-3"
               >
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-medium text-ink">{name}</div>

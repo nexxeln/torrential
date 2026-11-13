@@ -30,7 +30,7 @@ function describe(state: TitlesState): string {
 /** The way to today's torrent search, for what the catalog does not list. */
 function TorrentsLink({ query }: { query: string }) {
   return (
-    <Link href={torrentsPath(query, false)} className="self-start rounded-sm text-sm text-pencil hover:text-ink">
+    <Link href={torrentsPath(query, false)} className="self-start rounded-sm text-sm text-pencil hover:text-ink pointer-coarse:py-3">
       Search torrents for “{query}”
     </Link>
   );
@@ -81,7 +81,7 @@ function Results({ query, state, onLeaveTop, grid }: { query: string; state: Tit
       <TitleGrid list={grid} titles={answer.titles} label="Films and shows" stale={stale} onLeaveTop={onLeaveTop} />
       <div className="flex flex-col gap-4">
         <TorrentsLink query={query} />
-        <p className="text-sm text-pencil max-sm:hidden">
+        <p className="text-sm text-pencil max-sm:hidden tv:hidden">
           <kbd className="font-sans font-medium text-soft">↑ ↓ ← →</kbd> to choose ·{" "}
           <kbd className="font-sans font-medium text-soft">Enter</kbd> to open ·{" "}
           <kbd className="font-sans font-medium text-soft">/</kbd> to search
@@ -104,7 +104,7 @@ function ContinueCard({ item }: { item: ContinueItem }) {
       <Link
         href={playPath(item.video)}
         aria-label={[title.name, what, left].filter(Boolean).join(", ")}
-        className="group/card flex flex-col gap-2.5 rounded-lg"
+        className="group/card flex flex-col gap-2.5 rounded-lg tv:transition-transform tv:focus:scale-105 motion-reduce:tv:transition-none"
       >
         <div className="relative aspect-video overflow-hidden rounded-lg bg-raised outline-1 -outline-offset-1 outline-white/10 group-hover/card:outline-white/30">
           {episode?.thumbnail ? <Picture src={artUrl(title.id, episode)} alt="" className="absolute inset-0 size-full object-cover" fallback={background} /> : background}
@@ -211,7 +211,7 @@ export function Home({ query }: { query: string }) {
   };
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-4 pb-16 sm:px-6">
+    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-page pb-16">
       <Header current="search" />
       <main className="flex flex-col gap-3 pt-[min(8vh,--spacing(16))]">
         <SearchField
