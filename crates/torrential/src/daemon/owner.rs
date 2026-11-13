@@ -173,86 +173,26 @@ pub enum Shelving {
 }
 
 pub enum Command {
-    Resolve {
-        prefix: HexPrefix,
-        results: Vec<Release>,
-        command: &'static str,
-        reply: Reply<Resolved>,
-    },
-    Get {
-        get: Box<GetCommand>,
-        reply: Reply<GetReply>,
-    },
-    Play {
-        play: Box<PlayCommand>,
-        reply: Reply<(Job, Arc<Metainfo>)>,
-    },
-    Played {
-        id: TorrentId,
-        reply: Reply<()>,
-    },
-    Release {
-        hold: Hold,
-        reply: Reply<()>,
-    },
-    Metadata {
-        target: MetaTarget,
-        deadline: Instant,
-        reply: Reply<FilesInfo>,
-    },
-    Cache {
-        metainfo: Metainfo,
-    },
-    Status {
-        refs: Vec<String>,
-        reply: Reply<Vec<Job>>,
-    },
-    Pause {
-        refs: Vec<String>,
-        reply: Reply<Vec<Change>>,
-    },
-    Resume {
-        refs: Vec<String>,
-        all: bool,
-        reply: Reply<Vec<Change>>,
-    },
-    Remove {
-        refs: Vec<String>,
-        delete: bool,
-        reply: Reply<Vec<Change>>,
-    },
-    Verify {
-        reference: String,
-        repair: bool,
-        reply: Reply<Vec<Change>>,
-    },
-    Watch {
-        refs: Vec<String>,
-        reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)>,
-    },
-    StreamFile {
-        id: TorrentId,
-        index: u32,
-        reply: Reply<StreamFile>,
-    },
-    /// The file to stream, with a lease that keeps its play from leaving or pausing until dropped.
-    Stream {
-        id: TorrentId,
-        index: u32,
-        reply: Reply<(StreamFile, Lease)>,
-    },
-    Library {
-        shelving: Shelving,
-        reply: Reply<()>,
-    },
+    Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
+    Get { get: Box<GetCommand>, reply: Reply<GetReply> },
+    Play { play: Box<PlayCommand>, reply: Reply<(Job, Arc<Metainfo>)> },
+    Played { id: TorrentId, reply: Reply<()> },
+    Release { hold: Hold, reply: Reply<()> },
+    Metadata { target: MetaTarget, deadline: Instant, reply: Reply<FilesInfo> },
+    Cache { metainfo: Metainfo },
+    Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
+    Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
+    Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
+    Remove { refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>> },
+    Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
+    Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
+    StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
+    Stream { id: TorrentId, index: u32, reply: Reply<(StreamFile, Lease)> },
+    Library { shelving: Shelving, reply: Reply<()> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
-    Disconnected {
-        keep_until: Option<Instant>,
-    },
-    Shutdown {
-        reply: oneshot::Sender<()>,
-    },
+    Disconnected { keep_until: Option<Instant> },
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 #[derive(Clone, Debug)]

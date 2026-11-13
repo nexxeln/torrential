@@ -205,24 +205,23 @@ impl Owner {
         }
     }
 
-    /// Someone opened or closed a stream of `id`. A play someone opens resumes if it stopped.
     /// Someone starts streaming `id`, until they drop the lease. The first stream to open marks
     /// when the play was watched, and resumes it if it stopped.
     pub(super) fn lease(&mut self, id: TorrentId) -> Lease {
         let first = !self.streamed_now(id);
-        let held = Arc::clone(self.tending.viewers.entry(id).or_default());
-        if first {
-            self.watched_now(id);
+        let lease = Lease { _held: Arc::clone(self.tending.viewers.entry(id).or_default()) };
+        if !first {
+            return lease;
         }
+        self.watched_now(id);
         if let Some(job) = self.jobs.get(&id)
-            && first
             && (job.record.intent == Intent::Paused || job.observed == Observed::Parked)
             && matches!(job.record.home, Home::Plays(_))
             && let Err(error) = self.resume(&[id.to_hex()], false)
         {
             log(&format!("{id} is streaming but cannot resume: {}", error.message));
         }
-        Lease { _held: held }
+        lease
     }
 
     /// Whether someone holds a lease on `id`.

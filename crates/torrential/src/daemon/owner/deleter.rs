@@ -307,9 +307,10 @@ impl Deleter {
 
     /// Makes a new, empty folder for a play of `id`.
     pub fn make_play(&self, id: TorrentId) -> Result<PathBuf, Error> {
-        let root = self.root().map_err(|why| {
-            Error::new(ErrorCode::StorageError, format!("no play can start, for {why}"))
-                .with_hint("stop the engine and play again, and torrential uses the folder there then")
+        let refused = |why: &str| Error::new(ErrorCode::StorageError, format!("no play can start, for {why}"));
+        let root = self.plays.as_ref().map_err(|why| refused(why))?;
+        root.intact().map_err(|why| {
+            refused(why).with_hint("put the folder back, or stop the engine and play again to use the folder there now")
         })?;
         for n in 0u32.. {
             let name = format!("{}-{n}", &id.to_hex()[..STEM]);
@@ -431,19 +432,14 @@ impl Deleter {
             if !pending.ran {
                 reports.push((pending.job, report));
             }
-            match again {
-                true => {
-                    pending.ran = true;
-                    self.pending.push(pending);
-                }
-                false => {
-                    // A deletion left on record runs again at the next start, and finds done what is done.
-                    if let Some(key) = key
-                        && let Err(error) = store.deleted(key)
-                    {
-                        log(&format!("cannot note that a deletion is done: {}", error.message));
-                    }
-                }
+            if again {
+                pending.ran = true;
+                self.pending.push(pending);
+            } else if let Some(key) = key
+                && let Err(error) = store.deleted(key)
+            {
+                // It runs again at the next start, and finds done what is done.
+                log(&format!("cannot note that a deletion is done: {}", error.message));
             }
         }
         reports
