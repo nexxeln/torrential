@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useJob } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { goBack } from "../router";
-import { Problem, Readout, Starting, TopBar } from "./Chrome";
+import { FfmpegReadout, Problem, Readout, Starting, TopBar } from "./Chrome";
 import { command } from "./keys";
 import { Playback } from "./Playback";
 import { useSession } from "./session";
@@ -57,7 +57,11 @@ export function Player({ target, file }: Props) {
           {session.stage === "failed" ? (
             <Problem title="This video cannot start" error={session.error} onRetry={retry} onBack={back} />
           ) : (
-            <Starting step={session.stage === "finding" ? 0 : 1} name={name} readout={job && <Readout job={job} />} />
+            <Starting
+              step={session.stage === "finding" ? 0 : session.ffmpeg ? 2 : 1}
+              name={name}
+              readout={session.stage === "reading" && session.ffmpeg ? <FfmpegReadout fetching={session.ffmpeg} /> : job && <Readout job={job} />}
+            />
           )}
           <div className="absolute inset-x-0 top-0 z-10">
             <TopBar name={session.stage === "failed" ? name : null} file={null} onBack={back} />

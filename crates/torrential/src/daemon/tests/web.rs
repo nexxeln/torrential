@@ -2,6 +2,8 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -12,8 +14,9 @@ use torrential_core::Target;
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
 use super::super::search_port::{self, FakeSource, fake_catalog};
-use super::super::web::ffmpeg::Tools;
-use super::{Harness, magnet, prefix, titles, torrent, written};
+use super::super::web::fetch::{Build, Fetch, VERSION};
+use super::super::web::ffmpeg::{INSTALL, Tools};
+use super::{Harness, Outside, magnet, prefix, titles, torrent, written};
 
 /// One HTTP/1.1 connection from a browser, or from curl.
 struct Page(BufReader<TcpStream>);
@@ -304,7 +307,7 @@ async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
         media,
         json!({
             "duration": 7.0, "container": "mp4", "video": null, "audio": [], "subtitles": [],
-            "direct": "video/mp4", "remux": false, "chapters": [],
+            "direct": "video/mp4", "ffmpeg": "missing", "chapters": [],
         })
     );
     let (_, media) = get(&h, &format!("/api/media?id={id}&file=1")).await;
@@ -317,6 +320,8 @@ async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
     for answer in &needs_ffmpeg {
         assert_eq!(error(answer), (404, "not_found", "ffmpeg is not installed, and this needs it"));
     }
+    let fetch = post(&h, "/api/ffmpeg", json!({})).await;
+    assert_eq!(error(&fetch), (404, "not_found", "ffmpeg is not installed, and this needs it"));
     let not_playing = [
         get(&h, &format!("/api/media?id={id}&file=7")).await,
         get(&h, &format!("/api/media?id={}&file=0", "ab".repeat(20))).await,
@@ -391,9 +396,9 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
             media["container"],
             media["video"]["mime"],
             media["audio"][0]["codec"],
-            media["remux"]
+            media["ffmpeg"]
         ]),
-        json!([5400.0, "matroska", "hvc1.2.4.L120.B0", "eac3", true])
+        json!([5400.0, "matroska", "hvc1.2.4.L120.B0", "eac3", "ready"])
     );
     assert_eq!(get(&h, &format!("/api/media?id={id}&file=0")).await.1, media);
     assert_eq!(
@@ -447,6 +452,160 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
         ]
     );
     assert_eq!(tools.calls().len(), 3, "a refused request runs nothing");
+}
+
+/// A .tar.xz holding stand-ins for ffmpeg and ffprobe, as a pinned build does. The stand-in
+/// ffprobe prints `probe`, and each appends its arguments to `calls`.
+fn archive(calls: &Path, probe: &str, ffmpeg: &str) -> Vec<u8> {
+    let script = |name: &str, body: &str| format!("#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n", calls.display());
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, body) in
+        [("ffmpeg", script("ffmpeg", ffmpeg)), ("ffprobe", script("ffprobe", &format!("cat <<'END'\n{probe}\nEND")))]
+    {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        tar.append_data(&mut header, name, body.as_bytes()).unwrap();
+    }
+    let mut xz = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::default()).unwrap();
+    std::io::Write::write_all(&mut xz, &tar.into_inner().unwrap()).unwrap();
+    xz.finish().unwrap()
+}
+
+/// Serves `body` to every request, in two halves half a second apart, and counts the requests.
+async fn serve(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let url = format!("http://{}/ffmpeg.tar.xz", listener.local_addr().unwrap());
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    if socket.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let (first, second) = body.split_at(body.len() / 2);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(first).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = socket.write_all(second).await;
+            });
+        }
+    });
+    (url, asked)
+}
+
+fn build(url: String, archive: &[u8]) -> Build {
+    use sha2::Digest;
+    Build { url, sha256: format!("{:x}", sha2::Sha256::digest(archive)), size: archive.len() as u64 }
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+const FETCH: [&str; 1] = ["Content-Type: application/json"];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "printf 'ftyp'; printf 'moof'");
+    let (url, asked) = serve(archive.clone()).await;
+    let outside = Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() };
+    let h = Harness::with_outside(search_port::Fake::new(fake_catalog()), outside);
+    // Without ffprobe the engine reads the file's header and its end for the duration.
+    h.swarm.set_rate(100 * GIB);
+    let id = playing(&h, 65).await;
+    let (media_path, stream) =
+        (format!("/api/media?id={id}&file=0"), format!("/api/stream?id={id}&file=0&t=0&video=copy"));
+    let (_, media) = get(&h, &media_path).await;
+    assert_eq!(json!([media["container"], media["ffmpeg"]]), json!(["matroska", "fetch"]));
+    let early = get(&h, &stream).await;
+    assert_eq!(error(&early), (404, "not_found", "torrential has not fetched ffmpeg yet, and this needs it"));
+
+    let mut first = Page::open(&h).await;
+    first.send("POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let (status, headers) = first.head().await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
+    let size = archive.len();
+    assert_eq!(first.line().await, Some(json!({ "type": "progress", "done": 0, "size": size })));
+    let (_, _, second) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    let mut seen = Vec::new();
+    while let Some(line) = first.line().await {
+        seen.push(line);
+    }
+    for seen in [seen, lines(&second)] {
+        let (last, before) = seen.split_last().unwrap();
+        assert_eq!(last, &json!({ "type": "ready" }));
+        assert!(before.iter().all(|line| line["type"] == "progress" && line["size"] == size), "{before:?}");
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "both requests followed one download");
+    let folder = h.dir.path().join("ffmpeg");
+    assert_eq!(
+        (names(&folder), names(&folder.join(VERSION))),
+        (vec![VERSION.to_string()], vec!["ffmpeg".into(), "ffprobe".into()])
+    );
+
+    let (_, media) = get(&h, &media_path).await;
+    assert_eq!(json!([media["video"]["mime"], media["ffmpeg"]]), json!(["hvc1.2.4.L120.B0", "ready"]));
+    let (status, _, body) = fetch(&h, "GET", &stream, &[], "").await;
+    assert_eq!((status, body.as_slice()), (200, &b"ftypmoof"[..]));
+    let (_, _, again) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!(lines(&again), [json!({ "type": "ready" })]);
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "a fetched ffmpeg is not fetched again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
+    let calls = tempfile::tempdir().unwrap();
+    let archive = archive(&calls.path().join("calls"), FILM, "true");
+    let (url, asked) = serve(archive.clone()).await;
+    let pinned = Build { sha256: "0".repeat(64), ..build(url, &archive) };
+    let h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(pinned), ..Outside::default() },
+    );
+    for tries in 1..=2 {
+        let (status, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+        let last = lines(&body).pop().unwrap();
+        assert_eq!(
+            (status, last),
+            (
+                200,
+                json!({
+                    "type": "error",
+                    "error": {
+                        "code": "verification_failed",
+                        "message": "the ffmpeg download is not the build torrential pins, so it was deleted",
+                        "hint": format!("try again later, or {INSTALL}"),
+                    },
+                })
+            )
+        );
+        assert!(!h.dir.path().join("ffmpeg").exists(), "nothing is left after try {tries}");
+        assert_eq!(asked.load(Ordering::SeqCst), tries, "each try downloads again");
+    }
+
+    let off = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Off, ..Outside::default() },
+    );
+    let refused = post(&off, "/api/ffmpeg", json!({})).await;
+    assert_eq!(error(&refused), (404, "not_found", "ffmpeg is not installed, and config.yaml turns off fetching it"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

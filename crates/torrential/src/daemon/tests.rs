@@ -17,6 +17,7 @@ use super::search_port::{self, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
+use super::web::fetch::{Fetch, Ffmpeg};
 use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
 
@@ -45,6 +46,8 @@ struct Harness {
 struct Outside {
     /// Where the engine finds ffmpeg and ffprobe. Nowhere, until a test says.
     tools: Arc<Mutex<Tools>>,
+    /// What the engine does with none. It fetches nothing, unless a test says where from.
+    fetch: Fetch,
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     timing: Timing,
@@ -54,6 +57,7 @@ impl Default for Outside {
     fn default() -> Self {
         Self {
             tools: Arc::default(),
+            fetch: Fetch::Unavailable,
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
@@ -145,10 +149,14 @@ impl Harness {
                 Box::new(disk.clone()),
             ),
             preferences: Arc::new(torrential_core::Preferences::default),
-            tools: Arc::new({
-                let tools = outside.tools.clone();
-                move || tools.lock().unwrap().clone()
-            }),
+            ffmpeg: Ffmpeg::new(
+                Arc::new({
+                    let tools = outside.tools.clone();
+                    move || tools.lock().unwrap().clone()
+                }),
+                dir.path().join("ffmpeg"),
+                outside.fetch.clone(),
+            ),
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
         };

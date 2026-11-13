@@ -19,6 +19,7 @@ use super::super::magnet::{self, Magnet};
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
+use super::super::web::fetch::Readiness;
 use super::Resolved;
 
 const MOST_TRIED: usize = 6;
@@ -353,7 +354,7 @@ impl Trial<'_> {
         {
             return Err(Skip::Stalled.into());
         }
-        let remux = (ctx.web.tools)().ffmpeg.is_some();
+        let remux = ctx.web.ffmpeg.found().readiness() != Readiness::Missing;
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
 
         report(AttemptEvent::Check { check: Check::Start });

@@ -33,7 +33,7 @@ const probe = document.createElement("video");
 export function plan(media: MediaInfo, audio: number | null, direct: boolean): Plan {
   const ownAudio = audio === null || audio === defaultAudio(media.audio)?.stream;
   if (direct && ownAudio && media.direct && probe.canPlayType(media.direct) !== "") return { kind: "direct" };
-  if (!media.remux) return { kind: "blocked", reason: "ffmpeg" };
+  if (media.ffmpeg !== "ready") return { kind: "blocked", reason: "ffmpeg" };
   const source = mediaSourceClass();
   if (!source) return { kind: "blocked", reason: "browser" };
   // A file with no audio track becomes a video-only stream, and a buffer told to expect audio would refuse it.

@@ -25,6 +25,7 @@ globset = "0.4"
 httparse = "1.10"
 indicatif = "0.18"
 libc = "0.2"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "optimization"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -38,4 +39,5 @@ url = "2.5"
 [dev-dependencies]
 assert_cmd = "2.2"
 insta = { version = "1.49", features = ["json"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 tempfile = "3.27"

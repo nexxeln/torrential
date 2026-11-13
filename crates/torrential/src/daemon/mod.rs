@@ -56,8 +56,8 @@ pub struct Ports {
     pub machine: Arc<Detector>,
     /// The preferences in config.yaml now.
     pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
-    /// Where ffmpeg and ffprobe are now.
-    pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
+    /// ffmpeg and ffprobe, installed or fetched.
+    pub ffmpeg: web::fetch::Ffmpeg,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
 }
@@ -67,8 +67,9 @@ impl Ports {
         let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
             Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
-        let tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync> =
-            Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        let installed = Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        let fetch = web::fetch::Fetch::from_env(env, true);
+        let ffmpeg = web::fetch::Ffmpeg::new(installed, web::fetch::root(&paths.state), fetch);
         // The fake engine's subtitles are made up too, unless a test asks for the real sources.
         let subtitles: Arc<dyn subtitle_port::SubtitlePort> =
             if fake(env) && env.var("TORRENTIAL_TEST_SUBTITLES") != Some("live") {
@@ -101,7 +102,7 @@ impl Ports {
                 disk: Box::new(admission::RoomyDisk),
                 machine: Detector::start(env, settings.downloads_dir(paths), Box::new(admission::RoomyDisk)),
                 preferences,
-                tools,
+                ffmpeg,
                 subtitles,
                 catalog,
             });
@@ -124,7 +125,7 @@ impl Ports {
             disk: disk(),
             machine: Detector::start(env, settings.downloads_dir(paths), disk()),
             preferences,
-            tools,
+            ffmpeg,
             subtitles,
             catalog,
         })
@@ -186,7 +187,7 @@ pub fn start(
         parse: ports.parse,
         version,
         http_port,
-        web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
+        web: web::State::new(ports.preferences, ports.ffmpeg, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
