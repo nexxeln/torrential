@@ -311,11 +311,15 @@ impl Walk<'_> {
 }
 
 impl PlayTitle {
-    /// Whether this play may try `release`: never the download it replaces, and only the pinned
-    /// release when one is. A trial checks again once it knows the release's torrent.
+    /// Whether this play may try `release`: never the download it replaces, only the pinned
+    /// release when one is, and on a TV, which gets the file as it is, never one whose name says a
+    /// codec the TV does not decode, held here or not. A trial checks again once it knows the
+    /// release's torrent.
     fn may_try(&self, release: &Release) -> bool {
+        let tv = matches!(self.containers, Containers::Tv(_));
         self.replace.is_none_or(|old| release.id != ReleaseId::Torrent(old))
             && self.pin.is_none_or(|pin| release.id == pin)
+            && (!tv || self.player.plays(Quality::parse(&release.name)))
     }
 }
 

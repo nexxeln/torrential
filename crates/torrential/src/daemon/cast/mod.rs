@@ -17,8 +17,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use torrential_core::text::sanitize;
 use torrential_core::title::Span;
 use torrential_core::{
-    AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, Player, ReleaseId, Resolution,
-    Target, TitleLink, TorrentId, Tv, TvList, VideoRef, Viewer, Watched,
+    AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, Player, Quality, ReleaseId,
+    Resolution, Target, TitleLink, TorrentId, Tv, TvList, VideoRef, Viewer, Watched,
 };
 
 use super::devices::names::Names;
@@ -884,7 +884,17 @@ async fn find(
     let (id, file, name, video, release, resume_at) = match &request.target {
         Target::Title(video) => {
             let pin = match &request.source {
-                Some(prefix) => Some(server::pinned(ctx, video, prefix).await?),
+                Some(prefix) => {
+                    let release = server::pinned(ctx, video, prefix).await?;
+                    if !tv.tv.decodes.plays(Quality::parse(&release.name)) {
+                        return Err(Error::new(
+                            ErrorCode::Usage,
+                            format!("{} cannot decode the video of this source", tv.tv.name),
+                        )
+                        .with_hint("let torrential choose a source, or play it on this Mac"));
+                    }
+                    Some(release.id)
+                }
                 None => None,
             };
             let ask = PlayTitle {

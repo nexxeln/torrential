@@ -366,13 +366,13 @@ async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
 }
 
 /// The release among `video`'s sources whose ID starts with `prefix`.
-pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<ReleaseId, Error> {
+pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<Release, Error> {
     let parsed: HexPrefix = prefix.parse()?;
     let sources = sources(ctx, video.clone()).await?;
     let name = title_name(&sources.title, sources.video.episode);
     let matching: Vec<&Release> = sources.result.releases.iter().filter(|r| parsed.matches(&r.id)).collect();
     match matching.as_slice() {
-        [one] => Ok(one.id),
+        [one] => Ok((*one).clone()),
         [] => Err(Error::new(ErrorCode::NotFound, format!("no source of {name} has an ID that starts with {prefix}"))
             .with_hint(format!("run torrential sources {video} to list them"))
             .with_next(format!("torrential sources {video}"))),
@@ -416,7 +416,7 @@ async fn play_title(
 ) -> Result<Response, Error> {
     let TitleRequest { video, source } = request;
     let pin = match source {
-        Some(prefix) => Some(pinned(ctx, &video, &prefix).await?),
+        Some(prefix) => Some(pinned(ctx, &video, &prefix).await?.id),
         None => None,
     };
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;

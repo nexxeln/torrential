@@ -967,3 +967,41 @@ async fn of_two_tvs_casting_one_film_the_one_cast_to_last_keeps_its_place() {
     control_on(&h, Some("living"), CastAction::Stop).await.unwrap();
     assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "not even as it stops");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest_fail() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let here = torrent(0xb5, "Night.of.the.Living.Dead.1968.2160p.UHD.HEVC", &[("Night.1968.2160p.mkv", 2 * MIB)]);
+    let x265 = torrent(0xb6, "Night.of.the.Living.Dead.1968.1080p.x265", &[("Night.1968.1080p.mkv", 2 * MIB)]);
+    let dead = torrent(0xb7, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
+    let catalog = vec![listed(&x265, "knaben", Some(90)), listed(&dead, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let h = harness(&tv, search);
+    // No peer has the H.264 source, so it never sends its file list.
+    for t in [&here, &x265] {
+        h.swarm.publish(t.clone());
+    }
+    h.swarm.set_rate(100 * GIB);
+    h.play_for(&here, &[0], Some("tt0063350")).await.unwrap();
+
+    let error = cast(&h, by_hand(Target::Title(night()))).await.unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::NoSource, "no source of Night of the Living Dead (1968) plays now")
+    );
+    assert_eq!(tv.actions(), ["GetProtocolInfo"], "the TV is sent nothing");
+
+    let hex = x265.info_hash.id().to_hex();
+    let pinned = CastRequest { source: Some(hex[..8].to_string()), ..by_hand(Target::Title(night())) };
+    let error = cast(&h, pinned).await.unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str(), error.hint.as_deref()),
+        (
+            ErrorCode::Usage,
+            "Fake TV cannot decode the video of this source",
+            Some("let torrential choose a source, or play it on this Mac")
+        )
+    );
+    assert_eq!(tv.actions(), ["GetProtocolInfo"]);
+}
