@@ -4,7 +4,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -395,10 +395,14 @@ fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
     }
 }
 
+static EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Where this torrential is installed, as it was when the process started. `main` reads it first,
+/// because on Linux, once an update replaces the file, the process's own path reads `<path> (deleted)`.
 pub fn executable() -> Result<PathBuf, Error> {
-    std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary: {e}")))
+    let found =
+        EXECUTABLE.get_or_init(|| std::env::current_exe().and_then(std::fs::canonicalize).map_err(|e| e.to_string()));
+    found.clone().map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary: {e}")))
 }
 
 fn verify(asset: &str, tarball: &[u8], sums: &[u8]) -> Result<(), Error> {

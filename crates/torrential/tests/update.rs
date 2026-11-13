@@ -82,36 +82,45 @@ impl Server {
         Server::gated(version, binary, published_sum, None)
     }
 
-    /// The first request whose path ends with the gate's text waits until the gate receives.
+    /// The first request whose path ends with the gate's text waits until the gate receives. Other
+    /// requests are answered meanwhile.
     fn gated(
         version: &str,
         binary: &[u8],
         published_sum: Option<&str>,
-        mut gate: Option<(&'static str, mpsc::Receiver<()>)>,
+        gate: Option<(&'static str, mpsc::Receiver<()>)>,
     ) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let tarball = Arc::new(tarball(binary));
         let sum = published_sum.map_or_else(|| hex(&tarball), str::to_string);
         let asked: Arc<Mutex<Vec<String>>> = Arc::default();
-        let (log, location) = (asked.clone(), format!("{base}/tag/v{version}"));
+        let (log, location, gate) = (asked.clone(), format!("{base}/tag/v{version}"), Arc::new(Mutex::new(gate)));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let path = request_path(&stream);
-                log.lock().unwrap().push(path.clone());
-                if gate.as_ref().is_some_and(|(end, _)| path.ends_with(end)) {
-                    let _ = gate.take().unwrap().1.recv();
-                }
-                let reply = match path.as_str() {
-                    "/latest" => (302, vec![("Location", location.clone())], Vec::new()),
-                    p if p.ends_with(".tar.gz") => (200, Vec::new(), tarball.to_vec()),
-                    p if p.ends_with(".tar.gz.sha256") => {
-                        let name = p.rsplit('/').next().unwrap().trim_end_matches(".sha256");
-                        (200, Vec::new(), format!("{sum}  {name}\n").into_bytes())
+                let (log, location, gate, tarball, sum) =
+                    (log.clone(), location.clone(), gate.clone(), tarball.clone(), sum.clone());
+                std::thread::spawn(move || {
+                    let path = request_path(&stream);
+                    log.lock().unwrap().push(path.clone());
+                    let held = {
+                        let mut gate = gate.lock().unwrap();
+                        if gate.as_ref().is_some_and(|(end, _)| path.ends_with(end)) { gate.take() } else { None }
+                    };
+                    if let Some((_, wait)) = held {
+                        let _ = wait.recv();
                     }
-                    _ => (404, Vec::new(), b"Not Found".to_vec()),
-                };
-                respond(stream, reply);
+                    let reply = match path.as_str() {
+                        "/latest" => (302, vec![("Location", location)], Vec::new()),
+                        p if p.ends_with(".tar.gz") => (200, Vec::new(), tarball.to_vec()),
+                        p if p.ends_with(".tar.gz.sha256") => {
+                            let name = p.rsplit('/').next().unwrap().trim_end_matches(".sha256");
+                            (200, Vec::new(), format!("{sum}  {name}\n").into_bytes())
+                        }
+                        _ => (404, Vec::new(), b"Not Found".to_vec()),
+                    };
+                    respond(stream, reply);
+                });
             }
         });
         Server { base, asked }
@@ -634,6 +643,47 @@ fn two_engines_that_share_one_executable_install_an_update_once() {
     assert_eq!(std::fs::read(homes[0].exe()).unwrap(), release);
     assert_eq!(homes[0].files_in_bin(), ["torrential"], "no partial file is left behind");
     assert_eq!(running, [Some((pids[0], "0.1.0".into())), Some((pids[1], "0.1.0".into()))]);
+}
+
+#[test]
+fn an_engine_that_finds_the_release_after_another_home_installed_it_starts_it_too() {
+    if target().is_none() {
+        return;
+    }
+    let (answer, gate) = mpsc::channel();
+    let built = Built::new();
+    let release = built.release("0.1.1");
+    let server = Server::gated("0.1.1", &release, None, Some(("/latest", gate)));
+    let mut homes = [Install::agent_with_engine(&server), Install::agent_with_engine(&server)];
+    std::fs::remove_dir_all(homes[1].dir.path().join("bin")).unwrap();
+    std::os::unix::fs::symlink(homes[0].bin(), homes[1].dir.path().join("bin")).unwrap();
+    for home in &mut homes {
+        home.set("TORRENTIAL_TEST_HTTP_PORT", "0");
+    }
+    // Home two starts on 0.1.0 and asks for the latest release, whose answer waits until home one
+    // has installed the release it found and runs it.
+    let second = homes[1].supervise();
+    eventually("home two asks for the latest release", || server.asked().contains(&"/latest".to_string()));
+    let (two, before) = homes[1].engine();
+    homes[0].found("0.1.1");
+    let first = homes[0].supervise();
+    eventually("home one runs 0.1.1", || homes[0].running().is_some_and(|(_, version)| version == "0.1.1"));
+
+    answer.send(()).unwrap();
+    eventually("home two runs 0.1.1", || homes[1].running().is_some_and(|(_, version)| version == "0.1.1"));
+    let (two_after, _) = homes[1].engine();
+    let logs = homes.each_ref().map(|home| std::fs::read_to_string(home.state().join("engine.log")).unwrap());
+    let stops = homes.each_ref().map(|home| home.run(&["engine", "stop"]).code);
+    let ended = [first, second].map(|mut service| service.wait().unwrap().code());
+
+    assert_eq!(before, "0.1.0");
+    assert_ne!(two_after, two, "the login service started home two again");
+    assert_eq!(std::fs::read(homes[0].exe()).unwrap(), release);
+    assert_eq!(Install::downloads_of_the_release(&server), 1);
+    assert!(logs[0].contains("installed torrential 0.1.1"), "{}", logs[0]);
+    assert!(logs[1].contains("torrential 0.1.1 is already installed"), "{}", logs[1]);
+    assert!(!logs[1].contains("update failed"), "{}", logs[1]);
+    assert_eq!((stops, ended), ([0, 0], [Some(0), Some(0)]));
 }
 
 /// Starts an engine that has found release 0.1.1, and sets `updates: notify` while the request
