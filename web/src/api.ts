@@ -452,14 +452,13 @@ export function asApiError(thrown: unknown): ApiError {
   return thrown instanceof EngineError ? thrown.error : UNREACHABLE;
 }
 
+/** A body that stops arriving, as when its request is aborted, rejects instead of answering null. */
 async function json<T>(response: Response): Promise<T> {
+  if (response.ok) return response.json() as Promise<T>;
   const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    // The engine names every failure. A server error without a name is a proxy in front of an engine that is not running.
-    const unnamed = response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
-    throw new EngineError(body?.error ?? unnamed, response.status);
-  }
-  return body as T;
+  // The engine names every failure. A server error without a name is a proxy in front of an engine that is not running.
+  const unnamed = response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
+  throw new EngineError(body?.error ?? unnamed, response.status);
 }
 
 /** The JSON values of an NDJSON body, one per line, as they arrive. */
