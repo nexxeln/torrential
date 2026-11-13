@@ -16,7 +16,7 @@ use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
-pub const WIRE_VERSION: u32 = 5;
+pub const WIRE_VERSION: u32 = 6;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -383,6 +383,46 @@ mod tests {
         assert_eq!(serde_json::from_str::<TitleFrame>(&text).unwrap(), step);
         let reply: TitleFrame = serde_json::from_str(r#"{"type":"ok"}"#).unwrap();
         assert_eq!(reply, TitleFrame::Reply(Box::new(Response::Ok)));
+    }
+
+    /// The requests each wire version added, the first entry holding every request of version 5.
+    /// An engine cannot read a request newer than its version, and a client reuses an engine only
+    /// of its own version.
+    const ADDED: &[(u32, &[&str])] = &[
+        (
+            5,
+            &[
+                "hello",
+                "search",
+                "files",
+                "get",
+                "play",
+                "status",
+                "pause",
+                "resume",
+                "remove",
+                "verify",
+                "watch",
+                "shutdown",
+                "titles",
+                "title",
+                "sources",
+                "play_title",
+                "get_title",
+            ],
+        ),
+        (6, &["home"]),
+    ];
+
+    #[test]
+    fn a_new_request_comes_with_a_new_wire_version() {
+        let unknown = serde_json::from_str::<Request>(r#"{"op": "?"}"#).unwrap_err().to_string();
+        let listed = unknown.split_once("expected one of ").map(|(_, ops)| ops).unwrap_or_default();
+        let listed = listed.split(" at line").next().unwrap_or_default();
+        let ops: std::collections::BTreeSet<&str> = listed.split(", ").map(|op| op.trim_matches('`')).collect();
+        let added: std::collections::BTreeSet<&str> = ADDED.iter().flat_map(|(_, ops)| ops.iter().copied()).collect();
+        assert_eq!(ops, added, "a new request goes in ADDED under a new wire version");
+        assert_eq!(ADDED.last().map(|(version, _)| *version), Some(WIRE_VERSION));
     }
 
     #[test]
