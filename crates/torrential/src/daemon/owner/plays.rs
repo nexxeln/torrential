@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, Kept};
 use torrential_core::{Error, TitleId, TorrentId};
 
-use super::super::admission;
+use super::super::admission::{self, Space};
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
 use super::super::engine_port::EngineCommand;
 use super::super::files;
@@ -352,7 +352,31 @@ impl Owner {
             log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
             self.pause(vec![id.to_hex()], oneshot::channel().0);
         }
-        self.make_room(&saved);
+        self.make_room(&saved, None);
+    }
+
+    /// Makes room in the plays folder for a new play of `id` that takes `bytes`, before the disk
+    /// is checked for room, so a full plays folder does not stop the play from starting.
+    pub(super) fn make_room_for(&mut self, id: TorrentId, bytes: u64) {
+        match self.store.saved_titles() {
+            Ok(saved) => self.make_room(&saved, Some(Share { id, bytes, watched_at: now(), busy: true })),
+            Err(error) => log(&format!("cannot read the library, so no play leaves: {}", error.message)),
+        }
+    }
+
+    /// Whether `id` is leaving the plays folder.
+    pub(super) fn leaving(&self, id: TorrentId) -> bool {
+        self.tending.leaving.contains(&id)
+    }
+
+    /// `space` as the check for room counts it: what the plays leaving the plays folder take up on
+    /// that disk is as good as free.
+    pub(super) fn reclaimable(&self, space: Space) -> Space {
+        if !self.disk.space(&self.config.plays.root).is_ok_and(|plays| plays.device == space.device) {
+            return space;
+        }
+        let leaving = self.tending.leaving.iter().filter_map(|id| self.jobs.get(id)).map(|job| self.play_bytes(job));
+        Space { free: space.free + leaving.sum::<u64>() + self.tending.deleter.play_bytes(), ..space }
     }
 
     /// Whether `job` is a play that may pause and leave by itself: not one the person got by
@@ -368,12 +392,12 @@ impl Owner {
         self.streamed_now(id) || self.under_test.contains_key(&id)
     }
 
-    /// Starts taking the plays watched longest ago out of the plays folder until the rest fit
-    /// in its limit.
-    fn make_room(&mut self, saved: &BTreeSet<TitleId>) {
+    /// Starts taking the plays watched longest ago out of the plays folder until the rest, and
+    /// `incoming`, fit in its limit.
+    fn make_room(&mut self, saved: &BTreeSet<TitleId>, incoming: Option<Share>) {
         // What is still to be deleted, or is leaving, takes up room too.
         let mut going = self.tending.deleter.play_bytes();
-        let mut shares = Vec::new();
+        let mut shares: Vec<Share> = incoming.into_iter().collect();
         for job in self.jobs.values() {
             let Home::Plays(play) = job.record.home else { continue };
             if self.tending.leaving.contains(&job.id()) {

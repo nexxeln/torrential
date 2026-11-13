@@ -8,14 +8,14 @@ use serde_json::json;
 use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
 use torrential_core::{ErrorCode, Place, Target, TorrentId};
 
-use super::super::admission::GIB;
+use super::super::admission::{GIB, reserve};
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
 use super::super::owner::Command;
 use super::super::owner::deleter::PlayName;
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
-use super::{Gate, Harness, MIB, Outside, Player, prefix, torrent, written};
+use super::{Gate, Harness, MIB, Outside, Player, ROOMY, prefix, torrent, written};
 
 impl Harness {
     async fn rm(&self, refs: Vec<String>, delete: bool) -> Vec<Change> {
@@ -432,4 +432,23 @@ async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_go
         assert!(std::time::Instant::now() < deadline, "the folder goes once it can be deleted");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_play_on_a_full_disk_starts_once_older_plays_make_room() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(2 * GIB);
+    let older = torrent(0xb1, "older", &[("older.mp4", 8 * GIB)]);
+    h.play_web(&older).await;
+    h.until("half of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
+    assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.disk.set_free(reserve(ROOMY.total) + GIB);
+
+    h.play_web(&torrent(0xb2, "newer", &[("newer.mp4", 2 * GIB)])).await;
+    assert_eq!(names(&h).await.last().map(String::as_str), Some("newer"));
+    h.until("the older play has left", |jobs| jobs.len() == 1).await;
 }

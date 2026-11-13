@@ -632,7 +632,7 @@ impl Owner {
         let Ok(space) = self.disk.space(dir) else { return 0 };
         self.jobs
             .values()
-            .filter(|j| j.id() != except && j.record.intent == Intent::Running)
+            .filter(|j| j.id() != except && j.record.intent == Intent::Running && !self.leaving(j.id()))
             .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
             .map(|job| self.space_needed(job))
             .sum()
@@ -709,7 +709,7 @@ impl Owner {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
-            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
+            admission::check_disk(self.reclaimable(plan.space), plan.needed(0), self.others_remaining(&dir, id))?;
         }
         let record = JobRecord {
             id,
@@ -805,7 +805,7 @@ impl Owner {
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
         let needed = plan.needed(if recheck { 0 } else { job.verified() });
-        admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
+        admission::check_disk(self.reclaimable(plan.space), needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
             preview.record.selection = selection;
@@ -922,6 +922,10 @@ impl Owner {
             }
         }
         let absent = matches!(before, Before::Absent);
+        if absent && matches!(to, Destination::Plays) {
+            let size = files.iter().map(|&i| metainfo.files[i as usize].size).sum();
+            self.make_room_for(id, size);
+        }
         let (dir, home) = if absent { self.destination(id, to)? } else { (None, Home::Folder) };
         let free = match &title {
             Some(_) if absent => {
@@ -1445,7 +1449,7 @@ impl Owner {
             admission::check_size(plan.selected_size, cap, Some(id))?;
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
-            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
+            admission::check_disk(self.reclaimable(plan.space), plan.needed(0), self.others_remaining(&dir, id))?;
             Ok(plan)
         });
         match admitted {
@@ -1739,8 +1743,11 @@ impl Owner {
         }
         if job.metainfo.is_some()
             && let Ok(space) = self.disk.space(&job.record.dir)
-            && let Err(error) =
-                admission::check_disk(space, self.space_needed(job), self.others_remaining(&job.record.dir, id))
+            && let Err(error) = admission::check_disk(
+                self.reclaimable(space),
+                self.space_needed(job),
+                self.others_remaining(&job.record.dir, id),
+            )
         {
             self.fail(id, error);
             return;
