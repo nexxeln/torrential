@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Playback, Release, ReleaseId, SearchResult, Skip,
-    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Release, ReleaseId, SearchResult, Skip,
+    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef, Viewer,
 };
 
 use super::super::engine_port::Metainfo;
@@ -43,8 +43,9 @@ pub struct PlayTitle {
     pub pin: Option<ReleaseId>,
     /// The download that stalled. It is never tried, and once another source plays it is paused.
     pub replace: Option<TorrentId>,
-    /// What the caller's player decodes, in place of the preference in config.yaml.
-    pub playback: Option<Playback>,
+    /// The device that pressed play, which sources are ranked for. `None` ranks for this
+    /// machine's display.
+    pub viewer: Option<Viewer>,
     pub containers: Containers,
     pub finish: Finish,
 }
@@ -103,9 +104,8 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     }
 
     let preferences = (ctx.web.preferences)();
-    let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
-    let rank_for = || ctx.machine.profile(preferences);
-    let query = match ctx.titles.query(&title, preferences).await {
+    let rank_for = || ctx.machine.profile(preferences, ask.viewer);
+    let query = match ctx.titles.query(&title, preferences, ask.viewer).await {
         Ok(query) => query,
         Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
     };
@@ -567,7 +567,7 @@ mod tests {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|n| release(n).id),
             replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
-            playback: None,
+            viewer: None,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };

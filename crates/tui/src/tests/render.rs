@@ -460,7 +460,7 @@ fn a_search_before_detection_says_so_without_cutting_the_words() {
 
 #[test]
 fn a_search_with_overrides_names_them_or_only_the_machine() {
-    let with = |preferences| Profile { detected: Some(mac()), preferences, room: None };
+    let with = |preferences| Profile { detected: Some(mac()), preferences, room: None, viewer: None };
     let tv = || with(Preferences { screen: Some(torrential_core::Screen::Tv4k), ..Preferences::default() });
     assert_eq!(
         heads_row(&searched_for((160, 45), tv())),
@@ -555,7 +555,8 @@ fn the_panel_opens_on_the_saved_overrides_and_fits_60_columns() {
         max_size: Some(5_000_000_000),
         playback: Some(torrential_core::Playback::H264),
     };
-    let mut state = searched_for((60, 16), Profile { detected: Some(mac()), preferences: five, room: None });
+    let mut state =
+        searched_for((60, 16), Profile { detected: Some(mac()), preferences: five, room: None, viewer: None });
     press(&mut state, "S");
     assert_eq!(
         panel_rows(&state),

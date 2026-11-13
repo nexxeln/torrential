@@ -39,7 +39,7 @@ pub enum Msg {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Effect {
-    Search { search: u64, query: SearchQuery },
+    Search { search: u64, query: Box<SearchQuery> },
     Files(Item),
     Get { release: ReleaseId, files: Option<Vec<String>> },
     Play(Item),
@@ -791,7 +791,7 @@ impl State {
             self.cursor = None;
         }
         let query = SearchQuery { limit: RESULT_LIMIT, ..SearchQuery::new(text) };
-        vec![Effect::Search { search: id, query }]
+        vec![Effect::Search { search: id, query: Box::new(query) }]
     }
 
     fn merge(&mut self, id: u64, result: SearchResult, phase: SearchPhase) {

@@ -1085,7 +1085,8 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     assert_eq!((status, &missing["error"]["code"]), (404, &json!("not_found")));
     assert_eq!(error(&get(&h, "/api/title/art?id=tt0063350&kind=banner").await).0, 400);
 
-    let (status, headers, body) = fetch(&h, "GET", "/api/title/sources?video=tt0063350&playback=h264", &[], "").await;
+    let phone = "/api/title/sources?video=tt0063350&width=1170&height=2532&scale=3&playback=hevc";
+    let (status, headers, body) = fetch(&h, "GET", phone, &[], "").await;
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
     let done = lines(&body).pop().unwrap();
@@ -1104,7 +1105,15 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
             json!(["night_of_the_living_dead", "film", "strong"]),
         ]
     );
-    assert_eq!(done["result"]["query"]["profile"]["preferences"]["playback"], json!("h264"));
+    let profile = &done["result"]["query"]["profile"];
+    assert_eq!(
+        (&profile["screen"], &profile["playback"], &profile["preferences"]["playback"]),
+        (
+            &json!({ "value": "720p", "source": "viewer" }),
+            &json!({ "value": "hevc", "source": "viewer" }),
+            &Value::Null
+        )
+    );
     assert_eq!(error(&get(&h, "/api/title/sources?video=tt9999901:2:2").await).0, 400, "it has not aired");
 
     let (_, _, raw) = fetch(&h, "GET", "/api/search?q=night", &[], "").await;
@@ -1158,6 +1167,37 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
     };
     let streams: Vec<&str> = reply.streams.iter().map(|s| s.path.as_str()).collect();
     assert_eq!((reply.job.id, streams, title.tried), (film.info_hash.id(), vec!["Night.1968.1080p.mkv"], vec![]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_ranks_its_sources_for_the_screen_that_pressed_play() {
+    use torrential_core::{Playback, Resolution, Viewer};
+    let (h, _) = titles::night();
+    let tv = json!({ "width": 3840, "height": 2160, "scale": 1, "playback": "hevc-hdr" });
+    let ask = json!({ "video": "tt0063350", "viewer": tv }).to_string();
+    let (status, _, body) = fetch(&h, "POST", "/api/title/play", &["Content-Type: application/json"], &ask).await;
+    assert_eq!((status, &lines(&body).pop().unwrap()["type"]), (200, &json!("playing")));
+    let viewer = h.search.ranked_for().and_then(|profile| profile.viewer);
+    assert_eq!(viewer, Some(Viewer { screen: Resolution::P2160, playback: Playback::HevcHdr }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screen_measured_in_part_or_without_pixels_is_refused() {
+    let (h, _) = titles::night();
+    assert_eq!(
+        error(&get(&h, "/api/title/sources?video=tt0063350&width=1170&playback=hevc").await),
+        (400, "usage", "a viewer needs all of width, height, scale, and playback")
+    );
+    let flat = json!({ "width": 1170, "height": 2532, "scale": 0, "playback": "hevc" });
+    assert_eq!(
+        error(&post(&h, "/api/title/play", json!({ "video": "tt0063350", "viewer": flat })).await),
+        (400, "usage", "scale 0 is not a number of device pixels to a CSS pixel")
+    );
+    let dark = json!({ "width": 0, "height": 2160, "scale": 1, "playback": "hevc" });
+    assert_eq!(
+        error(&post(&h, "/api/title/play", json!({ "video": "tt0063350", "viewer": dark })).await),
+        (400, "usage", "a 0x2160 screen has no pixels")
+    );
 }
 
 /// The releases `GET /api/title/sources` lists for `video`, each with why it failed lately.

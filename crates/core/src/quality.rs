@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
 pub struct Quality {
@@ -12,7 +12,7 @@ pub struct Quality {
     pub hdr: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Resolution {
     /// 576 lines or fewer, such as a DVD rip.
     #[serde(rename = "sd")]

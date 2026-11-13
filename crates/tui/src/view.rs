@@ -521,7 +521,7 @@ fn ranking_rows(buf: &mut Buffer, state: &State, ranking: &Ranking, screen: &Scr
     margin(buf, at, y, "ranking", fg(PENCIL));
     let room = right - at.content;
     let lead = if at.narrow() { "ranking for " } else { "for " };
-    let profile = Profile { detected: state.machine.clone(), preferences: ranking.picks, room: None };
+    let profile = Profile { detected: state.machine.clone(), preferences: ranking.picks, room: None, viewer: None };
     let heads = first_fit(shortenings(&profile.describe()), usize::from(room) - lead.len());
     put(buf, at.content, y, room, &heads.map(|heads| format!("{lead}{heads}")).unwrap_or_default(), fg(PENCIL));
     for (row, y) in ROWS.into_iter().zip(y + 1..) {
@@ -557,7 +557,7 @@ fn auto_note(row: Row, ranking: &Ranking, machine: Option<&Machine>) -> Option<S
         }),
         (Row::Playback, Some(machine)) => {
             let preferences = Preferences { playback: None, ..ranking.picks };
-            let auto = Profile { detected: Some(machine.clone()), preferences, room: None };
+            let auto = Profile { detected: Some(machine.clone()), preferences, room: None, viewer: None };
             Some(auto.playback().map_or_else(|| "any codec".into(), |p| format!("detected {}", p.value.as_str())))
         }
     }

@@ -2,7 +2,7 @@ import { ChevronRightIcon } from "@heroicons/react/16/solid";
 import { useEffect, useRef, useState } from "react";
 import { sources } from "../api";
 import { count, list, sentence } from "../lib/format";
-import { playback } from "../player/plan";
+import { viewer } from "../player/plan";
 import { playPath } from "../router";
 import { ResultRow } from "../search/ResultRow";
 import { type SearchState, useSearchStream } from "../search/useSearch";
@@ -37,7 +37,7 @@ interface Props {
 /** The releases Play would try, listed only when opened. Each plays that release and no other. */
 export function Sources({ video, label, kind, open: opened }: Props) {
   const [open, setOpen] = useState(opened);
-  const state = useSearchStream(open ? video : null, (signal) => sources(video, playback(), signal));
+  const state = useSearchStream(open ? video : null, (signal) => sources(video, viewer(), signal));
   const result = state.kind === "searching" || state.kind === "done" ? state.result : null;
 
   // A link to the list scrolls to it once the first sources make the page long enough to.

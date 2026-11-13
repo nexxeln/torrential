@@ -174,7 +174,7 @@ impl Harness {
             video: video.parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace,
-            playback: None,
+            viewer: None,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };
@@ -190,7 +190,7 @@ impl Harness {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace: None,
-            playback: None,
+            viewer: None,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };
@@ -764,7 +764,7 @@ async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHand
         video: "tt0063350".parse().unwrap(),
         pin: Some(ReleaseId::Torrent(source.info_hash.id())),
         replace: None,
-        playback: None,
+        viewer: None,
         containers: Containers::Browser,
         finish: Finish::Stream,
     };

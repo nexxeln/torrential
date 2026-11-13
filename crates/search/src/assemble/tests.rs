@@ -4,7 +4,7 @@ use std::sync::Arc;
 use torrential_core::error::Details;
 use torrential_core::{
     Arch, Category, Display, ErrorCode, Flag, Language, Machine, Os, Playback, Preferences, Profile, Release,
-    ReleaseId, Screen, SearchQuery, Sort, SourceOutcome, SourceReport,
+    ReleaseId, Screen, SearchQuery, Sort, SourceOutcome, SourceReport, Viewer,
 };
 
 use super::*;
@@ -933,6 +933,29 @@ fn a_remux_ranks_after_an_encode_in_its_band() {
             "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP",
         ]
     );
+}
+
+fn watching_on(width: u32, height: u32, scale: f64) -> Profile {
+    Profile { viewer: Some(Viewer::measured(width, height, scale, Playback::Hevc)), ..mac() }
+}
+
+#[test]
+fn a_phone_plays_720p_first_a_4k_tv_2160p_and_this_mac_its_1080p() {
+    let uhd = "Night of the Living Dead (1968) 2160p BRRip 5.1 10Bit x265 -YTS";
+    let hd = "Night of the Living Dead (1968) 1080p BRRip x264 -YTS";
+    let small = "Night Of The Living Dead 1968 720p BRRip x264-x0r";
+    let runs = [fresh(
+        &knaben(),
+        vec![
+            video(0x93, uhd, Some(50), 4_700_000_000),
+            video(0x94, hd, Some(232), 1_600_000_000),
+            video(0x92, small, Some(22), 1_700_000_000),
+        ],
+    )];
+    let wanted = night(Namesakes::Leading, 1968);
+    assert_eq!(played(&wanted, watching_on(1170, 2532, 3.0), &runs), [small, hd, uhd]);
+    assert_eq!(played(&wanted, watching_on(3840, 2160, 1.0), &runs), [uhd, hd, small]);
+    assert_eq!(played(&wanted, mac(), &runs), [hd, small, uhd]);
 }
 
 fn friday() -> Wanted {

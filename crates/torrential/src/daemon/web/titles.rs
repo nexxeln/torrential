@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use torrential_core::title::Episode;
 use torrential_core::watching::next;
 use torrential_core::{
-    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Kind, Next, Playback, Preferences, ReleaseId, TitleCard,
-    TitleDetails, TitleId, TorrentId, VideoRef, Watched,
+    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Kind, Next, Playback, ReleaseId, TitleCard, TitleDetails,
+    TitleId, TorrentId, VideoRef, Viewer, Watched,
 };
 
 use super::super::http::{Connection, Request};
@@ -83,18 +83,16 @@ fn art_of(request: &Request) -> Result<(TitleId, ArtKind), Error> {
     Ok((id, kind))
 }
 
-/// `GET /api/title/sources?video=[&playback=]`: the title's releases as `/api/search` streams
-/// them, in the order a play tries them.
+/// `GET /api/title/sources?video=[&width=&height=&scale=&playback=]`: the title's releases as
+/// `/api/search` streams them, in the order a play from that screen tries them.
 pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
     let asked = async {
         let video: VideoRef = required(request, "video")?.parse()?;
-        let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
+        let viewer = measured(request)?.map(Measured::viewer).transpose()?;
         let title = ctx.titles.resolve(&video, now()).await?;
         let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-        let preferences = (ctx.web.preferences)();
-        let preferences = Preferences { playback: playback.or(preferences.playback), ..preferences };
-        let query = ctx.titles.query(&title, preferences).await?;
+        let query = ctx.titles.query(&title, (ctx.web.preferences)(), viewer).await?;
         Ok::<_, Error>((query, title.video, jobs))
     };
     let asked = tokio::select! {
@@ -109,6 +107,44 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result
     }
 }
 
+/// The screen that pressed play and what its player decodes, as the web app measures them.
+#[derive(Deserialize)]
+struct Measured {
+    /// The screen in device pixels.
+    width: u32,
+    height: u32,
+    /// Device pixels to a CSS pixel.
+    scale: f64,
+    playback: Playback,
+}
+
+impl Measured {
+    fn viewer(self) -> Result<Viewer, Error> {
+        let Measured { width, height, scale, playback } = self;
+        let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
+        if width == 0 || height == 0 {
+            return usage(format!("a {width}x{height} screen has no pixels"));
+        }
+        if !(scale.is_finite() && scale > 0.0) {
+            return usage(format!("scale {scale} is not a number of device pixels to a CSS pixel"));
+        }
+        Ok(Viewer::measured(width, height, scale, playback))
+    }
+}
+
+/// The `width`, `height`, `scale`, and `playback` parameters, which come together or not at all.
+fn measured(request: &Request) -> Result<Option<Measured>, Error> {
+    let size = (number(request, "width")?, number(request, "height")?, number(request, "scale")?);
+    let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
+    match (size, playback) {
+        ((Some(width), Some(height), Some(scale)), Some(playback)) => {
+            Ok(Some(Measured { width, height, scale, playback }))
+        }
+        ((None, None, None), None) => Ok(None),
+        _ => Err(Error::new(ErrorCode::Usage, "a viewer needs all of width, height, scale, and playback")),
+    }
+}
+
 fn playback(text: &str) -> Result<Playback, Error> {
     serde_json::from_value(Value::String(text.to_string()))
         .map_err(|_| Error::new(ErrorCode::Usage, format!("{text} is not a playback: use h264, hevc, or hevc-hdr")))
@@ -118,7 +154,8 @@ fn playback(text: &str) -> Result<Playback, Error> {
 struct Play {
     /// `tt0063350`, `tt0903747:3:5`, or a series for its next episode.
     video: VideoRef,
-    playback: Option<Playback>,
+    /// The screen that pressed play. Without it, sources are ranked for this machine's display.
+    viewer: Option<Measured>,
     /// Play only this release.
     source: Option<ReleaseId>,
     /// The download that stalled.
@@ -129,10 +166,12 @@ struct Play {
 /// `failed`. Closing the connection stops the play and gives up the source under test.
 pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
-    let ask = match super::body::<Play>(request) {
-        Ok(Play { video, playback, source, replace }) => {
-            PlayTitle { video, pin: source, replace, playback, containers: Containers::Browser, finish: Finish::Stream }
-        }
+    let ask = super::body::<Play>(request).and_then(|Play { video, viewer, source, replace }| {
+        let viewer = viewer.map(Measured::viewer).transpose()?;
+        Ok(PlayTitle { video, pin: source, replace, viewer, containers: Containers::Browser, finish: Finish::Stream })
+    });
+    let ask = match ask {
+        Ok(ask) => ask,
         Err(error) => return fail(conn, request, &error).await,
     };
     conn.begin(NDJSON, request).await?;
