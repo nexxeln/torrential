@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use torrential_core::protocol::{
     Change, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream,
 };
-use torrential_core::{Error, ErrorCode, InfoHash, Job, JobStatus, Selection, Target};
+use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
 use super::admission::{FakeDisk, GIB, Space};
 use super::engine_port::{
@@ -13,7 +13,7 @@ use super::engine_port::{
     parse_fake,
 };
 use super::owner::OwnerConfig;
-use super::search_port::{self, fake_catalog};
+use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
@@ -49,6 +49,12 @@ struct Outside {
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     timing: Timing,
+    /// The preferences in config.yaml.
+    preferences: Preferences,
+    /// The display the engine detected. None, as on a server.
+    display: Option<Display>,
+    /// A search in place of the harness's fake, which keeps its catalog's order.
+    search: Option<Arc<dyn SearchPort>>,
 }
 
 impl Default for Outside {
@@ -58,6 +64,9 @@ impl Default for Outside {
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
+            preferences: Preferences::default(),
+            display: None,
+            search: None,
         }
     }
 }
@@ -133,19 +142,22 @@ impl Harness {
         let ports = Ports {
             engine,
             parse,
-            search: Arc::new(search.clone()),
+            search: outside.search.clone().unwrap_or_else(|| Arc::new(search.clone())),
             disk: Box::new(disk.clone()),
             machine: crate::machine::Detector::detected(
                 torrential_core::Machine {
                     os: torrential_core::Os::Linux,
-                    display: None,
+                    display: outside.display,
                     arch: Some(torrential_core::Arch::X86_64),
                     language: None,
                 },
                 dir.path().join("downloads"),
                 Box::new(disk.clone()),
             ),
-            preferences: Arc::new(torrential_core::Preferences::default),
+            preferences: Arc::new({
+                let preferences = outside.preferences;
+                move || preferences
+            }),
             tools: Arc::new({
                 let tools = outside.tools.clone();
                 move || tools.lock().unwrap().clone()

@@ -183,7 +183,7 @@ fn perform<B: Backend>(effect: Effect, backend: &Arc<B>, tx: &Sender<Msg>) {
     match effect {
         Effect::Search { search, query } => {
             thread::spawn(move || {
-                let result = backend.search(query, &mut |result, pending| {
+                let result = backend.search(*query, &mut |result, pending| {
                     let _ = tx.send(Msg::SearchUpdate { search, result, pending });
                 });
                 let _ = tx.send(Msg::SearchDone { search, result });

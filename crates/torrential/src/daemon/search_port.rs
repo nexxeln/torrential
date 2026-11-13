@@ -117,6 +117,8 @@ struct FakeState {
     script: Vec<FakeSource>,
     recent: Vec<Release>,
     searches: usize,
+    /// The profile the last answer was ranked for.
+    ranked_for: Option<Profile>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,12 +153,18 @@ impl Fake {
             script,
             recent: Vec::new(),
             searches: 0,
+            ranked_for: None,
         })))
     }
 
     #[cfg(test)]
     pub fn searches(&self) -> usize {
         self.0.lock().unwrap().searches
+    }
+
+    #[cfg(test)]
+    pub fn ranked_for(&self) -> Option<Profile> {
+        self.0.lock().unwrap().ranked_for.clone()
     }
 
     #[cfg(test)]
@@ -179,6 +187,7 @@ impl Fake {
         let mut state = self.0.lock().unwrap();
         state.recent.retain(|r| !result.releases.iter().any(|n| n.id == r.id));
         state.recent.splice(0..0, result.releases.iter().cloned());
+        state.ranked_for = Some(result.query.profile.clone());
         result
     }
 }

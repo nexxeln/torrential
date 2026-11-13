@@ -10,7 +10,7 @@ use torrential_core::error::Details;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
 use torrential_core::{
-    AttemptEvent, Category, Check, Error, ErrorCode, Job, LocatorId, Release, ReleaseId, TitleLink, TorrentId,
+    AttemptEvent, Category, Check, Error, ErrorCode, Job, LocatorId, Player, Release, ReleaseId, TitleLink, TorrentId,
 };
 
 use super::super::admission::GIB;
@@ -47,11 +47,11 @@ pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) ->
 /// first never sends its file list, the second holds no video, no peer has any piece of the
 /// third, and the fourth plays. The search also finds the 1990 remake, which is not this film.
 pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
-    night_within(TIMING)
+    night_with(Outside::default())
 }
 
-/// `night`, with `timing` for its plays.
-fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
+/// `night`, with `outside` around the engine.
+pub(super) fn night_with(outside: Outside) -> (Harness, [FakeTorrentFile; 4]) {
     let night = [
         torrent(0xa1, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", &[("Night.1968.720p.mp4", 2 * GIB)]),
         torrent(0xa2, "Night.of.the.Living.Dead.1968.DVD9", &[("VIDEO_TS/NIGHT.iso", 4 * GIB)]),
@@ -72,7 +72,7 @@ fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
     catalog.push(listed(&remake, "knaben", Some(90)));
     let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
     let search = search_port::Fake::scripted(catalog, script, BTreeMap::new());
-    let h = Harness::with_outside(search, Outside { timing, ..Outside::default() });
+    let h = Harness::with_outside(search, outside);
     for t in &night[1..] {
         h.swarm.publish(t.clone());
     }
@@ -128,7 +128,12 @@ impl Harness {
         (play, hold)
     }
 
-    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Hold), Error> {
+    pub(super) async fn play_for(
+        &self,
+        t: &FakeTorrentFile,
+        files: &[u32],
+        title: Option<&str>,
+    ) -> Result<(Job, Hold), Error> {
         let (play, hold) = self.play_command(t, files, title);
         let (job, _) = self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
         Ok((job, hold))
@@ -174,7 +179,7 @@ impl Harness {
             video: video.parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace,
-            playback: None,
+            player: Player::External,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };
@@ -190,7 +195,7 @@ impl Harness {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace: None,
-            playback: None,
+            player: Player::External,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };
@@ -764,7 +769,7 @@ async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHand
         video: "tt0063350".parse().unwrap(),
         pin: Some(ReleaseId::Torrent(source.info_hash.id())),
         replace: None,
-        playback: None,
+        player: Player::External,
         containers: Containers::Browser,
         finish: Finish::Stream,
     };
@@ -784,7 +789,7 @@ async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHand
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last_to_go_stops_it() {
     let patient = Timing { first_bytes: std::time::Duration::from_secs(10), ..TIMING };
-    let (h, night) = night_within(patient);
+    let (h, night) = night_with(Outside { timing: patient, ..Outside::default() });
     h.swarm.set_rate(0);
     let first = testing(&h, &night[3]).await;
     let second = testing(&h, &night[3]).await;

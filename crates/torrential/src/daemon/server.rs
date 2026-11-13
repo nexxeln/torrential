@@ -13,8 +13,8 @@ use torrential_core::protocol::{
 use torrential_core::text::sanitize;
 use torrential_core::watching::next;
 use torrential_core::{
-    AttemptEvent, Error, ErrorCode, HexPrefix, Next, Release, ReleaseId, SearchQuery, SearchResult, Target, TitleCard,
-    TitleId, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Error, ErrorCode, HexPrefix, Next, Player, Profile, Release, ReleaseId, SearchQuery, SearchResult,
+    Target, TitleCard, TitleId, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::engine_port::{EngineHandle, Metainfo, ParseTorrent};
@@ -125,8 +125,8 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
 }
 
 async fn search(ctx: &Ctx, query: SearchQuery) -> Result<SearchResult, Error> {
-    let preferences = query.profile.preferences;
-    let mut result = ctx.search.search(query, &|| ctx.machine.profile(preferences)).await?;
+    let Profile { preferences, player, .. } = query.profile;
+    let mut result = ctx.search.search(query, &|| ctx.machine.profile(preferences, player)).await?;
     record(ctx, &mut result);
     Ok(result)
 }
@@ -141,8 +141,8 @@ pub(super) fn record(ctx: &Ctx, result: &mut SearchResult) {
 
 async fn stream_search(ctx: &Ctx, query: SearchQuery, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let preferences = query.profile.preferences;
-    let rank_for = || ctx.machine.profile(preferences);
+    let Profile { preferences, player, .. } = query.profile;
+    let rank_for = || ctx.machine.profile(preferences, player);
     let search = ctx.search.search_stream(query, &rank_for, progress_tx);
     tokio::pin!(search);
     let result = loop {
@@ -343,9 +343,10 @@ pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
 /// The releases of the film or episode `video` names, in the order a play tries them.
 async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
     let title = ctx.titles.resolve(&video, super::owner::now()).await?;
-    let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)()).await?).await?;
+    let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)(), Player::External).await?).await?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-    result.releases = ctx.titles.line(&jobs, &title.video, result.releases);
+    let ffmpeg = (ctx.web.tools)().both().is_some();
+    result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);
     Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
 }
 
@@ -406,7 +407,7 @@ async fn play_title(
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let before: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
     let mut seen = Seen::default();
-    let ask = PlayTitle { video, pin, replace: None, playback: None, containers: Containers::Any, finish };
+    let ask = PlayTitle { video, pin, replace: None, player: Player::External, containers: Containers::Any, finish };
     attempt::run(ctx, ask, |step| {
         seen.note(&step);
         let _ = steps.send(step);

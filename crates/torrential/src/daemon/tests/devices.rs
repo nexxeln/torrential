@@ -17,7 +17,7 @@ use super::{GIB, Harness, MIB, torrent, written};
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
 
 /// The machine's address on the home network, or `None` on one with no network to test over.
-fn lan() -> Option<Ipv4Addr> {
+pub(super) fn lan() -> Option<Ipv4Addr> {
     let found = Names::read().lan.first().copied();
     if found.is_none() {
         eprintln!("skipped: this machine has no address on a home network");
@@ -121,7 +121,7 @@ async fn devices(h: &Harness, request: Request) -> DeviceList {
 }
 
 /// Waits until the engine listens on `ip`, or until it stops.
-async fn listening(h: &Harness, ip: Ipv4Addr, on: bool) {
+pub(super) async fn listening(h: &Harness, ip: Ipv4Addr, on: bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect((ip, h.running.ctx.http_port)).await.is_ok() != on {
         assert!(

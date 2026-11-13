@@ -1,32 +1,79 @@
 //! The web app's side of the engine's HTTP server: its pages, its API, and what it asks ffmpeg for.
 
+use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use torrential_core::{ArtKind, Error, Target, TitleCard, TitleDetails, TitleId};
+use torrential_core::{
+    ArtKind, Display, Error, Playback, Preferences, Screen, Target, TitleCard, TitleDetails, TitleId,
+};
 use torrential_search::catalog::Picture;
 
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
-use super::super::search_port::{self, BoxFuture, FakeSource, fake_catalog};
+use super::super::search_port::{self, BoxFuture, FakeSource, SearchPort, fake_catalog};
 use super::super::titles::catalog_port::{self, CatalogPort};
 use super::super::web::ffmpeg::Tools;
-use super::{Harness, magnet, prefix, titles, torrent, written};
+use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
+
+/// Where a browser in a test runs.
+enum On {
+    /// This Mac, over loopback.
+    Mac,
+    /// A phone or TV paired with the engine, which reaches it by this machine's address on the
+    /// home network.
+    Device { ip: Ipv4Addr, cookie: String },
+}
+
+impl On {
+    /// Pairs another device, or `None` on a machine with no home network to test over.
+    async fn pair(h: &Harness) -> Option<Self> {
+        use torrential_core::protocol::{Request, Response};
+        let ip = super::devices::lan()?;
+        let Response::Devices { list } = h.ask(Request::AddDevice).await else {
+            panic!("adding a device answers the devices")
+        };
+        let code = list.offer.expect("adding a device opens a code").code;
+        super::devices::listening(h, ip, true).await;
+        let mut page = Page::to(h, ip).await;
+        page.send("POST", "/api/pair", &["Content-Type: application/json"], &json!({ "code": code }).to_string()).await;
+        let (status, headers) = page.head().await;
+        assert_eq!(status, 200, "{headers}");
+        let cookie = headers.lines().find_map(|h| h.strip_prefix("set-cookie: ")).expect("pairing sets a cookie");
+        Some(Self::Device { ip, cookie: cookie.split(';').next().unwrap().to_string() })
+    }
+
+    /// The address the browser reaches the engine by.
+    fn ip(&self) -> Ipv4Addr {
+        match self {
+            Self::Mac => Ipv4Addr::LOCALHOST,
+            Self::Device { ip, .. } => *ip,
+        }
+    }
+}
 
 /// One HTTP/1.1 connection from a browser, or from curl.
 struct Page(BufReader<TcpStream>);
 
 impl Page {
     async fn open(h: &Harness) -> Self {
-        Self(BufReader::new(TcpStream::connect(("127.0.0.1", h.running.ctx.http_port)).await.unwrap()))
+        Self::to(h, Ipv4Addr::LOCALHOST).await
     }
 
+    /// A connection to the engine at `ip`.
+    async fn to(h: &Harness, ip: Ipv4Addr) -> Self {
+        Self(BufReader::new(TcpStream::connect((ip, h.running.ctx.http_port)).await.unwrap()))
+    }
+
+    /// Sends a request that names the address the page connected to, as a browser does.
     async fn send(&mut self, method: &str, path: &str, headers: &[&str], body: &str) {
-        let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        let host = self.0.get_ref().peer_addr().unwrap();
+        let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
         for header in headers {
             request.push_str(&format!("{header}\r\n"));
         }
@@ -92,7 +139,27 @@ impl Page {
 
 /// One request on its own connection: the status, the headers, and the whole body.
 async fn fetch(h: &Harness, method: &str, path: &str, headers: &[&str], body: &str) -> (u16, String, Vec<u8>) {
-    let mut page = Page::open(h).await;
+    exchange(Page::open(h).await, method, path, headers, body).await
+}
+
+/// `fetch`, from a browser `on` this Mac or a paired device, which sends its cookie.
+async fn fetch_on(
+    h: &Harness,
+    on: &On,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> (u16, String, Vec<u8>) {
+    let cookie = match on {
+        On::Mac => None,
+        On::Device { cookie, .. } => Some(format!("Cookie: {cookie}")),
+    };
+    let headers: Vec<&str> = headers.iter().copied().chain(cookie.as_deref()).collect();
+    exchange(Page::to(h, on.ip()).await, method, path, &headers, body).await
+}
+
+async fn exchange(mut page: Page, method: &str, path: &str, headers: &[&str], body: &str) -> (u16, String, Vec<u8>) {
     page.send(method, path, headers, body).await;
     let (status, headers) = page.head().await;
     let body = if method == "HEAD" { Vec::new() } else { page.body(&headers).await };
@@ -1223,7 +1290,8 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     assert_eq!((status, &missing["error"]["code"]), (404, &json!("not_found")));
     assert_eq!(error(&get(&h, "/api/title/art?id=tt0063350&kind=banner").await).0, 400);
 
-    let (status, headers, body) = fetch(&h, "GET", "/api/title/sources?video=tt0063350&playback=h264", &[], "").await;
+    let listing = "/api/title/sources?video=tt0063350&width=1170&height=2532&scale=3&playback=hevc";
+    let (status, headers, body) = fetch(&h, "GET", listing, &[], "").await;
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
     let done = lines(&body).pop().unwrap();
@@ -1242,7 +1310,16 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
             json!(["night_of_the_living_dead", "film", "strong"]),
         ]
     );
-    assert_eq!(done["result"]["query"]["profile"]["preferences"]["playback"], json!("h264"));
+    let profile = &done["result"]["query"]["profile"];
+    assert_eq!(
+        (&profile["screen"], &profile["playback"], &profile["player"]),
+        (
+            &Value::Null,
+            &json!({ "value": "hevc", "source": "viewer" }),
+            &json!({ "kind": "browser", "playback": "hevc" })
+        ),
+        "a browser on this Mac, which detected no display, ranks for no screen"
+    );
     assert_eq!(error(&get(&h, "/api/title/sources?video=tt9999901:2:2").await).0, 400, "it has not aired");
 
     let (_, _, raw) = search(&h, json!({ "q": "night" })).await;
@@ -1296,6 +1373,25 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
     };
     let streams: Vec<&str> = reply.streams.iter().map(|s| s.path.as_str()).collect();
     assert_eq!((reply.job.id, streams, title.tried), (film.info_hash.id(), vec!["Night.1968.1080p.mkv"], vec![]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screen_measured_in_part_or_without_pixels_is_refused() {
+    let (h, _) = titles::night();
+    assert_eq!(
+        error(&get(&h, "/api/title/sources?video=tt0063350&width=1170&playback=hevc").await),
+        (400, "usage", "a viewer needs all of width, height, scale, and playback")
+    );
+    let flat = json!({ "width": 1170, "height": 2532, "scale": 0, "playback": "hevc" });
+    assert_eq!(
+        error(&post(&h, "/api/title/play", json!({ "video": "tt0063350", "viewer": flat })).await),
+        (400, "usage", "scale 0 is not a number of device pixels to a CSS pixel")
+    );
+    let dark = json!({ "width": 0, "height": 2160, "scale": 1, "playback": "hevc" });
+    assert_eq!(
+        error(&post(&h, "/api/title/play", json!({ "video": "tt0063350", "viewer": dark })).await),
+        (400, "usage", "a 0x2160 screen has no pixels")
+    );
 }
 
 /// The releases `GET /api/title/sources` lists for `video`, each with why it failed lately.
@@ -1398,5 +1494,205 @@ async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_wo
     assert_eq!(
         (status, &done["type"], &done["result"]["releases"][0]["name"]),
         (200, &json!("done"), &json!("ubuntu-24.04.5-desktop-amd64.iso"))
+    );
+}
+
+/// A MacBook's panel. In its More Space mode the desktop lays out 1800x1169 at 2x, so a browser
+/// measures a frame of 3600x2338, larger than the panel.
+const PANEL: Display = Display { width: 3024, height: 1964, hdr: true };
+/// An iPhone's screen, as the web app measures it.
+const PHONE: &str = "width=1170&height=2532&scale=3&playback=hevc";
+
+/// What the sources listed at `path` for a browser `on` this Mac or a device were ranked for: the
+/// screen and the playback, each with where it came from.
+async fn listed_for(h: &Harness, on: &On, path: &str) -> (Value, Value) {
+    let (status, _, body) = fetch_on(h, on, "GET", path, &[], "").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let profile = lines(&body).pop().unwrap()["result"]["query"]["profile"].clone();
+    (profile["screen"].clone(), profile["playback"].clone())
+}
+
+/// What the last search of a play was ranked for, as `listed_for` reads it.
+fn played_for(h: &Harness) -> (Value, Value) {
+    let profile = serde_json::to_value(h.search.ranked_for().expect("the play searched")).unwrap();
+    (profile["screen"].clone(), profile["playback"].clone())
+}
+
+async fn play_on(h: &Harness, on: &On, ask: Value) -> Vec<Value> {
+    let headers = ["Content-Type: application/json"];
+    let (status, _, body) = fetch_on(h, on, "POST", "/api/title/play", &headers, &ask.to_string()).await;
+    let lines = lines(&body);
+    assert_eq!((status, &lines.last().unwrap()["type"]), (200, &json!("playing")), "{lines:#?}");
+    lines
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn this_mac_ranks_for_its_own_panel_and_its_browser_for_what_it_decodes_whatever_config_yaml_says() {
+    let hevc_hdr = Preferences { playback: Some(Playback::HevcHdr), ..Preferences::default() };
+    let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: hevc_hdr, ..Outside::default() });
+    let scaled = "/api/title/sources?video=tt0063350&width=3600&height=2338&scale=2&playback=h264";
+    let mac = (json!({ "value": "1080p", "source": "detected" }), json!({ "value": "h264", "source": "viewer" }));
+    assert_eq!(listed_for(&h, &On::Mac, scaled).await, mac);
+    let viewer = json!({ "width": 3600, "height": 2338, "scale": 2, "playback": "h264" });
+    play_on(&h, &On::Mac, json!({ "video": "tt0063350", "viewer": viewer })).await;
+    assert_eq!(played_for(&h), mac);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_device_ranks_for_the_screen_it_reports_and_config_yaml_only_for_this_mac() {
+    let tv = Preferences { screen: Some(Screen::Tv4k), playback: Some(Playback::H264), ..Preferences::default() };
+    let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: tv, ..Outside::default() });
+    let Some(phone) = On::pair(&h).await else { return };
+    let listing = format!("/api/title/sources?video=tt0063350&{PHONE}");
+    let on_phone = (json!({ "value": "720p", "source": "viewer" }), json!({ "value": "hevc", "source": "viewer" }));
+    assert_eq!(listed_for(&h, &phone, &listing).await, on_phone);
+    assert_eq!(
+        listed_for(&h, &On::Mac, &listing).await,
+        (json!({ "value": "2160p", "source": "override" }), json!({ "value": "hevc", "source": "viewer" })),
+        "the same numbers from this Mac rank for the screen in config.yaml"
+    );
+    let viewer = json!({ "width": 1170, "height": 2532, "scale": 3, "playback": "hevc" });
+    play_on(&h, &phone, json!({ "video": "tt0063350", "viewer": viewer })).await;
+    assert_eq!(played_for(&h), on_phone);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tab_opened_before_an_update_ranks_for_what_it_decodes_on_this_macs_screen() {
+    let hevc = Preferences { playback: Some(Playback::Hevc), ..Preferences::default() };
+    let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: hevc, ..Outside::default() });
+    let mac = (json!({ "value": "1080p", "source": "detected" }), json!({ "value": "h264", "source": "viewer" }));
+    assert_eq!(listed_for(&h, &On::Mac, "/api/title/sources?video=tt0063350&playback=h264").await, mac);
+    play_on(&h, &On::Mac, json!({ "video": "tt0063350", "playback": "h264" })).await;
+    assert_eq!(played_for(&h), mac);
+}
+
+/// The name of the source a play from a browser `on` this Mac or a device, on `viewer`, tries
+/// first.
+async fn first_tried(h: &Harness, on: &On, viewer: &Value) -> String {
+    let lines = play_on(h, on, json!({ "video": "tt0063350", "viewer": viewer })).await;
+    let trying = lines.iter().find(|line| line["type"] == "trying").unwrap();
+    trying["release"]["name"].as_str().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg_converts_it() {
+    let (h, night) = titles::night();
+    let hdr = torrent(0xb1, "Night.of.the.Living.Dead.1968.2160p.UHD.BluRay.REMUX.HDR.HEVC", &[("Night.mp4", MIB)]);
+    let remux = torrent(0xb2, "Night.of.the.Living.Dead.1968.1080p.BluRay.REMUX.AVC", &[("Night.mp4", MIB)]);
+    for t in [&hdr, &remux] {
+        h.swarm.publish(t.clone());
+        h.play_for(t, &[0], Some("tt0063350")).await.unwrap();
+    }
+    let (Some(phone), Some(tv)) = (On::pair(&h).await, On::pair(&h).await) else { return };
+    let phone_screen = json!({ "width": 1170, "height": 2532, "scale": 3, "playback": "h264" });
+    let tv_screen = json!({ "width": 3840, "height": 2160, "scale": 1, "playback": "hevc-hdr" });
+
+    let listing = "/api/title/sources?video=tt0063350&width=1170&height=2532&scale=3&playback=h264";
+    let (status, _, body) = fetch_on(&h, &phone, "GET", listing, &[], "").await;
+    assert_eq!(status, 200);
+    let done = lines(&body).pop().unwrap();
+    let listed: Vec<&str> =
+        done["result"]["releases"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let catalog: Vec<&str> = night.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(listed, [[remux.name.as_str()].as_slice(), &catalog, &[hdr.name.as_str()]].concat());
+
+    assert_eq!(first_tried(&h, &phone, &phone_screen).await, remux.name, "a remux here costs no download");
+    assert_eq!(first_tried(&h, &tv, &tv_screen).await, hdr.name);
+    *h.outside.tools.lock().unwrap() = Tools { ffmpeg: Some(std::path::PathBuf::from("/bin/sh")), ffprobe: None };
+    assert_eq!(first_tried(&h, &phone, &phone_screen).await, remux.name, "ffmpeg without ffprobe converts nothing");
+    StandIns::install(&h, FILM, "");
+    assert_eq!(first_tried(&h, &phone, &phone_screen).await, hdr.name, "ffmpeg converts it for the phone");
+}
+
+/// A Torznab indexer on this machine that answers every search with `releases`, each a torrent
+/// with the size and seeders it claims.
+async fn indexer(releases: &[(&FakeTorrentFile, u64, u32)]) -> String {
+    let items: String = releases
+        .iter()
+        .map(|(t, size, seeders)| {
+            format!(
+                "<item><title>{}</title><size>{size}</size><category>2000</category>\
+                 <torznab:attr name=\"seeders\" value=\"{seeders}\" />\
+                 <torznab:attr name=\"infohash\" value=\"{}\" /></item>",
+                t.name,
+                t.info_hash.id().to_hex()
+            )
+        })
+        .collect();
+    let feed = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <rss version=\"2.0\" xmlns:torznab=\"http://torznab.com/schemas/2015/feed\"><channel>{items}</channel></rss>"
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/api", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let feed = feed.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{feed}",
+                    feed.len()
+                );
+                let _ = socket.write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_and_a_tv_on_the_home_network_each_get_the_copy_for_their_screen() {
+    let uhd = torrent(0xc1, "Night of the Living Dead 1968 2160p UHD BluRay x265 HDR", &[("Night.mp4", MIB)]);
+    let hd = torrent(0xc2, "Night of the Living Dead 1968 1080p BluRay x264", &[("Night.mp4", MIB)]);
+    let sd = torrent(0xc3, "Night Of The Living Dead 1968 720p BRRip x264", &[("Night.mp4", MIB)]);
+    let url = indexer(&[(&uhd, 12 * GIB, 50), (&hd, 4 * GIB, 232), (&sd, 1700 * MIB, 22)]).await;
+    let builtin = ["archlinux", "ubuntu", "debian", "archive.org", "academictorrents", "knaben", "apibay", "nyaa"];
+    let config = torrential_search::SearchConfig {
+        cache_dir: None,
+        torznab: vec![torrential_search::TorznabConfig { name: "home".into(), url, api_key: None }],
+        endpoints: std::collections::BTreeMap::new(),
+        disabled: builtin.map(String::from).to_vec(),
+    };
+    let search: Arc<dyn SearchPort> = Arc::new(search_port::Live::new(&config).unwrap());
+    let phone_screen = Preferences { screen: Some(Screen::Phone), playback: Some(Playback::H264), max_size: None };
+    let outside = Outside { preferences: phone_screen, search: Some(search), ..Outside::default() };
+    let h = Harness::with_outside(search_port::Fake::default(), outside);
+    h.play_for(&uhd, &[0], Some("tt0063350")).await.unwrap();
+    let (Some(phone), Some(tv)) = (On::pair(&h).await, On::pair(&h).await) else { return };
+
+    async fn listed(h: &Harness, on: &On, viewer: &str) -> Vec<String> {
+        let path = format!("/api/title/sources?video=tt0063350&{viewer}");
+        let (status, _, body) = fetch_on(h, on, "GET", &path, &[], "").await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        let done = lines(&body).pop().unwrap();
+        let names = done["result"]["releases"].as_array().unwrap().iter();
+        names.map(|r| r["name"].as_str().unwrap().to_string()).collect()
+    }
+    assert_eq!(
+        listed(&h, &phone, "width=1170&height=2532&scale=3&playback=h264").await,
+        [sd.name.as_str(), &hd.name, &uhd.name],
+        "the 4K copy here neither plays on the phone nor fits it"
+    );
+    assert_eq!(
+        listed(&h, &tv, "width=3840&height=2160&scale=1&playback=hevc-hdr").await,
+        [uhd.name.as_str(), &hd.name, &sd.name],
+        "phone and h264 in config.yaml are for this Mac"
+    );
+
+    let _cast = h.running.ctx.devices.grant(uhd.info_hash.id(), 0, "Night.mp4").unwrap();
+    let path = "/api/title/sources?video=tt0063350&width=3840&height=2160&scale=1&playback=hevc-hdr";
+    let (status, _, body) = exchange(Page::to(&h, tv.ip()).await, "GET", path, &[], "").await;
+    assert_eq!(
+        (status, serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"].clone()),
+        (401, json!("not_paired")),
+        "a TV that holds only a cast grant lists no sources"
     );
 }

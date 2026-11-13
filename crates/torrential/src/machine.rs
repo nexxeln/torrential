@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use torrential_core::{Arch, Display, Error, ErrorCode, Language, Machine, Os, Preferences, Profile};
+use torrential_core::{Arch, Display, Error, ErrorCode, Language, Machine, Os, Player, Preferences, Profile};
 
 use crate::daemon::admission::{Disk, reserve};
 use crate::env::Env;
@@ -38,9 +38,9 @@ impl Detector {
         Arc::new(Detector { machine: OnceLock::from(machine), downloads, disk })
     }
 
-    pub fn profile(&self, preferences: Preferences) -> Profile {
+    pub fn profile(&self, preferences: Preferences, player: Player) -> Profile {
         let room = self.disk.space(&self.downloads).ok().map(|space| space.free.saturating_sub(reserve(space.total)));
-        Profile { detected: self.machine.get().cloned(), preferences, room }
+        Profile { detected: self.machine.get().cloned(), preferences, room, player }
     }
 }
 
