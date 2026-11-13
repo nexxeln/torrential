@@ -546,12 +546,19 @@ impl Store {
 
     /// Notes the plays folder the engine uses. When it used another before, the plays it had
     /// become downloads in a folder the person chose, and their folders are no longer deleted.
-    pub fn use_plays_folder(&mut self, identity: Identity) -> Result<(), Error> {
+    /// Those not done stop with `stopped`, since their paths may now lead into the new folder.
+    pub fn use_plays_folder(&mut self, identity: Identity, stopped: &Error) -> Result<(), Error> {
         self.write(|tx| {
             let before: Option<(i64, i64)> = tx
                 .query_row("SELECT device, inode FROM plays_folder", [], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
             if before.is_some_and(|before| before != (identity.device as i64, identity.inode as i64)) {
+                let (intent, _, error) = intent_columns(&Intent::Failed { error: stopped.clone() });
+                tx.execute(
+                    "UPDATE jobs SET intent = ?1, finished_at = NULL, error = ?2 \
+                     WHERE intent != 'done' AND id IN (SELECT job FROM plays)",
+                    params![intent, error],
+                )?;
                 tx.execute("DELETE FROM plays", [])?;
                 tx.execute("DELETE FROM deletions", [])?;
             }
@@ -992,16 +999,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("state.db")).unwrap();
         let first = Identity { device: 1, inode: 2 };
+        let stopped = Error::new(ErrorCode::PathConflict, "the plays folder it was in was moved");
         assert_eq!(store.plays_folder().unwrap(), None);
-        store.use_plays_folder(first).unwrap();
-        let folder = Identity { device: 1, inode: 9 };
-        let play = JobRecord { home: Home::Plays(Play { watched_at: 100, by_hand: false, folder }), ..record(1) };
-        store.insert(&play, None, 100).unwrap();
-        store.use_plays_folder(first).unwrap();
-        assert_eq!(store.jobs().unwrap()[0].record.home, play.home, "the same folder keeps its plays");
+        store.use_plays_folder(first, &stopped).unwrap();
+        let home = Home::Plays(Play { watched_at: 100, by_hand: false, folder: Identity { device: 1, inode: 9 } });
+        let done = Intent::Done { finished_at: 150 };
+        store.insert(&JobRecord { home, ..record(1) }, None, 100).unwrap();
+        store.insert(&JobRecord { home, intent: done.clone(), ..record(2) }, None, 100).unwrap();
+        store.use_plays_folder(first, &stopped).unwrap();
+        let jobs = |store: &Store| -> Vec<(Home, Intent)> {
+            store.jobs().unwrap().into_iter().map(|job| (job.record.home, job.record.intent)).collect()
+        };
+        assert_eq!(jobs(&store), [(home, Intent::Running), (home, done.clone())], "the same folder keeps its plays");
         let moved = Identity { device: 1, inode: 3 };
-        store.use_plays_folder(moved).unwrap();
-        assert_eq!((store.plays_folder().unwrap(), store.jobs().unwrap()[0].record.home), (Some(moved), Home::Folder));
+        store.use_plays_folder(moved, &stopped).unwrap();
+        assert_eq!(store.plays_folder().unwrap(), Some(moved));
+        assert_eq!(jobs(&store), [(Home::Folder, Intent::Failed { error: stopped }), (Home::Folder, done)]);
     }
 
     #[test]

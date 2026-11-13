@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
-use torrential_core::{ErrorCode, Place, Target, TorrentId};
+use torrential_core::{ErrorCode, JobStatus, Place, Target, TorrentId};
 
 use super::super::admission::{GIB, reserve};
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
@@ -531,4 +531,35 @@ async fn a_play_folder_moved_away_with_another_folder_put_at_its_name_has_nothin
     );
     assert_eq!(std::fs::read(folder.join("film/film.mp4")).unwrap().len(), 4, "the folder at its name stays");
     assert!(moved.join("film/film.mp4").exists(), "and so does the folder moved away");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plays_in_a_plays_folder_replaced_while_the_engine_was_stopped_stop_and_say_why() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let (clip, film) = (torrent(0x15, "clip", &[("clip.mp4", MIB)]), torrent(0x16, "film", &[("film.mkv", 4 * GIB)]));
+    h.play_web(&clip).await;
+    h.until("the clip is done", |jobs| jobs[0].status.name() == "done").await;
+    h.swarm.set_rate(0);
+    h.play_web(&film).await;
+    let plays = h.plays();
+    let h = h
+        .restart_after(|| {
+            std::fs::rename(&plays, plays.with_extension("old")).unwrap();
+            std::fs::create_dir(&plays).unwrap();
+        })
+        .await;
+
+    let jobs = h.status().await;
+    let seen: Vec<_> = jobs.iter().map(|job| (job.name.clone().unwrap(), job.status.name(), job.place)).collect();
+    assert_eq!(seen, [("clip".to_string(), "done", Place::Folder), ("film".to_string(), "error", Place::Folder)]);
+    let JobStatus::Error { error } = &jobs[1].status else { unreachable!() };
+    assert_eq!(
+        (error.code, error.message.as_str(), error.hint.as_deref()),
+        (
+            ErrorCode::PathConflict,
+            "the plays folder it was in was moved or replaced, so torrential stopped it",
+            Some("resume it to go on downloading where it was, or remove it")
+        )
+    );
 }

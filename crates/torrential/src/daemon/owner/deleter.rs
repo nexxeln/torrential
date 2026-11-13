@@ -229,18 +229,23 @@ impl Deleter {
     /// are, as downloads in a folder the person chose.
     pub fn open(plays: &Path, trash: Trash, store: &mut Store) -> Result<Deleter, Error> {
         let root = Root::open(plays);
+        let stopped = Error::new(
+            ErrorCode::PathConflict,
+            "the plays folder it was in was moved or replaced, so torrential stopped it",
+        )
+        .with_hint("resume it to go on downloading where it was, or remove it");
         match &root {
             Ok(root) => match store.plays_folder()? {
                 Some(identity) if identity == root.identity => {}
                 Some(_) => {
                     log(&format!(
                         "the plays folder {} is not the one the engine used before, so torrential deletes none of \
-                         the plays it had there, and they stay as downloads in a folder you chose",
+                         the plays it had there, and they stay, stopped, as downloads in a folder you chose",
                         plays.display()
                     ));
-                    store.use_plays_folder(root.identity)?;
+                    store.use_plays_folder(root.identity, &stopped)?;
                 }
-                None => store.use_plays_folder(root.identity)?,
+                None => store.use_plays_folder(root.identity, &stopped)?,
             },
             Err(why) => log(why),
         }
