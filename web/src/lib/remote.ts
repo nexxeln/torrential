@@ -68,10 +68,25 @@ function focusables(scope: Element): HTMLElement[] {
   });
 }
 
-/** Focuses `element`, and on a page scrolls it toward the middle of the screen when it is near an edge. */
+/** Scrolls the list that holds `element`, such as the player's files panel, just far enough to show it. */
+function reveal(element: HTMLElement): void {
+  for (let list = element.parentElement; list; list = list.parentElement) {
+    if (!/auto|scroll/.test(getComputedStyle(list).overflowY) || list.scrollHeight <= list.clientHeight) continue;
+    const inner = element.getBoundingClientRect();
+    const outer = list.getBoundingClientRect();
+    if (inner.top < outer.top) list.scrollTop -= outer.top - inner.top;
+    else if (inner.bottom > outer.bottom) list.scrollTop += inner.bottom - outer.bottom;
+    return;
+  }
+}
+
+/**
+ * Focuses `element`. On a page it scrolls toward the middle of the screen when near an edge. In the
+ * player, where scrolling the whole screen would move the picture, only its own list scrolls.
+ */
 function land(element: HTMLElement, page: boolean): void {
   element.focus({ preventScroll: !page });
-  if (!page) return;
+  if (!page) return reveal(element);
   const box = element.getBoundingClientRect();
   const margin = innerHeight * 0.15;
   if (box.top < margin || box.bottom > innerHeight - margin) element.scrollIntoView({ block: "center", inline: "nearest" });
