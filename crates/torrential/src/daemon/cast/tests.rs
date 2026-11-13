@@ -105,3 +105,27 @@ fn the_list_keeps_thirty_two_tvs_and_drops_those_the_last_search_missed_first() 
     assert_eq!(hosts.len(), 32);
     assert!(hosts.iter().all(|host| *host > 100), "{hosts:?}");
 }
+
+#[test]
+fn a_cast_gives_up_on_a_tv_that_stops_answering_fails_every_poll_or_never_plays() {
+    let start = Instant::now();
+    let after = |seconds| start + Duration::from_secs(seconds);
+    let why = |contact: &Contact, seconds| contact.lost(after(seconds), "LG TV").map(|error| error.message);
+
+    let silent = Contact::new(start);
+    assert_eq!(why(&silent, 14), None);
+    assert_eq!(why(&silent, 15).as_deref(), Some("LG TV stopped answering"));
+
+    let mut faulting = Contact { played: true, ..Contact::new(start) };
+    faulting.answered = after(59);
+    assert_eq!(why(&faulting, 59), None);
+    faulting.answered = after(60);
+    assert_eq!(why(&faulting, 60).as_deref(), Some("LG TV stopped saying what it plays"), "a fault is an answer");
+
+    let mut loading = Contact::new(start);
+    (loading.answered, loading.said) = (after(89), after(89));
+    assert_eq!(why(&loading, 89), None);
+    assert_eq!(why(&loading, 90).as_deref(), Some("LG TV took the video but did not start playing it"));
+    loading.played = true;
+    assert_eq!(why(&loading, 90), None);
+}

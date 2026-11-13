@@ -51,6 +51,8 @@ const WORTH_SAVING: f64 = 5.0;
 const START_WITHIN: Duration = Duration::from_secs(90);
 /// A TV that answers nothing for this long has gone.
 const LOST_AFTER: Duration = Duration::from_secs(15);
+/// A TV that answers but does not say what it does for this long has stopped playing the cast.
+const FAILING_FOR: Duration = Duration::from_secs(60);
 /// How long an ended cast stays listed, so whoever started it can see how it ended.
 const ENDED_KEPT: Duration = Duration::from_secs(60);
 /// How long the engine waits to be reachable on the home network before it gives up on a cast.
@@ -557,10 +559,8 @@ impl Run {
         control: &mut mpsc::UnboundedReceiver<Control>,
     ) -> Result<(), Error> {
         let tv = &self.tv.tv;
-        let started = Instant::now();
-        let mut answered = Instant::now();
+        let mut contact = Contact::new(Instant::now());
         let mut saved = Instant::now();
-        let mut played = false;
         let mut resume = found.start_at.filter(|at| *at > WORTH_SAVING).map(|at| (at, RESUME_TRIES));
         let mut polls = 0u32;
         let mut tick = tokio::time::interval(POLL);
@@ -589,13 +589,15 @@ impl Run {
                 }
             }
             polls += 1;
-            match self.poll(polls % VOLUME_EVERY == 1).await {
+            let polled = self.poll(polls % VOLUME_EVERY == 1).await;
+            let now = Instant::now();
+            match polled {
                 Ok(polled) => {
-                    answered = Instant::now();
+                    (contact.answered, contact.said) = (now, now);
                     let elsewhere = polled.uri.as_deref().is_some_and(|uri| !uri.is_empty() && !uri.contains(token));
                     match polled.transport {
                         Transport::Playing | Transport::Paused if !elsewhere => {
-                            played = true;
+                            contact.played = true;
                             let paused = polled.transport == Transport::Paused;
                             let duration = polled.duration.or(known);
                             self.view.send_modify(|cast| {
@@ -612,31 +614,23 @@ impl Run {
                                 resume = Some((at, tries - 1));
                             }
                         }
-                        _ if played && elsewhere => {
+                        _ if contact.played && elsewhere => {
                             self.save(found);
                             return Ok(());
                         }
-                        Transport::Stopped if played => {
+                        Transport::Stopped if contact.played => {
                             self.save(found);
                             return Ok(());
                         }
                         _ => {}
                     }
                 }
-                Err(Failed::Refused(..)) => answered = Instant::now(),
-                Err(Failed::Gone(_)) if answered.elapsed() >= LOST_AFTER => {
-                    self.save(found);
-                    return Err(Error::new(ErrorCode::NetworkUnavailable, format!("{} stopped answering", tv.name))
-                        .with_hint("check that the TV is on, then press Play on TV again"));
-                }
+                Err(Failed::Refused(..)) => contact.answered = now,
                 Err(Failed::Gone(_)) => {}
             }
-            if !played && started.elapsed() >= START_WITHIN {
-                return Err(Error::new(
-                    ErrorCode::FetchFailed,
-                    format!("{} took the video but did not start playing it", tv.name),
-                )
-                .with_hint("check what the TV shows, and play it on this Mac if the TV says it cannot play the file"));
+            if let Some(error) = contact.lost(now, &tv.name) {
+                self.save(found);
+                return Err(error);
             }
             if saved.elapsed() >= SAVE_EVERY {
                 self.save(found);
@@ -697,9 +691,11 @@ impl Run {
         }
     }
 
+    /// What the TV does, and where it is when it says. A TV that faults on where it is still
+    /// says whether it plays.
     async fn poll(&self, volume: bool) -> Result<Polled, Failed> {
         let transport = self.transport("GetTransportInfo", &[("InstanceID", "0")]).await?;
-        let position = self.transport("GetPositionInfo", &[("InstanceID", "0")]).await?;
+        let position = self.transport("GetPositionInfo", &[("InstanceID", "0")]).await.unwrap_or_default();
         let volume = match (&self.tv.rendering, volume) {
             (Some(rendering), true) => {
                 let args = [("InstanceID", "0"), ("Channel", "Master")];
@@ -744,6 +740,46 @@ impl Run {
         if let Err(error) = self.ctx.titles.shelf.watch(&watched) {
             super::log(&format!("cannot keep where {} stopped: {error}", found.name));
         }
+    }
+}
+
+/// When a cast last heard from its TV, which says when it gives up on the TV.
+#[derive(Clone, Copy, Debug)]
+struct Contact {
+    started: Instant,
+    /// The last answer of any kind, a fault too.
+    answered: Instant,
+    /// The last poll that said what the TV does.
+    said: Instant,
+    /// Whether the TV has played the cast.
+    played: bool,
+}
+
+impl Contact {
+    fn new(now: Instant) -> Self {
+        Self { started: now, answered: now, said: now, played: false }
+    }
+
+    /// Why the cast ends at `now`, if it does: the TV `tv` names has stopped answering, has failed
+    /// every poll for a minute, or never started playing.
+    fn lost(&self, now: Instant, tv: &str) -> Option<Error> {
+        if now.saturating_duration_since(self.answered) >= LOST_AFTER {
+            let error = Error::new(ErrorCode::NetworkUnavailable, format!("{tv} stopped answering"));
+            return Some(error.with_hint("check that the TV is on, then press Play on TV again"));
+        }
+        if now.saturating_duration_since(self.said) >= FAILING_FOR {
+            let error = Error::new(ErrorCode::FetchFailed, format!("{tv} stopped saying what it plays"));
+            return Some(error.with_hint("check what the TV shows, then press Play on TV again"));
+        }
+        if !self.played && now.saturating_duration_since(self.started) >= START_WITHIN {
+            let error = Error::new(ErrorCode::FetchFailed, format!("{tv} took the video but did not start playing it"));
+            return Some(
+                error.with_hint(
+                    "check what the TV shows, and play it on this Mac if the TV says it cannot play the file",
+                ),
+            );
+        }
+        None
     }
 }
 

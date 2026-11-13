@@ -715,6 +715,35 @@ async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_tv_that_stops_while_it_fails_to_say_where_it_is_ends_the_cast_and_its_grant() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let film = torrent(83, "Night", &[("Night.mp4", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+
+    cast(&h, by_hand(Target::Prefix(prefix(&film)))).await.unwrap();
+    let uri = tv.screen.lock().unwrap().uri.clone();
+    tv.set(|screen| screen.faults.push("GetPositionInfo"));
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    tv.set(|screen| screen.transport = "STOPPED");
+    let ended = until(&h, "its end", Cast::ended).await;
+    assert_eq!(ended.state, CastState::Ended { error: None });
+    let url = url::Url::parse(&uri).unwrap();
+    let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+    let after = fetch_one(&host, url.path(), "GET", Some("bytes=0-")).await.0;
+    assert!(
+        ["GET refused", "GET bytes=0- no answer", "GET bytes=0- -> 404 text/plain"]
+            .iter()
+            .any(|end| after.starts_with(end)),
+        "the grant ended with the cast: {after}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cast_that_takes_the_tv_waits_until_the_one_before_lets_go() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
