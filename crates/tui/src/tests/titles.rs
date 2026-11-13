@@ -151,7 +151,15 @@ fn played(name: &str, video_text: &str, resume_at: Option<f64>) -> TitlePlayed {
 fn opened(size: (u16, u16)) -> State {
     let mut state = titles_app(size);
     state.update(Msg::Watch(Event::Snapshot { jobs: jobs() }));
-    state.update(Msg::Home(Ok(home())));
+    state.update(Msg::Home { ask: 1, result: Ok(home()) });
+    state
+}
+
+/// Bare `torrential` once the engine has answered with no downloads and an empty home.
+fn empty(size: (u16, u16)) -> State {
+    let mut state = titles_app(size);
+    state.update(Msg::Watch(Event::Snapshot { jobs: Vec::new() }));
+    state.update(Msg::Home { ask: 1, result: Ok(Home { going_on: Vec::new(), saved: Vec::new() }) });
     state
 }
 
@@ -166,14 +174,14 @@ fn searching(size: (u16, u16)) -> State {
 fn film(size: (u16, u16)) -> State {
     let mut state = searching(size);
     state.update(key(KeyCode::Enter));
-    state.update(Msg::Title { id: title_id("tt0063350"), result: Ok(Box::new(night_page(Some(2050.0)))) });
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(night_page(Some(2050.0)))) });
     state
 }
 
 fn series(size: (u16, u16)) -> State {
     let mut state = opened(size);
     press(&mut state, "l");
-    state.update(Msg::Title { id: title_id("tt9999901"), result: Ok(Box::new(harbor_page())) });
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(harbor_page())) });
     state
 }
 
@@ -191,8 +199,8 @@ fn bare_torrential_opens_on_what_to_go_on_with_and_the_saved_titles() {
     let mut state = titles_app((100, 30));
     assert_eq!(state.page, Page::Titles);
     let effects = state.update(Msg::Watch(Event::Snapshot { jobs: jobs() }));
-    assert!(effects.contains(&Effect::Home), "the engine is asked what to go on with: {effects:?}");
-    state.update(Msg::Home(Ok(home())));
+    assert!(effects.contains(&Effect::Home { ask: 1 }), "the engine is asked what to go on with: {effects:?}");
+    state.update(Msg::Home { ask: 1, result: Ok(home()) });
     assert_eq!(
         list_lines(&state)[..6],
         [
@@ -261,8 +269,8 @@ fn a_search_finds_films_and_shows_by_name_and_enter_opens_one() {
         ]
     );
     assert_eq!(footer(&state).trim(), "enter open   P play   / search   d downloads   ? keys");
-    assert_eq!(state.update(key(KeyCode::Enter)), [Effect::Title(title_id("tt0063350"))]);
-    state.update(Msg::Title { id: title_id("tt0063350"), result: Ok(Box::new(night_page(Some(2050.0)))) });
+    assert_eq!(state.update(key(KeyCode::Enter)), [Effect::Title { ask: 1, id: title_id("tt0063350") }]);
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(night_page(Some(2050.0)))) });
     assert_eq!(
         list_lines(&state)[..7],
         [
@@ -282,9 +290,9 @@ fn a_search_finds_films_and_shows_by_name_and_enter_opens_one() {
 #[test]
 fn a_series_lists_its_seasons_and_episodes_and_where_you_stopped() {
     let mut state = opened((100, 30));
-    assert_eq!(state.update(key(KeyCode::Char('l'))), [Effect::Title(title_id("tt9999901"))]);
+    assert_eq!(state.update(key(KeyCode::Char('l'))), [Effect::Title { ask: 1, id: title_id("tt9999901") }]);
     assert_eq!(list_lines(&state)[..2], ["     series │ Harbor Lights", "            │ looking up the title"]);
-    state.update(Msg::Title { id: title_id("tt9999901"), result: Ok(Box::new(harbor_page())) });
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(harbor_page())) });
     assert_eq!(
         list_lines(&state)[..20],
         [
@@ -328,19 +336,19 @@ fn a_series_lists_its_seasons_and_episodes_and_where_you_stopped() {
 #[test]
 fn a_finished_film_and_a_caught_up_series_play_from_the_start() {
     let mut state = film((100, 30));
-    state.update(Msg::Title { id: title_id("tt0063350"), result: Ok(Box::new(night_page(Some(5750.0)))) });
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(night_page(Some(5750.0)))) });
     assert_eq!(list_lines(&state)[6], "            ● Play");
     let mut caught_up = harbor_page();
     caught_up.next = None;
     let mut state = series((100, 30));
-    state.update(Msg::Title { id: title_id("tt9999901"), result: Ok(Box::new(caught_up)) });
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(caught_up)) });
     assert_eq!(list_lines(&state)[4], "            ● Play S01E01  First Light");
 }
 
 #[test]
 fn esc_steps_back_from_a_title_to_the_search_to_the_home_lists() {
     let mut state = film((100, 30));
-    assert_eq!(state.update(key(KeyCode::Esc)), [Effect::Home]);
+    assert_eq!(state.update(key(KeyCode::Esc)), [Effect::Home { ask: 2 }]);
     assert_eq!(state.pick(), Some(Pick::Found(title_id("tt0063350"))));
     state.update(key(KeyCode::Esc));
     assert_eq!((state.titles.found.is_none(), state.titles.query.text.as_str()), (true, ""));
@@ -357,7 +365,7 @@ fn the_downloads_are_one_key_away_and_t_comes_back() {
     press(&mut state, "d");
     assert_eq!((state.page, cursor_name(&state)), (Page::Downloads, "wikipedia-en-2026-09-text".into()));
     assert!(footer(&state).starts_with("              Press t for films and shows."), "{}", footer(&state));
-    assert_eq!(press(&mut state, "t"), [Effect::Home]);
+    assert_eq!(press(&mut state, "t"), [Effect::Home { ask: 2 }]);
     assert_eq!((state.page, state.toast.is_none()), (Page::Titles, true), "the downloads page's toast stays there");
     assert_eq!(state.pick(), Some(Pick::Continue(video("tt9999901:1:3"))), "the cursor stays where it was");
 }
@@ -366,14 +374,14 @@ fn the_downloads_are_one_key_away_and_t_comes_back() {
 fn with_no_downloads_esc_in_the_empty_torrent_search_comes_back() {
     let mut state = titles_app((100, 30));
     state.update(Msg::Watch(Event::Snapshot { jobs: Vec::new() }));
-    state.update(Msg::Home(Ok(home())));
+    state.update(Msg::Home { ask: 1, result: Ok(home()) });
     press(&mut state, "d");
     assert_eq!(state.page, Page::Downloads);
     assert!(footer(&state).starts_with("              Press esc for films and shows."), "{}", footer(&state));
     press(&mut state, "arch");
     state.update(key(KeyCode::Esc));
     assert_eq!((state.page, state.query.text.as_str()), (Page::Downloads, ""), "the first esc clears the words");
-    assert_eq!(state.update(key(KeyCode::Esc)), [Effect::Home]);
+    assert_eq!(state.update(key(KeyCode::Esc)), [Effect::Home { ask: 2 }]);
     assert_eq!(state.page, Page::Titles);
 }
 
@@ -391,8 +399,7 @@ fn the_update_key_shows_only_where_keys_are_not_typed() {
 
 #[test]
 fn typing_d_into_the_search_box_types_it() {
-    let mut state = titles_app((100, 30));
-    state.update(Msg::Home(Ok(Home { going_on: Vec::new(), saved: Vec::new() })));
+    let mut state = empty((100, 30));
     press(&mut state, "dune");
     assert_eq!((state.page, state.titles.query.text.as_str()), (Page::Titles, "dune"));
 }
@@ -401,16 +408,15 @@ fn typing_d_into_the_search_box_types_it() {
 fn the_home_lists_are_asked_again_when_the_engine_comes_back() {
     let mut state = opened((100, 30));
     let effects = state.update(Msg::Watch(Event::Snapshot { jobs: jobs() }));
-    assert!(!effects.contains(&Effect::Home), "the engine was there all along: {effects:?}");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Home { .. })), "the engine was there all along: {effects:?}");
     state.update(Msg::WatchLost(Error::new(ErrorCode::DaemonUnavailable, "the engine closed the connection")));
     let effects = state.update(Msg::Watch(Event::Snapshot { jobs: jobs() }));
-    assert!(effects.contains(&Effect::Home), "{effects:?}");
+    assert!(effects.contains(&Effect::Home { ask: 2 }), "{effects:?}");
 }
 
 #[test]
 fn an_empty_home_says_what_to_do_and_an_absent_engine_says_so() {
-    let mut state = titles_app((100, 30));
-    state.update(Msg::Home(Ok(Home { going_on: Vec::new(), saved: Vec::new() })));
+    let state = empty((100, 30));
     assert_eq!(
         list_lines(&state)[..2],
         [
@@ -446,9 +452,33 @@ fn a_late_answer_to_an_old_search_or_title_changes_nothing() {
     state.update(Msg::FoundTitles { search: 1, result: Ok(found()) });
     assert_eq!(state.titles.found.as_ref().map(|f| &f.titles), Some(&Load::Loading));
     state.update(Msg::FoundTitles { search: 2, result: Ok(vec![sintel()]) });
-    state.update(key(KeyCode::Enter));
-    state.update(Msg::Title { id: title_id("tt0063350"), result: Ok(Box::new(night_page(None))) });
+    assert_eq!(state.update(key(KeyCode::Enter)), [Effect::Title { ask: 1, id: title_id("tt1727587") }]);
+    state.update(key(KeyCode::Esc));
+    assert_eq!(state.update(key(KeyCode::Enter)), [Effect::Title { ask: 2, id: title_id("tt1727587") }]);
+    state.update(Msg::Title { ask: 1, result: Ok(Box::new(night_page(None))) });
     assert_eq!(state.titles.open.as_ref().map(|o| &o.page), Some(&Load::Loading));
+}
+
+#[test]
+fn a_late_answer_to_an_older_home_or_title_request_changes_nothing() {
+    let mut state = opened((100, 30));
+    press(&mut state, "d");
+    assert_eq!(press(&mut state, "t"), [Effect::Home { ask: 2 }]);
+    press(&mut state, "d");
+    assert_eq!(press(&mut state, "t"), [Effect::Home { ask: 3 }]);
+    state.update(Msg::Home { ask: 3, result: Ok(home()) });
+    let late = Error::new(ErrorCode::DaemonUnavailable, "the engine did not respond in time");
+    state.update(Msg::Home { ask: 2, result: Err(late) });
+    assert_eq!(state.titles.home, Load::Ready(home()));
+
+    assert_eq!(press(&mut state, "l"), [Effect::Title { ask: 1, id: title_id("tt9999901") }]);
+    state.update(key(KeyCode::Esc));
+    assert_eq!(press(&mut state, "l"), [Effect::Title { ask: 2, id: title_id("tt9999901") }]);
+    let late = Error::new(ErrorCode::FetchFailed, "cannot look up tt9999901 on Cinemeta");
+    state.update(Msg::Title { ask: 1, result: Err(late) });
+    assert_eq!(state.titles.open.as_ref().map(|o| &o.page), Some(&Load::Loading));
+    state.update(Msg::Title { ask: 2, result: Ok(Box::new(harbor_page())) });
+    assert_eq!(state.titles.open.as_ref().map(|o| &o.page), Some(&Load::Ready(harbor_page())));
 }
 
 #[test]

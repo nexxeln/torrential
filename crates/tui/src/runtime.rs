@@ -239,9 +239,9 @@ fn perform<B: Backend>(effect: Effect, backend: &Arc<B>, tx: &Sender<Msg>) {
                 let _ = tx.send(Msg::Upgraded(backend.upgrade()));
             });
         }
-        Effect::Home => {
+        Effect::Home { ask } => {
             thread::spawn(move || {
-                let _ = tx.send(Msg::Home(backend.home()));
+                let _ = tx.send(Msg::Home { ask, result: backend.home() });
             });
         }
         Effect::FindTitles { search, words } => {
@@ -249,10 +249,10 @@ fn perform<B: Backend>(effect: Effect, backend: &Arc<B>, tx: &Sender<Msg>) {
                 let _ = tx.send(Msg::FoundTitles { search, result: backend.titles(&words) });
             });
         }
-        Effect::Title(id) => {
+        Effect::Title { ask, id } => {
             thread::spawn(move || {
                 let result = backend.title(&id).map(Box::new);
-                let _ = tx.send(Msg::Title { id, result });
+                let _ = tx.send(Msg::Title { ask, result });
             });
         }
         Effect::PlayTitle(video) => {

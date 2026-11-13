@@ -36,9 +36,9 @@ pub enum Msg {
     Saved { edit: Edit, result: Result<Preferences, Error> },
     NewerVersion(String),
     Upgraded(Result<Option<String>, Error>),
-    Home(Result<Home, Error>),
+    Home { ask: u64, result: Result<Home, Error> },
     FoundTitles { search: u64, result: Result<Vec<TitleCard>, Error> },
-    Title { id: TitleId, result: Result<Box<TitlePage>, Error> },
+    Title { ask: u64, result: Result<Box<TitlePage>, Error> },
     PlayStep(Box<AttemptEvent>),
     TitlePlayed(Result<(String, Box<TitlePlayed>), Error>),
 }
@@ -55,9 +55,9 @@ pub enum Effect {
     Copy(String),
     SavePreferences(Edit),
     Upgrade,
-    Home,
+    Home { ask: u64 },
     FindTitles { search: u64, words: String },
-    Title(TitleId),
+    Title { ask: u64, id: TitleId },
     PlayTitle(VideoRef),
 }
 
@@ -176,16 +176,16 @@ impl State {
                 self.upgraded(result);
                 Vec::new()
             }
-            Msg::Home(result) => {
-                self.home_arrived(result);
+            Msg::Home { ask, result } => {
+                self.home_arrived(ask, result);
                 Vec::new()
             }
             Msg::FoundTitles { search, result } => {
                 self.titles_found(search, result);
                 Vec::new()
             }
-            Msg::Title { id, result } => {
-                self.title_arrived(id, result.map(|page| *page));
+            Msg::Title { ask, result } => {
+                self.title_arrived(ask, result.map(|page| *page));
                 Vec::new()
             }
             Msg::PlayStep(step) => {
@@ -836,7 +836,7 @@ impl State {
                 }
                 effects.push(Effect::FreeSpace);
                 if back && self.page == Page::Titles {
-                    effects.push(Effect::Home);
+                    effects.push(self.titles.ask_home());
                 }
                 effects
             }

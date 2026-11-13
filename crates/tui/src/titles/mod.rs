@@ -75,6 +75,10 @@ pub struct Titles {
     pub open: Option<Opened>,
     pub starting: Option<Starting>,
     next_search: u64,
+    /// The last request for the home lists, and for the open title's page. Only the answer to the
+    /// last one is used: an earlier one may answer later.
+    home_ask: u64,
+    title_ask: u64,
 }
 
 impl Titles {
@@ -89,7 +93,14 @@ impl Titles {
             open: None,
             starting: None,
             next_search: 1,
+            home_ask: 0,
+            title_ask: 0,
         }
+    }
+
+    pub(crate) fn ask_home(&mut self) -> Effect {
+        self.home_ask += 1;
+        Effect::Home { ask: self.home_ask }
     }
 
     /// The rows the cursor moves over, top to bottom.
@@ -236,7 +247,7 @@ impl State {
         self.page = Page::Titles;
         self.help = false;
         self.toast = None;
-        vec![Effect::Home]
+        vec![self.titles.ask_home()]
     }
 
     fn show_downloads(&mut self) -> Vec<Effect> {
@@ -286,7 +297,7 @@ impl State {
 
     fn close_title(&mut self) -> Vec<Effect> {
         self.titles.open = None;
-        vec![Effect::Home]
+        vec![self.titles.ask_home()]
     }
 
     fn move_pick(&mut self, m: Move) {
@@ -336,7 +347,8 @@ impl State {
         let Some(card) = self.titles.card(&pick).cloned() else { return Vec::new() };
         let id = card.id.clone();
         self.titles.open = Some(Opened { card, page: Load::Loading, cursor: Pick::Next, scroll: 0 });
-        vec![Effect::Title(id)]
+        self.titles.title_ask += 1;
+        vec![Effect::Title { ask: self.titles.title_ask, id }]
     }
 
     fn play_pick(&mut self) -> Vec<Effect> {
@@ -372,7 +384,10 @@ impl State {
         vec![Effect::PlayTitle(VideoRef { title: card.id, episode })]
     }
 
-    pub(crate) fn home_arrived(&mut self, result: Result<Home, Error>) {
+    pub(crate) fn home_arrived(&mut self, ask: u64, result: Result<Home, Error>) {
+        if ask != self.titles.home_ask {
+            return;
+        }
         self.titles.home = match result {
             Ok(home) => Load::Ready(home),
             Err(error) => Load::Failed(error),
@@ -392,8 +407,11 @@ impl State {
         };
     }
 
-    pub(crate) fn title_arrived(&mut self, id: TitleId, result: Result<TitlePage, Error>) {
-        let Some(open) = self.titles.open.as_mut().filter(|o| o.card.id == id) else { return };
+    pub(crate) fn title_arrived(&mut self, ask: u64, result: Result<TitlePage, Error>) {
+        if ask != self.titles.title_ask {
+            return;
+        }
+        let Some(open) = self.titles.open.as_mut() else { return };
         open.page = match result {
             Ok(page) => {
                 open.card = page.details.card.clone();
