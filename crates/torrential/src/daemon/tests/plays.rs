@@ -450,6 +450,7 @@ async fn a_new_play_on_a_full_disk_starts_once_older_plays_make_room() {
     assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     h.disk.set_free(reserve(ROOMY.total) + GIB);
+    h.disk.frees(h.play_folder(&older), 2 * GIB);
 
     h.play_web(&torrent(0xb2, "newer", &[("newer.mp4", 2 * GIB)])).await;
     assert_eq!(names(&h).await.last().map(String::as_str), Some("newer"));
@@ -632,4 +633,32 @@ async fn a_play_too_large_to_get_is_refused_before_any_play_leaves_for_it() {
     assert_eq!((status, &body["error"]["code"]), (413, &json!("too_large")), "{body}");
     assert_eq!(names(&h).await, named(&["older"]));
     assert!(h.play_folder(&older).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_cannot_be_deleted() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(2 * GIB);
+    let older = torrent(0xb7, "older", &[("older.mp4", 8 * GIB)]);
+    h.play_web(&older).await;
+    let inner = h.play_folder(&older).join("older");
+    written(&inner.join("older.mp4"), MIB);
+    h.until("half of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
+    assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    h.disk.set_free(reserve(ROOMY.total) + GIB);
+    let shut = |mode| std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(mode)).unwrap();
+    shut(0o555);
+
+    h.play_web(&torrent(0xb8, "newer", &[("newer.mp4", 2 * GIB)])).await;
+    let jobs = h.until("the newer play stops", |jobs| jobs.iter().any(|job| job.status.name() == "error")).await;
+    shut(0o755);
+    let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
+    assert_eq!((jobs.len(), jobs[0].name.as_deref(), error.code), (1, Some("newer"), ErrorCode::DiskFull));
 }

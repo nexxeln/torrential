@@ -652,11 +652,16 @@ impl Owner {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
-            // A new play makes room in the plays folder only once nothing but the disk refuses it.
-            if matches!(home, Home::Plays(_)) && !dry_run {
-                self.make_room_for(id, plan.selected_size);
-            }
-            admission::check_disk(self.reclaimable(plan.space), plan.needed(0), self.others_remaining(&dir, id))?;
+            // A new play makes room in the plays folder only once nothing but the disk refuses it,
+            // and then finds what is free with the plays that went already gone.
+            let space = match home {
+                Home::Plays(_) if !dry_run => {
+                    self.make_room_for(id, plan.selected_size);
+                    self.disk.space(&dir).unwrap_or(plan.space)
+                }
+                _ => plan.space,
+            };
+            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(&dir, id))?;
         }
         let record = JobRecord {
             id,
@@ -1688,13 +1693,13 @@ impl Owner {
         }
         if job.metainfo.is_some()
             && let Ok(space) = self.disk.space(&job.record.dir)
-            && let Err(error) = admission::check_disk(
-                self.reclaimable(space),
-                self.space_needed(job),
-                self.others_remaining(&job.record.dir, id),
-            )
+            && let Err(error) =
+                admission::check_disk(space, self.space_needed(job), self.others_remaining(&job.record.dir, id))
         {
-            self.fail(id, error);
+            // Plays leaving the plays folder make room: it is checked again once they are gone.
+            if !self.reclaiming(space) {
+                self.fail(id, error);
+            }
             return;
         }
         let resume_data = self.store.resume(id).ok().flatten();

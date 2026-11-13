@@ -371,14 +371,21 @@ impl Owner {
         self.tending.leaving.contains_key(&id)
     }
 
-    /// `space` as the check for room counts it: what the plays leaving the plays folder take up on
-    /// that disk is as good as free.
+    /// `space` as a new download's check for room counts it: what the plays leaving the plays
+    /// folder take up on that disk is as good as free. A play folder that could not be deleted is
+    /// not. The download starts only once they are gone, and the disk has the room then.
     pub(super) fn reclaimable(&self, space: Space) -> Space {
-        if !self.disk.space(&self.config.plays.root).is_ok_and(|plays| plays.device == space.device) {
+        if !self.reclaiming(space) {
             return space;
         }
         let leaving = self.tending.leaving.keys().filter_map(|id| self.jobs.get(id)).map(|job| self.play_bytes(job));
-        Space { free: space.free + leaving.sum::<u64>() + self.tending.deleter.play_bytes(), ..space }
+        Space { free: space.free + leaving.sum::<u64>(), ..space }
+    }
+
+    /// Whether plays leaving the plays folder will free room on the disk `space` is on.
+    pub(super) fn reclaiming(&self, space: Space) -> bool {
+        !self.tending.leaving.is_empty()
+            && self.disk.space(&self.config.plays.root).is_ok_and(|plays| plays.device == space.device)
     }
 
     /// Whether `job` is a play that may pause and leave by itself: not one the person got by
@@ -513,6 +520,8 @@ impl Owner {
             self.tending.leaving.remove(&id);
             log(&format!("{} stays in the plays folder, for its title is saved", self.named(id)));
         }
+        // A download waiting for the room the play was to leave finds out now whether there is.
+        self.schedule();
         Ok(())
     }
 
