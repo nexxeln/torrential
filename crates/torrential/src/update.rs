@@ -25,8 +25,8 @@ const DAY: i64 = 24 * 60 * 60;
 const HOUR: i64 = 60 * 60;
 const CHECK_WITHIN: Duration = Duration::from_secs(10);
 const MAX_ASSET: usize = 256 << 20;
-/// How long a restart for an update waits after the engine could not save every download.
-const RESTART_RETRY: Duration = Duration::from_secs(60);
+/// How long a switch to an installed update waits after the engine could not save every download.
+const SWITCH_RETRY: Duration = Duration::from_secs(60);
 const CHECKED: &str = "update.json";
 const UPDATED: &str = "updated.json";
 const CONFIRM_WITHIN: Duration = Duration::from_secs(10);
@@ -36,7 +36,7 @@ const CONFIRM_WITHIN: Duration = Duration::from_secs(10);
 pub enum Policy {
     /// Show a notice when a newer version is available
     Notify,
-    /// Install newer versions in the background when nothing is playing
+    /// Install newer versions in the background, and switch to them when nothing is playing
     #[default]
     Auto,
     /// Never check for newer versions
@@ -437,10 +437,12 @@ impl Drop for Partial {
 /// What the web app says about versions.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum News {
-    /// This engine started after it installed `to` in place of `from`.
+    /// This engine started after an update installed `to` in place of `from`.
     Updated { from: String, to: String },
-    /// A newer release the engine installs once nothing is playing.
+    /// Release `latest` is installed, and the login service starts it once nothing is playing.
     Waiting { latest: Version },
+    /// Release `latest` is installed, and starts the next time the engine starts.
+    Installed { latest: Version },
     /// A newer release that `torrential update` installs.
     Available { current: String, latest: Version },
 }
@@ -459,7 +461,10 @@ impl News {
     pub fn line(&self) -> String {
         match self {
             Self::Updated { from, to } => Audience::Person.updated(from, to),
-            Self::Waiting { latest } => format!("torrential {latest} installs when nothing is playing."),
+            Self::Waiting { latest } => format!("torrential {latest} is installed and starts when nothing is playing."),
+            Self::Installed { latest } => {
+                format!("torrential {latest} is installed and starts the next time the engine starts.")
+            }
             Self::Available { current, latest } => Audience::Person.out(current, *latest),
         }
     }
@@ -479,10 +484,10 @@ impl Board {
     }
 }
 
-/// Looks for newer releases, and under `updates: auto` installs one and stops the engine for it once
-/// nothing is playing and every download is saved. Returns once the owner has stopped for the
-/// engine to restart into the installed release.
-pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>) {
+/// Looks for newer releases, and under `updates: auto` installs one. An engine that the login
+/// service started, as `service` says, then stops once nothing is playing and every download is
+/// saved, for the service to start the installed release. Returns once the owner has stopped.
+pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
     let (current, board) = (env.version(), &ctx.news);
     let updated_from = read_json::<Updated>(&paths.state.join(UPDATED)).filter(|u| u.to == current).map(|u| u.from);
     let Some(releases) = Releases::from_env(&env) else {
@@ -510,8 +515,11 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>) {
                     match put_release(&releases, &env, latest).await {
                         Ok(_) => {
                             crate::daemon::log(&format!("installed torrential {latest}"));
-                            write_json(&paths.state.join(UPDATED), &Updated { from: current.clone(), to: latest.to_string() });
-                            return restart(&ctx, latest).await;
+                            write_json(
+                                &paths.state.join(UPDATED),
+                                &Updated { from: current.clone(), to: latest.to_string() },
+                            );
+                            return switch(&ctx, latest, service).await;
                         }
                         Err(e) => {
                             crate::daemon::log(&format!("update failed: {}", e.message));
@@ -530,11 +538,17 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>) {
     }
 }
 
-/// Stops the engine for a restart into `to` once nothing plays and every download is saved.
-async fn restart(ctx: &Ctx, to: Version) {
+/// Stops the engine for the login service to start release `to` once nothing plays and every
+/// download is saved. An engine without a login service keeps running until it next starts.
+async fn switch(ctx: &Ctx, to: Version, service: bool) {
+    if !service {
+        crate::daemon::log(&format!("torrential {to} starts the next time the engine starts"));
+        ctx.news.post(Some(News::Installed { latest: to }));
+        return std::future::pending().await;
+    }
     loop {
         if ctx.playing.any() {
-            crate::daemon::log(&format!("torrential {to} waits until nothing is playing"));
+            crate::daemon::log(&format!("torrential {to} starts when nothing is playing"));
             ctx.news.post(Some(News::Waiting { latest: to }));
         }
         let closed = ctx.playing.close().await;
@@ -543,7 +557,7 @@ async fn restart(ctx: &Ctx, to: Version) {
             Err(e) => {
                 crate::daemon::log(&format!("torrential {to} waits: {}", e.message));
                 drop(closed);
-                tokio::time::sleep(RESTART_RETRY).await;
+                tokio::time::sleep(SWITCH_RETRY).await;
             }
         }
     }
@@ -734,7 +748,11 @@ mod tests {
         assert_eq!(line(Policy::Off, "0.5.1", Some("0.4.0")), None);
         assert_eq!(
             News::Waiting { latest: version("0.5.1") }.line(),
-            "torrential 0.5.1 installs when nothing is playing."
+            "torrential 0.5.1 is installed and starts when nothing is playing."
+        );
+        assert_eq!(
+            News::Installed { latest: version("0.5.1") }.line(),
+            "torrential 0.5.1 is installed and starts the next time the engine starts."
         );
     }
 

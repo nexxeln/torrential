@@ -200,13 +200,20 @@ pub fn log(message: &str) {
     eprintln!("{} {message}", crate::output::format::timestamp(owner::now()));
 }
 
-/// Runs the engine until `torrential engine stop`, a signal, or an update.
-pub fn run(env: &Env) -> u8 {
+/// The exit status after which launchd (`KeepAlive` without `SuccessfulExit`) and systemd
+/// (`Restart=on-failure`) start the engine again, from the binary an update installed. Any other
+/// clean stop exits 0, which neither restarts.
+pub const RESTART: u8 = 75;
+
+/// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
+/// systemd started it, a switch to an installed update.
+pub fn run(env: &Env, service: bool) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
-    match serve(env, &paths) {
+    match serve(env, &paths, service) {
+        Ok(Ended::Restart) if service => RESTART,
         Ok(_) => 0,
         // The other engine serves this home, so launchd and systemd have nothing to start again.
         Err(Startup::AlreadyRunning(message)) => {
@@ -236,7 +243,7 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     error.code.exit_code()
 }
 
-fn serve(env: &Env, paths: &Paths) -> Result<Ended, Startup> {
+fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
     std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
@@ -309,7 +316,7 @@ fn serve(env: &Env, paths: &Paths) -> Result<Ended, Startup> {
             }
         });
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone()));
+        let updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), service));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         accept.abort();
         running.http.abort();

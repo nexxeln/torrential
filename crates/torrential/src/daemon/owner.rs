@@ -181,7 +181,7 @@ pub enum Command {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ended {
     Stopped,
-    /// Stopped with every download saved, for an update to restart the engine.
+    /// Stopped with every download saved, to start again from an installed update.
     Restart,
 }
 

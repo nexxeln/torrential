@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -81,6 +81,16 @@ struct Server {
 
 impl Server {
     fn start(version: &str, binary: &[u8], published_sum: Option<&str>) -> Server {
+        Server::gated(version, binary, published_sum, None)
+    }
+
+    /// The first request whose path ends with the gate's text waits until the gate receives.
+    fn gated(
+        version: &str,
+        binary: &[u8],
+        published_sum: Option<&str>,
+        mut gate: Option<(&'static str, mpsc::Receiver<()>)>,
+    ) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let tarball = Arc::new(tarball(binary));
@@ -91,6 +101,9 @@ impl Server {
             for stream in listener.incoming().flatten() {
                 let path = request_path(&stream);
                 log.lock().unwrap().push(path.clone());
+                if gate.as_ref().is_some_and(|(end, _)| path.ends_with(end)) {
+                    let _ = gate.take().unwrap().1.recv();
+                }
                 let reply = match path.as_str() {
                     "/latest" => (302, vec![("Location", location.clone())], Vec::new()),
                     p if p.ends_with(".tar.gz") => (200, Vec::new(), tarball.to_vec()),
@@ -449,3 +462,116 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
     assert!(log.contains("says it is torrential 0.1.0"), "{log}");
 }
 
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+impl Install {
+    /// Runs the engine the way the login service does: `daemon run --service`, started again each
+    /// time it exits with the restart status. Its output goes to the engine log.
+    fn supervise(&self) -> std::process::Child {
+        let script = r#"while :; do "$0" daemon run --service >>"$1" 2>&1; s=$?; [ "$s" = 75 ] || exit "$s"; done"#;
+        std::fs::create_dir_all(self.state()).unwrap();
+        let (exe, log) = (self.exe().display().to_string(), self.state().join("engine.log").display().to_string());
+        self.command(Path::new("/bin/sh"), &["-c", script, &exe, &log]).spawn().unwrap()
+    }
+
+    /// What the web app on `port` hears about versions, or nothing while no engine answers there.
+    fn news(port: u16) -> Option<serde_json::Value> {
+        let mut page = TcpStream::connect(("127.0.0.1", port)).ok()?;
+        page.write_all(b"GET /api/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").ok()?;
+        let mut answer = String::new();
+        page.read_to_string(&mut answer).ok()?;
+        serde_json::from_str(answer.split_once("\r\n\r\n")?.1).ok()
+    }
+
+    /// The ID of the test download that never finishes while `TORRENTIAL_TEST_FAKE_RATE` is 0.
+    fn wikipedia(&self) -> String {
+        let jobs: serde_json::Value = serde_json::from_str(&self.run(&["status", "--json"]).stdout).unwrap();
+        let jobs = jobs["jobs"].as_array().unwrap();
+        jobs.iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap()["id"].as_str().unwrap().to_string()
+    }
+}
+
+/// A player asking for the end of a file that has not arrived, so its stream stays open.
+fn open_stream(port: u16, id: &str) -> (TcpStream, [u8; 12]) {
+    let mut player = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let ask = format!("GET /{id}/0/enwiki.xml.bz2 HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=23514217000-\r\n\r\n");
+    player.write_all(ask.as_bytes()).unwrap();
+    let mut head = [0; 12];
+    player.read_exact(&mut head).unwrap();
+    (player, head)
+}
+
+#[test]
+fn under_the_login_service_an_update_installs_while_a_film_plays_and_starts_once_it_ends() {
+    let Some(target) = target() else { return };
+    let (answer, gate) = mpsc::channel();
+    let built = Built::new();
+    let server = Server::gated("0.1.1", &built.release("0.1.1", Some("0.1.1")), None, Some(("/latest", gate)));
+    let mut install = Install::agent_with_engine(&server);
+    let port = free_port();
+    install.set("TORRENTIAL_TEST_FAKE_RATE", "0");
+    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
+    let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
+    let mut service = install.supervise();
+    eventually("the service started the engine", || install.running().is_some());
+    let (pid, _) = install.engine();
+
+    let (player, head) = open_stream(port, &install.wikipedia());
+    answer.send(()).unwrap();
+    eventually("the engine says the update waits", || {
+        Install::news(port)
+            .is_some_and(|news| news["notice"] == "torrential 0.1.1 is installed and starts when nothing is playing.")
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let playing = (std::fs::read(install.exe()).unwrap(), install.running());
+    drop(player);
+    eventually("the service started 0.1.1", || install.running().is_some_and(|(now, v)| now != pid && v == "0.1.1"));
+    let news = Install::news(port);
+    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    let stop = install.run(&["engine", "stop"]);
+    let ended = service.wait().unwrap();
+
+    assert_eq!(&head, b"HTTP/1.1 206");
+    assert_eq!(playing.0, built.release("0.1.1", Some("0.1.1")), "the release was installed while the film played");
+    assert_eq!(playing.1, Some((pid, "0.1.0".into())), "the engine kept its version until the film ended");
+    assert_ne!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode);
+    assert_eq!(news, Some(serde_json::json!({"version": "0.1.1", "notice": "Updated torrential to 0.1.1."})));
+    assert_eq!((stop.code, ended.code()), (0, Some(0)), "a stop the person asks for does not start it again");
+    let [tarball, sum] = assets(target);
+    assert_eq!(server.asked(), ["/latest".to_string(), tarball, sum]);
+}
+
+#[test]
+fn without_the_login_service_an_installed_update_starts_with_the_next_command() {
+    let Some(target) = target() else { return };
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
+    let mut install = Install::agent_with_engine(&server);
+    let port = free_port();
+    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
+    install.found("0.1.1");
+
+    let started = install.run(&["status", "--json"]);
+    let (old_pid, _) = install.engine();
+    eventually("the engine installed 0.1.1", || {
+        Install::news(port).is_some_and(|news| {
+            news["notice"] == "torrential 0.1.1 is installed and starts the next time the engine starts."
+        })
+    });
+    let kept = install.running();
+    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    let first = install.run(&["status"]);
+    let second = install.run(&["status"]);
+
+    assert_eq!(started.code, 0);
+    assert_eq!(std::fs::read(install.exe()).unwrap(), built.release("0.1.1", Some("0.1.1")));
+    assert_eq!(kept, Some((old_pid, "0.1.0".into())), "the engine kept the version it started with");
+    assert_eq!(first.stderr, "# updated torrential from 0.1.0 to 0.1.1\n");
+    assert_eq!(second.stderr, "");
+    let (pid, version) = install.engine();
+    assert_eq!(version, "0.1.1", "the next command started the engine on the new version");
+    assert_ne!(pid, old_pid);
+    assert_eq!(server.asked(), assets(target), "a release found within the day needs no new check");
+}

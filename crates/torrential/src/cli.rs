@@ -318,8 +318,9 @@ pub enum DaemonCommand {
     /// Run the engine in the foreground
     #[command(hide = true)]
     Run {
-        /// Passed by login services from torrential 0.4 and earlier, and ignored
-        #[arg(long, hide = true)]
+        /// Started by launchd or systemd, which start the engine again when it exits to switch to an
+        /// installed update
+        #[arg(long)]
         service: bool,
     },
     /// The short-lived middle process of the detached start

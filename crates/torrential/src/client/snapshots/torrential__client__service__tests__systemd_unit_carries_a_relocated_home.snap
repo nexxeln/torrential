@@ -6,7 +6,7 @@ expression: text
 Description=torrential engine
 
 [Service]
-ExecStart="/usr/bin/torrential" daemon run
+ExecStart="/usr/bin/torrential" daemon run --service
 Environment="TORRENTIAL_HOME=/srv/torrential"
 Restart=on-failure
 
