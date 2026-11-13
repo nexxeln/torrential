@@ -146,10 +146,11 @@ fn fake(env: &Env) -> bool {
     env.var("TORRENTIAL_TEST_ENGINE") == Some("fake")
 }
 
-/// An engine a test started, with a fake engine or on the loopback network. Only it reads the
-/// settings that let a test reach into what the engine does.
-fn test_engine(env: &Env) -> bool {
-    env.var("TORRENTIAL_TEST_ENGINE").is_some() || env.var("TORRENTIAL_TEST_NETWORK").is_some()
+/// The settings of an engine a test started, the one with the fake engine or on the loopback
+/// network, and `None` for any other. Every setting that lets a test reach into what the engine
+/// does is read through it.
+fn test_engine(env: &Env) -> Option<&Env> {
+    (fake(env) || env.var("TORRENTIAL_TEST_NETWORK") == Some("loopback")).then_some(env)
 }
 
 /// How long a play leaving the plays folder waits before it goes: no time, unless a test engine
@@ -165,18 +166,24 @@ fn trash_pause(env: &Env) -> Duration {
 }
 
 fn test_pause(env: &Env, name: &str) -> Duration {
-    let asked = env.var(name).filter(|_| test_engine(env));
+    let asked = test_engine(env).and_then(|test| test.var(name));
     asked.and_then(torrential_core::units::parse_duration).map_or(Duration::ZERO, |pause| pause.min(MAX_TEST_PAUSE))
 }
 
 const MAX_TEST_PAUSE: Duration = Duration::from_secs(60);
 
+/// How long a play no one streams keeps downloading. A test engine may ask for less.
+fn plays_idle(env: &Env) -> Duration {
+    let asked = test_engine(env).and_then(|test| test.var("TORRENTIAL_TEST_PLAYS_IDLE"));
+    asked.and_then(torrential_core::units::parse_duration).unwrap_or(owner::plays::IDLE_AFTER)
+}
+
 /// Where the files of a download in a folder the person chose go when they delete them. A test
 /// engine never uses the person's Trash: `TORRENTIAL_TEST_TRASH` names its own, or it keeps one
 /// beside its state.
 fn trash(env: &Env, paths: &Paths) -> owner::trash::Trash {
-    if test_engine(env) {
-        let dir = env.var("TORRENTIAL_TEST_TRASH").map_or_else(|| paths.state.join("trash"), PathBuf::from);
+    if let Some(test) = test_engine(env) {
+        let dir = test.var("TORRENTIAL_TEST_TRASH").map_or_else(|| paths.state.join("trash"), PathBuf::from);
         return owner::trash::Trash::At(dir);
     }
     let home = || Path::new(env.var("HOME").unwrap_or("/")).join(".local/share");
@@ -308,14 +315,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         save_resume_every,
         stall_after,
         writes_stop_within: WRITES_STOP_WITHIN,
-        plays: owner::plays::Plays {
-            root: paths.plays(),
-            max: settings.plays_max.0,
-            idle_after: env
-                .var("TORRENTIAL_TEST_PLAYS_IDLE")
-                .and_then(torrential_core::units::parse_duration)
-                .unwrap_or(owner::plays::IDLE_AFTER),
-        },
+        plays: owner::plays::Plays { root: paths.plays(), max: settings.plays_max.0, idle_after: plays_idle(env) },
         trash: trash(env, paths),
         deletion_pause: deletion_pause(env),
         trash_pause: trash_pause(env),

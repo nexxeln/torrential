@@ -1671,18 +1671,28 @@ fn settings_for_tests_reach_only_an_engine_a_test_started() {
     assert_eq!(pause(&[held, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(30));
     let long = ("TORRENTIAL_TEST_DELETION_PAUSE", "2h");
     assert_eq!(pause(&[long, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(60), "and a minute at most");
+    let public = ("TORRENTIAL_TEST_NETWORK", "public");
+    assert_eq!(pause(&[held, public]), Duration::ZERO, "an engine on the public network is no test engine");
 
     let trash = |pairs: &[(&str, &str)]| {
         let env = env(pairs);
         super::trash(&env, &crate::paths::Paths::resolve(&env, 501, None).unwrap())
     };
     let named = ("TORRENTIAL_TEST_TRASH", "/tmp/trash");
-    assert_eq!(trash(&[named, ("HOME", "/home/ada")]), Trash::system(std::path::Path::new("/home/ada/.local/share")));
+    let system = Trash::system(std::path::Path::new("/home/ada/.local/share"));
+    assert_eq!(trash(&[named, ("HOME", "/home/ada")]), system);
+    assert_eq!(trash(&[named, public, ("HOME", "/home/ada")]), system);
     assert_eq!(trash(&[named, ("TORRENTIAL_TEST_ENGINE", "fake")]), Trash::At("/tmp/trash".into()));
     assert_eq!(trash(&[("TORRENTIAL_TEST_NETWORK", "loopback")]), Trash::At("/th/state/trash".into()));
 
+    let idle = |pairs: &[(&str, &str)]| super::plays_idle(&env(pairs));
+    let quick = ("TORRENTIAL_TEST_PLAYS_IDLE", "1s");
+    assert_eq!(idle(&[quick]), IDLE_AFTER);
+    assert_eq!(idle(&[quick, public]), IDLE_AFTER);
+    assert_eq!(idle(&[quick, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(1));
+
     let trash_pause = |pairs: &[(&str, &str)]| super::trash_pause(&env(pairs));
     let held = ("TORRENTIAL_TEST_TRASH_PAUSE", "5s");
-    assert_eq!(trash_pause(&[held]), Duration::ZERO);
+    assert_eq!(trash_pause(&[held, public]), Duration::ZERO);
     assert_eq!(trash_pause(&[held, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(5));
 }
