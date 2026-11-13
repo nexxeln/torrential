@@ -165,6 +165,35 @@ async fn other_websites_cannot_use_the_engine_through_the_browser() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_get_starts_no_work_since_a_browser_without_fetch_metadata_sends_one_from_any_website() {
+    let h = Harness::new();
+    let iso = torrent(63, "debian.iso", &[("debian.iso", GIB)]);
+    let url = "https://cdimage.example/debian.iso.torrent";
+    h.search.serve_torrent(url, iso.bytes());
+    let fetched = "ref=https%3A%2F%2Fcdimage.example%2Fdebian.iso.torrent";
+    for route in [
+        format!("files?{fetched}"),
+        format!("play?{fetched}"),
+        "title/play?video=tt0063350".into(),
+        "pause?refs=all".into(),
+        "resume?refs=all".into(),
+        "remove?refs=all".into(),
+        "watched?video=tt0063350&position=60&duration=5760".into(),
+        "library?title=tt0063350&saved=true".into(),
+        "devices/add".into(),
+        "devices/remove?id=0badf00d".into(),
+    ] {
+        let name = route.split('?').next().unwrap();
+        let refused = get(&h, &format!("/api/{route}")).await;
+        let expected = format!("the engine has no GET /api/{name}");
+        assert_eq!(error(&refused), (404, "not_found", expected.as_str()), "{route}");
+    }
+    let (status, listing) = post(&h, "/api/files", json!({ "ref": url })).await;
+    assert_eq!((status, &listing["files"][0]["path"]), (200, &json!("debian.iso")));
+    assert_eq!(get(&h, "/api/jobs").await.1, json!({ "jobs": [] }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_search_sends_a_line_each_time_a_source_answers() {
     let listed = |hex: &str, name: &str, source: &str| torrential_core::Release {
         id: torrential_core::ReleaseId::Torrent(hex.repeat(20).parse().unwrap()),
@@ -262,7 +291,7 @@ async fn a_page_follows_and_changes_downloads() {
     post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
     let event = events.event().await;
     assert_eq!(json!([event["event"], event["job"]["id"]]), json!(["job", id]));
-    let (_, listing) = get(&h, &format!("/api/files?ref={}", prefix(&film))).await;
+    let (_, listing) = post(&h, "/api/files", json!({ "ref": prefix(&film) })).await;
     assert_eq!(
         json!([listing["id"], listing["files"][1]["path"], listing["files"][1]["selected"]]),
         json!([id, "film.srt", true])

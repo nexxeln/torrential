@@ -15,7 +15,7 @@
 //   GET  /api/pieces?id=&file=                          FilePieces
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
-//   GET  /api/files?ref=                                FileListing
+//   POST /api/files       { ref }                       FileListing
 //   POST /api/pause | /api/resume | /api/remove  { refs }   { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
 //
@@ -592,7 +592,7 @@ export function jobs(signal?: AbortSignal): Promise<Job[]> {
 }
 
 export function files(ref: string, signal?: AbortSignal): Promise<FileListing> {
-  return fetch(`/api/files?ref=${encodeURIComponent(ref)}`, { signal }).then(json<FileListing>);
+  return post("/api/files", { ref }, signal);
 }
 
 /** A phone or TV this Mac let in. */

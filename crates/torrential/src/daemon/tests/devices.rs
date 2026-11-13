@@ -482,15 +482,15 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
     assert_eq!(form.status, 415);
     if let Some(name) = h.running.ctx.devices.local_name() {
         let by_name = Browser { host: format!("{name}:{port}"), ..mac_again(port) };
-        let files = "/api/files?ref=http%3A%2F%2Fexample.org%2Fsintel.torrent";
-        let moved = by_name.get(files).await;
-        let location = format!("http://127.0.0.1:{port}{files}");
+        let search = "/api/search?q=sintel%20trailer";
+        let moved = by_name.get(search).await;
+        let location = format!("http://127.0.0.1:{port}{search}");
         assert_eq!(
             (moved.status, moved.header("location"), moved.body.len()),
             (307, Some(location.as_str()), 0),
             "its own .local name goes to 127.0.0.1, where browsers say which site asked"
         );
-        let followed = mac_again(port).send("GET", files, &["Sec-Fetch-Site: cross-site"], "").await;
+        let followed = mac_again(port).send("GET", search, &["Sec-Fetch-Site: cross-site"], "").await;
         assert_eq!(followed.status, 403, "a browser that follows it from another website says so");
         let pause = by_name.send("POST", "/api/pause", &[], r#"{"refs":["all"]}"#).await;
         assert_eq!(

@@ -764,7 +764,8 @@ struct Sender {
 impl Sender {
     /// For a request over loopback, false when another website made it through the person's
     /// browser. Players, curl, and agents send none of these headers but `Host`. Only loopback
-    /// names count, since browsers send Sec-Fetch-Site over plain HTTP to those alone.
+    /// names count, since browsers send Sec-Fetch-Site over plain HTTP to those alone. A browser
+    /// that sends neither header passes too, so no GET starts work.
     fn loopback_allowed(&self, port: u16) -> bool {
         let loopback = |host: &str| matches!(host, "127.0.0.1" | "localhost" | "::1");
         // A web page that rebinds its own hostname to 127.0.0.1 still names that hostname.

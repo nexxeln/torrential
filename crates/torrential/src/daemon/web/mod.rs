@@ -1,5 +1,9 @@
 //! The web app's API: `/api/*` on the engine's HTTP server. web/src/api.ts is the same contract
 //! from the browser's side.
+//!
+//! A route that starts work or changes anything takes a JSON POST. Any website can make a browser
+//! send a GET here, and an old browser does not say which, but a JSON POST from another website
+//! waits for a preflight the engine never grants.
 
 pub mod assets;
 pub mod devices;
@@ -164,9 +168,9 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
             let jobs = owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
             Ok(json!({ "jobs": jobs }))
         }
-        (Method::Get, "files") => {
-            let target = target(&required(request, "ref")?)?;
-            value(server::files(ctx, target, METADATA_WAIT).await?)
+        (Method::Post, "files") => {
+            let Ref { reference } = body(request)?;
+            value(server::files(ctx, target(&reference)?, METADATA_WAIT).await?)
         }
         (Method::Post, "pause" | "resume" | "remove") => {
             let Refs { refs } = body(request)?;
@@ -187,6 +191,12 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
 #[derive(Deserialize)]
 struct Refs {
     refs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Ref {
+    #[serde(rename = "ref")]
+    reference: String,
 }
 
 fn method(request: &Request) -> &'static str {
