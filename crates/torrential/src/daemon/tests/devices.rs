@@ -361,7 +361,21 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
     assert_eq!(form.status, 415);
     if let Some(name) = h.running.ctx.devices.local_name() {
         let by_name = Browser { host: format!("{name}:{port}"), ..mac_again(port) };
-        assert_eq!(by_name.get("/api/me").await.json(), serde_json::json!({ "asker": "mac" }), "its own .local name");
+        let files = "/api/files?ref=http%3A%2F%2Fexample.org%2Fsintel.torrent";
+        let moved = by_name.get(files).await;
+        let location = format!("http://127.0.0.1:{port}{files}");
+        assert_eq!(
+            (moved.status, moved.header("location"), moved.body.len()),
+            (307, Some(location.as_str()), 0),
+            "its own .local name goes to 127.0.0.1, where browsers say which site asked"
+        );
+        let followed = mac_again(port).send("GET", files, &["Sec-Fetch-Site: cross-site"], "").await;
+        assert_eq!(followed.status, 403, "a browser that follows it from another website says so");
+        let pause = by_name.send("POST", "/api/pause", &[], r#"{"refs":["all"]}"#).await;
+        assert_eq!(
+            (pause.status, pause.header("location")),
+            (307, Some(format!("http://127.0.0.1:{port}/api/pause").as_str()))
+        );
     }
     assert_eq!(ErrorCode::LocalOnly.exit_code(), 6);
 }

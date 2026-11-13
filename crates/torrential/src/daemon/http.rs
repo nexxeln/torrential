@@ -328,6 +328,12 @@ impl Connection<'_> {
                 ),
             ),
             Refusal::CastEnded => ("404 Not Found", "This cast has ended, so press Play on TV again.\n".to_string()),
+            Refusal::Moved(location) => {
+                return self
+                    .empty("307 Temporary Redirect", &format!("Location: {location}\r\n"), false)
+                    .await
+                    .map(drop);
+            }
         };
         let head = format!(
             "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -589,14 +595,26 @@ enum Refusal {
     Elsewhere(String),
     /// A cast URL whose grant was dropped, or never made.
     CastEnded,
+    /// Over loopback, a request that names this Mac's .local name. It holds the same path on
+    /// 127.0.0.1, where browsers say which website made a request.
+    Moved(String),
 }
 
-/// Who sent `request`. A cast URL is let in by its grant alone, anything else over loopback is
-/// this Mac, and from the network a paired device's cookie lets it in.
+/// Who sent `request`. Over loopback, a request that names this Mac's .local name moves to
+/// 127.0.0.1 first. A cast URL is let in by its grant alone, anything else over loopback is this
+/// Mac, and from the network a paired device's cookie lets it in.
 fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
     let name = devices.local_name();
+    let named = |host: &str| name.as_deref() == Some(split_host(host).0);
     match peer {
-        Peer::Loopback if !request.from.loopback_allowed(port, name.as_deref()) => return Err(Refusal::Forbidden),
+        Peer::Loopback if request.from.host.as_deref().is_some_and(named) => {
+            if !request.path.starts_with('/') {
+                return Err(Refusal::Forbidden);
+            }
+            let query = if request.query.is_empty() { String::new() } else { format!("?{}", request.query) };
+            return Err(Refusal::Moved(format!("http://127.0.0.1:{port}{}{query}", request.path)));
+        }
+        Peer::Loopback if !request.from.loopback_allowed(port) => return Err(Refusal::Forbidden),
         Peer::Network { local, .. } => {
             if !request.from.home_allowed(port, local, name.as_deref()) {
                 let host = name.unwrap_or_else(|| local.to_string());
@@ -626,23 +644,19 @@ struct Sender {
 
 impl Sender {
     /// For a request over loopback, false when another website made it through the person's
-    /// browser. Players, curl, and agents send none of these headers but `Host`. A Mac reaches its
-    /// own .local `name` over loopback too, and no web page elsewhere can make it resolve that.
-    fn loopback_allowed(&self, port: u16, name: Option<&str>) -> bool {
-        let ours = |host: &str| matches!(host, "127.0.0.1" | "localhost") || Some(host) == name;
-        let local = |host: &str| ours(host.rsplit_once(':').map_or(host, |(host, _)| host));
+    /// browser. Players, curl, and agents send none of these headers but `Host`. Only loopback
+    /// names count, since browsers send Sec-Fetch-Site over plain HTTP to those alone.
+    fn loopback_allowed(&self, port: u16) -> bool {
+        let loopback = |host: &str| matches!(host, "127.0.0.1" | "localhost" | "::1");
         // A web page that rebinds its own hostname to 127.0.0.1 still names that hostname.
-        if self.host.as_deref().is_some_and(|host| !local(host)) {
+        if self.host.as_deref().is_some_and(|host| !loopback(split_host(host).0)) {
             return false;
         }
         if self.cross_site() {
             return false;
         }
         let own = |origin: &str| {
-            origin
-                .strip_prefix("http://")
-                .and_then(|host| host.rsplit_once(':'))
-                .is_some_and(|(host, origin_port)| ours(host) && origin_port == port.to_string())
+            origin.strip_prefix("http://").map(split_host).is_some_and(|(host, at)| loopback(host) && at == Some(port))
         };
         self.origin.as_deref().is_none_or(own)
     }
@@ -725,16 +739,18 @@ mod tests {
         let allowed = |host: &str, site: Option<&str>, origin: Option<&str>| {
             let from =
                 Sender { host: Some(host.into()), site: site.map(String::from), origin: origin.map(String::from) };
-            from.loopback_allowed(47919, Some("studio-mac.local"))
+            from.loopback_allowed(47919)
         };
         // A player, curl, or an agent.
         assert!(allowed("127.0.0.1:47919", None, None));
         assert!(allowed("localhost", None, None));
-        assert!(Sender { host: None, site: None, origin: None }.loopback_allowed(47919, None), "HTTP/1.0 has no Host");
-        // This Mac's browser at the address its QR code holds, which resolves to 127.0.0.1 here.
-        assert!(allowed("studio-mac.local:47919", Some("same-origin"), Some("http://studio-mac.local:47919")));
-        assert!(!allowed("other-mac.local:47919", None, None));
-        assert!(!allowed("127.0.0.1:47919", None, Some("http://other-mac.local:47919")));
+        assert!(Sender { host: None, site: None, origin: None }.loopback_allowed(47919), "HTTP/1.0 has no Host");
+        assert!(allowed("[::1]:47919", None, None));
+        // Plain HTTP to a .local name carries no Sec-Fetch-Site, so another website's request to
+        // this Mac's own name looks like the Mac's.
+        assert!(!allowed("studio-mac.local:47919", Some("same-origin"), Some("http://studio-mac.local:47919")));
+        assert!(!allowed("studio-mac.local:47919", None, None));
+        assert!(!allowed("127.0.0.1:47919", None, Some("http://studio-mac.local:47919")));
         // The web app itself, and its address typed into the browser.
         assert!(allowed("127.0.0.1:47919", Some("same-origin"), Some("http://127.0.0.1:47919")));
         assert!(allowed("localhost:47919", Some("same-origin"), Some("http://localhost:47919")));
