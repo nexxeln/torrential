@@ -58,7 +58,7 @@ export function Sources({ video, label, kind, open: opened }: Props) {
           aria-expanded={open}
           aria-controls="sources"
           onClick={() => setOpen(!open)}
-          className="group/open -mx-2 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-base font-medium text-ink hover:bg-white/5 sm:text-sm"
+          className="group/open -mx-2 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-base font-medium text-ink hover:bg-white/5 sm:text-sm pointer-coarse:min-h-11"
         >
           <ChevronRightIcon className="size-4 fill-pencil transition-transform group-aria-expanded/open:rotate-90 motion-reduce:transition-none" />
           Sources
