@@ -613,16 +613,15 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
     fn count(left: &mut Left, stat: &rustix::fs::Stat) {
         left.bytes = left.bytes.map(|bytes| bytes + stat.st_blocks as u64 * 512);
     }
-    let names: Vec<Vec<u8>> = match rustix::fs::Dir::read_from(folder) {
-        Ok(mut entries) => std::iter::from_fn(|| entries.read())
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_bytes().to_vec())
-            .filter(|name| name != b"." && name != b"..")
-            .collect(),
-        Err(_) => {
-            unmeasured(&mut left, "it cannot be read");
-            return left;
-        }
+    let listed = rustix::fs::Dir::read_from(folder).and_then(|mut entries| {
+        std::iter::from_fn(|| entries.read())
+            .map(|entry| entry.map(|entry| entry.file_name().to_bytes().to_vec()))
+            .filter(|name| !matches!(name, Ok(name) if name == b"." || name == b".."))
+            .collect::<rustix::io::Result<Vec<Vec<u8>>>>()
+    });
+    let Ok(names) = listed else {
+        unmeasured(&mut left, "it cannot be read");
+        return left;
     };
     for name in names {
         let name = OsStr::from_bytes(&name);
@@ -917,6 +916,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("notes.txt")).unwrap(), "the person's own notes");
         let trash = root.join(format!("disk/.Trashes/{}", crate::paths::uid()));
         assert!(!trash.join("notes.txt").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_whose_entries_cannot_be_read_cannot_be_measured_and_keeps_what_is_in_it() {
+        let Place { root, .. } = &place();
+        write(&root.join("play/film.mp4"), "film");
+        // A descriptor that names the folder but cannot read it fails once its entries are read.
+        let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let unreadable = rustix::fs::openat(CWD, root.join("play"), flags, Mode::empty()).unwrap();
+        let device = Identity::of(&rustix::fs::fstat(&unreadable).unwrap()).device;
+        let left = empty(&unreadable, &HashSet::new(), device);
+        assert_eq!((left.bytes, left.why), (None, Some("it cannot be read")));
+        assert_eq!(std::fs::read_to_string(root.join("play/film.mp4")).unwrap(), "film");
     }
 
     #[test]
