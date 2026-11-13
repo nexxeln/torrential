@@ -62,6 +62,14 @@ pub enum Command {
     /// Open the web app, to search and watch in your browser
     #[command(after_help = "Examples:\n  torrential web\n  torrential web --no-open")]
     Web(WebArgs),
+    /// List, add, or remove the phones and TVs that watch from this Mac
+    #[command(
+        after_help = "Examples:\n  torrential devices\n  torrential devices add\n  torrential devices remove 3f9a0c2e --json"
+    )]
+    Devices {
+        #[command(subcommand)]
+        command: Option<DevicesCommand>,
+    },
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -73,8 +81,9 @@ pub enum Command {
     Pause(RefsArgs),
     /// Resume downloads, or retry failed ones
     Resume(ResumeArgs),
-    /// Remove downloads from the list without deleting their files
-    Rm(RefsArgs),
+    /// Remove downloads from the list. A play's files go with it, and other files stay unless --delete moves them to the Trash
+    #[command(after_help = "Examples:\n  torrential rm 9b5212\n  torrential rm 9b5212 --delete --json")]
+    Rm(RmArgs),
     /// Re-hash the data on disk and report damaged pieces
     Verify(VerifyArgs),
     /// Show or change ranking and update settings
@@ -286,6 +295,16 @@ pub struct RefsArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct RmArgs {
+    /// Download IDs from torrential status
+    #[arg(value_name = "ID", required = true, num_args = 1.., add = ArgValueCandidates::new(complete_download_ids))]
+    pub references: Vec<String>,
+    /// Move the files of a download in your own folder to the Trash too
+    #[arg(long)]
+    pub delete: bool,
+}
+
+#[derive(Args, Debug)]
 pub struct ResumeArgs {
     /// Download IDs from torrential status
     #[arg(value_name = "ID", required_unless_present = "all", add = ArgValueCandidates::new(complete_download_ids))]
@@ -303,6 +322,20 @@ pub struct VerifyArgs {
     /// Download damaged pieces again
     #[arg(long)]
     pub repair: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DevicesCommand {
+    /// List the paired devices and the open code, the default
+    List,
+    /// Show a code and a QR code that let one more phone or TV in for 5 minutes
+    Add,
+    /// Lock a device out at once
+    Remove {
+        /// A device ID from torrential devices
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

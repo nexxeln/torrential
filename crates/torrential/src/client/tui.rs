@@ -3,13 +3,19 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
-use torrential_core::protocol::{Change, Event, FilesReply, GetReply, GetRequest, Request, Response};
-use torrential_core::{Error, ErrorCode, Machine, Preferences, Profile, SearchQuery, SearchResult, Target};
+use torrential_core::protocol::{
+    Change, Event, FilesReply, GetReply, GetRequest, Home, Request, Response, TitlePage, TitlePlayed, TitleRequest,
+};
+use torrential_core::{
+    AttemptEvent, Error, ErrorCode, Machine, Preferences, Profile, SearchQuery, SearchResult, Target, TitleCard,
+    TitleId, VideoRef,
+};
 
 use torrential_tui::{Edit, Exit};
 
 use super::connect::{self, Conn, DEFAULT_REPLY_WITHIN};
 use super::play::{self, Playing};
+use super::{answer, titles};
 use crate::config::{self, Config};
 use crate::daemon::admission::{Disk, RealDisk};
 use crate::env::Env;
@@ -33,10 +39,10 @@ pub fn run(env: &Env) -> Result<u8, Error> {
     }
 }
 
-struct EngineBackend {
-    paths: Paths,
-    downloads: PathBuf,
-    env: Env,
+pub(crate) struct EngineBackend {
+    pub(crate) paths: Paths,
+    pub(crate) downloads: PathBuf,
+    pub(crate) env: Env,
 }
 
 #[derive(Deserialize)]
@@ -125,7 +131,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn remove(&self, id: &str) -> Result<Vec<Change>, Error> {
-        self.changes(Request::Remove { refs: vec![id.to_string()] }, DEFAULT_REPLY_WITHIN)
+        self.changes(Request::Remove { refs: vec![id.to_string()], delete: false }, DEFAULT_REPLY_WITHIN)
     }
 
     fn verify(&self, id: &str) -> Result<Vec<Change>, Error> {
@@ -176,5 +182,36 @@ impl torrential_tui::Backend for EngineBackend {
             Outcome::Updated(latest) => Some(latest.to_string()),
             Outcome::Latest(_) => None,
         })
+    }
+
+    fn home(&self) -> Result<Home, Error> {
+        match answer(self.conn()?.call(&Request::Home)?)? {
+            Response::Home { home } => Ok(*home),
+            other => Err(connect::unexpected(&other)),
+        }
+    }
+
+    fn titles(&self, words: &str) -> Result<Vec<TitleCard>, Error> {
+        match answer(self.conn()?.call(&Request::Titles { words: words.to_string() })?)? {
+            Response::Titles { titles } => Ok(titles),
+            other => Err(connect::unexpected(&other)),
+        }
+    }
+
+    fn title(&self, id: &TitleId) -> Result<TitlePage, Error> {
+        match answer(self.conn()?.call(&Request::Title { id: id.clone() })?)? {
+            Response::Title { title } => Ok(*title),
+            other => Err(connect::unexpected(&other)),
+        }
+    }
+
+    fn play_title(&self, video: &VideoRef, step: &mut dyn FnMut(AttemptEvent)) -> Result<(String, TitlePlayed), Error> {
+        let config = Config::load(&self.paths, &self.env)?;
+        let mut conn = self.conn()?;
+        let request = TitleRequest { video: video.clone(), source: None };
+        let (reply, title) = titles::play_each(&mut conn, request, |event| step(event.clone()))?;
+        let player = play::player(&config, &self.paths, &self.env, &reply.streams[0].url)?;
+        play::open(&player, &Playing { name: title.name.clone(), reply, title: Some(title.clone()) }, &self.env)?;
+        Ok((player.name(), title))
     }
 }

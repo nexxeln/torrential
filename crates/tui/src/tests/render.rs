@@ -13,7 +13,7 @@ use crate::{layout, view};
 
 const SIZES: [(u16, u16); 5] = [(80, 24), (100, 30), (160, 45), (47, 40), (47, 19)];
 
-fn shot(state: &State) -> String {
+pub(super) fn shot(state: &State) -> String {
     let (w, h) = state.size;
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
@@ -24,7 +24,7 @@ fn shot(state: &State) -> String {
     terminal.backend().to_string()
 }
 
-fn snapshots(name: &str, scenario: impl Fn((u16, u16)) -> State) {
+pub(super) fn snapshots(name: &str, scenario: impl Fn((u16, u16)) -> State) {
     for size in SIZES {
         insta::assert_snapshot!(format!("{name}_{}x{}", size.0, size.1), shot(&scenario(size)));
     }
@@ -460,7 +460,7 @@ fn a_search_before_detection_says_so_without_cutting_the_words() {
 
 #[test]
 fn a_search_with_overrides_names_them_or_only_the_machine() {
-    let with = |preferences| Profile { detected: Some(mac()), preferences, room: None };
+    let with = |preferences| Profile { detected: Some(mac()), preferences, ..Profile::default() };
     let tv = || with(Preferences { screen: Some(torrential_core::Screen::Tv4k), ..Preferences::default() });
     assert_eq!(
         heads_row(&searched_for((160, 45), tv())),
@@ -555,7 +555,7 @@ fn the_panel_opens_on_the_saved_overrides_and_fits_60_columns() {
         max_size: Some(5_000_000_000),
         playback: Some(torrential_core::Playback::H264),
     };
-    let mut state = searched_for((60, 16), Profile { detected: Some(mac()), preferences: five, room: None });
+    let mut state = searched_for((60, 16), Profile { detected: Some(mac()), preferences: five, ..Profile::default() });
     press(&mut state, "S");
     assert_eq!(
         panel_rows(&state),
@@ -648,7 +648,7 @@ fn every_screen_draws_at_every_size_from_the_smallest_up() {
     }
 }
 
-fn render(state: &State) -> Buffer {
+pub(super) fn render(state: &State) -> Buffer {
     render_in(state, ColorMode::TrueColor)
 }
 
@@ -659,7 +659,7 @@ fn render_in(state: &State, mode: ColorMode) -> Buffer {
     buf
 }
 
-fn find(buf: &Buffer, text: &str) -> (u16, u16) {
+pub(super) fn find(buf: &Buffer, text: &str) -> (u16, u16) {
     let w = buf.area.width;
     for y in 0..buf.area.height {
         let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
@@ -670,11 +670,11 @@ fn find(buf: &Buffer, text: &str) -> (u16, u16) {
     panic!("{text:?} is not on screen");
 }
 
-fn line(buf: &Buffer, y: u16) -> String {
+pub(super) fn line(buf: &Buffer, y: u16) -> String {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()
 }
 
-const MARK: u16 = 12;
+pub(super) const MARK: u16 = 12;
 
 #[test]
 fn the_selected_row_is_bright_and_bold_with_the_mark_beside_it() {

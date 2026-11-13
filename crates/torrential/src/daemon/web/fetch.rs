@@ -267,6 +267,12 @@ impl Ffmpeg {
         }
     }
 
+    /// Whether a file the browser cannot read plays: ffmpeg and ffprobe are here, or a fetch
+    /// brings them first.
+    pub fn converts(&self) -> bool {
+        self.found().readiness() != Readiness::Missing
+    }
+
     /// The programs that are here now. Never fetches them.
     pub fn now(&self) -> Result<Programs, Error> {
         match self.found() {

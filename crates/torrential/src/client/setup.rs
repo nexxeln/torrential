@@ -44,7 +44,7 @@ pub fn run(args: SetupArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
         result = if changed { "saved" } else { "unchanged" };
     }
     let file = config::file(&paths)?;
-    let profile = Profile { detected: Some(crate::machine::detect(env)?), preferences: wanted, room: None };
+    let profile = Profile { detected: Some(crate::machine::detect(env)?), preferences: wanted, ..Profile::default() };
     let doc = views::setup(&profile, updates, &file, result);
     let report = Report { result, profile: &profile, updates, file: file.display().to_string() };
     Ok(super::emit(mode, &doc, &Typed { kind: "setup", body: report }))

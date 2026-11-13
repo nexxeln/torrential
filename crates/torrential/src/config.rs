@@ -27,6 +27,7 @@ pub struct Config {
     pub subtitles: SubtitleConfig,
     pub catalog: CatalogConfig,
     pub ffmpeg: FfmpegConfig,
+    pub plays_max: PlaysMax,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,6 +42,16 @@ impl Default for FfmpegConfig {
     }
 }
 
+/// The most torrential's plays folder holds before the plays watched longest ago leave it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlaysMax(pub u64);
+
+impl Default for PlaysMax {
+    fn default() -> Self {
+        Self(20 << 30)
+    }
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct File {
@@ -52,6 +63,14 @@ struct File {
     subtitles: Subtitles,
     catalog: Catalog,
     ffmpeg: Ffmpeg,
+    plays: Plays,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct Plays {
+    /// A size, or none to keep every play.
+    max: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -369,7 +388,14 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
     };
     let ffmpeg = FfmpegConfig { fetch: file.ffmpeg.fetch.unwrap_or(true) };
     let updates = file.updates.unwrap_or_default();
-    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog, ffmpeg })
+    let plays_max = match file.plays.max {
+        None => PlaysMax::default(),
+        Some(Spanned { value, .. }) if value.trim() == "none" => PlaysMax(u64::MAX),
+        Some(Spanned { value, referenced, .. }) => PlaysMax(parse_size(&value).ok_or_else(|| {
+            (Some(referenced.line()), format!("plays.max {value:?} is not a size; use a form like 20GiB, or none"))
+        })?),
+    };
+    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog, ffmpeg, plays_max })
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -516,6 +542,19 @@ sources:
         for none in ["preferences: {}\n", "preferences:\n", "preferences:\n  max_size: none\n", "sources: {}\n"] {
             assert_eq!(read(none), Preferences::default(), "{none}");
         }
+    }
+
+    #[test]
+    fn the_plays_folder_holds_20_gib_unless_config_yaml_says_otherwise() {
+        let max = |text: &str| parse(text, &env()).map(|c| c.plays_max.0);
+        assert_eq!(max(""), Ok(20 << 30));
+        assert_eq!(max("plays:\n  max: 8GiB\n"), Ok(8 << 30));
+        assert_eq!(max("plays: { max: 700MB }\n"), Ok(700_000_000));
+        assert_eq!(max("plays:\n  max: none\n"), Ok(u64::MAX));
+        assert_eq!(
+            max("updates: auto\nplays:\n  max: lots\n"),
+            Err((Some(3), "plays.max \"lots\" is not a size; use a form like 20GiB, or none".to_string()))
+        );
     }
 
     #[test]

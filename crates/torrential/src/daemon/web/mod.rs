@@ -1,7 +1,12 @@
 //! The web app's API: `/api/*` on the engine's HTTP server. web/src/api.ts is the same contract
 //! from the browser's side.
+//!
+//! A route that starts work or changes anything takes a JSON POST. Any website can make a browser
+//! send a GET here, and an old browser does not say which, but a JSON POST from another website
+//! waits for a preflight the engine never grants.
 
 pub mod assets;
+pub mod devices;
 pub mod fetch;
 pub mod ffmpeg;
 pub mod media;
@@ -23,6 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, Release, SearchQuery, Target, TorrentId};
 
+use super::devices::Asker;
 use super::http::{Connection, Method, Request};
 use super::owner::Command;
 use super::search_port::Progress;
@@ -105,15 +111,15 @@ impl<K: Clone + Eq + Hash, V: Clone> Kept<K, V> {
     }
 }
 
-/// Answers the request for `/api/{route}`.
-pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -> io::Result<bool> {
+/// Answers the request for `/api/{route}` from this Mac or a paired device.
+pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, asker: &Asker) -> io::Result<bool> {
     match (request.method, route) {
-        (Method::Get, "search") => return search(conn, request).await,
+        (Method::Post, "search") => return search(conn, request).await,
         (Method::Get, "events") => return watch::events(conn, request).await,
         (Method::Get, "stream") => return watch::stream(conn, request).await,
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
-        (Method::Get, "title/sources") => return titles::sources(conn, request).await,
-        (Method::Post, "title/play") => return titles::play(conn, request).await,
+        (Method::Get, "title/sources") => return titles::sources(conn, request, asker).await,
+        (Method::Post, "title/play") => return titles::play(conn, request, asker).await,
         (Method::Get, "title/art") => return titles::art(conn, request).await,
         (Method::Post, "ffmpeg") => return ffmpeg(conn, request).await,
         _ => {}
@@ -126,7 +132,7 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
     }
     // A browser that leaves, or stops a request, closes the connection. The work stops with it.
     let reply = tokio::select! {
-        reply = respond(ctx, request, route) => reply,
+        reply = respond(ctx, request, route, asker) => reply,
         gone = conn.gone() => return Err(gone),
     };
     match reply {
@@ -135,9 +141,13 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
     }
 }
 
-async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Error> {
+async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Result<Value, Error> {
     let owner = &ctx.owner;
     match (request.method, route) {
+        (Method::Get, "me") => devices::me(ctx, asker),
+        (Method::Get, "devices") => devices::list(ctx, asker),
+        (Method::Post, "devices/add") => devices::add(ctx, asker),
+        (Method::Post, "devices/remove") => devices::remove(ctx, asker, body(request)?),
         (Method::Post, "play") => value(play::play(ctx, body(request)?).await?),
         (Method::Get, "titles") => titles::search(ctx, request).await,
         (Method::Get, "title") => titles::page(ctx, request).await,
@@ -160,19 +170,19 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Err
             let jobs = owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
             Ok(json!({ "jobs": jobs }))
         }
-        (Method::Get, "files") => {
-            let target = target(&required(request, "ref")?)?;
-            value(server::files(ctx, target, METADATA_WAIT).await?)
+        (Method::Post, "files") => {
+            let Ref { reference } = body(request)?;
+            value(server::files(ctx, target(&reference)?, METADATA_WAIT).await?)
         }
         (Method::Post, "pause" | "resume" | "remove") => {
-            let Refs { refs } = body(request)?;
+            let Refs { refs, delete } = body(request)?;
             if refs.is_empty() {
                 return Err(Error::new(ErrorCode::Usage, "refs names no download"));
             }
             let changes = match route {
                 "pause" => owner.ask(|reply| Command::Pause { refs, reply }).await?,
                 "resume" => owner.ask(|reply| Command::Resume { refs, all: false, reply }).await?,
-                _ => owner.ask(|reply| Command::Remove { refs, reply }).await?,
+                _ => owner.ask(|reply| Command::Remove { refs, delete, reply }).await?,
             };
             Ok(json!({ "changes": changes }))
         }
@@ -183,6 +193,15 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Err
 #[derive(Deserialize)]
 struct Refs {
     refs: Vec<String>,
+    /// With `remove`, deletes the files of a download in a folder the person chose too.
+    #[serde(default)]
+    delete: bool,
+}
+
+#[derive(Deserialize)]
+struct Ref {
+    #[serde(rename = "ref")]
+    reference: String,
 }
 
 fn method(request: &Request) -> &'static str {
@@ -242,6 +261,8 @@ fn status(code: ErrorCode) -> &'static str {
     use ErrorCode::*;
     match code {
         Usage | ConfirmationRequired => "400 Bad Request",
+        NotPaired => "401 Unauthorized",
+        LocalOnly => "403 Forbidden",
         InvalidRef | InvalidTorrent | NotFound | NoSelection => "404 Not Found",
         AmbiguousRef | JobConflict | PathConflict => "409 Conflict",
         TooLarge => "413 Content Too Large",
@@ -296,8 +317,8 @@ async fn results(
     let ctx = conn.ctx;
     conn.begin(NDJSON, request).await?;
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let preferences = query.profile.preferences;
-    let rank_for = || ctx.machine.profile(preferences);
+    let Profile { preferences, player, .. } = query.profile;
+    let rank_for = || ctx.machine.profile(preferences, player);
     let search = ctx.search.search_stream(query, &rank_for, progress_tx);
     tokio::pin!(search);
     let result = loop {
@@ -362,10 +383,24 @@ async fn follow(conn: &mut Connection<'_>, mut stage: tokio::sync::watch::Receiv
     }
 }
 
+/// What `POST /api/search` takes. A search can fetch .torrent files and keep fetching after it
+/// answers, so it is a JSON POST, which another website cannot make without a preflight.
+#[derive(Deserialize)]
+struct Search {
+    q: String,
+    category: Option<String>,
+    limit: Option<u16>,
+    #[serde(default)]
+    fresh: bool,
+}
+
 fn search_query(ctx: &Ctx, request: &Request) -> Result<SearchQuery, Error> {
-    let text = request.param("q").map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
-    let text = text.ok_or_else(|| Error::new(ErrorCode::Usage, "the search has no words: the q parameter is empty"))?;
-    let category = match request.param("category") {
+    let Search { q, category, limit, fresh } = body(request)?;
+    let text = q.trim();
+    if text.is_empty() {
+        return Err(Error::new(ErrorCode::Usage, "the search has no words: q is empty"));
+    }
+    let category = match category {
         Some(name) => Some(
             Category::ALL
                 .into_iter()
@@ -376,10 +411,10 @@ fn search_query(ctx: &Ctx, request: &Request) -> Result<SearchQuery, Error> {
     };
     Ok(SearchQuery {
         category,
-        limit: number(request, "limit")?.unwrap_or(SEARCH_LIMIT).clamp(1, MOST_RESULTS),
-        fresh: request.param("fresh").is_some_and(|fresh| fresh != "0" && fresh != "false"),
+        limit: limit.unwrap_or(SEARCH_LIMIT).clamp(1, MOST_RESULTS),
+        fresh,
         profile: Profile { preferences: (ctx.web.preferences)(), ..Profile::default() },
-        ..SearchQuery::new(text)
+        ..SearchQuery::new(text.to_string())
     })
 }
 

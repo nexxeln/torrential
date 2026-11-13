@@ -1,6 +1,8 @@
 //! Where a person stopped each film and episode, what of a title to play next, and the steps a
 //! title play reports.
 
+use std::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::catalog::{EpisodeInfo, Kind, TitleCard, TitleDetails, TitleId, VideoRef};
@@ -192,6 +194,20 @@ pub enum Skip {
     Failed {
         error: Error,
     },
+}
+
+/// Why a play moved past a source, in plain words.
+impl fmt::Display for Skip {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Skip::NoFileList { waited_s } => write!(f, "no peer sent its file list in {waited_s}s"),
+            Skip::NoVideo => f.write_str("none of its files is the video"),
+            Skip::Unplayable { container } => write!(f, "its .{container} file needs ffmpeg, which is not installed"),
+            Skip::TooLarge { error } | Skip::Failed { error } => f.write_str(&crate::text::sanitize(&error.message)),
+            Skip::NoData { waited_s } => write!(f, "no data arrived in {waited_s}s"),
+            Skip::Stalled => f.write_str("it stalled"),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

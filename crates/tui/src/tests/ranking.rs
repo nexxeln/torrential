@@ -78,7 +78,7 @@ fn enter_saves_a_tv_4k_screen_and_searches_again() {
     assert_eq!(save, [edit(Preferences::default(), TV_4K)]);
     assert_eq!(state.ranking, None);
     let effects = state.update(saved(&save[0], Preferences::default()));
-    assert_eq!(effects, [Effect::Search { search: 2, query: night_query() }]);
+    assert_eq!(effects, [Effect::Search { search: 2, query: Box::new(night_query()) }]);
     assert_eq!((state.toast.unwrap().text.as_str(), state.preferences), ("Saved screen tv-4k.", Some(TV_4K)));
 }
 
@@ -121,7 +121,7 @@ fn each_row_starts_on_its_override_and_auto_clears_it() {
     assert_eq!(save, [edit(LAPTOP, cleared)]);
     let effects = state.update(saved(&save[0], LAPTOP));
     assert_eq!(state.preferences, Some(cleared));
-    assert_eq!(effects, [Effect::Search { search: 2, query: night_query() }]);
+    assert_eq!(effects, [Effect::Search { search: 2, query: Box::new(night_query()) }]);
     assert_eq!(state.toast.unwrap().text, "Saved screen auto.");
 }
 
@@ -182,7 +182,7 @@ fn a_save_while_a_search_runs_starts_it_again() {
     right(&mut state, 4);
     let save = state.update(key(KeyCode::Enter));
     let effects = state.update(saved(&save[0], Preferences::default()));
-    assert_eq!(effects, [Effect::Search { search: 2, query: night_query() }], "the running search had none");
+    assert_eq!(effects, [Effect::Search { search: 2, query: Box::new(night_query()) }], "the running search had none");
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn a_save_keeps_a_typed_filter_and_runs_the_search_again() {
     press(&mut state, "Sllll");
     let save = state.update(key(KeyCode::Enter));
     let effects = state.update(saved(&save[0], Preferences::default()));
-    assert_eq!(effects, [Effect::Search { search: 2, query: night_query() }]);
+    assert_eq!(effects, [Effect::Search { search: 2, query: Box::new(night_query()) }]);
     assert_eq!(state.query.text, "night of the living dead 1080p", "the filter stays");
 }
 

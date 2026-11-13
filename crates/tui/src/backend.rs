@@ -1,5 +1,7 @@
-use torrential_core::protocol::{Change, Event, FilesReply, GetReply};
-use torrential_core::{Error, Machine, Preferences, SearchQuery, SearchResult};
+use torrential_core::protocol::{Change, Event, FilesReply, GetReply, Home, TitlePage, TitlePlayed};
+use torrential_core::{
+    AttemptEvent, Error, Machine, Preferences, SearchQuery, SearchResult, TitleCard, TitleId, VideoRef,
+};
 
 use crate::state::Edit;
 
@@ -42,4 +44,14 @@ pub trait Backend: Send + Sync + 'static {
     /// Installs the latest torrential over this binary and returns its version, or `None` when
     /// this binary is already the latest.
     fn upgrade(&self) -> Result<Option<String>, Error>;
+    /// The films and episodes to go on with, and the saved titles.
+    fn home(&self) -> Result<Home, Error>;
+    /// Films and series named like `words`.
+    fn titles(&self, words: &str) -> Result<Vec<TitleCard>, Error>;
+    /// One film or series, with where the person stopped and what plays next.
+    fn title(&self, id: &TitleId) -> Result<TitlePage, Error>;
+    /// Plays a film or an episode from the first of its sources that starts, as
+    /// `torrential play <title id>` does, and opens it in a player. `step` receives each step of
+    /// the play. Returns the player's name and what played.
+    fn play_title(&self, video: &VideoRef, step: &mut dyn FnMut(AttemptEvent)) -> Result<(String, TitlePlayed), Error>;
 }

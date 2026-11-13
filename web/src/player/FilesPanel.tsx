@@ -36,6 +36,7 @@ export function FilesPanel({ id, videos, current, onClose }: Props) {
   return (
     <aside
       aria-label="Videos in this torrent"
+      data-overlay=""
       className="absolute inset-y-0 right-0 z-30 flex w-88 max-w-full animate-appear flex-col bg-raised/95 inset-ring inset-ring-white/10 backdrop-blur-md motion-reduce:animate-none"
     >
       <div className="flex items-center justify-between py-3 pr-3 pl-5">
@@ -46,7 +47,7 @@ export function FilesPanel({ id, videos, current, onClose }: Props) {
           type="button"
           aria-label="Close"
           onClick={onClose}
-          className="relative flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
+          className="relative hit-area flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
         >
           <XMarkIcon className="size-4 fill-soft" />
         </button>
@@ -62,7 +63,7 @@ export function FilesPanel({ id, videos, current, onClose }: Props) {
                 href={watchPath(id, file.index)}
                 replace
                 aria-current={file.index === current ? "true" : undefined}
-                className="group/file flex items-start gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10 aria-current:bg-white/10"
+                className="group/file flex items-start gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10 aria-current:bg-white/10 pointer-coarse:py-3"
               >
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-medium text-ink">{name}</div>

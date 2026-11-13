@@ -41,7 +41,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     {
       "id": "c32cdd0000000000000000000000000000000000",
@@ -64,7 +65,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     {
       "id": "6bc1af0000000000000000000000000000000000",
@@ -88,7 +90,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     {
       "id": "e3a1f00000000000000000000000000000000000",
@@ -122,7 +125,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     {
       "id": "d40a190000000000000000000000000000000000",
@@ -145,7 +149,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     {
       "id": "51e0c70000000000000000000000000000000000",
@@ -168,7 +173,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     },
     {
       "id": "a282c60000000000000000000000000000000000",
@@ -191,7 +197,8 @@ next: torrential wait 9b5212 d40a19 51e0c7
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     }
   ],
   "next": "torrential wait 9b5212 d40a19 51e0c7"
