@@ -1163,6 +1163,40 @@ async fn an_update_restarts_the_engine_only_once_every_download_is_saved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_update_stops_the_engine_only_once_a_finished_download_is_saved_too() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::ResumeData { .. }));
+    let (swarm, engine_gate) = (Swarm::new(0), gate.clone());
+    swarm.set_rate(100 * GIB);
+    let engine = move |_: &std::path::Path| -> Box<dyn EnginePort> {
+        Box::new(Gated { port: Fake::new(swarm), gate: engine_gate })
+    };
+    let h = Harness::with_engine(engine, parse_fake);
+    let film = torrent(38, "film", &[("film.mkv", GIB)]);
+    gate.close();
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("every piece is in", |jobs| jobs[0].progress.verified == GIB).await;
+    gate.until_held(1).await;
+    let db = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
+    )
+    .unwrap();
+
+    let ctx = h.running.ctx.clone();
+    let restart = tokio::spawn(async move { ctx.owner.ask(|reply| Command::Restart { reply }).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let held = gate.held();
+    gate.open();
+    let refused = tokio::time::timeout(Duration::from_secs(5), restart).await.unwrap().unwrap();
+
+    assert_eq!(held, 1, "only the save of the finished download was held back");
+    assert_eq!(
+        refused.map_err(|e| (e.code, e.message)),
+        Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_download_that_gets_nothing_from_peers_that_have_its_pieces_keeps_waiting() {
     let h = Harness::new();
     let film = torrent(35, "film", &[("film.mp4", GIB)]);

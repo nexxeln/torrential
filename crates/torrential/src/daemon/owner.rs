@@ -1497,6 +1497,9 @@ impl Owner {
         if finishing && job.selected_size() == Some(verified) {
             let finished_at = now();
             if let Err(error) = self.store.finish(id, finished_at, &data, verified) {
+                if let Some(stopping) = &mut self.stopping {
+                    stopping.unsaved = true;
+                }
                 self.fail(id, error);
                 return;
             }
