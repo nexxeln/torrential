@@ -18,6 +18,7 @@ use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode
 use super::super::cast::Find;
 use super::super::devices::names::Names;
 use super::super::search_port::{self, FakeSource};
+use super::devices::listening;
 use super::titles::listed;
 use super::web::post;
 use super::{GIB, Harness, MIB, Outside, prefix, torrent, written};
@@ -826,6 +827,9 @@ async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends()
     post(&h, "/api/watched", tab(100.0)).await;
     control(&h, CastAction::Stop).await.unwrap();
     assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "the cast's last place stands");
+    // With the cast over, the engine trades its socket on the network for one on 127.0.0.1.
+    listening(&h, ip, false).await;
+    listening(&h, Ipv4Addr::LOCALHOST, true).await;
 
     let (status, saved) = post(&h, "/api/watched", tab(1_230.0)).await;
     assert_eq!((status, &saved["kept"]), (200, &serde_json::json!(true)));

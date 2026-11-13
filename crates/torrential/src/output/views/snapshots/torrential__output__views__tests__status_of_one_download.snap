@@ -41,7 +41,8 @@ next:     torrential wait 9b5212
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     }
   ],
   "next": "torrential wait 9b5212"
@@ -82,7 +83,8 @@ next:     torrential resume c32cdd
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     }
   ],
   "next": "torrential resume c32cdd"
@@ -124,7 +126,8 @@ finished: 2026-10-18T09:02:03Z
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     }
   ],
   "next": null
@@ -178,7 +181,8 @@ next:     torrential resume e3a1f0
       "selection": {
         "kind": "all"
       },
-      "added_at": 1792311123
+      "added_at": 1792311123,
+      "place": "folder"
     }
   ],
   "next": "torrential resume e3a1f0"

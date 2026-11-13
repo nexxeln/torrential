@@ -17,8 +17,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use torrential_core::text::sanitize;
 use torrential_core::title::Span;
 use torrential_core::{
-    AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, ReleaseId, Target, TitleLink,
-    TorrentId, Tv, TvList, VideoRef, Watched,
+    AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, Player, ReleaseId, Resolution,
+    Target, TitleLink, TorrentId, Tv, TvList, VideoRef, Viewer, Watched,
 };
 
 use super::devices::names::Names;
@@ -882,7 +882,8 @@ async fn find(
                 video: video.clone(),
                 pin,
                 replace: None,
-                playback: Some(tv.tv.decodes),
+                // A TV says what it decodes but not its screen, and 1080p plays well on any TV.
+                player: Player::Device(Viewer { screen: Resolution::P1080, playback: tv.tv.decodes }),
                 containers: Containers::Tv(tv.tv.plays),
                 finish: Finish::Stream,
             };

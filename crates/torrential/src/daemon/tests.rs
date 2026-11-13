@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use torrential_core::protocol::{
     Change, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream,
 };
-use torrential_core::{Error, ErrorCode, InfoHash, Job, JobStatus, Selection, Target};
+use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
 use super::admission::{FakeDisk, GIB, Space};
 use super::engine_port::{
@@ -13,7 +13,9 @@ use super::engine_port::{
     parse_fake,
 };
 use super::owner::OwnerConfig;
-use super::search_port::{self, fake_catalog};
+use super::owner::plays::{IDLE_AFTER, Plays};
+use super::owner::trash::Trash;
+use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
@@ -51,6 +53,19 @@ struct Outside {
     timing: Timing,
     /// Where searches for TVs go: nowhere that answers, unless a test runs a fake TV.
     tvs: super::cast::Find,
+    /// What the plays folder holds, and how long a play no one streams keeps downloading.
+    plays_max: u64,
+    idle_after: Duration,
+    /// Holds back some of the engine's events while it is closed.
+    gate: Option<Gate>,
+    /// How long a file waits between its check and its move to the Trash.
+    trash_pause: Duration,
+    /// The preferences in config.yaml.
+    preferences: Preferences,
+    /// The display the engine detected. None, as on a server.
+    display: Option<Display>,
+    /// A search in place of the harness's fake, which keeps its catalog's order.
+    search: Option<Arc<dyn SearchPort>>,
 }
 
 impl Default for Outside {
@@ -61,11 +76,18 @@ impl Default for Outside {
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
             tvs: super::cast::Find::At(std::net::SocketAddr::from(([127, 0, 0, 1], 9))),
+            plays_max: 20 * GIB,
+            idle_after: IDLE_AFTER,
+            gate: None,
+            trash_pause: Duration::ZERO,
+            preferences: Preferences::default(),
+            display: None,
+            search: None,
         }
     }
 }
 
-fn config(dir: &std::path::Path) -> OwnerConfig {
+fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
     OwnerConfig {
         default_dir: dir.join("downloads"),
         probe_dir: dir.join("probes"),
@@ -75,6 +97,10 @@ fn config(dir: &std::path::Path) -> OwnerConfig {
         save_resume_every: Duration::from_millis(100),
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
+        plays: Plays { root: dir.join("plays"), max: outside.plays_max, idle_after: outside.idle_after },
+        trash: Trash::At(dir.join("trash")),
+        deletion_pause: Duration::ZERO,
+        trash_pause: outside.trash_pause,
     }
 }
 
@@ -94,7 +120,11 @@ impl Harness {
     fn with_outside(search: search_port::Fake, outside: Outside) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        let engine: Box<dyn EnginePort> = match &outside.gate {
+            Some(gate) => Box::new(Gated { port: Fake::new(swarm.clone()), gate: gate.clone() }),
+            None => Box::new(Fake::new(swarm.clone())),
+        };
+        let running = Self::boot(&dir, engine, parse_fake, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 
@@ -136,19 +166,22 @@ impl Harness {
         let ports = Ports {
             engine,
             parse,
-            search: Arc::new(search.clone()),
+            search: outside.search.clone().unwrap_or_else(|| Arc::new(search.clone())),
             disk: Box::new(disk.clone()),
             machine: crate::machine::Detector::detected(
                 torrential_core::Machine {
                     os: torrential_core::Os::Linux,
-                    display: None,
+                    display: outside.display,
                     arch: Some(torrential_core::Arch::X86_64),
                     language: None,
                 },
                 dir.path().join("downloads"),
                 Box::new(disk.clone()),
             ),
-            preferences: Arc::new(torrential_core::Preferences::default),
+            preferences: Arc::new({
+                let preferences = outside.preferences;
+                move || preferences
+            }),
             tools: Arc::new({
                 let tools = outside.tools.clone();
                 move || tools.lock().unwrap().clone()
@@ -159,7 +192,7 @@ impl Harness {
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, store, ports, config(dir.path()), outside.timing, "0.1.0".into(), 0).unwrap()
+        start(&handle, store, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -256,6 +289,11 @@ impl Harness {
 
     fn downloads(&self) -> PathBuf {
         self.dir.path().join("downloads")
+    }
+
+    /// The folder the first play of `t` downloads into.
+    fn play_folder(&self, t: &FakeTorrentFile) -> PathBuf {
+        self.dir.path().join("plays").join(format!("{}-0", &t.info_hash.id().to_hex()[..16]))
     }
 }
 
@@ -412,7 +450,7 @@ async fn every_command_answers_usage_for_a_title() {
         Request::Status { refs: refs() },
         Request::Pause { refs: refs() },
         Request::Resume { refs: refs(), all: false },
-        Request::Remove { refs: refs() },
+        Request::Remove { refs: refs(), delete: false },
         Request::Verify { reference: "tt0903747:3:5".into(), repair: false },
     ];
     let mut answers = Vec::new();
@@ -536,7 +574,7 @@ async fn pause_and_rm_are_idempotent_and_rm_keeps_the_path() {
     assert_eq!(h.changes(pause()).await.unwrap(), [(id.clone(), "paused".into())]);
     assert_eq!(h.changes(pause()).await.unwrap(), [(id.clone(), "already_paused".into())]);
     assert_eq!(h.states().await, ["paused"]);
-    let rm = || Request::Remove { refs: vec![id.clone()] };
+    let rm = || Request::Remove { refs: vec![id.clone()], delete: false };
     let Response::Changed { changes } = h.ask(rm()).await else { panic!("expected changes") };
     assert_eq!(
         (changes[0].result.as_str(), changes[0].path.clone()),
@@ -548,7 +586,7 @@ async fn pause_and_rm_are_idempotent_and_rm_keeps_the_path() {
         ("already_removed", Some(h.downloads().join("arch.iso")))
     );
     assert!(h.status().await.is_empty());
-    let unknown = h.changes(Request::Remove { refs: vec!["abcdef".into()] }).await.unwrap_err();
+    let unknown = h.changes(Request::Remove { refs: vec!["abcdef".into()], delete: false }).await.unwrap_err();
     assert_eq!(unknown.code, ErrorCode::NotFound);
 }
 
@@ -644,7 +682,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
             h.downloads().display()
         )
     );
-    h.changes(Request::Remove { refs: vec![prefix(&film)] }).await.unwrap();
+    h.changes(Request::Remove { refs: vec![prefix(&film)], delete: false }).await.unwrap();
 
     let busy: Vec<FakeTorrentFile> = (45..48).map(|n| torrent(n, &format!("busy{n}"), &[("f", GIB)])).collect();
     for t in &busy {
@@ -653,7 +691,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
     let set = torrent(48, "set", &[("a.bin", GIB), ("docs/b.bin", GIB)]);
     assert_eq!(h.get(h.torrent_file(&set), &[]).await.unwrap().outcome, GetOutcome::Queued);
     h.disk.link(h.downloads().join("set/docs"));
-    h.changes(Request::Remove { refs: vec![prefix(&busy[0])] }).await.unwrap();
+    h.changes(Request::Remove { refs: vec![prefix(&busy[0])], delete: false }).await.unwrap();
     let jobs = h.until("the queued download stopped", |jobs| jobs[2].status.name() != "queued").await;
     let JobStatus::Error { error } = &jobs[2].status else { panic!("{jobs:#?}") };
     assert_eq!(
@@ -1637,6 +1675,44 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
 
 mod cast;
 mod devices;
+mod plays;
 mod titles;
 mod tui;
 mod web;
+
+#[test]
+fn settings_for_tests_reach_only_an_engine_a_test_started() {
+    use crate::env::Env;
+    let env =
+        |pairs: &[(&str, &str)]| Env::from_pairs([("TORRENTIAL_HOME", "/th")].into_iter().chain(pairs.iter().copied()));
+    let pause = |pairs: &[(&str, &str)]| super::deletion_pause(&env(pairs));
+    let held = ("TORRENTIAL_TEST_DELETION_PAUSE", "30s");
+    assert_eq!(pause(&[held]), Duration::ZERO);
+    assert_eq!(pause(&[held, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(30));
+    let long = ("TORRENTIAL_TEST_DELETION_PAUSE", "2h");
+    assert_eq!(pause(&[long, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(60), "and a minute at most");
+    let public = ("TORRENTIAL_TEST_NETWORK", "public");
+    assert_eq!(pause(&[held, public]), Duration::ZERO, "an engine on the public network is no test engine");
+
+    let trash = |pairs: &[(&str, &str)]| {
+        let env = env(pairs);
+        super::trash(&env, &crate::paths::Paths::resolve(&env, 501, None).unwrap())
+    };
+    let named = ("TORRENTIAL_TEST_TRASH", "/tmp/trash");
+    let system = Trash::system(std::path::Path::new("/home/ada/.local/share"));
+    assert_eq!(trash(&[named, ("HOME", "/home/ada")]), system);
+    assert_eq!(trash(&[named, public, ("HOME", "/home/ada")]), system);
+    assert_eq!(trash(&[named, ("TORRENTIAL_TEST_ENGINE", "fake")]), Trash::At("/tmp/trash".into()));
+    assert_eq!(trash(&[("TORRENTIAL_TEST_NETWORK", "loopback")]), Trash::At("/th/state/trash".into()));
+
+    let idle = |pairs: &[(&str, &str)]| super::plays_idle(&env(pairs));
+    let quick = ("TORRENTIAL_TEST_PLAYS_IDLE", "1s");
+    assert_eq!(idle(&[quick]), IDLE_AFTER);
+    assert_eq!(idle(&[quick, public]), IDLE_AFTER);
+    assert_eq!(idle(&[quick, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(1));
+
+    let trash_pause = |pairs: &[(&str, &str)]| super::trash_pause(&env(pairs));
+    let held = ("TORRENTIAL_TEST_TRASH_PAUSE", "5s");
+    assert_eq!(trash_pause(&[held, public]), Duration::ZERO);
+    assert_eq!(trash_pause(&[held, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(5));
+}

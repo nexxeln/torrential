@@ -10,6 +10,7 @@ use torrential_core::{Error, ErrorCode, Job, Target, TorrentFile, TorrentId};
 
 use super::super::engine_port::Metainfo;
 use super::super::http;
+use super::super::owner::plays::Destination;
 use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
 use super::super::server::{self, Ctx, METADATA_WAIT};
 
@@ -92,7 +93,8 @@ pub async fn begin(
 ) -> Result<(Job, FilesInfo), Error> {
     let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
     let setup_max_size = (ctx.web.preferences)().max_size;
-    let play = PlayCommand { source, dir: None, files, setup_max_size, title: None, finish: Finish::Stream };
+    let to = Destination::Plays;
+    let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
     let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let info = server::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
     Ok((job, info))

@@ -27,6 +27,19 @@ pub struct Job {
     /// The title the download was made for, when playing a title made it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<TitleLink>,
+    #[serde(default)]
+    pub place: Place,
+}
+
+/// Where a download's files live, which says who deletes them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Place {
+    /// The downloads folder or a folder the person chose. Its files stay until the person deletes them.
+    #[default]
+    Folder,
+    /// A folder of its own inside torrential's plays folder, which torrential empties as it fills.
+    Plays,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -289,13 +302,15 @@ mod tests {
             selection: Selection::All,
             added_at: 7,
             title: None,
+            place: Place::Folder,
         };
         let json = serde_json::to_value(&job).unwrap();
         let keys: std::collections::BTreeSet<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["added_at", "dir", "id", "info_hash", "name", "path", "progress", "selection", "state"].into()
+            ["added_at", "dir", "id", "info_hash", "name", "path", "place", "progress", "selection", "state"].into()
         );
+        assert_eq!(json["place"], "folder");
         assert_eq!(serde_json::from_value::<Job>(json).unwrap(), job);
 
         let link = TitleLink { title: "tt0063350".parse().unwrap(), span: crate::title::Span::Film, release: None };
@@ -303,6 +318,18 @@ mod tests {
         let json = serde_json::to_value(&linked).unwrap();
         assert_eq!(json["title"], serde_json::json!({"title": "tt0063350", "span": "film", "release": null}));
         assert_eq!(serde_json::from_value::<Job>(json).unwrap(), linked);
+    }
+
+    #[test]
+    fn a_job_from_an_engine_that_knows_no_places_is_in_a_folder() {
+        let id: TorrentId = "9b521219bc48550140a666f74a29048ed78e933b".parse().unwrap();
+        let mut json = serde_json::json!({
+            "id": id, "info_hash": InfoHash::V1(*id.as_bytes()), "name": null, "dir": "/downloads", "path": null,
+            "state": "queued", "progress": Progress::default(), "selection": Selection::All, "added_at": 7,
+        });
+        assert_eq!(serde_json::from_value::<Job>(json.clone()).unwrap().place, Place::Folder);
+        json["place"] = "plays".into();
+        assert_eq!(serde_json::from_value::<Job>(json).unwrap().place, Place::Plays);
     }
 
     #[test]

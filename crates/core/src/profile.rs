@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::preferences::{Playback, Preferences};
-use crate::quality::{Quality, Resolution};
+use crate::preferences::{Playback, Preferences, Screen};
+use crate::quality::{Quality, Resolution, band};
 use crate::units::{format_limit, size_text};
 
 /// What the engine detected. Each part is `None` when detection found nothing.
@@ -26,12 +26,93 @@ impl Display {
     /// The largest standard resolution at or below the panel's shorter side, so a
     /// 3024x1964 laptop panel wants 1080p and a 3840x2160 monitor wants 2160p.
     pub const fn target(self) -> Resolution {
-        let lines = if self.width < self.height { self.width } else { self.height };
-        match lines {
-            2160.. => Resolution::P2160,
-            1080.. => Resolution::P1080,
-            720.. => Resolution::P720,
-            _ => Resolution::Sd,
+        panel_target(self.width, self.height)
+    }
+}
+
+const fn panel_target(width: u32, height: u32) -> Resolution {
+    let lines = if width < height { width } else { height };
+    match lines {
+        2160.. => Resolution::P2160,
+        1080.. => Resolution::P1080,
+        720.. => Resolution::P720,
+        _ => Resolution::Sd,
+    }
+}
+
+/// The device that pressed play, such as a phone or a TV: the resolution that suits its
+/// screen and what its player decodes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Viewer {
+    pub screen: Resolution,
+    pub playback: Playback,
+}
+
+/// CSS pixels across the shorter side below which a screen is a phone's. Phones measure 320
+/// to 480, and the smallest tablets and TV browsers 540 or more.
+const PHONE_BELOW: f64 = 500.0;
+
+impl Viewer {
+    /// A screen a browser measured as `width` by `height` device pixels, with `scale` of them
+    /// to a CSS pixel. A CSS pixel looks about the same size on any screen at its usual
+    /// distance, so the CSS size tells a phone from a TV with as many device pixels. A phone
+    /// wants what the `phone` screen preference wants, and any other screen what a display
+    /// with as many pixels wants.
+    pub fn measured(width: u32, height: u32, scale: f64, playback: Playback) -> Viewer {
+        let phone = f64::from(width.min(height)) / scale < PHONE_BELOW;
+        let screen = if phone { Screen::Phone.target() } else { panel_target(width, height) };
+        Viewer { screen, playback }
+    }
+}
+
+/// What a title plays in, which decides whose screen and formats its sources are ranked for.
+/// config.yaml's `screen` and `playback` describe this machine's display and the player it opens,
+/// so they rank for nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Player {
+    /// The player `torrential play` and the terminal UI open on this machine, which searches rank
+    /// for too: config.yaml's `screen` and `playback`, else what the engine detected.
+    #[default]
+    External,
+    /// A browser on this machine. It shows this machine's display, or the screen in config.yaml,
+    /// and plays what it decodes.
+    Browser { playback: Playback },
+    /// A browser on another device, such as a phone or a TV: the screen and formats it reported.
+    Device(Viewer),
+}
+
+impl Player {
+    /// The screen ranking aims for, when the player reported the one that decides.
+    const fn screen(self) -> Option<Resolution> {
+        match self {
+            Self::Device(viewer) => Some(viewer.screen),
+            Self::External | Self::Browser { .. } => None,
+        }
+    }
+
+    /// What the player decodes, when it reported that.
+    const fn decodes(self) -> Option<Playback> {
+        match self {
+            Self::Browser { playback } | Self::Device(Viewer { playback, .. }) => Some(playback),
+            Self::External => None,
+        }
+    }
+
+    /// Whether the player streams the file as it downloads, so a bitrate its screen cannot show
+    /// only makes the download take longer.
+    const fn streams(self) -> bool {
+        !matches!(self, Self::External)
+    }
+
+    /// Whether a download already on this machine, of `quality`, plays before anything a search
+    /// finds: in a browser that decodes it or that `ffmpeg` converts it for, and in the player this
+    /// machine opens always, as before. Size and bitrate do not count, since the file costs no
+    /// download.
+    pub const fn reuses(self, quality: Quality, ffmpeg: bool) -> bool {
+        match self.decodes() {
+            Some(playback) => ffmpeg || playback.plays(quality),
+            None => true,
         }
     }
 }
@@ -167,6 +248,8 @@ impl Language {
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Detected,
+    /// What the browser that pressed play reported.
+    Viewer,
     /// A preference from `torrential setup`.
     Override,
 }
@@ -190,11 +273,17 @@ pub struct Profile {
     /// `get` keeps. `None` when unknown.
     #[serde(default)]
     pub room: Option<u64>,
+    #[serde(default)]
+    pub player: Player,
 }
 
 impl Profile {
-    /// The resolution ranking aims for: the preferred screen's, else the detected display's.
+    /// The resolution ranking aims for: another device's screen, else the preferred screen's,
+    /// else the detected display's.
     pub fn screen(&self) -> Option<Setting<Resolution>> {
+        if let Some(screen) = self.player.screen() {
+            return Some(Setting { value: screen, source: Source::Viewer });
+        }
         match (self.preferences.screen, self.display()) {
             (Some(screen), _) => Some(Setting { value: screen.target(), source: Source::Override }),
             (None, Some(display)) => Some(Setting { value: display.target(), source: Source::Detected }),
@@ -202,9 +291,13 @@ impl Profile {
         }
     }
 
-    /// An explicit playback preference wins. Otherwise the detected display chooses
-    /// HEVC with or without HDR. A screen override leaves playback unknown.
+    /// What a browser decodes. For the player this machine opens, an explicit playback
+    /// preference wins, and otherwise the detected display chooses HEVC with or without HDR. A
+    /// screen override leaves its playback unknown.
     pub fn playback(&self) -> Option<Setting<Playback>> {
+        if let Some(playback) = self.player.decodes() {
+            return Some(Setting { value: playback, source: Source::Viewer });
+        }
         if let Some(playback) = self.preferences.playback {
             return Some(Setting { value: playback, source: Source::Override });
         }
@@ -225,13 +318,27 @@ impl Profile {
         self.detected.as_ref().and_then(|m| m.language.as_ref())
     }
 
-    /// False only for a release known to be larger than `max_size` or the room on disk, or
-    /// known to need a codec or HDR the player may not handle. Unknown values fit.
-    pub fn fits(&self, size: Option<u64>, quality: Quality) -> bool {
+    /// False only for a release known to be larger than `max_size` or the room on disk, known
+    /// to need a codec or HDR the player may not handle, or known to stream to a browser at more
+    /// `mbps` than its screen shows. Unknown values fit.
+    pub fn fits(&self, size: Option<u64>, quality: Quality, mbps: Option<f64>) -> bool {
         let within = |cap: Option<u64>| size.zip(cap).is_none_or(|(size, cap)| size <= cap);
         within(self.preferences.max_size)
             && within(self.room)
             && self.playback().is_none_or(|playback| playback.value.plays(quality))
+            && mbps.zip(self.most_mbps()).is_none_or(|(mbps, most)| mbps <= most)
+    }
+
+    /// The most Mbit/s a play may stream to a browser: the top of the band of the resolution its
+    /// screen wants, where remuxes start. So a phone takes up to 8, about 6 GB for a film of 100
+    /// minutes, a 1080p screen up to 16, and a 4K TV up to 40. More shows the screen nothing new
+    /// and only makes the download take longer. The player this machine opens keeps the rules it
+    /// had.
+    fn most_mbps(&self) -> Option<f64> {
+        if !self.player.streams() {
+            return None;
+        }
+        Some(*band(Some(self.screen()?.value)).end())
     }
 
     /// Lower is closer to the screen's resolution: the same, then one step lower, then one
@@ -341,8 +448,9 @@ const fn screen_label(resolution: Resolution) -> &'static str {
     }
 }
 
-/// The values ranking used, each with where it came from, then what was detected and the
-/// preferences. Reading it back keeps only the last two and the room.
+/// The values ranking used, each with where it came from, then what was detected, the
+/// preferences, and the player when it is a browser. Reading it back keeps only the last three
+/// and the room.
 impl Serialize for Profile {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -355,6 +463,8 @@ impl Serialize for Profile {
             language: Option<&'a Language>,
             detected: &'a Option<Machine>,
             preferences: &'a Preferences,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            player: Option<Player>,
         }
         Fields {
             screen: self.screen(),
@@ -365,6 +475,7 @@ impl Serialize for Profile {
             language: self.language(),
             detected: &self.detected,
             preferences: &self.preferences,
+            player: (self.player != Player::External).then_some(self.player),
         }
         .serialize(serializer)
     }
@@ -389,7 +500,23 @@ mod tests {
     }
 
     fn profile(detected: Option<Machine>, preferences: Preferences) -> Profile {
-        Profile { detected, preferences, room: None }
+        Profile { detected, preferences, ..Profile::default() }
+    }
+
+    fn phone() -> Viewer {
+        Viewer::measured(1170, 2532, 3.0, Playback::Hevc)
+    }
+
+    fn tv_4k() -> Viewer {
+        Viewer::measured(3840, 2160, 1.0, Playback::HevcHdr)
+    }
+
+    fn playing_in(player: Player, preferences: Preferences) -> Profile {
+        Profile { player, ..profile(Some(mac()), preferences) }
+    }
+
+    fn watching_on(viewer: Viewer, preferences: Preferences) -> Profile {
+        playing_in(Player::Device(viewer), preferences)
     }
 
     #[test]
@@ -420,15 +547,81 @@ mod tests {
     }
 
     #[test]
+    fn a_screen_under_500_css_pixels_across_is_a_phone_and_any_other_wants_what_its_pixels_show() {
+        let screen = |width, height, scale| Viewer::measured(width, height, scale, Playback::Hevc).screen.as_str();
+        assert_eq!(screen(1170, 2532, 3.0), "720p", "an iPhone");
+        assert_eq!(screen(2400, 1080, 2.625), "720p", "an Android phone on its side");
+        assert_eq!(screen(1640, 2360, 2.0), "1080p", "an iPad");
+        assert_eq!(screen(3024, 1964, 2.0), "1080p", "a MacBook");
+        assert_eq!(screen(1920, 1080, 2.0), "1080p", "a TV browser that lays out 960x540");
+        assert_eq!(screen(1920, 1080, 1.0), "1080p", "a 1080p TV");
+        assert_eq!(screen(3840, 2160, 2.0), "2160p", "a 4K TV browser that lays out 1920x1080");
+        assert_eq!(screen(3840, 2160, 1.0), "2160p", "a 4K TV");
+        assert_eq!(screen(1280, 720, 1.0), "720p", "a 720p TV");
+    }
+
+    #[test]
+    fn another_device_ranks_for_its_own_screen_a_browser_for_what_it_decodes_and_config_for_this_machine() {
+        let tv_h264 =
+            Preferences { screen: Some(Screen::Tv4k), playback: Some(Playback::H264), ..Preferences::default() };
+        let read = |p: Profile| (p.screen().map(|s| (s.value, s.source)), p.playback().map(|p| (p.value, p.source)));
+        let browser = |playback| Player::Browser { playback };
+
+        assert_eq!(
+            read(playing_in(Player::External, tv_h264)),
+            (Some((Resolution::P2160, Source::Override)), Some((Playback::H264, Source::Override)))
+        );
+        assert_eq!(
+            read(playing_in(browser(Playback::Hevc), tv_h264)),
+            (Some((Resolution::P2160, Source::Override)), Some((Playback::Hevc, Source::Viewer))),
+            "a browser here shows the screen in config.yaml"
+        );
+        assert_eq!(
+            read(playing_in(browser(Playback::H264), Preferences::default())),
+            (Some((Resolution::P1080, Source::Detected)), Some((Playback::H264, Source::Viewer))),
+            "a browser here shows the detected display"
+        );
+        assert_eq!(
+            read(watching_on(phone(), tv_h264)),
+            (Some((Resolution::P720, Source::Viewer)), Some((Playback::Hevc, Source::Viewer)))
+        );
+        assert_eq!(
+            read(watching_on(tv_4k(), Preferences::default())),
+            (Some((Resolution::P2160, Source::Viewer)), Some((Playback::HevcHdr, Source::Viewer)))
+        );
+    }
+
+    #[test]
+    fn a_browser_takes_no_more_mbit_than_the_band_of_its_screen() {
+        let fits = |p: &Profile, mbps: [f64; 4]| mbps.map(|mbps| p.fits(Some(1), Quality::default(), Some(mbps)));
+        let tv = Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() };
+        let rates = [8.0, 8.1, 22.0, 41.0];
+        assert_eq!(fits(&watching_on(phone(), tv), rates), [true, false, false, false], "a phone");
+        assert_eq!(fits(&watching_on(tv_4k(), Preferences::default()), rates), [true, true, true, false], "a 4K TV");
+        let here = |preferences| playing_in(Player::Browser { playback: Playback::Hevc }, preferences);
+        assert_eq!(fits(&here(Preferences::default()), rates), [true, true, false, false], "this Mac's browser");
+        assert_eq!(
+            fits(&here(tv), rates),
+            [true, true, true, false],
+            "this Mac's browser on the screen in config.yaml"
+        );
+        assert_eq!(fits(&playing_in(Player::External, Preferences::default()), rates), [true; 4], "this Mac's player");
+        assert!(
+            watching_on(phone(), Preferences::default()).fits(Some(1), Quality::default(), None),
+            "an unknown bitrate"
+        );
+    }
+
+    #[test]
     fn an_sdr_display_ranks_hdr_as_unplayable_and_a_full_disk_ranks_big_files_out() {
         let sdr = Machine { display: Some(Display { width: 1920, height: 1080, hdr: false }), ..mac() };
-        let fits = |p: &Profile, size, name| p.fits(Some(size), Quality::parse(name));
+        let fits = |p: &Profile, size, name| p.fits(Some(size), Quality::parse(name), None);
         let on_sdr = profile(Some(sdr), Preferences::default());
         let full = Profile { room: Some(4_000_000_000), ..profile(Some(mac()), Preferences::default()) };
 
         assert_eq!([fits(&on_sdr, 1, "Film 2160p HDR x265"), fits(&on_sdr, 1, "Film 2160p x265")], [false, true]);
         assert_eq!([fits(&full, 4_000_000_000, "Film"), fits(&full, 4_000_000_001, "Film")], [true, false]);
-        assert!(full.fits(None, Quality::default()), "an unknown size fits");
+        assert!(full.fits(None, Quality::default(), None), "an unknown size fits");
     }
 
     #[test]
@@ -566,5 +759,16 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<Profile>(json).unwrap(), tv);
+        let on_phone = watching_on(phone(), Preferences::default());
+        let json = serde_json::to_value(&on_phone).unwrap();
+        assert_eq!(
+            (&json["screen"], &json["playback"], &json["player"]),
+            (
+                &serde_json::json!({"value": "720p", "source": "viewer"}),
+                &serde_json::json!({"value": "hevc", "source": "viewer"}),
+                &serde_json::json!({"kind": "device", "screen": "720p", "playback": "hevc"})
+            )
+        );
+        assert_eq!(serde_json::from_value::<Profile>(json).unwrap(), on_phone);
     }
 }

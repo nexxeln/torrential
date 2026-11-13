@@ -29,6 +29,7 @@ libc = "0.2"
 qrcodegen = "1.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -37,6 +38,10 @@ socket2 = "0.6"
 tar = { version = "0.4", default-features = false }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "signal", "macros", "io-util", "fs", "process"] }
 url = "2.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [dev-dependencies]
 assert_cmd = "2.2"

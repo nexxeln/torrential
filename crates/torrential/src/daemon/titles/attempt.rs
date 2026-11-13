@@ -10,12 +10,13 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Playback, Plays, Release, ReleaseId, SearchResult,
-    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId,
+    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
+use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
@@ -43,8 +44,8 @@ pub struct PlayTitle {
     pub pin: Option<ReleaseId>,
     /// The download that stalled. It is never tried, and once another source plays it is paused.
     pub replace: Option<TorrentId>,
-    /// What the caller's player decodes, in place of the preference in config.yaml.
-    pub playback: Option<Playback>,
+    /// What the title plays in, which its sources are ranked for.
+    pub player: Player,
     pub containers: Containers,
     pub finish: Finish,
 }
@@ -98,17 +99,18 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    let held = ctx.titles.line(&healthy, &title.video, Vec::new());
-    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r))
+    let ffmpeg = (ctx.web.tools)().both().is_some();
+    let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
+    let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
+    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
         && walk.try_source(release, 1, &mut report).await
     {
         return;
     }
 
     let preferences = (ctx.web.preferences)();
-    let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
-    let rank_for = || ctx.machine.profile(preferences);
-    let query = match ctx.titles.query(&title, preferences).await {
+    let rank_for = || ctx.machine.profile(preferences, ask.player);
+    let query = match ctx.titles.query(&title, preferences, ask.player).await {
         Ok(query) => query,
         Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
     };
@@ -122,7 +124,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         error: None,
     };
     let line_up = |search: &Searching, tried: &[Tried]| {
-        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone()), tried)
+        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone(), ask.player, ffmpeg), tried)
     };
     loop {
         let ran = search.started.elapsed();
@@ -356,7 +358,7 @@ impl Trial<'_> {
         {
             return Err(Skip::Stalled.into());
         }
-        let remux = (ctx.web.tools)().ffmpeg.is_some();
+        let remux = (ctx.web.tools)().both().is_some();
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
 
         report(AttemptEvent::Check { check: Check::Start });
@@ -365,9 +367,11 @@ impl Trial<'_> {
         let hold = Hold::fresh();
         // Held before the owner is asked, so a play that goes away at any point after gives it up.
         self.hold = Some(hold);
+        // A film played to keep goes where `get` puts it. One played to watch goes to the plays folder.
+        let to = if ask.finish == Finish::Keep { Destination::Folder(None) } else { Destination::Plays };
         let play = PlayCommand {
             source,
-            dir: None,
+            to,
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
             setup_max_size: (ctx.web.preferences)().max_size,
             title: Some(TitlePlay { link, hold }),
@@ -578,7 +582,7 @@ mod tests {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|n| release(n).id),
             replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
-            playback: None,
+            player: Player::External,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };
