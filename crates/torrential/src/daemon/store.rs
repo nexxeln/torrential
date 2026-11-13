@@ -2,7 +2,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleId, TitleLink, TorrentId};
+use torrential_core::{
+    Error, ErrorCode, InfoHash, Kind, PieceMap, Release, Selection, TitleCard, TitleId, TitleLink, TorrentId,
+};
 
 use super::admission::Cap;
 use super::book::{Home, Intent, JobRecord, Linked, Play};
@@ -618,6 +620,28 @@ impl Store {
                 .insert(title.parse().map_err(|_| corrupt(&self.path, &format!("saved title {title} is unreadable")))?);
         }
         Ok(saved)
+    }
+
+    /// Saves `card` in the library, keeping when it was first saved, so the library lists the
+    /// title even when the catalog cannot be reached.
+    pub fn save_title(&mut self, card: &TitleCard, now: i64) -> Result<(), Error> {
+        let kind = match card.kind {
+            Kind::Film => "film",
+            Kind::Series => "series",
+        };
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO library (title, kind, name, year, rating, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT (title) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
+                 year = excluded.year, rating = excluded.rating",
+                params![card.id.as_str(), kind, card.name, card.year, card.rating, now],
+            )
+            .map(drop)
+        })
+    }
+
+    pub fn unsave_title(&mut self, title: &TitleId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("DELETE FROM library WHERE title = ?1", [title.as_str()]).map(drop))
     }
 
     /// Links a download that already existed to the title a play joined it for.

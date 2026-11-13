@@ -309,6 +309,27 @@ async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn saving_a_title_while_its_play_leaves_the_plays_folder_keeps_the_play_and_its_files() {
+    let gate =
+        Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0xa4; 20])));
+    let (h, night) = night_with(Outside { plays_max: 200 * MIB, gate: Some(gate.clone()), ..Outside::default() });
+    h.swarm.set_rate(100 * MIB);
+    h.play_title("tt0063350", Some(&night[3]), None).await;
+    let folder = h.play_folder(&night[3]);
+    written(&folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4"), MIB);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    gate.close();
+    h.play_web(&torrent(0x51, "film", &[("film.mp4", 2 * GIB)])).await;
+    gate.until_held(1).await;
+
+    assert_eq!(post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await.0, 200);
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(names(&h).await, named(&["night_of_the_living_dead", "film"]));
+    assert!(folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_and_still_keeps_it() {
     let h = Harness::with_outside(
         super::search_port::Fake::new(vec![]),

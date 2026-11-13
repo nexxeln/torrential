@@ -7,7 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::protocol::{Change, GetOutcome, GetReply};
 use torrential_core::{
-    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleLink, TorrentId,
+    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleCard, TitleId, TitleLink,
+    TorrentId,
 };
 
 use super::admission::{self, Cap, Disk};
@@ -165,6 +166,12 @@ pub struct StreamFile {
     pub complete: bool,
 }
 
+/// A change to the library.
+pub enum Shelving {
+    Save(TitleCard),
+    Unsave(TitleId),
+}
+
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
@@ -181,6 +188,7 @@ pub enum Command {
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
     StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
     Viewing { id: TorrentId, open: bool },
+    Library { shelving: Shelving, reply: Reply<()> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
     Disconnected { keep_until: Option<Instant> },
@@ -446,6 +454,9 @@ impl Owner {
                 let _ = reply.send(self.stream_file(id, index));
             }
             Command::Viewing { id, open } => self.viewing(id, open),
+            Command::Library { shelving, reply } => {
+                let _ = reply.send(self.library(shelving));
+            }
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Connected => self.connections += 1,
             Command::Disconnected { keep_until } => {
@@ -1337,6 +1348,7 @@ impl Owner {
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
                 self.tending.letting_go.remove(&id);
+                self.leave();
                 self.put_back(id);
                 self.finish_deletions();
             }

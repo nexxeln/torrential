@@ -8,15 +8,16 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, Kept};
-use torrential_core::{Error, TorrentId};
+use torrential_core::{Error, TitleId, TorrentId};
 
 use super::super::admission;
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
+use super::super::engine_port::EngineCommand;
 use super::super::files;
 use super::super::log;
 use super::super::server::OwnerHandle;
 use super::deleter::{Deleter, Doom, InUse};
-use super::{Command, Finish, Owner, Reply, now};
+use super::{Command, Finish, Owner, Reply, Shelving, now};
 
 /// How long a play no one streams keeps downloading. Long enough that a break, or a phone that
 /// locked, comes back to a play still downloading. Short enough that a film left after a few
@@ -101,6 +102,8 @@ pub struct Tending {
     /// The folder and the files of each download taken off the list that the engine has yet to
     /// let go of.
     pub(super) letting_go: BTreeMap<TorrentId, (PathBuf, Vec<PathBuf>)>,
+    /// Plays leaving the plays folder, on the list until the engine lets go of them.
+    leaving: BTreeSet<TorrentId>,
     /// `rm`s that answer once their deletions are done.
     removals: Vec<Removal>,
     tended_at: Option<Instant>,
@@ -114,6 +117,7 @@ impl Tending {
             viewers: BTreeMap::new(),
             deleter,
             letting_go: BTreeMap::new(),
+            leaving: BTreeSet::new(),
             removals: Vec::new(),
             tended_at: None,
             refused: None,
@@ -333,30 +337,59 @@ impl Owner {
             }
         };
         let (clock, idle_after) = (now(), self.config.plays.idle_after);
-        let mut idle = Vec::new();
-        let mut shares = Vec::new();
-        for job in self.jobs.values() {
-            let Home::Plays(play) = job.record.home else { continue };
-            let in_library = job.record.title.as_ref().is_some_and(|linked| saved.contains(&linked.link.title));
-            if play.by_hand || in_library {
-                continue;
-            }
-            let id = job.id();
-            let busy = self.tending.viewers.contains_key(&id) || self.under_test.contains_key(&id);
-            let unwatched = Duration::from_secs(clock.saturating_sub(play.watched_at).max(0) as u64);
-            if !busy && job.record.intent == Intent::Running && unwatched >= idle_after {
-                idle.push(id);
-            }
-            shares.push(Share { id, bytes: self.play_bytes(job), watched_at: play.watched_at, busy });
-        }
+        let idle: Vec<TorrentId> = self
+            .jobs
+            .values()
+            .filter(|job| self.tended(job, &saved))
+            .filter(|job| job.record.intent == Intent::Running && !self.playing(job.id()))
+            .filter(|job| {
+                let Home::Plays(play) = job.record.home else { return false };
+                Duration::from_secs(clock.saturating_sub(play.watched_at).max(0) as u64) >= idle_after
+            })
+            .map(JobEntry::id)
+            .collect();
         let after = crate::output::format::elapsed(idle_after);
         for id in idle {
             log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
             self.pause(vec![id.to_hex()], oneshot::channel().0);
         }
-        // What is still to be deleted takes up room too.
-        let room = self.config.plays.max.saturating_sub(self.tending.deleter.play_bytes());
-        let leaving = leaving(shares, room);
+        self.make_room(&saved);
+    }
+
+    /// Whether `job` is a play that may pause and leave by itself: not one the person got by
+    /// hand, not one whose title they saved, and not one leaving already.
+    fn tended(&self, job: &JobEntry, saved: &BTreeSet<TitleId>) -> bool {
+        let Home::Plays(play) = job.record.home else { return false };
+        let in_library = job.record.title.as_ref().is_some_and(|linked| saved.contains(&linked.link.title));
+        !play.by_hand && !in_library && !self.tending.leaving.contains(&job.id())
+    }
+
+    /// Someone streams `id`, or a title play is testing it.
+    fn playing(&self, id: TorrentId) -> bool {
+        self.tending.viewers.contains_key(&id) || self.under_test.contains_key(&id)
+    }
+
+    /// Starts taking the plays watched longest ago out of the plays folder until the rest fit
+    /// in its limit.
+    fn make_room(&mut self, saved: &BTreeSet<TitleId>) {
+        // What is still to be deleted, or is leaving, takes up room too.
+        let mut going = self.tending.deleter.play_bytes();
+        let mut shares = Vec::new();
+        for job in self.jobs.values() {
+            let Home::Plays(play) = job.record.home else { continue };
+            if self.tending.leaving.contains(&job.id()) {
+                going += self.play_bytes(job);
+            } else if self.tended(job, saved) {
+                let id = job.id();
+                shares.push(Share {
+                    id,
+                    bytes: self.play_bytes(job),
+                    watched_at: play.watched_at,
+                    busy: self.playing(id),
+                });
+            }
+        }
+        let leaving = leaving(shares, self.config.plays.max.saturating_sub(going));
         if leaving.is_empty() {
             return;
         }
@@ -370,13 +403,86 @@ impl Owner {
         self.tending.refused = None;
         let max = crate::output::format::size(Some(self.config.plays.max));
         for id in &leaving {
-            log(&format!("{} left the plays folder to keep it under {max}", self.named(*id)));
+            log(&format!("{} is leaving the plays folder to keep it under {max}", self.named(*id)));
         }
-        let refs: Vec<String> = leaving.iter().map(TorrentId::to_hex).collect();
-        if let Err(error) = self.remove(&refs, false) {
-            log(&format!("the plays watched longest ago stay, for they cannot be removed: {}", error.message));
+        self.evict(leaving);
+    }
+
+    /// Starts taking `ids` out of the plays folder. Each stays on the list until the engine lets
+    /// go of it, so that saving its title, or streaming it, in the meantime keeps it.
+    fn evict(&mut self, ids: Vec<TorrentId>) {
+        for id in ids {
+            let Some(job) = self.jobs.get_mut(&id) else { continue };
+            if job.observed.in_engine() {
+                job.observed = Observed::Absent;
+                self.engine.send(EngineCommand::Remove(id));
+                self.draining.insert(id);
+                for pause in &mut self.pauses {
+                    pause.waiting.remove(&id);
+                }
+            }
+            self.tending.leaving.insert(id);
+            self.publish(id);
+        }
+        self.finish_pauses();
+        self.leave();
+    }
+
+    /// Takes out of the plays folder each leaving play the engine has let go of. The library is
+    /// read in this same step, and every save goes through the owner, so a play whose title was
+    /// saved at any point before now stays. So does one someone streams, or one the person got
+    /// by hand, since it started leaving.
+    pub(super) fn leave(&mut self) {
+        let ready: Vec<TorrentId> =
+            self.tending.leaving.iter().copied().filter(|id| !self.draining.contains(id)).collect();
+        if ready.is_empty() {
+            return;
+        }
+        let saved = self.store.saved_titles();
+        for id in ready {
+            self.tending.leaving.remove(&id);
+            let Some(job) = self.jobs.get(&id) else { continue };
+            let why = match &saved {
+                Err(_) => Some("the library cannot be read"),
+                Ok(saved) if !self.tended(job, saved) => Some("it became yours"),
+                Ok(_) if self.playing(id) => Some("someone streams it"),
+                Ok(_) => None,
+            };
+            if let Some(why) = why {
+                log(&format!("{} stays in the plays folder, for {why}", self.named(id)));
+                continue;
+            }
+            log(&format!("{} left the plays folder", self.named(id)));
+            if let Err(error) = self.remove(&[id.to_hex()], false) {
+                log(&format!("{} stays, for it cannot be removed: {}", self.named(id), error.message));
+            }
         }
         self.finish_deletions();
+        self.schedule();
+    }
+
+    /// Saves a title in the library, or takes it out. A play of a title saved while it leaves the
+    /// plays folder stays.
+    pub(super) fn library(&mut self, shelving: Shelving) -> Result<(), Error> {
+        let card = match shelving {
+            Shelving::Unsave(title) => return self.store.unsave_title(&title),
+            Shelving::Save(card) => card,
+        };
+        self.store.save_title(&card, now())?;
+        let kept: Vec<TorrentId> = self
+            .tending
+            .leaving
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.jobs.get(id).and_then(|job| job.record.title.as_ref()).is_some_and(|l| l.link.title == card.id)
+            })
+            .collect();
+        for id in kept {
+            self.tending.leaving.remove(&id);
+            log(&format!("{} stays in the plays folder, for its title is saved", self.named(id)));
+        }
+        Ok(())
     }
 
     /// What a play takes up on disk now.

@@ -12,8 +12,8 @@ use super::super::store::sql_error;
 const WATCHED: &str = "SELECT video, position, duration, release, updated_at FROM watched";
 
 /// Watch positions and the library, on a connection of its own to the engine's database, which
-/// `Store::open` has migrated. It writes only `watched` and `library`, so it never contends with
-/// the owner for a row.
+/// `Store::open` has migrated. It writes only `watched`, so it never contends with the owner for
+/// a row. The owner saves titles, so a save is ordered with what the owner does to their plays.
 pub struct Shelf {
     conn: Mutex<Connection>,
     path: PathBuf,
@@ -83,27 +83,6 @@ impl Shelf {
         Error::new(ErrorCode::StateCorrupt, format!("{} has an unreadable {what}", self.path.display()))
     }
 
-    /// Saves `card` in the library, keeping when it was first saved, so the library lists the
-    /// title even when the catalog cannot be reached.
-    pub fn save(&self, card: &TitleCard, now: i64) -> Result<(), Error> {
-        self.conn()
-            .execute(
-                "INSERT INTO library (title, kind, name, year, rating, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT (title) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
-                 year = excluded.year, rating = excluded.rating",
-                params![card.id.as_str(), kind_text(card.kind), card.name, card.year, card.rating, now],
-            )
-            .map(drop)
-            .map_err(|e| self.fail(e))
-    }
-
-    pub fn unsave(&self, title: &TitleId) -> Result<(), Error> {
-        self.conn()
-            .execute("DELETE FROM library WHERE title = ?1", [title.as_str()])
-            .map(drop)
-            .map_err(|e| self.fail(e))
-    }
-
     pub fn is_saved(&self, title: &TitleId) -> Result<bool, Error> {
         self.conn()
             .query_row("SELECT 1 FROM library WHERE title = ?1", [title.as_str()], |_| Ok(()))
@@ -140,13 +119,6 @@ impl Shelf {
             cards.push(TitleCard { id, kind, name, year, rating });
         }
         Ok(cards)
-    }
-}
-
-fn kind_text(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Film => "film",
-        Kind::Series => "series",
     }
 }
 
@@ -243,16 +215,17 @@ mod tests {
         };
         let night = card("tt0063350", Kind::Film, "Night of the Living Dead", Some(1968), Some(7.8));
         let harbor = card("tt9999901", Kind::Series, "Harbor Lights", Some(2019), None);
-        shelf.save(&night, 10).unwrap();
-        shelf.save(&harbor, 20).unwrap();
-        shelf.save(&night, 30).unwrap();
+        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        store.save_title(&night, 10).unwrap();
+        store.save_title(&harbor, 20).unwrap();
+        store.save_title(&night, 30).unwrap();
         assert_eq!(shelf.saved().unwrap(), [harbor.clone(), night.clone()]);
         assert_eq!(shelf.is_saved(&night.id), Ok(true));
-        shelf.unsave(&night.id).unwrap();
-        shelf.unsave(&night.id).unwrap();
+        store.unsave_title(&night.id).unwrap();
+        store.unsave_title(&night.id).unwrap();
         assert_eq!((shelf.saved().unwrap(), shelf.is_saved(&night.id)), (vec![harbor], Ok(false)));
 
-        drop(shelf);
+        drop((shelf, store));
         drop(Store::open(&dir.path().join("state.db")).unwrap());
         let reopened = Shelf::open(&dir.path().join("state.db")).unwrap();
         assert_eq!(reopened.saved().unwrap().len(), 1, "the library outlives the engine");
