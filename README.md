@@ -33,7 +33,7 @@ nix develop -c cargo install --path crates/torrential
 torrential web
 ```
 
-Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. What you play downloads into a folder of torrential's own, which holds 20 GiB. When it is full, the plays you watched longest ago leave first, and the titles you saved stay. A play no one has watched for 10 minutes stops downloading until you play it again. Playing never deletes or writes over a file of yours.
+Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. What you play downloads into a folder of torrential's own, which holds 20 GiB. When it is full, the plays you watched longest ago leave first. The titles you saved stay, and so does the film you watched last, even when it alone is larger. A play no one has watched for 10 minutes stops downloading until you play it again. Playing never deletes or writes over a file of yours.
 
 <p align="center">
   <img src="docs/web-title.png" alt="The page of Night of the Living Dead in the web app, with its poster, synopsis, and a Play button" width="800">
