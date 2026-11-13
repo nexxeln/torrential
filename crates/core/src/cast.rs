@@ -111,7 +111,8 @@ impl<'de> Deserialize<'de> for Plays {
 /// A TV, or another media renderer, that answered a search of the home network.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Tv {
-    /// The renderer's UDN, such as `uuid:6a3e…`, which stays the same when the TV restarts.
+    /// The renderer's UDN and its address, such as `uuid:6a3e…@192.168.1.40`. A device that
+    /// copies a TV's UDN from another address is another TV, and so is the TV at a new address.
     pub id: String,
     /// The name the TV gives itself, such as `[LG] webOS TV OLED55C1`.
     pub name: String,
@@ -200,7 +201,7 @@ pub enum CastAction {
 /// A cast to start.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct CastRequest {
-    /// A TV's ID or a part of its name. `None` picks the only TV on the network.
+    /// A TV's ID or address, or a part of its name. `None` picks the only TV on the network.
     pub tv: Option<String>,
     /// A film or an episode, or a torrent.
     pub target: Target,

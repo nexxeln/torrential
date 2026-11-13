@@ -500,7 +500,7 @@ async fn a_cast_plays_a_download_on_the_tv_through_its_grant_and_the_grant_ends_
     assert_eq!(
         found,
         serde_json::json!([{
-            "id": "uuid:fake-tv", "name": "Fake TV", "address": ip.to_string(),
+            "id": format!("uuid:fake-tv@{ip}"), "name": "Fake TV", "address": ip.to_string(),
             "plays": ["mkv", "mp4"], "decodes": "h264", "volume": true,
         }])
     );

@@ -70,10 +70,10 @@ pub struct Casts {
 
 #[derive(Default)]
 struct State {
-    /// By UDN.
+    /// By ID, so a device that copies a TV's UDN from another address is another TV.
     tvs: BTreeMap<String, Known>,
     searched: Option<Instant>,
-    /// By the TV's UDN.
+    /// By the TV's ID.
     casts: BTreeMap<String, Entry>,
     /// How each file a cast grant serves goes to the TV, by the grant's path.
     served: HashMap<String, Dlna>,
@@ -286,7 +286,13 @@ impl Casts {
                     [one] => *one,
                     [] => return Err(nothing_plays()),
                     many => {
-                        let names: Vec<String> = many.iter().map(|e| e.view.borrow().tv_name.clone()).collect();
+                        let names: Vec<String> = many
+                            .iter()
+                            .map(|e| {
+                                let cast = e.view.borrow();
+                                at_address(&cast.tv_name, &cast.tv)
+                            })
+                            .collect();
                         return Err(Error::new(
                             ErrorCode::AmbiguousRef,
                             format!("casts play on {} TVs: {}", names.len(), names.join(", ")),
@@ -345,9 +351,9 @@ impl Casts {
                 .with_hint("run torrential tv to list the TVs on the network")
                 .with_next("torrential tv")),
             (many, _) => {
-                let names: Vec<&str> = many.iter().map(|r| r.tv.name.as_str()).collect();
+                let names: Vec<String> = many.iter().map(|r| at_address(&r.tv.name, &r.tv.id)).collect();
                 Err(Error::new(ErrorCode::AmbiguousRef, format!("{} TVs answered: {}", names.len(), names.join(", ")))
-                    .with_hint("name one with --tv"))
+                    .with_hint("name one with --tv, by its address if they share a name"))
             }
         }
     }
@@ -375,10 +381,21 @@ fn nothing_plays() -> Error {
     Error::new(ErrorCode::NotFound, "no cast is playing").with_hint("start one with torrential tv play")
 }
 
-/// Whether `wanted` is the TV's ID, or a part of its name in any case.
+/// Whether `wanted` is the TV's ID or address, or a part of its name in any case.
 fn names_tv(wanted: &str, id: &str, name: &str) -> bool {
     let wanted = wanted.trim();
-    !wanted.is_empty() && (id == wanted || name.to_lowercase().contains(&wanted.to_lowercase()))
+    !wanted.is_empty()
+        && (id == wanted || address(id) == wanted || name.to_lowercase().contains(&wanted.to_lowercase()))
+}
+
+/// The address in a TV's ID, which is its UDN and its address.
+fn address(id: &str) -> &str {
+    id.rsplit_once('@').map_or("", |(_, address)| address)
+}
+
+/// A TV's name with its address, which tells apart two TVs of the same name.
+fn at_address(name: &str, id: &str) -> String {
+    format!("{name} at {}", address(id))
 }
 
 /// The renderer that answered a search, with what its ConnectionManager says it plays. `None` for

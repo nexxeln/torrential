@@ -320,7 +320,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "flags": [
             {
               "name": "--tv",
-              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one answers",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one answers",
               "takes_value": true,
               "repeatable": false,
               "value_name": "NAME"
@@ -362,7 +362,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "flags": [
             {
               "name": "--tv",
-              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
               "takes_value": true,
               "repeatable": false,
               "value_name": "NAME"
@@ -376,7 +376,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "flags": [
             {
               "name": "--tv",
-              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
               "takes_value": true,
               "repeatable": false,
               "value_name": "NAME"
@@ -397,7 +397,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "flags": [
             {
               "name": "--tv",
-              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
               "takes_value": true,
               "repeatable": false,
               "value_name": "NAME"
@@ -418,7 +418,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "flags": [
             {
               "name": "--tv",
-              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
               "takes_value": true,
               "repeatable": false,
               "value_name": "NAME"
@@ -432,7 +432,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "flags": [
             {
               "name": "--tv",
-              "help": "The TV, by a part of its name or its ID from torrential tv, when more than one plays",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
               "takes_value": true,
               "repeatable": false,
               "value_name": "NAME"

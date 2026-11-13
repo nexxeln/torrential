@@ -90,7 +90,7 @@ pub fn sink(list: &str) -> Vec<(String, String)> {
 impl Renderer {
     pub fn new(description: Description, address: String, sink: Vec<(String, String)>) -> Self {
         let tv = Tv {
-            id: description.udn,
+            id: format!("{}@{address}", description.udn),
             name: description.name,
             address,
             plays: plays(&sink),

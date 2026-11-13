@@ -18,12 +18,37 @@ fn heard(udn: &str, address: &str) -> Known {
 }
 
 #[test]
-fn a_tv_is_named_by_its_id_or_any_part_of_its_name() {
-    let (id, name) = ("uuid:6a3e0b2c", "[LG] webOS TV OLED55C1");
-    assert!(names_tv("uuid:6a3e0b2c", id, name));
+fn a_device_that_copies_a_tvs_udn_from_another_address_is_listed_as_another_tv() {
+    let casts = Casts::new(Weak::new(), Find::At(SocketAddr::from(([127, 0, 0, 1], 9))));
+    let listed = |casts: &Casts| -> Vec<String> {
+        casts.list().tvs.iter().map(|tv| format!("{} {} {}", tv.id, tv.name, tv.address)).collect()
+    };
+    casts.state().found(vec![heard("uuid:lg", "192.168.1.40")]);
+    casts.state().found(vec![heard("uuid:lg", "192.168.1.40"), heard("uuid:lg", "192.168.1.66")]);
+    assert_eq!(listed(&casts), ["uuid:lg@192.168.1.40 LG TV 192.168.1.40", "uuid:lg@192.168.1.66 LG TV 192.168.1.66"]);
+    let error = casts.choose(Some("lg")).unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::AmbiguousRef, "2 TVs answered: LG TV at 192.168.1.40, LG TV at 192.168.1.66")
+    );
+    assert_eq!(casts.choose(Some("192.168.1.66")).unwrap().tv.address, "192.168.1.66");
+    assert_eq!(casts.choose(Some("uuid:lg@192.168.1.40")).unwrap().tv.address, "192.168.1.40");
+
+    casts.state().found(vec![heard("uuid:lg", "192.168.1.41")]);
+    assert_eq!(listed(&casts).len(), 3, "a TV at a new address is a new entry, and the old ones stay a search");
+    casts.state().found(vec![heard("uuid:lg", "192.168.1.41")]);
+    assert_eq!(listed(&casts), ["uuid:lg@192.168.1.41 LG TV 192.168.1.41"]);
+}
+
+#[test]
+fn a_tv_is_named_by_its_id_its_address_or_any_part_of_its_name() {
+    let (id, name) = ("uuid:6a3e0b2c@192.168.1.40", "[LG] webOS TV OLED55C1");
+    assert!(names_tv("uuid:6a3e0b2c@192.168.1.40", id, name));
+    assert!(names_tv("192.168.1.40", id, name));
     assert!(names_tv("lg", id, name));
     assert!(names_tv(" oled55 ", id, name));
-    assert!(!names_tv("uuid:6a3e", id, name), "an ID names a TV whole");
+    assert!(!names_tv("uuid:6a3e0b2c", id, name), "a UDN alone names any device that claims it");
+    assert!(!names_tv("192.168.1.4", id, name), "an address names a TV whole");
     assert!(!names_tv("samsung", id, name));
     assert!(!names_tv("  ", id, name));
 }

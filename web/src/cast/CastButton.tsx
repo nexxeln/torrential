@@ -139,7 +139,9 @@ function Picker({ start, at, above, onCast }: { start: Omit<CastStart, "tv">; at
           <TvIcon aria-hidden="true" className="size-5 shrink-0 fill-soft" />
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="truncate text-sm text-ink">{tv.name}</span>
-            <span className="truncate text-xs text-pencil">Plays {plays(tv)}</span>
+            <span className="truncate text-xs text-pencil">
+              {tv.address} · Plays {plays(tv)}
+            </span>
           </span>
           {sending === tv.id && <Spinner className="size-4 text-soft" />}
         </button>

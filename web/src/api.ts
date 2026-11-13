@@ -732,7 +732,7 @@ export type Container = "mkv" | "mp4" | "webm" | "avi" | "ts" | "mov" | "mpeg" |
 
 /** A TV, or another media renderer, on the home network. */
 export interface Tv {
-  /** The renderer's UDN. */
+  /** The renderer's UDN and its address. A device that copies a TV's UDN from another address is another TV. */
   id: string;
   name: string;
   address: string;

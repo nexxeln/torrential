@@ -367,7 +367,7 @@ pub enum TvCommand {
 
 #[derive(Args, Debug)]
 pub struct TvArgs {
-    /// The TV, by a part of its name or its ID from torrential tv, when more than one plays
+    /// The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays
     #[arg(long, value_name = "NAME")]
     pub tv: Option<String>,
 }
@@ -377,7 +377,7 @@ pub struct TvPlayArgs {
     /// A title ID such as tt0063350, tt0903747:3:5, or tt0903747 s03e05, or a download or search result ID, magnet link, infohash, or .torrent file or URL
     #[arg(value_name = "WORDS", required = true, num_args = 1..=2, add = ArgValueCandidates::new(complete_download_ids))]
     pub words: Vec<String>,
-    /// The TV, by a part of its name or its ID from torrential tv, when more than one answers
+    /// The TV, by a part of its name, its address, or its ID from torrential tv, when more than one answers
     #[arg(long, value_name = "NAME")]
     pub tv: Option<String>,
     /// With a title ID, play only this one of its torrents, by an ID from torrential sources
