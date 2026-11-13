@@ -18,7 +18,8 @@ use torrential_core::{Error, ErrorCode};
 use super::ffmpeg::{self, INSTALL, Programs, Tools};
 use crate::env::Env;
 
-/// jellyfin-ffmpeg's portable builds, which link only to what every system has.
+/// jellyfin-ffmpeg's portable builds, which link only to the system's own libraries: glibc on
+/// Linux, and `/usr/lib` and the system frameworks on macOS.
 const RELEASE: &str = "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2";
 pub const VERSION: &str = "8.1.3-2";
 
@@ -28,6 +29,9 @@ struct Pin {
     file: &'static str,
     sha256: &'static str,
     size: u64,
+    /// The glibc loader the programs start with, from the system's root folder. A Linux without
+    /// glibc, such as Alpine, has none and cannot run them.
+    loader: Option<&'static str>,
 }
 
 /// One for each platform torrential releases for, by `std::env::consts` names. The hashes are the
@@ -39,6 +43,7 @@ const PINS: [Pin; 3] = [
         file: "jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz",
         sha256: "d898cc819e7c4e9219d6410ddbdaada0838f14bec6ff89e283639915394cb43f",
         size: 32_904_768,
+        loader: None,
     },
     Pin {
         os: "linux",
@@ -46,6 +51,7 @@ const PINS: [Pin; 3] = [
         file: "jellyfin-ffmpeg_8.1.3-2_portable_linux64-gpl.tar.xz",
         sha256: "1df84d04c4322902dba81c290508cdf3d89524d210b9fe03154bea6c4e3bfbb6",
         size: 60_657_368,
+        loader: Some("lib64/ld-linux-x86-64.so.2"),
     },
     Pin {
         os: "linux",
@@ -53,6 +59,7 @@ const PINS: [Pin; 3] = [
         file: "jellyfin-ffmpeg_8.1.3-2_portable_linuxarm64-gpl.tar.xz",
         sha256: "6522585818059cc886363fb1dee86ac9b8579fec3b914337fb92974ef9eb9884",
         size: 54_093_080,
+        loader: Some("lib/ld-linux-aarch64.so.1"),
     },
 ];
 
@@ -76,12 +83,13 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn pinned(os: &str, arch: &str) -> Option<Build> {
-        PINS.iter().find(|pin| pin.os == os && pin.arch == arch).map(|pin| Build {
-            url: format!("{RELEASE}/{}", pin.file),
-            sha256: pin.sha256.to_string(),
-            size: pin.size,
-        })
+    /// The build for `os` and `arch`, when the system whose root folder is `system` can run it.
+    pub fn pinned(os: &str, arch: &str, system: &Path) -> Option<Build> {
+        let pin = PINS.iter().find(|pin| pin.os == os && pin.arch == arch)?;
+        if pin.loader.is_some_and(|loader| !system.join(loader).exists()) {
+            return None;
+        }
+        Some(Build { url: format!("{RELEASE}/{}", pin.file), sha256: pin.sha256.to_string(), size: pin.size })
     }
 }
 
@@ -91,7 +99,7 @@ pub enum Fetch {
     Build(Build),
     /// config.yaml turns fetching off. A build fetched before still runs.
     Off(Build),
-    /// torrential has no build for this machine.
+    /// torrential has no build that runs on this machine.
     Unavailable,
 }
 
@@ -103,7 +111,7 @@ impl Fetch {
         if env.var("TORRENTIAL_TEST_NETWORK").is_some() || env.var("TORRENTIAL_TEST_ENGINE").is_some() {
             return Fetch::Unavailable;
         }
-        match Build::pinned(std::env::consts::OS, std::env::consts::ARCH) {
+        match Build::pinned(std::env::consts::OS, std::env::consts::ARCH, Path::new("/")) {
             Some(build) if allowed => Fetch::Build(build),
             Some(build) => Fetch::Off(build),
             None => Fetch::Unavailable,
@@ -208,6 +216,8 @@ enum Fetched {
     /// None, or not as it was fetched, so it needs fetching again.
     Absent,
     Running(watch::Receiver<Stage>),
+    /// The fetched build did not run here, so this engine run does not fetch it again.
+    Refused(Error),
 }
 
 impl Ffmpeg {
@@ -253,18 +263,20 @@ impl Ffmpeg {
             Fetched::Ready(_) => return Ok(Fetching::Here),
             // A fetch that panicked has dropped its sender.
             Fetched::Running(stage) if stage.has_changed().is_ok() => return Ok(Fetching::Running(stage.clone())),
+            Fetched::Refused(error) => return Err(error.clone()),
             _ => {}
         }
         let (report, stage) = watch::channel(Stage::Downloading { done: 0, size: build.size });
         *fetched = Fetched::Running(stage.clone());
         let (root, state) = (self.root.clone(), self.fetched.clone());
         tokio::spawn(async move {
-            let done = fetch(&build, &root, &report).await;
-            *state.lock().expect("no holder panics") = match &done {
-                Ok(programs) => Fetched::Ready(programs.clone()),
-                Err(_) => Fetched::Absent,
+            let (now, done) = match fetch(&build, &root, &report).await {
+                Ok(programs) => (Fetched::Ready(programs), Ok(())),
+                Err(Failure::Again(error)) => (Fetched::Absent, Err(error)),
+                Err(Failure::Refused(error)) => (Fetched::Refused(error.clone()), Err(error)),
             };
-            report.send_replace(Stage::Done(done.map(drop)));
+            *state.lock().expect("no holder panics") = now;
+            report.send_replace(Stage::Done(done));
         });
         Ok(Fetching::Running(stage))
     }
@@ -317,14 +329,28 @@ fn programs(folder: &Path) -> Programs {
     Programs { ffmpeg: folder.join("ffmpeg"), ffprobe: folder.join("ffprobe") }
 }
 
+/// Why a fetch brought no ffmpeg.
+enum Failure {
+    /// Another try can work: the network, the disk, or a download that is not the build.
+    Again(Error),
+    /// The build does not run on this machine, so another download would not help.
+    Refused(Error),
+}
+
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Failure::Again(error)
+    }
+}
+
 /// Downloads `build`, checks its hash, unpacks ffmpeg and ffprobe with a manifest of them, and
 /// checks that they run, into `root`'s folder for this version. Anything else in `root` is removed.
 /// A failure leaves nothing.
-async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Result<Programs, Error> {
+async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Result<Programs, Failure> {
     let folder = root.join(VERSION);
     let started = Instant::now();
     super::super::log(&format!("fetching ffmpeg {VERSION} from {}", build.url));
-    let fetched = async {
+    let fetched: Result<Programs, Failure> = async {
         let partial = Partial::create(root)?;
         let archive = partial.path.join(ARCHIVE);
         download(build, &archive, report).await?;
@@ -340,14 +366,16 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
                 .with_hint("free some space or fix the folder's permissions, then try again")
         })?;
         for program in PROGRAMS {
-            runs(&partial.path.join(program)).await?;
+            runs(&partial.path.join(program)).await.map_err(Failure::Refused)?;
         }
-        partial.finish(&folder)
+        Ok(partial.finish(&folder)?)
     }
     .await;
     match &fetched {
         Ok(_) => super::super::log(&format!("fetched ffmpeg {VERSION} in {} s", started.elapsed().as_secs())),
-        Err(error) => super::super::log(&format!("cannot fetch ffmpeg: {}", error.message)),
+        Err(Failure::Again(error) | Failure::Refused(error)) => {
+            super::super::log(&format!("cannot fetch ffmpeg: {}", error.message));
+        }
     }
     fetched
 }
@@ -557,7 +585,14 @@ mod tests {
 
     #[test]
     fn apple_silicon_and_linux_on_arm64_and_x86_64_have_a_pinned_build() {
-        let pinned = |os, arch| Build::pinned(os, arch).map(|build| build.url.rsplit('/').next().unwrap().to_string());
+        let system = tempfile::tempdir().unwrap();
+        for loader in ["lib64/ld-linux-x86-64.so.2", "lib/ld-linux-aarch64.so.1"] {
+            std::fs::create_dir_all(system.path().join(loader).parent().unwrap()).unwrap();
+            std::fs::write(system.path().join(loader), "").unwrap();
+        }
+        let pinned = |os, arch| {
+            Build::pinned(os, arch, system.path()).map(|build| build.url.rsplit('/').next().unwrap().to_string())
+        };
         assert_eq!(pinned("macos", "aarch64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz"));
         assert_eq!(pinned("linux", "x86_64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_linux64-gpl.tar.xz"));
         assert_eq!(
@@ -569,9 +604,28 @@ mod tests {
     }
 
     #[test]
+    fn a_linux_without_the_glibc_loader_its_build_starts_with_has_no_build() {
+        let system = tempfile::tempdir().unwrap();
+        let pinned = |os, arch| {
+            Build::pinned(os, arch, system.path()).map(|build| build.url.rsplit('/').next().unwrap().to_string())
+        };
+        assert_eq!([pinned("linux", "x86_64"), pinned("linux", "aarch64")], [None, None]);
+        assert_eq!(pinned("macos", "aarch64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz"));
+        for loader in ["lib64/ld-linux-x86-64.so.2", "lib/ld-linux-aarch64.so.1"] {
+            std::fs::create_dir_all(system.path().join(loader).parent().unwrap()).unwrap();
+            std::fs::write(system.path().join(loader), "").unwrap();
+        }
+        assert_eq!(pinned("linux", "x86_64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_linux64-gpl.tar.xz"));
+        assert_eq!(
+            pinned("linux", "aarch64").as_deref(),
+            Some("jellyfin-ffmpeg_8.1.3-2_portable_linuxarm64-gpl.tar.xz")
+        );
+    }
+
+    #[test]
     fn an_engine_fetches_the_pinned_build_whatever_its_environment_says() {
         let fetch = |vars: &[(&str, &str)], allowed| Fetch::from_env(&Env::from_pairs(vars.iter().copied()), allowed);
-        let pinned = Build::pinned(std::env::consts::OS, std::env::consts::ARCH);
+        let pinned = Build::pinned(std::env::consts::OS, std::env::consts::ARCH, Path::new("/"));
         let Some(pinned) = pinned else {
             assert_eq!(fetch(&[], true), Fetch::Unavailable);
             return;

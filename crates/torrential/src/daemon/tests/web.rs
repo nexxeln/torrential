@@ -683,6 +683,32 @@ async fn a_fetched_ffmpeg_that_changed_on_disk_is_fetched_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_build_that_does_not_run_here_is_fetched_once_for_each_engine_run() {
+    let calls = tempfile::tempdir().unwrap();
+    let ffmpeg = "echo 'error while loading shared libraries: libmvec.so.1' >&2; exit 127";
+    let archive = archive(&calls.path().join("calls"), FILM, ffmpeg);
+    let (url, asked) = serve(archive.clone()).await;
+    let mut h = Harness::with_outside(
+        search_port::Fake::new(fake_catalog()),
+        Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
+    );
+    let message = "the ffmpeg torrential fetched does not run on this machine: error while loading shared libraries: libmvec.so.1";
+    let refused = json!({
+        "type": "error",
+        "error": { "code": "fetch_failed", "message": message, "hint": format!("{INSTALL}, then try again") },
+    });
+    assert_eq!(fetch_ffmpeg(&h).await, refused);
+    let (status, _, body) = fetch(&h, "POST", "/api/ffmpeg", &FETCH, "{}").await;
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the engine does not download it again");
+    assert_eq!(error(&(status, serde_json::from_slice(&body).unwrap())), (502, "fetch_failed", message));
+    assert!(!h.dir.path().join("ffmpeg").exists(), "nothing is kept");
+
+    h = h.crash_and_restart().await;
+    assert_eq!(fetch_ffmpeg(&h).await, refused);
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "a new engine run tries once more");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ffmpeg_is_not_fetched_into_a_folder_other_users_can_change() {
     let calls = tempfile::tempdir().unwrap();
     let archive = archive(&calls.path().join("calls"), FILM, "true");
