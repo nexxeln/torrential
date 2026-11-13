@@ -18,7 +18,7 @@ use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
-pub const WIRE_VERSION: u32 = 7;
+pub const WIRE_VERSION: u32 = 8;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -448,6 +448,7 @@ mod tests {
         ),
         (6, &["devices", "add_device", "remove_device"]),
         (7, &["home"]),
+        (8, &["tvs", "cast", "cast_control"]),
     ];
 
     #[test]
