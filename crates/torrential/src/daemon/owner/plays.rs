@@ -356,8 +356,9 @@ impl Owner {
         self.make_room(&saved, None);
     }
 
-    /// Makes room in the plays folder for a new play of `id` that takes `bytes`, before the disk
-    /// is checked for room, so a full plays folder does not stop the play from starting.
+    /// Makes room in the plays folder for a new play of `id` that takes `bytes`, after every check
+    /// but the one for room on the disk, so a full plays folder does not stop the play from
+    /// starting, and a play refused for another reason sends no play away.
     pub(super) fn make_room_for(&mut self, id: TorrentId, bytes: u64) {
         match self.store.saved_titles() {
             Ok(saved) => self.make_room(&saved, Some(Share { id, bytes, watched_at: now(), busy: true })),

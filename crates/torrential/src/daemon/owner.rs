@@ -652,6 +652,10 @@ impl Owner {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
+            // A new play makes room in the plays folder only once nothing but the disk refuses it.
+            if matches!(home, Home::Plays(_)) && !dry_run {
+                self.make_room_for(id, plan.selected_size);
+            }
             admission::check_disk(self.reclaimable(plan.space), plan.needed(0), self.others_remaining(&dir, id))?;
         }
         let record = JobRecord {
@@ -865,10 +869,6 @@ impl Owner {
             }
         }
         let absent = matches!(before, Before::Absent);
-        if absent && matches!(to, Destination::Plays) {
-            let size = files.iter().map(|&i| metainfo.files[i as usize].size).sum();
-            self.make_room_for(id, size);
-        }
         let (dir, home) = if absent { self.destination(id, to)? } else { (None, Home::Folder) };
         let free = match &title {
             Some(_) if absent => {

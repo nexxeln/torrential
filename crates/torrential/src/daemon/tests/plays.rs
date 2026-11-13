@@ -613,3 +613,23 @@ async fn get_on_a_play_again_notes_that_it_is_the_persons_when_the_first_get_cou
     let noted: bool = database.query_row("SELECT by_hand FROM plays", [], |row| row.get(0)).unwrap();
     assert!(noted, "the next start finds the play the person's");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_too_large_to_get_is_refused_before_any_play_leaves_for_it() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let older = torrent(0xb5, "older", &[("older.mp4", 2 * GIB)]);
+    h.play_web(&older).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let huge = torrent(0xb6, "huge", &[("huge.mkv", 60 * GIB)]);
+    h.swarm.publish(huge.clone());
+    let (status, body) = post(&h, "/api/play", json!({ "ref": magnet_link(&huge) })).await;
+    assert_eq!((status, &body["error"]["code"]), (413, &json!("too_large")), "{body}");
+    assert_eq!(names(&h).await, named(&["older"]));
+    assert!(h.play_folder(&older).exists());
+}
