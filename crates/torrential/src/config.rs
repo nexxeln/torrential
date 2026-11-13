@@ -686,11 +686,11 @@ sources:
     }
 
     #[test]
-    fn updates_default_to_notify_and_a_bad_value_names_the_line() {
+    fn updates_install_by_themselves_unless_the_file_says_notify_or_off() {
         let read = |text: &str| parse(text, &env()).unwrap().updates;
         assert_eq!(
-            [read(""), read("updates: auto\n"), read("updates: off\n")],
-            [Policy::Notify, Policy::Auto, Policy::Off]
+            [read(""), read("sources: {}\n"), read("updates: notify\n"), read("updates: off\n")],
+            [Policy::Auto, Policy::Auto, Policy::Notify, Policy::Off]
         );
         let error = load("sources: {}\nupdates: always\n").unwrap_err();
         assert_eq!(

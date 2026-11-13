@@ -1,5 +1,6 @@
 import { isActive, useJobs } from "../lib/jobs";
 import { Link } from "../router";
+import { UpdateNotice } from "./UpdateNotice";
 
 /** `current` is the page of the main navigation this one is, if any. */
 export function Header({ current }: { current: "search" | "downloads" | null }) {
@@ -11,10 +12,12 @@ export function Header({ current }: { current: "search" | "downloads" | null }) 
       <Link href="/" className="rounded-lg text-base font-semibold tracking-tight text-ink">
         torrential
       </Link>
-      {link === "lost" && (
+      {link === "lost" ? (
         <p role="status" className="truncate px-3 text-sm text-error">
           The engine is not running. Start it with <code className="font-mono">torrential web</code>.
         </p>
+      ) : (
+        <UpdateNotice link={link} />
       )}
       <nav aria-label="Main" className="-mr-2.5 flex shrink-0 items-center gap-1">
         <Link href="/" aria-current={current === "search" ? "page" : undefined} className={item}>

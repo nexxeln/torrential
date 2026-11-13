@@ -95,25 +95,35 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
 }
 
 pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
+    let current = |conn: &Conn| conn.engine_version == env.version() && conn.wire == WIRE_VERSION;
     if let Some(conn) = existing(paths, env)? {
-        if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
+        if current(&conn) {
             return Ok(conn);
         }
-        stop(conn)?;
+        stop(conn, paths, env)?;
+        // The engine may have been restarting into the update that made this command's version.
+        if let Some(conn) = existing(paths, env)?.filter(current) {
+            return Ok(conn);
+        }
     }
     launch::start(paths, env)
 }
 
-pub fn stop(mut conn: Conn) -> Result<u32, Error> {
-    let pid = conn.pid;
+/// Asks the engine to stop and waits until it exits. An engine that was restarting into an update
+/// keeps its process ID, so another version answering from that ID counts as stopped too.
+pub fn stop(mut conn: Conn, paths: &Paths, env: &Env) -> Result<u32, Error> {
+    let (pid, version) = (conn.pid, conn.engine_version.clone());
     let _ = conn.call_within(&Request::Shutdown, Duration::from_secs(20));
+    drop(conn);
+    let replaced =
+        || matches!(existing(paths, env), Ok(Some(conn)) if conn.pid == pid && conn.engine_version != version);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while alive(pid) {
+    while alive(pid) && !replaced() {
         if Instant::now() > deadline {
             return Err(Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
                 .with_hint(format!("kill {pid}, then run the command again")));
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
     }
     Ok(pid)
 }

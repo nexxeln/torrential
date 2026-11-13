@@ -28,6 +28,10 @@
 //   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
 //   POST /api/library        { title, saved }              { saved: boolean }
 //   GET  /api/home                                         Home
+//
+// The engine:
+//
+//   GET  /api/version                                      Version
 
 export type Category = "video" | "audio" | "software" | "book" | "game" | "dataset" | "other";
 export type Flag = "official" | "trusted" | "public_domain" | "creative_commons" | "cam" | "adult";
@@ -649,4 +653,14 @@ export function setSaved(title: string, saved: boolean): Promise<boolean> {
 
 export function home(signal?: AbortSignal): Promise<Home> {
   return fetch("/api/home", { signal }).then(json<Home>);
+}
+
+/** The engine's version, and the line to show about a newer one, such as "Updated torrential to 0.5.1.". */
+export interface Version {
+  version: string;
+  notice: string | null;
+}
+
+export function version(signal?: AbortSignal): Promise<Version> {
+  return fetch("/api/version", { signal }).then(json<Version>);
 }

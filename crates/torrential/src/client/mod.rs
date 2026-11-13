@@ -328,7 +328,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
         }
         DaemonCommand::Stop => {
             let (result, pid) = match connect::existing(&paths, env)? {
-                Some(conn) => ("stopped", Some(connect::stop(conn)?)),
+                Some(conn) => ("stopped", Some(connect::stop(conn, &paths, env)?)),
                 None => ("already_stopped", None),
             };
             #[derive(Serialize)]
@@ -349,7 +349,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
         }
         DaemonCommand::Install => {
             if let Some(conn) = connect::existing(&paths, env)? {
-                connect::stop(conn)?;
+                connect::stop(conn, &paths, env)?;
             }
             service_report(service::install(env, &paths)?, mode)
         }

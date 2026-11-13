@@ -186,7 +186,10 @@ impl Connection<'_> {
             return self.empty("405 Method Not Allowed", "", request.keep_alive).await;
         }
         match route(&request.path) {
-            Some((id, index)) => self.file(request, id, index).await,
+            Some((id, index)) => {
+                let _playing = self.ctx.playing.open();
+                self.file(request, id, index).await
+            }
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
                     let headers = format!("Cache-Control: {}\r\n", asset.cache);

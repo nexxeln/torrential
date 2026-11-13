@@ -7,6 +7,7 @@ pub mod http;
 pub mod libtorrent;
 pub mod magnet;
 pub mod owner;
+pub mod playing;
 pub mod resolve;
 pub mod search_port;
 pub mod server;
@@ -21,6 +22,7 @@ mod tests;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +35,7 @@ use crate::config::Config;
 use crate::env::Env;
 use crate::machine::Detector;
 use crate::paths::{self, Paths};
+use crate::update::{self, Version};
 use admission::Disk;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
@@ -187,6 +190,8 @@ pub fn start(
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
+        playing: playing::Playing::new(),
+        news: update::Board::default(),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })
@@ -196,13 +201,20 @@ pub fn log(message: &str) {
     eprintln!("{} {message}", crate::output::format::timestamp(owner::now()));
 }
 
+/// Runs the engine until `torrential engine stop`, a signal, or an update, which it restarts into.
 pub fn run(env: &Env) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
+    // Linux names a replaced binary "(deleted)", so the path is read before an update replaces it.
+    let exe = update::executable();
     match serve(env, &paths) {
-        Ok(()) => 0,
+        Ok(None) => 0,
+        Ok(Some(to)) => match exe {
+            Ok(exe) => restart(env, &exe, to),
+            Err(e) => fail_start(Some(&paths), &e),
+        },
         Err(Startup::AlreadyRunning(message)) => {
             log(&message);
             ErrorCode::DaemonUnavailable.exit_code()
@@ -230,7 +242,22 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     error.code.exit_code()
 }
 
-fn serve(env: &Env, paths: &Paths) -> Result<(), Startup> {
+/// Replaces this process with the binary an update installed. The process ID stays, so launchd
+/// and systemd keep watching it. A test engine's made-up version follows the update.
+fn restart(env: &Env, exe: &Path, to: Version) -> u8 {
+    log(&format!("restarting into torrential {to}"));
+    let mut engine = std::process::Command::new(exe);
+    engine.args(["daemon", "run"]).env("TORRENTIAL_UPDATED_FROM", env.version());
+    if env.var("TORRENTIAL_TEST_VERSION").is_some() {
+        engine.env("TORRENTIAL_TEST_VERSION", to.to_string());
+    }
+    let e = engine.exec();
+    log(&format!("cannot restart into torrential {to}: {e}"));
+    ErrorCode::DaemonUnavailable.exit_code()
+}
+
+/// Returns the version an update installed, when that is why the engine stopped.
+fn serve(env: &Env, paths: &Paths) -> Result<Option<Version>, Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
     std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
@@ -277,7 +304,7 @@ fn serve(env: &Env, paths: &Paths) -> Result<(), Startup> {
         .map_err(|e| Error::internal(format!("cannot start the async runtime: {e}")))?;
     let version = env.version();
     let ports = Ports::from_env(env, paths, &settings, runtime.handle())?;
-    let engine = runtime.block_on(async {
+    let (engine, updated) = runtime.block_on(async {
         let socket = paths.socket();
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).map_err(|e| {
@@ -303,19 +330,34 @@ fn serve(env: &Env, paths: &Paths) -> Result<(), Startup> {
             }
         });
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let updates = tokio::spawn(crate::update::watch(env.clone(), paths.clone()));
-        let _ = running.owner.await;
+        let (playing, news) = (running.ctx.playing.clone(), running.ctx.news.clone());
+        let updated_from = env.var("TORRENTIAL_UPDATED_FROM").map(String::from);
+        let mut updates = tokio::spawn(update::watch(env.clone(), paths.clone(), playing, news, updated_from));
+        let mut owner = running.owner;
+        let updated = tokio::select! {
+            _ = &mut owner => None,
+            Ok(to) = &mut updates => {
+                shut_down(&running.ctx.owner);
+                let _ = owner.await;
+                Some(to)
+            }
+        };
         accept.abort();
         running.http.abort();
         signals.abort();
         updates.abort();
         let _ = std::fs::remove_file(&socket);
-        Ok::<_, Error>(running.engine)
+        Ok::<_, Error>((running.engine, updated))
     })?;
     drop(runtime);
     let _ = engine.join();
     log("engine stopped");
-    Ok(())
+    Ok(updated)
+}
+
+fn shut_down(owner: &OwnerHandle) {
+    let (reply, _) = tokio::sync::oneshot::channel();
+    owner.tell(owner::Command::Shutdown { reply });
 }
 
 async fn stop_on_signal(owner: OwnerHandle) {
@@ -328,8 +370,7 @@ async fn stop_on_signal(owner: OwnerHandle) {
         _ = int.recv() => {}
     }
     log("stopping on a signal");
-    let (reply, _) = tokio::sync::oneshot::channel();
-    owner.tell(owner::Command::Shutdown { reply });
+    shut_down(&owner);
 }
 
 fn prepare_runtime_dir(dir: &Path) -> Result<(), Error> {

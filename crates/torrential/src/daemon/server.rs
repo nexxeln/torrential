@@ -65,6 +65,8 @@ pub struct Ctx {
     pub http_port: u16,
     pub web: super::web::State,
     pub titles: super::titles::Titles,
+    pub playing: super::playing::Playing,
+    pub news: crate::update::Board,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {

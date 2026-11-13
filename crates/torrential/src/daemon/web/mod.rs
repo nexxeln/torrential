@@ -109,10 +109,16 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str) -
     match (request.method, route) {
         (Method::Get, "search") => return search(conn, request).await,
         (Method::Get, "events") => return watch::events(conn, request).await,
-        (Method::Get, "stream") => return watch::stream(conn, request).await,
+        (Method::Get, "stream") => {
+            let _playing = conn.ctx.playing.open();
+            return watch::stream(conn, request).await;
+        }
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
         (Method::Get, "title/sources") => return titles::sources(conn, request).await,
-        (Method::Post, "title/play") => return titles::play(conn, request).await,
+        (Method::Post, "title/play") => {
+            let _playing = conn.ctx.playing.open();
+            return titles::play(conn, request).await;
+        }
         (Method::Get, "title/art") => return titles::art(conn, request).await,
         _ => {}
     }
@@ -142,6 +148,7 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str) -> Result<Value, Err
         (Method::Post, "watched") => titles::watched(ctx, body(request)?).await,
         (Method::Post, "library") => titles::library(ctx, body(request)?).await,
         (Method::Get, "home") => titles::home(ctx).await,
+        (Method::Get, "version") => Ok(json!({ "version": ctx.version, "notice": ctx.news.line() })),
         (Method::Get, "media") => {
             let (id, file) = file_of(request)?;
             value(&*watch::media(ctx, id, file).await?)

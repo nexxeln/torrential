@@ -94,8 +94,10 @@ subtitles:
   online: false               # do not look for subtitles online
 catalog:
   online: false               # do not look up films and shows online
-updates: auto                 # install new versions by itself, or off
+updates: notify               # say when a new version is out instead of installing it, or off
 ```
+
+The engine starts when you log in and keeps running, and it installs new versions when nothing is playing. `torrential engine uninstall` stops it starting at login.
 
 ## It never seeds
 

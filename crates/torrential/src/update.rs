@@ -4,6 +4,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode};
 
 use crate::daemon::owner::now;
+use crate::daemon::playing::Playing;
 use crate::env::Env;
 use crate::output::Mode;
 use crate::output::theme::{Token, paint};
@@ -30,9 +32,9 @@ const UPDATED: &str = "updated.json";
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
     /// Show a notice when a newer version is available
-    #[default]
     Notify,
-    /// Install newer versions in the background
+    /// Install newer versions in the background when nothing is playing
+    #[default]
     Auto,
     /// Never check for newer versions
     Off,
@@ -352,13 +354,67 @@ impl Drop for Partial {
     }
 }
 
-pub async fn watch(env: Env, paths: Paths) {
-    let Some(releases) = Releases::from_env(&env) else { return };
+/// What the web app says about versions.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum News {
+    /// This engine started after it installed `to` in place of `from`.
+    Updated { from: String, to: String },
+    /// A newer release the engine installs once nothing is playing.
+    Waiting { latest: Version },
+    /// A newer release that `torrential update` installs.
+    Available { current: String, latest: Version },
+}
+
+impl News {
+    pub fn of(policy: Policy, checked: &Checked, current: &str, updated_from: Option<&str>) -> Option<News> {
+        if policy == Policy::Off {
+            return None;
+        }
+        match checked.newer(current) {
+            Some(latest) => Some(News::Available { current: current.to_string(), latest }),
+            None => updated_from.map(|from| News::Updated { from: from.to_string(), to: current.to_string() }),
+        }
+    }
+
+    pub fn line(&self) -> String {
+        match self {
+            Self::Updated { from, to } => Audience::Person.updated(from, to),
+            Self::Waiting { latest } => format!("torrential {latest} installs when nothing is playing."),
+            Self::Available { current, latest } => Audience::Person.out(current, *latest),
+        }
+    }
+}
+
+/// The news the update watcher keeps for the web app.
+#[derive(Clone, Default)]
+pub struct Board(Arc<Mutex<Option<News>>>);
+
+impl Board {
+    pub fn post(&self, news: Option<News>) {
+        *self.0.lock().expect("the board is never poisoned") = news;
+    }
+
+    pub fn line(&self) -> Option<String> {
+        self.0.lock().expect("the board is never poisoned").as_ref().map(News::line)
+    }
+}
+
+/// Looks for newer releases, and under `updates: auto` installs one once nothing is playing.
+/// Returns the version it installed, which the engine restarts into. `updated_from` is the
+/// version this engine replaced, when an update started it.
+pub async fn watch(env: Env, paths: Paths, playing: Playing, board: Board, updated_from: Option<String>) -> Version {
     let current = env.version();
+    let Some(releases) = Releases::from_env(&env) else {
+        board.post(updated_from.map(|from| News::Updated { from, to: current }));
+        return std::future::pending().await;
+    };
     loop {
         let now = now();
         let wait = match crate::config::updates(&paths) {
-            Ok(Policy::Off) | Err(_) => HOUR,
+            Ok(Policy::Off) | Err(_) => {
+                board.post(None);
+                HOUR
+            }
             Ok(policy) => {
                 if Checked::read(&paths).next_check() <= now
                     && let Err(e) = check(&releases, &paths, now).await
@@ -367,11 +423,18 @@ pub async fn watch(env: Env, paths: Paths) {
                 }
                 let checked = Checked::read(&paths);
                 if policy == Policy::Auto && checked.install_due(&current, now) {
+                    if let Some(latest) = checked.newer(&current).filter(|_| playing.any()) {
+                        crate::daemon::log(&format!("torrential {latest} waits until nothing is playing"));
+                        board.post(Some(News::Waiting { latest }));
+                        playing.none().await;
+                        continue;
+                    }
                     match install(&releases, &paths, &env, now).await {
                         Ok(Outcome::Updated(to)) => {
                             crate::daemon::log(&format!("installed torrential {to}"));
                             write_json(&paths.state.join(UPDATED), &Updated { from: current, to: to.to_string() });
-                            return;
+                            playing.none().await;
+                            return to;
                         }
                         Ok(Outcome::Latest(_)) => {}
                         Err(e) => {
@@ -382,7 +445,9 @@ pub async fn watch(env: Env, paths: Paths) {
                         }
                     }
                 }
-                (Checked::read(&paths).next_check() - now).clamp(60, HOUR)
+                let checked = Checked::read(&paths);
+                board.post(News::of(policy, &checked, &current, updated_from.as_deref()));
+                (checked.next_check() - now).clamp(60, HOUR)
             }
         };
         tokio::time::sleep(Duration::from_secs(wait as u64)).await;
@@ -559,6 +624,23 @@ mod tests {
         assert!(!checked("0.1.0", None).install_due("0.1.0", t));
         assert!(!checked("0.1.1", Some(t - HOUR)).install_due("0.1.0", t));
         assert!(checked("0.1.1", Some(t - DAY)).install_due("0.1.0", t));
+    }
+
+    #[test]
+    fn the_web_app_hears_of_a_newer_release_or_the_update_that_started_the_engine() {
+        let checked = |latest: &str| Checked { latest: Some(latest.into()), ..Checked::default() };
+        let line = |policy, latest: &str, from| News::of(policy, &checked(latest), "0.5.0", from).map(|n| n.line());
+        assert_eq!(
+            line(Policy::Notify, "0.5.1", None).as_deref(),
+            Some("torrential 0.5.1 is available (you have 0.5.0). Run torrential update to install it.")
+        );
+        assert_eq!(line(Policy::Auto, "0.5.0", Some("0.4.0")).as_deref(), Some("Updated torrential to 0.5.0."));
+        assert_eq!(line(Policy::Auto, "0.5.0", None), None);
+        assert_eq!(line(Policy::Off, "0.5.1", Some("0.4.0")), None);
+        assert_eq!(
+            News::Waiting { latest: version("0.5.1") }.line(),
+            "torrential 0.5.1 installs when nothing is playing."
+        );
     }
 
     #[test]

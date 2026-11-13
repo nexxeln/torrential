@@ -637,7 +637,7 @@ fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
     assert_eq!(
         shown.stdout,
         format!(
-            "{mac}\nupdates:  notify\nfile:     {file}\n\
+            "{mac}\nupdates:  auto\nfile:     {file}\n\
              # ranking for this Mac: 1080p screen, HDR, HEVC, arm64, English · overrides: none\n\
              next:     {flags}\n"
         )
@@ -645,7 +645,7 @@ fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
     assert_eq!(
         saved.stdout,
         format!(
-            "saved\n{mac}\nupdates:  notify\nfile:     {file}\n\
+            "saved\n{mac}\nupdates:  auto\nfile:     {file}\n\
              # ranking for this Mac: 2160p screen, up to 8 GB, arm64, English · overrides: screen tv-4k, max_size \
              8GB\n# get rejects downloads over 8 GB unless --max-size is higher\nnext:     torrential search <words>\n"
         )
