@@ -97,7 +97,7 @@ catalog:
 updates: notify               # say when a new version is out instead of installing it, or off
 ```
 
-The engine starts when you log in and keeps running, and it installs new versions when nothing is playing. `torrential engine uninstall` stops it starting at login.
+The engine starts when you log in and keeps running. It installs new versions in the background and starts them once nothing is playing. `torrential engine uninstall` stops it starting at login.
 
 ## It never seeds
 
