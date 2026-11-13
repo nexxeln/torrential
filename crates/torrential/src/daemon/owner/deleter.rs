@@ -861,6 +861,26 @@ mod tests {
         assert!(!folder.join("film.mp4").exists(), "what is on the play folder's own disk goes");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn files_on_a_disk_of_their_own_go_to_the_finder_trash_on_that_disk() {
+        let Place { root, store, .. } = &mut place();
+        let Some(_disk) = Mounted::at(&root.join("disk"), &root.join("disk.dmg")) else {
+            eprintln!("hdiutil cannot mount a disk image here, so this test proves nothing");
+            return;
+        };
+        let dir = root.join("disk/Downloads");
+        write(&dir.join("Set/a.mkv"), "a");
+        let mut deleter = Deleter::open(&root.join("plays"), Trash::Finder, store).unwrap();
+        deleter.remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv"]) })).unwrap();
+
+        let trashed = vec![dir.join("Set/a.mkv")];
+        assert_eq!(run(&mut deleter, store, &InUse::default()), [Report { trashed, ..Report::default() }]);
+        let trash = root.join(format!("disk/.Trashes/{}", crate::paths::uid()));
+        assert_eq!(std::fs::read_to_string(trash.join("a.mkv")).unwrap(), "a");
+        assert!(!dir.join("Set").exists());
+    }
+
     #[test]
     fn a_play_folder_left_that_cannot_be_measured_counts_what_it_took_up_even_after_a_restart() {
         use std::os::unix::fs::PermissionsExt;
