@@ -20,7 +20,8 @@ use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
-use streams::{Lease, Streams};
+pub use streams::Lease;
+use streams::Streams;
 
 mod streams;
 

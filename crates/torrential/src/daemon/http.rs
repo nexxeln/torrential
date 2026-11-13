@@ -17,7 +17,7 @@ use tokio::sync::{oneshot, watch};
 use torrential_core::TorrentId;
 
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
-use super::owner::{Command, StreamFile};
+use super::owner::{Command, Lease, StreamFile};
 use super::server::Ctx;
 use super::web;
 
@@ -576,7 +576,7 @@ impl Connection<'_> {
 
     async fn file(&mut self, request: Request, id: TorrentId, index: u32) -> io::Result<bool> {
         let keep = request.keep_alive;
-        let Ok((file, _lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
+        let Ok((file, lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
             return self.empty("404 Not Found", "", keep).await;
         };
         let Ok(range) = range(request.range.as_deref(), file.size) else {
@@ -599,7 +599,13 @@ impl Connection<'_> {
         );
         self.wr.write_all(head.as_bytes()).await?;
         if !request.head_only() {
-            self.body(&file, id, index, start, end).await?;
+            let ctx = self.ctx;
+            let runtime =
+                || web::watch::probed(ctx, id, index)?.duration.and_then(|s| Duration::try_from_secs_f64(s).ok());
+            tokio::select! {
+                sent = self.body(&file, id, index, start, end, &lease) => sent?,
+                never = lease.follow(&ctx.engine, id, index, file.size, runtime) => match never {},
+            }
         }
         Ok(keep)
     }
@@ -611,13 +617,22 @@ impl Connection<'_> {
         Ok(keep)
     }
 
-    async fn body(&mut self, file: &StreamFile, id: TorrentId, index: u32, start: u64, end: u64) -> io::Result<()> {
+    async fn body(
+        &mut self,
+        file: &StreamFile,
+        id: TorrentId,
+        index: u32,
+        start: u64,
+        end: u64,
+        lease: &Lease,
+    ) -> io::Result<()> {
         let mut complete = file.complete;
         let mut disk = None;
         let mut buf = vec![0; CHUNK as usize];
         let mut offset = start;
         while offset < end {
             let length = CHUNK.min(end - offset);
+            lease.waiting(offset);
             if !complete {
                 complete = self.arrived(id, index, offset, length).await?;
             }
@@ -628,6 +643,7 @@ impl Connection<'_> {
             let chunk = &mut buf[..length as usize];
             disk.seek(SeekFrom::Start(offset)).await?;
             disk.read_exact(chunk).await?;
+            lease.writing(offset);
             self.wr.write_all(chunk).await?;
             offset += length;
         }

@@ -13,7 +13,7 @@ mod online;
 mod play;
 mod thumbnail;
 mod titles;
-mod watch;
+pub(super) mod watch;
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
