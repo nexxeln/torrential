@@ -10,6 +10,7 @@ use torrential_core::{ErrorCode, Place, Target, TorrentId};
 
 use super::super::admission::GIB;
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
+use super::super::owner::Command;
 use super::super::owner::deleter::PlayName;
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
@@ -353,6 +354,29 @@ async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_an
         .await;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert_eq!(names(&h).await, named(&["mine", "next"]), "the play got by hand stays");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_whose_file_is_handed_to_a_stream_stays_until_the_stream_ends() {
+    let h = Harness::with_outside(
+        super::search_port::Fake::new(vec![]),
+        Outside { plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let older = torrent(0x71, "older", &[("older.mp4", 2 * GIB)]);
+    h.play_web(&older).await;
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let id = older.info_hash.id();
+    let stream = h.running.ctx.owner.ask(|reply| Command::Stream { id, index: 0, reply }).await.unwrap();
+
+    h.play_web(&torrent(0x72, "newer", &[("newer.mp4", 2 * GIB)])).await;
+    h.until("the newer play is done", |jobs| jobs.len() == 2 && jobs.iter().all(|job| job.status.name() == "done"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(names(&h).await, named(&["older", "newer"]), "someone streams the older play");
+    drop(stream);
+    h.until("the older play leaves once no one streams it", |jobs| jobs.len() == 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

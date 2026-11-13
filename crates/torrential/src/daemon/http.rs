@@ -12,7 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use torrential_core::TorrentId;
 
-use super::owner::plays::Viewer;
 use super::owner::{Command, StreamFile};
 use super::server::Ctx;
 use super::web;
@@ -274,10 +273,9 @@ impl Connection<'_> {
 
     async fn file(&mut self, request: Request, id: TorrentId, index: u32) -> io::Result<bool> {
         let keep = request.keep_alive;
-        let Ok(file) = self.ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await else {
+        let Ok((file, _lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
             return self.empty("404 Not Found", "", keep).await;
         };
-        let _viewer = Viewer::new(&self.ctx.owner, id);
         let Ok(range) = range(request.range.as_deref(), file.size) else {
             let unsatisfiable = format!("Content-Range: bytes */{}\r\n", file.size);
             return self.empty("416 Range Not Satisfiable", &unsatisfiable, keep).await;
