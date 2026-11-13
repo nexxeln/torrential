@@ -32,6 +32,22 @@ fn a_download_limit_holds_a_torrent_back_until_it_is_lifted() {
 }
 
 #[test]
+fn the_largest_download_limit_still_holds_a_torrent_back() {
+    let fixture = Fixture::new("largest", &[("a.bin", 100_000)], 13);
+    let torrent = fixture.torrent(TorrentFormat::V1);
+    let mut node = Node::new(loopback());
+    let download = TempDir::new().unwrap();
+    let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent), download.path());
+    add.paused = true;
+    let id = node.add(add);
+    node.session.set_download_limit(id, rate(u32::MAX)).unwrap();
+    // libtorrent reads i32::MAX as no limit at all.
+    assert_eq!(node.session.download_limit(id).unwrap(), rate(2_147_483_646));
+    node.session.set_download_limit(id, None).unwrap();
+    assert_eq!(node.session.download_limit(id).unwrap(), None);
+}
+
+#[test]
 fn a_torrent_added_again_from_resume_data_has_no_download_limit() {
     let fixture = Fixture::new("relimited", &[("a.bin", 2_000_000)], 12);
     let torrent = fixture.torrent(TorrentFormat::V1);

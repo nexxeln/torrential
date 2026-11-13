@@ -223,6 +223,12 @@ impl Session {
         r.map_err(|e| with_id(e, id))
     }
 
+    /// How fast this torrent may download, in bytes per second. `None` when it has no cap.
+    pub fn download_limit(&self, id: TorrentId) -> Result<Option<NonZeroU32>, EngineError> {
+        let r = self.native.download_limit(id.as_bytes()).map(NonZeroU32::new);
+        r.map_err(|e| with_id(e, id))
+    }
+
     /// Asks for session counters. `Alert::SessionStats` delivers them.
     pub fn post_session_stats(&mut self) -> Result<(), EngineError> {
         self.native.pin_mut().post_session_stats().map_err(bridge::error)

@@ -633,9 +633,14 @@ void Session::download_in_order(rust::Slice<const std::uint8_t> id) {
 }
 
 void Session::set_download_limit(rust::Slice<const std::uint8_t> id, std::uint32_t bytes_per_second) {
-  // libtorrent takes an int, and 0 lifts the limit.
-  std::uint32_t const most = std::numeric_limits<int>::max();
+  // libtorrent takes an int, and reads both 0 and the largest int as no limit.
+  std::uint32_t const most = std::numeric_limits<int>::max() - 1;
   find(id).set_download_limit(static_cast<int>(std::min(bytes_per_second, most)));
+}
+
+std::uint32_t Session::download_limit(rust::Slice<const std::uint8_t> id) const {
+  // libtorrent says -1 when there is no limit.
+  return static_cast<std::uint32_t>(std::max(find(id).download_limit(), 0));
 }
 
 void Session::post_session_stats() { session_.post_session_stats(); }
