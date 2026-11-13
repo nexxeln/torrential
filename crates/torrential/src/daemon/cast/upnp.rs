@@ -97,9 +97,32 @@ impl Renderer {
 
     /// The MIME type to send `container` as, in the TV's own spelling.
     pub fn mime(&self, container: Container) -> &str {
-        let listed = self.sink.iter().find(|(mime, _)| Container::of_mime(mime) == Some(container));
+        let listed = self.sink.iter().find(|(mime, extra)| takes(mime, extra) == Some(container));
         listed.map_or(container.mimes()[0], |(mime, _)| mime)
     }
+}
+
+/// Parts of a DLNA media format profile's name that say its container. TVs list MPEG transport
+/// streams as `video/mpeg` with a profile such as `AVC_TS_HD_24_AC3_T`, and program streams as
+/// `video/mpeg` too.
+const PROFILE_PARTS: [(&str, Container); 5] = [
+    ("TS", Container::Ts),
+    ("PS", Container::Mpeg),
+    ("MPEG1", Container::Mpeg),
+    ("MP4", Container::Mp4),
+    ("MKV", Container::Mkv),
+];
+
+/// The container a sink entry takes: the one its DLNA profile names, or else its MIME type's.
+fn takes(mime: &str, extra: &str) -> Option<Container> {
+    let profile = extra.split(';').find_map(|field| field.trim().strip_prefix("DLNA.ORG_PN="));
+    let named = profile.filter(|_| mime.starts_with("video/")).and_then(|profile| {
+        profile
+            .to_ascii_uppercase()
+            .split('_')
+            .find_map(|part| PROFILE_PARTS.iter().find(|(name, _)| *name == part).map(|(_, container)| *container))
+    });
+    named.or_else(|| Container::of_mime(mime))
 }
 
 /// The containers a sink takes. A sink that names `*` or `video/*` takes every one, and one that
@@ -117,7 +140,7 @@ fn plays(sink: &[(String, String)]) -> Plays {
             Container::Wmv,
         ]);
     }
-    let named: Plays = sink.iter().filter_map(|(mime, _)| Container::of_mime(mime)).collect();
+    let named: Plays = sink.iter().filter_map(|(mime, extra)| takes(mime, extra)).collect();
     if named == Plays::default() && !sink.iter().any(|(mime, _)| mime.starts_with("video/")) {
         return UNSAID.into_iter().collect();
     }
@@ -285,6 +308,24 @@ mod tests {
         let renderer = Renderer::new(description, "192.168.1.40".into(), tv);
         assert_eq!(renderer.mime(Container::Mkv), "video/x-mkv", "the TV's own spelling");
         assert_eq!(renderer.mime(Container::WebM), "video/webm");
+    }
+
+    #[test]
+    fn an_mpeg_type_with_a_transport_stream_profile_takes_ts_files_in_the_tvs_spelling() {
+        let tv = sink(
+            "http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_HD_24_AC3_T;DLNA.ORG_OP=01;DLNA.ORG_CI=0,\
+             http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_HP_HD_AAC",
+        );
+        assert_eq!(serde_json::to_string(&plays(&tv)).unwrap(), r#"["mp4","ts"]"#);
+        let description = describe(LG, &Url::parse("http://192.168.1.40:1876/").unwrap()).unwrap();
+        let renderer = Renderer::new(description, "192.168.1.40".into(), tv);
+        assert_eq!(renderer.mime(Container::Ts), "video/mpeg", "the TV's own spelling");
+        assert_eq!(renderer.mime(Container::Mp4), "video/mp4");
+        let program = sink("http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_PS_NTSC,http-get:*:video/mpeg:*");
+        assert_eq!(serde_json::to_string(&plays(&program)).unwrap(), r#"["mpeg"]"#);
+        let both =
+            sink("http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_PS_PAL,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_TS_HD_NA");
+        assert_eq!(serde_json::to_string(&plays(&both)).unwrap(), r#"["ts","mpeg"]"#);
     }
 
     #[test]
