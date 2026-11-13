@@ -218,34 +218,57 @@ fn the_engine_exits_after_its_idle_timeout() {
     assert!(std::fs::read_to_string(home.state().join("engine.log")).unwrap().contains("engine stopped"));
 }
 
+/// A default-home engine with stand-ins for launchctl and systemctl, which record how they were
+/// called, and the paths of its login service.
+struct Service {
+    home: Home,
+    unit: PathBuf,
+    calls: PathBuf,
+}
+
+impl Service {
+    fn new() -> Self {
+        let mut home =
+            Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0"), ("CLAUDECODE", "1")]);
+        let dir = home.dir.path().to_path_buf();
+        home.unset("TORRENTIAL_HOME");
+        for (var, folder) in [
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_STATE_HOME", "state"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_RUNTIME_DIR", "run"),
+        ] {
+            home.set(var, &dir.join(folder).display().to_string());
+        }
+        let (bin, calls) = (dir.join("bin"), dir.join("calls"));
+        std::fs::create_dir(&bin).unwrap();
+        for program in ["launchctl", "systemctl"] {
+            let script = format!("#!/bin/sh\necho \"{program} $*\" >> '{}'\n", calls.display());
+            std::fs::write(bin.join(program), script).unwrap();
+            std::fs::set_permissions(bin.join(program), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        home.set("TORRENTIAL_TEST_SERVICE_BIN", &bin.display().to_string());
+        let unit = if cfg!(target_os = "macos") {
+            dir.join("Library/LaunchAgents/dev.torrential.engine.plist")
+        } else {
+            dir.join(".config/systemd/user/torrential.service")
+        };
+        Self { home, unit, calls }
+    }
+
+    fn link(&self) -> PathBuf {
+        self.home.dir.path().join(".config/systemd/user/default.target.wants/torrential.service")
+    }
+
+    fn calls(&self) -> String {
+        std::fs::read_to_string(&self.calls).unwrap_or_default()
+    }
+}
+
 #[test]
 fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
-    let mut home =
-        Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0"), ("CLAUDECODE", "1")]);
+    let Service { home, unit, calls } = Service::new();
     let dir = home.dir.path().to_path_buf();
-    home.unset("TORRENTIAL_HOME");
-    for (var, folder) in [
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_CACHE_HOME", "cache"),
-        ("XDG_RUNTIME_DIR", "run"),
-    ] {
-        home.set(var, &dir.join(folder).display().to_string());
-    }
-    // Stand-ins for launchctl and systemctl, which record how they were called.
-    let (bin, calls) = (dir.join("bin"), dir.join("calls"));
-    std::fs::create_dir(&bin).unwrap();
-    for program in ["launchctl", "systemctl"] {
-        let script = format!("#!/bin/sh\necho \"{program} $*\" >> '{}'\n", calls.display());
-        std::fs::write(bin.join(program), script).unwrap();
-        std::fs::set_permissions(bin.join(program), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    }
-    home.set("TORRENTIAL_TEST_SERVICE_BIN", &bin.display().to_string());
-    let unit = if cfg!(target_os = "macos") {
-        dir.join("Library/LaunchAgents/dev.torrential.engine.plist")
-    } else {
-        dir.join(".config/systemd/user/torrential.service")
-    };
     let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_torrential")).unwrap();
 
     let first = home.run(&["status"]);
@@ -285,6 +308,67 @@ fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
             .to_string()
     };
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), expected, "adding the service at start ran neither");
+}
+
+#[test]
+fn engine_install_starts_the_service_the_engine_added_at_its_first_start() {
+    let service = Service::new();
+    assert_eq!(service.home.run(&["status"]).code, 0);
+    let added = std::fs::read_to_string(&service.unit).unwrap();
+
+    let install = service.home.json(&["engine", "install", "--json"]);
+
+    assert_eq!(install["result"], "already_installed");
+    assert_eq!(std::fs::read_to_string(&service.unit).unwrap(), added);
+    let uid = unsafe { libc::geteuid() };
+    let expected = if cfg!(target_os = "macos") {
+        format!(
+            "launchctl bootout gui/{uid}/dev.torrential.engine\nlaunchctl bootstrap gui/{uid} {}\n",
+            service.unit.display()
+        )
+    } else {
+        "systemctl --user daemon-reload\nsystemctl --user enable --now torrential.service\n".to_string()
+    };
+    assert_eq!(service.calls(), expected, "the unit was there, and install still started it");
+}
+
+#[test]
+fn a_login_service_left_half_written_is_finished_at_the_next_start() {
+    let service = Service::new();
+    assert_eq!(service.home.run(&["status"]).code, 0);
+    let whole = std::fs::read_to_string(&service.unit).unwrap();
+    assert_eq!(service.home.run(&["engine", "stop"]).code, 0);
+    std::fs::write(&service.unit, &whole[..whole.len() / 2]).unwrap();
+    if cfg!(target_os = "linux") {
+        std::fs::remove_file(service.link()).unwrap();
+    }
+
+    let next = service.home.run(&["status"]);
+
+    assert_eq!(
+        (next.code, next.stderr.as_str()),
+        (0, "# the engine now starts at login; torrential engine uninstall turns that off\n")
+    );
+    assert_eq!(std::fs::read_to_string(&service.unit).unwrap(), whole);
+    if cfg!(target_os = "linux") {
+        assert_eq!(std::fs::read_link(service.link()).unwrap(), service.unit);
+    }
+    let unit_dir = service.unit.parent().unwrap();
+    let mut left: Vec<_> = std::fs::read_dir(unit_dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    left.retain(|name| name != "default.target.wants");
+    assert_eq!(left, [service.unit.file_name().unwrap()], "no partial file is left behind");
+}
+
+#[test]
+fn a_login_service_someone_else_wrote_is_left_alone() {
+    let service = Service::new();
+    std::fs::create_dir_all(service.unit.parent().unwrap()).unwrap();
+    std::fs::write(&service.unit, "a unit the person wrote\n").unwrap();
+
+    let first = service.home.run(&["status"]);
+
+    assert_eq!((first.code, first.stderr.as_str()), (0, ""));
+    assert_eq!(std::fs::read_to_string(&service.unit).unwrap(), "a unit the person wrote\n");
 }
 
 fn magnet(size: u64) -> String {

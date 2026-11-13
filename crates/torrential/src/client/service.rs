@@ -5,6 +5,7 @@ use torrential_core::{Error, ErrorCode};
 
 use crate::env::Env;
 use crate::paths::{Paths, uid};
+use crate::skill::write_atomic;
 use crate::update::{Audience, executable};
 
 pub const LABEL: &str = "dev.torrential.engine";
@@ -124,23 +125,46 @@ fn run(env: &Env, program: &str, args: &[&str]) -> Result<(), Error> {
     )))
 }
 
-/// Writes the unit, and on Linux the link that starts it at login, without starting it.
-fn write(manager: Manager, path: &Path, text: &str) -> Result<(), Error> {
+/// Writes whatever of the unit, and on Linux the link that starts it at login, is not already in
+/// place, without starting it. Returns whether it wrote anything.
+fn put(manager: Manager, path: &Path, text: &str) -> Result<bool, Error> {
     let write_failed = |e: std::io::Error| {
         Error::new(ErrorCode::SandboxWriteBlocked, format!("cannot write {}: {e}", path.display()))
             .with_hint("run torrential engine install from a terminal outside any sandbox")
     };
     let dir = path.parent().expect("unit paths have a parent");
-    std::fs::create_dir_all(dir).map_err(write_failed)?;
-    std::fs::write(path, text).map_err(write_failed)?;
+    let mut wrote = false;
+    if std::fs::read(path).ok().as_deref() != Some(text.as_bytes()) {
+        std::fs::create_dir_all(dir).map_err(write_failed)?;
+        write_atomic(path, text.as_bytes()).map_err(write_failed)?;
+        wrote = true;
+    }
     if manager == Manager::Systemd {
         let wants = dir.join("default.target.wants");
-        std::fs::create_dir_all(&wants).map_err(write_failed)?;
         let link = wants.join("torrential.service");
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(path, &link).map_err(write_failed)?;
+        if std::fs::read_link(&link).ok().as_deref() != Some(path) {
+            std::fs::create_dir_all(&wants).map_err(write_failed)?;
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(path, &link).map_err(write_failed)?;
+            wrote = true;
+        }
     }
-    Ok(())
+    Ok(wrote)
+}
+
+/// Starts the service now and at every login, whether or not its unit just changed.
+fn activate(env: &Env, manager: Manager, path: &Path) -> Result<(), Error> {
+    match manager {
+        Manager::Launchd => {
+            let domain = format!("gui/{}", uid());
+            let _ = run(env, "launchctl", &["bootout", &format!("{domain}/{LABEL}")]);
+            run(env, "launchctl", &["bootstrap", &domain, &path.display().to_string()])
+        }
+        Manager::Systemd => {
+            run(env, "systemctl", &["--user", "daemon-reload"])?;
+            run(env, "systemctl", &["--user", "enable", "--now", "torrential.service"])
+        }
+    }
 }
 
 pub fn install(env: &Env, paths: &Paths) -> Result<Report, Error> {
@@ -148,23 +172,10 @@ pub fn install(env: &Env, paths: &Paths) -> Result<Report, Error> {
     let path = manager.unit_path(&home(env)?);
     let _ = std::fs::remove_file(paths.state.join(DECLINED));
     let text = unit(manager, &executable()?, &paths.log(), env.var("TORRENTIAL_HOME"));
-    if std::fs::read_to_string(&path).is_ok_and(|current| current == text) {
-        return Ok(Report { result: "already_installed", manager, unit: path });
-    }
-    write(manager, &path, &text)?;
-    let unit = path.display().to_string();
-    match manager {
-        Manager::Launchd => {
-            let domain = format!("gui/{}", uid());
-            let _ = run(env, "launchctl", &["bootout", &format!("{domain}/{LABEL}")]);
-            run(env, "launchctl", &["bootstrap", &domain, &unit])?;
-        }
-        Manager::Systemd => {
-            run(env, "systemctl", &["--user", "daemon-reload"])?;
-            run(env, "systemctl", &["--user", "enable", "--now", "torrential.service"])?;
-        }
-    }
-    Ok(Report { result: "installed", manager, unit: path })
+    let wrote = put(manager, &path, &text)?;
+    activate(env, manager, &path)?;
+    let result = if wrote { "installed" } else { "already_installed" };
+    Ok(Report { result, manager, unit: path })
 }
 
 pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
@@ -196,15 +207,24 @@ pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
 /// adds one only when its test supplies stand-ins for launchctl and systemctl.
 pub fn add_at_start(env: &Env, paths: &Paths) -> Result<Option<PathBuf>, Error> {
     let test = ["TORRENTIAL_TEST_ENGINE", "TORRENTIAL_TEST_NETWORK"].iter().any(|var| env.var(var).is_some());
-    if env.var("TORRENTIAL_HOME").is_some() || (test && env.var("TORRENTIAL_TEST_SERVICE_BIN").is_none()) {
+    if env.var("TORRENTIAL_HOME").is_some()
+        || (test && env.var("TORRENTIAL_TEST_SERVICE_BIN").is_none())
+        || paths.state.join(DECLINED).exists()
+    {
         return Ok(None);
     }
     let manager = Manager::current();
     let path = manager.unit_path(&home(env)?);
-    if path.exists() || paths.state.join(DECLINED).exists() {
+    let text = unit(manager, &executable()?, &paths.log(), None);
+    let current = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(Error::new(ErrorCode::StorageError, format!("cannot read {}: {e}", path.display()))),
+    };
+    // Anything other than this unit, or the start of it that a failed write left, is someone else's.
+    if !text.as_bytes().starts_with(&current) || !put(manager, &path, &text)? {
         return Ok(None);
     }
-    write(manager, &path, &unit(manager, &executable()?, &paths.log(), None))?;
     let _ = std::fs::write(paths.state.join(ADDED), b"");
     Ok(Some(path))
 }
