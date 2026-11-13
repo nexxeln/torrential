@@ -172,7 +172,8 @@ fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Er
 
 /// Follows the downloads `ids` again once the engine answers. An engine that is restarting leaves
 /// its socket and refuses connections for a few seconds, so `back` tries again for a short while.
-/// One that was stopped removes its socket, which ends the wait at once.
+/// One that was stopped removes its socket, and a newer one is not for this torrential to use; either
+/// ends the wait at once.
 fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, UnixStream), Error> {
     let stopped = || Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting");
     let deadline = Instant::now() + BACK_WITHIN;
@@ -183,7 +184,9 @@ fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, UnixStream), Error
                 followed => return followed,
             },
             Ok(None) if !engine.paths.socket().exists() => return Err(stopped()),
-            _ => {}
+            Ok(None) => {}
+            Err(error) if error.code == ErrorCode::DaemonUnavailable => {}
+            Err(error) => return Err(error),
         }
         if Instant::now() > deadline {
             return Err(stopped());

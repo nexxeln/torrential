@@ -302,7 +302,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
     match command {
         DaemonCommand::Status => {
-            let report = match connect::existing(&paths, env)? {
+            let report = match connect::running(&paths, env)? {
                 Some(mut conn) => {
                     let downloads = match conn.call(&Request::Status { refs: Vec::new() }) {
                         Ok(Response::Jobs { jobs }) => Some(jobs.len()),
@@ -329,7 +329,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             Ok(emit(mode, &views::daemon_status(&report), &Typed { kind: "daemon", body: &report }))
         }
         DaemonCommand::Stop => {
-            let (result, pid) = match connect::existing(&paths, env)? {
+            let (result, pid) = match connect::running(&paths, env)? {
                 Some(conn) => ("stopped", Some(connect::stop(conn, connect::Stop::Asked)?)),
                 None => ("already_stopped", None),
             };
@@ -350,7 +350,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             Ok(emit(mode, &doc, &Typed { kind: "daemon_stop", body: Stopped { result, pid } }))
         }
         DaemonCommand::Install => {
-            if let Some(conn) = connect::existing(&paths, env)? {
+            if let Some(conn) = connect::running(&paths, env)? {
                 connect::stop(conn, connect::Stop::Asked)?;
             }
             service_report(service::install(env, &paths)?, mode)
@@ -484,7 +484,7 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         Ok(()) => checks.push(check("state", CheckStatus::Ok, paths.state.display().to_string())),
         Err(error) => checks.push(check("state", CheckStatus::Fail, error.message)),
     }
-    match connect::existing(&paths, env) {
+    match connect::running(&paths, env) {
         Ok(Some(conn)) => {
             checks.push(check("engine", CheckStatus::Ok, format!("running {} (pid {})", conn.engine_version, conn.pid)))
         }

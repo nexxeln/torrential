@@ -57,7 +57,8 @@ impl Conn {
     }
 }
 
-pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
+/// The engine that runs now, whatever its version, for reports and for stops the person asks for.
+pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     let socket = paths.socket();
     let stream = match UnixStream::connect(&socket) {
         Ok(stream) => stream,
@@ -95,16 +96,21 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     }
 }
 
-pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
-    let Some(conn) = existing(paths, env)? else { return launch::start(paths, env) };
-    // A client never uses or stops a newer engine. It would be one from before an update, which
-    // the person restarts to run the new version too.
-    if newer(&conn, env) {
-        return Err(Error::new(
+/// The engine, for a command to use. A client never uses or stops a newer engine: it runs a release
+/// installed after this torrential started, which the person restarts this torrential to run too.
+/// Every connection a command uses comes from here.
+pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
+    match running(paths, env)? {
+        Some(conn) if newer(&conn, env) => Err(Error::new(
             ErrorCode::DaemonVersion,
             format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
-        ));
+        )),
+        found => Ok(found),
     }
+}
+
+pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
+    let Some(conn) = existing(paths, env)? else { return launch::start(paths, env) };
     if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
         return Ok(conn);
     }

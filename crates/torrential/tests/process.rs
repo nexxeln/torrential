@@ -291,6 +291,69 @@ fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_swit
     assert_eq!(asked.join().unwrap(), ["hello", "shutdown"]);
 }
 
+const NEWER_ENGINE: &str =
+    "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n";
+
+/// A stand-in engine on `socket` that answers one connection per version in `versions`, each as
+/// that torrential: hello with the version, a refused switch to shutdown, and no downloads to the rest.
+fn stand_in(socket: &Path, versions: &'static [&'static str]) -> std::thread::JoinHandle<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    std::thread::spawn(move || {
+        for (version, stream) in versions.iter().zip(listener.incoming()) {
+            let mut stream = stream.unwrap();
+            while let Some(request) = read_frame(&mut stream) {
+                let reply = match request["op"].as_str().unwrap() {
+                    "hello" => format!(
+                        r#"{{"type":"hello","engine_version":"{version}","wire":5,"pid":{},"http_port":0}}"#,
+                        std::process::id()
+                    ),
+                    "shutdown" => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
+                    _ => r#"{"type":"jobs","jobs":[]}"#.to_string(),
+                };
+                stream.write_all(&frame(&reply)).unwrap();
+            }
+        }
+    })
+}
+
+#[test]
+fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrential() {
+    use std::os::fd::AsRawFd;
+    let home = Home::new();
+    std::fs::create_dir_all(home.state()).unwrap();
+    // A newer engine holds the home's lock as it starts, so the engine this client launches gives way.
+    let lock = std::fs::File::create(home.state().join("engine.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let client = home
+        .process(&["status"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    eventually("the launched engine gave way", Duration::from_secs(10), || {
+        std::fs::read_to_string(home.state().join("engine.log")).is_ok_and(|log| log.contains("another engine owns"))
+    });
+    let newer = stand_in(&home.dir.path().join("th/run/engine.sock"), &["9.0.0"]);
+
+    let client = client.wait_with_output().unwrap();
+
+    assert_eq!((client.status.code(), String::from_utf8(client.stderr).unwrap().as_str()), (Some(6), NEWER_ENGINE));
+    newer.join().unwrap();
+}
+
+#[test]
+fn a_client_that_an_engine_playing_a_film_turns_away_never_uses_a_newer_one_it_finds_next() {
+    let home = Home::new();
+    let engines = stand_in(&home.dir.path().join("th/run/engine.sock"), &["0.1.0", "9.0.0"]);
+
+    let run = home.run(&["status"]);
+
+    assert_eq!((run.code, run.stderr.as_str()), (6, NEWER_ENGINE));
+    engines.join().unwrap();
+}
+
 #[test]
 fn a_sandboxed_client_refuses_to_start_an_engine() {
     let mut home = Home::with(&[("CODEX_SANDBOX_NETWORK_DISABLED", "1"), ("CODEX_THREAD_ID", "t-1")]);
@@ -577,6 +640,35 @@ fn wait_follows_a_download_again_when_the_engine_comes_back() {
     let last: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
     assert_eq!((wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()), (Some(8), ""), "{stdout}");
     assert_eq!(last["outcome"], "timeout");
+}
+
+#[test]
+fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrential() {
+    let mut home = Home::with(&[
+        ("TORRENTIAL_TEST_ENGINE", "fake"),
+        ("TORRENTIAL_TEST_FAKE_RATE", "1MiB"),
+        ("TORRENTIAL_TEST_VERSION", "0.1.0"),
+    ]);
+    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    let wait = home
+        .process(&["wait", "9b5212", "--timeout", "20s"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
+    home.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    assert_eq!(home.run(&["status"]).code, 0);
+    let wait = wait.wait_with_output().unwrap();
+
+    assert_eq!(
+        (wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()),
+        (Some(6), "error[daemon_version]: the engine runs the newer torrential 0.1.1, so restart this torrential\n")
+    );
 }
 
 #[test]
