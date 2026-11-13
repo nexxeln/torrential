@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use torrential_core::protocol::{Request, Response};
+use torrential_core::protocol::{Request, Response, WIRE_VERSION};
 use torrential_core::{Error, ErrorCode};
 
 use crate::daemon::owner::{self, now};
@@ -19,6 +19,7 @@ use crate::output::Mode;
 use crate::output::theme::{Token, paint};
 use crate::paths::Paths;
 use crate::skill::{Writes, sha256, write_atomic};
+use crate::wire;
 
 const RELEASES: &str = "https://github.com/nexxeln/torrential/releases";
 const ISSUES: &str = "https://github.com/nexxeln/torrential/issues";
@@ -301,7 +302,7 @@ async fn put_release(
     wanted: impl Fn() -> bool,
 ) -> Result<Put, Error> {
     let _lock = FolderLock::take(exe.parent().unwrap_or(Path::new("/"))).await?;
-    if let Some(installed) = version_of(exe).filter(|installed| *installed >= version) {
+    if let Some(installed) = version_of(exe).await.filter(|installed| *installed >= version) {
         return Ok(Put::Current(installed));
     }
     let writes = Writes::new(env, "torrential update".into());
@@ -310,7 +311,11 @@ async fn put_release(
         return Ok(Put::NotWanted);
     }
     partial.write(&fetch(releases, version, target).await?, exe, &writes)?;
-    if let Err(error) = confirm(&partial.path, version).and_then(|()| trial(&partial.path, version, env)) {
+    let tried = async {
+        confirm(&partial.path, version).await?;
+        trial(&partial.path, version, env).await
+    };
+    if let Err(error) = tried.await {
         return match error.code {
             ErrorCode::VerificationFailed => Ok(Put::Refused(error)),
             _ => Err(error),
@@ -378,8 +383,8 @@ async fn fetch(releases: &Releases, version: Version, target: &str) -> Result<Ve
 /// Runs `binary --version` and accepts it only when it says it is torrential `version`. A binary
 /// for another system, a damaged one, or one from another release fails here, before it replaces
 /// anything.
-fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
-    match says(binary) {
+async fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
+    match says(binary).await {
         Ok(said) if said == format!("torrential {version}") => Ok(()),
         Ok(said) => Err(refused(version, format!("says it is {said}"))),
         Err(why) => Err(refused(version, why)),
@@ -387,48 +392,59 @@ fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
 }
 
 /// The torrential version `binary --version` says it is.
-fn version_of(binary: &Path) -> Option<Version> {
-    Version::parse(says(binary).ok()?.strip_prefix("torrential ")?)
+async fn version_of(binary: &Path) -> Option<Version> {
+    Version::parse(says(binary).await.ok()?.strip_prefix("torrential ")?)
 }
 
 /// What `binary --version` prints, or why it prints nothing.
-fn says(binary: &Path) -> Result<String, String> {
-    let mut child = Command::new(binary)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("does not run here ({e})"))?;
-    let status = exited(&mut child, CONFIRM_WITHIN).ok_or("does not answer --version")?;
+async fn says(binary: &Path) -> Result<String, String> {
+    let mut child = Reaped(
+        Command::new(binary)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("does not run here ({e})"))?,
+    );
+    let status = child.exited(CONFIRM_WITHIN).await.ok_or("does not answer --version")?;
     let mut said = String::new();
-    let _ = child.stdout.take().map(|mut out| out.read_to_string(&mut said));
+    let _ = child.0.stdout.take().map(|mut out| out.read_to_string(&mut said));
     match said.trim() {
         said if status.success() && !said.is_empty() => Ok(said.to_string()),
         _ => Err(format!("does not run here ({status})")),
     }
 }
 
-/// Waits up to `within` for `child` to exit, and kills it after that.
-fn exited(child: &mut Child, within: Duration) -> Option<ExitStatus> {
-    let deadline = Instant::now() + within;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+/// A release's binary as it runs on trial, killed and reaped if this drops before it exits, as it
+/// does when the engine stops in the middle of an update.
+struct Reaped(Child);
+
+impl Reaped {
+    /// Waits up to `within` for the process to exit.
+    async fn exited(&mut self, within: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + within;
+        loop {
+            match self.0.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(20)).await,
+                _ => return None,
             }
         }
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
 /// Starts `binary` as an engine in a home and on a port of its own, and accepts it once that engine
 /// answers a status request and then stops cleanly. A release that answers `--version` but fails as
 /// an engine fails here, before it replaces anything.
-fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> {
+async fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> {
     let home = Scratch(std::env::temp_dir().join(format!("torrential-trial.{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&home.0);
     let unprepared =
@@ -437,21 +453,20 @@ fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> {
     std::fs::write(home.0.join("config/config.yaml"), "updates: off\n").map_err(unprepared)?;
     let paths =
         Paths::resolve(&env.clone().with("TORRENTIAL_HOME", &home.0.display().to_string()), crate::paths::uid(), None)?;
-    let mut engine = Command::new(binary)
-        .args(["daemon", "run"])
-        .env("HOME", &home.0)
-        .env("TORRENTIAL_HOME", &home.0)
-        .env("TORRENTIAL_TEST_HTTP_PORT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| refused(version, format!("does not run here ({e})")))?;
-    if let Err(why) = serves(&mut engine, &paths, env) {
-        exited(&mut engine, Duration::ZERO);
-        return Err(refused(version, why));
-    }
-    match exited(&mut engine, TRIAL_WITHIN) {
+    let mut engine = Reaped(
+        Command::new(binary)
+            .args(["daemon", "run"])
+            .env("HOME", &home.0)
+            .env("TORRENTIAL_HOME", &home.0)
+            .env("TORRENTIAL_TEST_HTTP_PORT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| refused(version, format!("does not run here ({e})")))?,
+    );
+    serves(&mut engine, &paths, env).await.map_err(|why| refused(version, why))?;
+    match engine.exited(TRIAL_WITHIN).await {
         Some(status) if status.success() => Ok(()),
         Some(status) => Err(refused(version, format!("does not stop its engine cleanly ({status})"))),
         None => Err(refused(version, format!("does not stop its engine within {}s", TRIAL_WITHIN.as_secs()))),
@@ -459,28 +474,38 @@ fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> {
 }
 
 /// Waits until `engine`, in `paths`, answers a status request, then asks it to stop.
-fn serves(engine: &mut Child, paths: &Paths, env: &Env) -> Result<(), String> {
+async fn serves(engine: &mut Reaped, paths: &Paths, env: &Env) -> Result<(), String> {
     let deadline = Instant::now() + TRIAL_WITHIN;
-    let mut conn = loop {
-        if let Ok(Some(status)) = engine.try_wait() {
+    let mut socket = loop {
+        if let Ok(Some(status)) = engine.0.try_wait() {
             return Err(format!("does not start an engine ({status})"));
         }
-        if let Ok(Some(conn)) = crate::client::connect::running(paths, env) {
-            break conn;
+        if let Ok(socket) = tokio::net::UnixStream::connect(paths.socket()).await {
+            break socket;
         }
         if Instant::now() > deadline {
             return Err(format!("does not start an engine within {}s", TRIAL_WITHIN.as_secs()));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    match conn.call_within(&Request::Status { refs: Vec::new() }, TRIAL_WITHIN) {
-        Ok(Response::Jobs { .. }) => {}
+    let answered = async {
+        ask(&mut socket, &Request::Hello { client_version: env.version(), wire: WIRE_VERSION }).await?;
+        ask(&mut socket, &Request::Status { refs: Vec::new() }).await
+    };
+    match tokio::time::timeout(TRIAL_WITHIN, answered).await {
+        Ok(Ok(Some(Response::Jobs { .. }))) => {}
         // A release with another protocol refuses this torrential's requests, which shows it runs.
-        Ok(Response::Error { error }) if error.code == ErrorCode::DaemonVersion => {}
+        Ok(Ok(Some(Response::Error { error }))) if error.code == ErrorCode::DaemonVersion => {}
         _ => return Err("starts an engine that does not answer".into()),
     }
-    let _ = conn.call_within(&Request::Shutdown { asked: true }, TRIAL_WITHIN);
+    let _ = tokio::time::timeout(TRIAL_WITHIN, ask(&mut socket, &Request::Shutdown { asked: true })).await;
     Ok(())
+}
+
+/// Sends `request` to the engine on `socket` and reads its answer.
+async fn ask(socket: &mut tokio::net::UnixStream, request: &Request) -> std::io::Result<Option<Response>> {
+    wire::write_async(socket, request).await?;
+    wire::read_async(socket).await
 }
 
 /// A folder removed when this drops.
@@ -952,7 +977,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
         };
-        let said = |path: &Path| confirm(path, version("0.1.1")).map_err(|e| e.message);
+        let said = |path: &Path| runtime().unwrap().block_on(confirm(path, version("0.1.1"))).map_err(|e| e.message);
 
         assert_eq!(said(&script("right", "#!/bin/sh\necho torrential 0.1.1\n")), Ok(()));
         assert_eq!(

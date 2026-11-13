@@ -55,6 +55,21 @@ impl Built {
         )
         .into_bytes()
     }
+
+    /// A release like `release` that writes its process ID to `marks/pid`, and that hangs instead of
+    /// exiting once its engine stops, after it leaves `marks/hangs`.
+    fn hanging(&self, version: &str, marks: &Path) -> Vec<u8> {
+        let (real, marks) = (self.0.path().join("torrential").display().to_string(), marks.display());
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"torrential {version}\" ;;\n  *) echo $$ > '{marks}/pid'; \
+             TORRENTIAL_TEST_VERSION={version} '{real}' \"$@\"; : > '{marks}/hangs'; exec sleep 600 ;;\nesac\n"
+        )
+        .into_bytes()
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -530,6 +545,35 @@ fn a_release_that_says_its_version_but_cannot_run_an_engine_is_never_installed_o
     let refused = "update failed: the binary of torrential 0.1.1 does not start an engine (exit status: 3), so the \
                    installed torrential is unchanged";
     assert!(log.contains(refused), "{log}");
+}
+
+#[test]
+fn a_release_that_hangs_once_its_trial_engine_stops_holds_up_neither_the_engine_nor_a_stop() {
+    if target().is_none() {
+        return;
+    }
+    let (built, marks) = (Built::new(), tempfile::tempdir().unwrap());
+    let server = Server::start("0.1.1", &built.hanging("0.1.1", marks.path()), None);
+    let mut install = Install::agent_with_engine(&server);
+    // One worker thread, which a trial that blocks it would keep from answering anyone.
+    install.set("TOKIO_WORKER_THREADS", "1");
+    install.found("0.1.1");
+    let before = std::fs::read(install.exe()).unwrap();
+
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    eventually("the trial engine stopped and its release hangs", || marks.path().join("hangs").exists());
+    let release: i32 = std::fs::read_to_string(marks.path().join("pid")).unwrap().trim().parse().unwrap();
+    let answered = install.running();
+    let asked = std::time::Instant::now();
+    let stop = install.run(&["engine", "stop"]);
+    let took = asked.elapsed();
+
+    assert_eq!(answered.map(|(_, version)| version).as_deref(), Some("0.1.0"), "the engine answers during the trial");
+    assert_eq!(stop.code, 0, "{}", stop.stderr);
+    assert!(took < Duration::from_secs(5), "the stop took {took:?}");
+    assert!(!alive(release), "the stop killed the release on trial");
+    assert!(std::fs::read(install.exe()).unwrap() == before, "the installed binary is unchanged");
+    assert_eq!(install.files_in_bin(), ["torrential"], "no partial file is left behind");
 }
 
 #[test]
