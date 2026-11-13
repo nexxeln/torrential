@@ -71,7 +71,7 @@ fn main() -> ExitCode {
         Command::Tui
             | Command::Update(_)
             | Command::Completions { .. }
-            | Command::Daemon { command: DaemonCommand::Run { .. } | DaemonCommand::Guard { .. } }
+            | Command::Daemon { command: DaemonCommand::Run { .. } }
     );
     let exit = client::run(command, mode, &env);
     if notices {

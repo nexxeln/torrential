@@ -442,13 +442,12 @@ fn auto_mode_installs_a_found_release_and_the_engine_restarts_itself_into_it() {
     assert_eq!(first.stderr, "# updated torrential from 0.1.0 to 0.1.1\n");
     assert_eq!(second.stderr, "");
     assert_eq!(install.engine(), (old_pid, "0.1.1".into()), "the engine restarted in place, so launchd keeps it");
-    assert_eq!(install.files_in_bin(), ["torrential"], "the new engine let the previous binary go");
-    assert!(!install.state().join("updating.json").exists());
+    assert_eq!(install.files_in_bin(), ["torrential"]);
     assert_eq!(server.asked(), assets(target), "a release found within the day needs no new check");
 }
 
 #[test]
-fn an_update_waits_until_no_stream_is_open_then_installs_and_restarts() {
+fn an_update_installs_while_a_stream_is_open_and_restarts_once_it_closes() {
     use std::io::{Read, Write};
     let Some(target) = target() else { return };
     let (answer, gate) = mpsc::channel();
@@ -490,8 +489,8 @@ fn an_update_waits_until_no_stream_is_open_then_installs_and_restarts() {
     eventually("the engine restarted into 0.1.1", || install.running() == Some((pid, "0.1.1".into())));
 
     assert_eq!(&head, b"HTTP/1.1 206");
-    assert_eq!(waited, (old_inode, Some((pid, "0.1.0".into()))), "nothing changed while the stream was open");
-    assert_ne!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode, "the engine replaced the binary");
+    assert_ne!(waited.0, old_inode, "the release was installed while the stream was open");
+    assert_eq!(waited.1, Some((pid, "0.1.0".into())), "the engine kept running until the stream closed");
     assert_eq!(news().unwrap(), serde_json::json!({"version": "0.1.1", "notice": "Updated torrential to 0.1.1."}));
     let [tarball, sum] = assets(target);
     assert_eq!(server.asked(), ["/latest".to_string(), tarball, sum]);
@@ -524,8 +523,8 @@ fn an_engine_on_a_fallback_port_keeps_it_across_the_restart_into_an_update() {
 }
 
 impl Install {
-    fn attempt(&self) -> Option<serde_json::Value> {
-        serde_json::from_slice(&std::fs::read(self.state().join("updating.json")).ok()?).ok()
+    fn checked(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self.state().join("update.json")).unwrap()).unwrap()
     }
 
     fn downloads_of_the_release(server: &Server) -> usize {
@@ -547,7 +546,7 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
 
     assert_eq!(install.run(&["status", "--json"]).code, 0);
     let (pid, _) = install.engine();
-    eventually("the engine gave the release up", || install.attempt().is_some());
+    eventually("the engine gave the release up", || install.checked()["install_failed_at"].is_i64());
     std::thread::sleep(Duration::from_secs(3));
     let after = (install.running(), Install::downloads_of_the_release(&server));
     assert_eq!(install.run(&["engine", "stop"]).code, 0);
@@ -555,7 +554,6 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
     let (next_pid, next_version) = install.engine();
     std::thread::sleep(Duration::from_secs(3));
 
-    assert_eq!(install.attempt(), Some(serde_json::json!({"step": "failed", "version": "0.1.1"})));
     assert_eq!(after, (Some((pid, "0.1.0".into())), 1), "the engine kept running and fetched the release once");
     assert_ne!(next_pid, pid);
     assert_eq!(next_version, "0.1.0");
@@ -564,33 +562,6 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
     assert_eq!(install.files_in_bin(), ["torrential"]);
     let log = std::fs::read_to_string(install.state().join("engine.log")).unwrap();
     assert!(log.contains("says it is torrential 0.1.0"), "{log}");
-}
-
-#[test]
-fn a_release_that_exits_at_start_is_rolled_back_and_not_tried_again() {
-    if target().is_none() {
-        return;
-    }
-    let built = Built::new();
-    let server = Server::start("0.1.1", &built.release("0.1.1", None), None);
-    let install = Install::agent_with_engine(&server);
-    install.configure("updates: auto\n");
-    install.found("0.1.1");
-    let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
-
-    assert_eq!(install.run(&["status", "--json"]).code, 0);
-    let (pid, _) = install.engine();
-    eventually("the previous engine is back", || {
-        install.running().is_some_and(|(now, version)| now != pid && version == "0.1.0")
-    });
-    std::thread::sleep(Duration::from_secs(3));
-
-    assert_eq!(install.attempt(), Some(serde_json::json!({"step": "failed", "version": "0.1.1"})));
-    assert_eq!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode, "the previous binary is back in place");
-    assert_eq!(install.files_in_bin(), ["torrential"]);
-    assert_eq!(Install::downloads_of_the_release(&server), 1, "the engine does not try it again");
-    let jobs = install.run(&["status", "--json"]);
-    assert_eq!((jobs.code, jobs.stderr.as_str()), (0, ""));
 }
 
 #[test]

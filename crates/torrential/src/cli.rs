@@ -325,9 +325,6 @@ pub enum DaemonCommand {
     /// The short-lived middle process of the detached start
     #[command(hide = true)]
     Launch,
-    /// Watches the engine an update restarted into, from the binary the update replaced
-    #[command(hide = true)]
-    Guard { pid: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
