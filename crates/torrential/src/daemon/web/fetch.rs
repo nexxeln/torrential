@@ -349,9 +349,9 @@ impl From<Error> for Failure {
 async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Result<Programs, Failure> {
     let folder = root.join(VERSION);
     let started = Instant::now();
-    super::super::log(&format!("fetching ffmpeg {VERSION} from {}", build.url));
     let fetched: Result<Programs, Failure> = async {
         let partial = Partial::create(root)?;
+        super::super::log(&format!("fetching ffmpeg {VERSION} from {}", build.url));
         let archive = partial.path.join(ARCHIVE);
         download(build, &archive, report).await?;
         let (into, unpacked) = (partial.path.clone(), build.clone());
