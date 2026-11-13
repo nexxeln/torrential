@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Release, ReleaseId, SearchResult, Skip,
-    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Quality, Release, ReleaseId, SearchResult,
+    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
@@ -95,8 +95,10 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    let held = ctx.titles.line(&healthy, &title.video, Vec::new());
-    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r))
+    let ffmpeg = (ctx.web.tools)().ffmpeg.is_some();
+    let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
+    let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
+    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
         && walk.try_source(release, 1, &mut report).await
     {
         return;
@@ -118,7 +120,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         error: None,
     };
     let line_up = |search: &Searching, tried: &[Tried]| {
-        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone()), tried)
+        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone(), ask.player, ffmpeg), tried)
     };
     loop {
         let ran = search.started.elapsed();

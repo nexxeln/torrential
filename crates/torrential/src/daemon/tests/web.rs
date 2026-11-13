@@ -14,7 +14,7 @@ use super::super::engine_port::FakeTorrentFile;
 use super::super::http;
 use super::super::search_port::{self, FakeSource, fake_catalog};
 use super::super::web::ffmpeg::Tools;
-use super::{Harness, Outside, magnet, prefix, titles, torrent, written};
+use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
 
 /// One HTTP/1.1 connection from a browser, or from curl.
 struct Page(BufReader<TcpStream>);
@@ -1382,4 +1382,45 @@ async fn a_tab_opened_before_an_update_ranks_for_what_it_decodes_on_this_macs_sc
     assert_eq!(listed_for(&h, "127.0.0.1", "/api/title/sources?video=tt0063350&playback=h264").await, mac);
     play_from(&h, "127.0.0.1", json!({ "video": "tt0063350", "playback": "h264" })).await;
     assert_eq!(played_for(&h), mac);
+}
+
+/// The name of the source a play from `from` on `viewer` tries first.
+async fn first_tried(h: &Harness, from: &str, viewer: &Value) -> String {
+    let lines = play_from(h, from, json!({ "video": "tt0063350", "viewer": viewer })).await;
+    let trying = lines.iter().find(|line| line["type"] == "trying").unwrap();
+    trying["release"]["name"].as_str().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg_converts_it() {
+    let (h, night) = titles::night();
+    let hdr = torrent(0xb1, "Night.of.the.Living.Dead.1968.2160p.UHD.BluRay.REMUX.HDR.HEVC", &[("Night.mp4", MIB)]);
+    let remux = torrent(0xb2, "Night.of.the.Living.Dead.1968.1080p.BluRay.REMUX.AVC", &[("Night.mp4", MIB)]);
+    for t in [&hdr, &remux] {
+        h.swarm.publish(t.clone());
+        h.play_for(t, &[0], Some("tt0063350")).await.unwrap();
+    }
+    let phone = json!({ "width": 1170, "height": 2532, "scale": 3, "playback": "h264" });
+    let tv = json!({ "width": 3840, "height": 2160, "scale": 1, "playback": "hevc-hdr" });
+
+    let (status, _, body) = fetch_from(
+        &h,
+        "192.168.1.20",
+        "GET",
+        "/api/title/sources?video=tt0063350&width=1170&height=2532&scale=3&playback=h264",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    let done = lines(&body).pop().unwrap();
+    let listed: Vec<&str> =
+        done["result"]["releases"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let catalog: Vec<&str> = night.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(listed, [[remux.name.as_str()].as_slice(), &catalog, &[hdr.name.as_str()]].concat());
+
+    assert_eq!(first_tried(&h, "192.168.1.20", &phone).await, remux.name, "a remux here costs no download");
+    assert_eq!(first_tried(&h, "192.168.1.30", &tv).await, hdr.name);
+    StandIns::install(&h, FILM, "");
+    assert_eq!(first_tried(&h, "192.168.1.20", &phone).await, hdr.name, "ffmpeg converts it for the phone");
 }

@@ -128,7 +128,12 @@ impl Harness {
         (play, hold)
     }
 
-    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Hold), Error> {
+    pub(super) async fn play_for(
+        &self,
+        t: &FakeTorrentFile,
+        files: &[u32],
+        title: Option<&str>,
+    ) -> Result<(Job, Hold), Error> {
         let (play, hold) = self.play_command(t, files, title);
         let (job, _) = self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
         Ok((job, hold))

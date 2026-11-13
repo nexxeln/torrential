@@ -308,7 +308,8 @@ async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
     let title = ctx.titles.resolve(&video, super::owner::now()).await?;
     let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)(), Player::External).await?).await?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-    result.releases = ctx.titles.line(&jobs, &title.video, result.releases);
+    let ffmpeg = (ctx.web.tools)().ffmpeg.is_some();
+    result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);
     Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
 }
 

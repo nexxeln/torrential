@@ -104,6 +104,17 @@ impl Player {
     const fn streams(self) -> bool {
         !matches!(self, Self::External)
     }
+
+    /// Whether a download already on this machine, of `quality`, plays before anything a search
+    /// finds: in a browser that decodes it or that `ffmpeg` converts it for, and in the player this
+    /// machine opens always, as before. Size and bitrate do not count, since the file costs no
+    /// download.
+    pub const fn reuses(self, quality: Quality, ffmpeg: bool) -> bool {
+        match self.decodes() {
+            Some(playback) => ffmpeg || playback.plays(quality),
+            None => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

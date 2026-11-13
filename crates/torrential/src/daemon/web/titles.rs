@@ -102,7 +102,9 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result
     };
     match asked {
         Ok((query, video, jobs)) => {
-            super::results(conn, request, query, |releases| ctx.titles.line(&jobs, &video, releases)).await
+            let (player, ffmpeg) = (query.profile.player, (ctx.web.tools)().ffmpeg.is_some());
+            let line = |releases| ctx.titles.line(&jobs, &video, releases, player, ffmpeg);
+            super::results(conn, request, query, line).await
         }
         Err(error) => fail(conn, request, &error).await,
     }
