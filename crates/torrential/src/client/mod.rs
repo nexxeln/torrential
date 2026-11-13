@@ -356,6 +356,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
         DaemonCommand::Uninstall => service_report(service::uninstall(env, &paths)?, mode),
         DaemonCommand::Run { .. } => Ok(crate::daemon::run(env)),
         DaemonCommand::Launch => Ok(launch::launch_stage(env)),
+        DaemonCommand::Guard { pid } => Ok(crate::daemon::guard(env, pid)),
     }
 }
 

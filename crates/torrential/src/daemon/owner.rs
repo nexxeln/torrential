@@ -174,8 +174,6 @@ pub enum Command {
     Connected,
     Disconnected { keep_until: Option<Instant> },
     Shutdown { reply: oneshot::Sender<()> },
-    /// Stops the engine for an update to restart it, but only once every download's progress is
-    /// saved. Otherwise the engine carries on and the update tries again later.
     Restart { reply: Reply<()> },
 }
 
@@ -1794,7 +1792,8 @@ impl Owner {
         let saved = stopping.waiting.is_empty() && !stopping.unsaved;
         let ended = match stopping.restart {
             Some(restart) if stopping.replies.is_empty() && !saved => {
-                let error = Error::new(ErrorCode::StorageError, "the engine could not save the progress of every download");
+                let error =
+                    Error::new(ErrorCode::StorageError, "the engine could not save the progress of every download");
                 let _ = restart.send(Err(error));
                 self.schedule();
                 return;
@@ -1820,7 +1819,8 @@ impl Owner {
 enum Stopper {
     /// A person, a signal, or the idle timeout. The engine stops whatever the last saves did.
     Exit(Option<oneshot::Sender<()>>),
-    /// An update, which restarts the engine only once every download is saved.
+    /// An update, which restarts the engine only once every download's progress is saved.
+    /// Otherwise the engine carries on and the update tries again later.
     Update(Reply<()>),
 }
 

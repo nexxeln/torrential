@@ -1,5 +1,5 @@
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -11,8 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode};
 
-use crate::daemon::owner::now;
-use crate::daemon::owner;
+use crate::daemon::owner::{self, now};
 use crate::daemon::server::Ctx;
 use crate::env::Env;
 use crate::output::Mode;
@@ -30,6 +29,8 @@ const MAX_ASSET: usize = 256 << 20;
 const RESTART_RETRY: Duration = Duration::from_secs(60);
 const CHECKED: &str = "update.json";
 const UPDATED: &str = "updated.json";
+const ATTEMPT: &str = "updating.json";
+const CONFIRM_WITHIN: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +77,19 @@ impl Version {
 
     pub fn newer_than(self, current: &str) -> bool {
         Version::parse(current).is_some_and(|current| self > current)
+    }
+}
+
+impl Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Version::parse(&text).ok_or_else(|| serde::de::Error::custom(format!("{text} is not a version")))
     }
 }
 
@@ -254,6 +268,22 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
     if !latest.newer_than(&env.version()) {
         return Ok(Outcome::Latest(latest));
     }
+    let (exe, target) = installed()?;
+    let writes = Writes::new(env, "torrential update".into());
+    let partial = Partial::create(&exe, &writes)?;
+    partial.put(&fetch(releases, latest, target).await?, latest, &exe, &writes)?;
+    let _ = Command::new(&exe)
+        .args(["skill", "refresh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    Ok(Outcome::Updated(latest))
+}
+
+/// Where this torrential is installed and which release asset fits this machine, or why it cannot
+/// update itself.
+fn installed() -> Result<(PathBuf, &'static str), Error> {
     let Some(target) = target(std::env::consts::OS, std::env::consts::ARCH) else {
         return Err(Error::new(
             ErrorCode::NotFound,
@@ -269,20 +299,55 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
         )
         .with_hint("update it with Nix, for example nix profile upgrade torrential"));
     }
-    let writes = Writes::new(env, "torrential update".into());
-    let partial = Partial::create(&exe, &writes)?;
+    Ok((exe, target))
+}
+
+/// Downloads the binary of release `version` for `target` and checks it against its published checksum.
+async fn fetch(releases: &Releases, version: Version, target: &str) -> Result<Vec<u8>, Error> {
     let asset = format!("torrential-{target}.tar.gz");
-    let tarball = releases.download(latest, &asset).await?;
-    let sums = releases.download(latest, &format!("{asset}.sha256")).await?;
+    let tarball = releases.download(version, &asset).await?;
+    let sums = releases.download(version, &format!("{asset}.sha256")).await?;
     verify(&asset, &tarball, &sums)?;
-    partial.replace(&exe, &unpack(&asset, &tarball)?, &writes)?;
-    let _ = Command::new(&exe)
-        .args(["skill", "refresh"])
+    unpack(&asset, &tarball)
+}
+
+/// Runs `binary --version` and accepts it only when it says it is torrential `version`. A binary
+/// for another system, a damaged one, or one from another release fails here, before it replaces
+/// anything.
+fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
+    let refused = |why: String| {
+        Error::new(
+            ErrorCode::VerificationFailed,
+            format!("the binary of torrential {version} {why}, so the installed torrential is unchanged"),
+        )
+        .with_hint(format!("report it at {ISSUES}"))
+    };
+    let mut child = Command::new(binary)
+        .arg("--version")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status();
-    Ok(Outcome::Updated(latest))
+        .spawn()
+        .map_err(|e| refused(format!("does not run here ({e})")))?;
+    let deadline = std::time::Instant::now() + CONFIRM_WITHIN;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(refused("does not answer --version".into()));
+            }
+        }
+    };
+    let mut said = String::new();
+    let _ = child.stdout.take().map(|mut out| out.read_to_string(&mut said));
+    match said.trim() {
+        said if status.success() && said == format!("torrential {version}") => Ok(()),
+        "" => Err(refused(format!("does not run here ({status})"))),
+        said => Err(refused(format!("says it is {said}"))),
+    }
 }
 
 pub fn executable() -> Result<PathBuf, Error> {
@@ -320,14 +385,13 @@ fn unpack(asset: &str, tarball: &[u8]) -> Result<Vec<u8>, Error> {
 
 struct Partial {
     path: PathBuf,
-    file: File,
 }
 
 impl Partial {
     fn create(exe: &Path, writes: &Writes) -> Result<Partial, Error> {
         let dir = exe.parent().unwrap_or(Path::new("/"));
         let path = dir.join(format!(".torrential.{}.update", std::process::id()));
-        let file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&path).map_err(|e| {
+        OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&path).map_err(|e| {
             let error = writes.error(dir, e);
             match error.code {
                 ErrorCode::StorageError => error.with_hint(format!(
@@ -338,16 +402,23 @@ impl Partial {
                 _ => error,
             }
         })?;
-        Ok(Partial { path, file })
+        Ok(Partial { path })
     }
 
-    fn replace(mut self, exe: &Path, binary: &[u8], writes: &Writes) -> Result<(), Error> {
-        self.file
-            .write_all(binary)
-            .and_then(|()| self.file.set_permissions(std::fs::Permissions::from_mode(0o755)))
-            .and_then(|()| self.file.sync_all())
-            .and_then(|()| std::fs::rename(&self.path, exe))
-            .map_err(|e| writes.error(exe, e))
+    /// Writes `binary`, checks that it is torrential `version`, and moves it to `at`.
+    fn put(self, binary: &[u8], version: Version, at: &Path, writes: &Writes) -> Result<(), Error> {
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .and_then(|mut file| {
+                file.write_all(binary)?;
+                file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+                file.sync_all()
+            })
+            .map_err(|e| writes.error(at, e))?;
+        confirm(&self.path, version)?;
+        std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))
     }
 }
 
@@ -355,6 +426,172 @@ impl Drop for Partial {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Where an automatic update stands. The engine keeps it in its state, so an engine that stops or
+/// crashes at any step finds at its next start where the update was. No record means none is under
+/// way.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum Attempt {
+    /// Release `to` is downloaded and checked, waiting at `binary` next to `installed` until
+    /// nothing plays.
+    Staged { from: String, to: Version, installed: PathBuf, binary: PathBuf },
+    /// The engine stopped to put `to` in place, keeping the binary it replaces at `previous`.
+    Swapping(Swap),
+    /// `to` started once and has not said it is up. Another start in this step puts the previous
+    /// binary back.
+    Starting(Swap),
+    /// Release `version` did not install or start, so the engine leaves it.
+    Failed { version: Version },
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Swap {
+    pub from: String,
+    pub to: Version,
+    pub installed: PathBuf,
+    pub previous: PathBuf,
+}
+
+impl Attempt {
+    pub fn read(paths: &Paths) -> Option<Attempt> {
+        read_json(&paths.state.join(ATTEMPT))
+    }
+
+    fn write(&self, paths: &Paths) -> Result<(), Error> {
+        let path = paths.state.join(ATTEMPT);
+        write_atomic(&path, &serde_json::to_vec(self).expect("update records serialize"))
+            .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot write {}: {e}", path.display())))
+    }
+
+    fn clear(paths: &Paths) {
+        let _ = std::fs::remove_file(paths.state.join(ATTEMPT));
+    }
+}
+
+/// Downloads release `to`, checks it, and leaves it next to the installed binary for `swap`. A
+/// release staged before is used again. One whose binary does not say it is `to` is recorded as
+/// failed, so the engine never tries it again.
+async fn stage(releases: &Releases, paths: &Paths, env: &Env, to: Version) -> Result<(), Error> {
+    if let Some(Attempt::Staged { to: staged, binary, .. }) = Attempt::read(paths)
+        && staged == to
+        && confirm(&binary, to).is_ok()
+    {
+        return Ok(());
+    }
+    let (installed, target) = installed()?;
+    let writes = Writes::new(env, "torrential update".into());
+    let partial = Partial::create(&installed, &writes)?;
+    let binary = installed.with_file_name(format!(".torrential-{to}.new"));
+    if let Err(e) = partial.put(&fetch(releases, to, target).await?, to, &binary, &writes) {
+        if e.code == ErrorCode::VerificationFailed {
+            Attempt::Failed { version: to }.write(paths)?;
+        }
+        return Err(e);
+    }
+    Attempt::Staged { from: env.version(), to, installed, binary }.write(paths)
+}
+
+/// Puts the staged release in place of the installed binary, keeping that binary as `previous`
+/// until the new engine says it is up.
+pub fn swap(paths: &Paths) -> Result<Swap, Error> {
+    let Some(Attempt::Staged { from, to, installed, binary }) = Attempt::read(paths) else {
+        return Err(Error::internal("no update is staged"));
+    };
+    let previous = installed.with_file_name(format!(".torrential-{from}.previous"));
+    let swap = Swap { from, to, installed, previous };
+    Attempt::Swapping(swap.clone()).write(paths)?;
+    let _ = std::fs::remove_file(&swap.previous);
+    let swapped = std::fs::hard_link(&swap.installed, &swap.previous)
+        .or_else(|_| std::fs::copy(&swap.installed, &swap.previous).map(drop))
+        .and_then(|()| std::fs::rename(&binary, &swap.installed));
+    if let Err(e) = swapped {
+        let _ = roll_back(paths, &swap);
+        return Err(Error::new(ErrorCode::StorageError, format!("cannot put torrential {to} in place: {e}")));
+    }
+    Ok(swap)
+}
+
+/// Puts the previous binary back in place and records that release `swap.to` failed.
+pub fn roll_back(paths: &Paths, swap: &Swap) -> Result<(), Error> {
+    if swap.previous.exists() {
+        std::fs::rename(&swap.previous, &swap.installed).map_err(|e| {
+            Error::new(ErrorCode::StorageError, format!("cannot put {} back: {e}", swap.installed.display()))
+        })?;
+    }
+    Attempt::Failed { version: swap.to }.write(paths)
+}
+
+/// The update whose new engine has not said it is up yet.
+pub fn unacknowledged(paths: &Paths) -> Option<Swap> {
+    match Attempt::read(paths)? {
+        Attempt::Swapping(swap) | Attempt::Starting(swap) => Some(swap),
+        _ => None,
+    }
+}
+
+/// What a starting engine does about an update under way.
+pub enum AtStart {
+    Run,
+    /// This engine is the first start of release `swap.to`. It acknowledges once it is up.
+    Acknowledge(Swap),
+    /// This engine is the second start of a release that never said it was up. The previous binary
+    /// is back at `swap.installed`, and the engine restarts into it.
+    RollBack(Swap),
+}
+
+/// Reads the update record at an engine's start, with the state locked, and brings it to where an
+/// engine of version `me` can carry on.
+pub fn at_start(paths: &Paths, me: &str) -> AtStart {
+    let is_me = |version: &Version| Version::parse(me) == Some(*version);
+    match Attempt::read(paths) {
+        None | Some(Attempt::Failed { .. }) => AtStart::Run,
+        Some(Attempt::Staged { from, binary, .. }) => {
+            if from != me {
+                let _ = std::fs::remove_file(binary);
+                Attempt::clear(paths);
+            }
+            AtStart::Run
+        }
+        Some(Attempt::Swapping(swap)) if is_me(&swap.to) => {
+            let _ = Attempt::Starting(swap.clone()).write(paths);
+            AtStart::Acknowledge(swap)
+        }
+        Some(Attempt::Starting(swap)) if is_me(&swap.to) => match roll_back(paths, &swap) {
+            Ok(()) => AtStart::RollBack(swap),
+            Err(e) => {
+                crate::daemon::log(&format!("cannot go back from torrential {}: {}", swap.to, e.message));
+                AtStart::Run
+            }
+        },
+        // The previous binary runs, so the swap is undone. A release that never started may try again.
+        Some(Attempt::Swapping(swap)) if swap.from == me => {
+            let _ = std::fs::rename(&swap.previous, &swap.installed);
+            Attempt::clear(paths);
+            AtStart::Run
+        }
+        Some(Attempt::Starting(swap)) if swap.from == me => {
+            let _ = roll_back(paths, &swap);
+            AtStart::Run
+        }
+        Some(Attempt::Swapping(swap) | Attempt::Starting(swap)) => {
+            let _ = std::fs::remove_file(&swap.previous);
+            Attempt::clear(paths);
+            AtStart::Run
+        }
+    }
+}
+
+/// Records that the engine release `swap.to` started is up, and lets the previous binary go.
+pub fn acknowledge(paths: &Paths, swap: &Swap) {
+    let _ = std::fs::remove_file(&swap.previous);
+    Attempt::clear(paths);
+    write_json(&paths.state.join(UPDATED), &Updated { from: swap.from.clone(), to: swap.to.to_string() });
+}
+
+fn failed(paths: &Paths, version: Version) -> bool {
+    Attempt::read(paths) == Some(Attempt::Failed { version })
 }
 
 /// What the web app says about versions.
@@ -402,10 +639,11 @@ impl Board {
     }
 }
 
-/// Looks for newer releases, and under `updates: auto` installs one once nothing is playing.
-/// Returns the version it installed once the owner has stopped for the engine to restart into it.
-/// `updated_from` is the version this engine replaced, when an update started it.
-pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, updated_from: Option<String>) -> Version {
+/// Looks for newer releases, and under `updates: auto` stages one and stops the engine for it once
+/// nothing is playing and every download is saved. Returns once the owner has stopped for the
+/// engine to restart into the staged release. `updated_from` is the version this engine replaced,
+/// when an update started it.
+pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, updated_from: Option<String>) {
     let (current, board) = (env.version(), &ctx.news);
     let Some(releases) = Releases::from_env(&env) else {
         board.post(updated_from.map(|from| News::Updated { from, to: current }));
@@ -425,20 +663,15 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, updated_from: Option<S
                     crate::daemon::log(&format!("update check failed: {}", e.message));
                 }
                 let checked = Checked::read(&paths);
-                if policy == Policy::Auto && checked.install_due(&current, now) {
-                    if let Some(latest) = checked.newer(&current).filter(|_| ctx.playing.any()) {
-                        crate::daemon::log(&format!("torrential {latest} waits until nothing is playing"));
-                        board.post(Some(News::Waiting { latest }));
-                        drop(ctx.playing.close().await);
-                        continue;
-                    }
-                    match install(&releases, &paths, &env, now).await {
-                        Ok(Outcome::Updated(to)) => {
-                            crate::daemon::log(&format!("installed torrential {to}"));
-                            write_json(&paths.state.join(UPDATED), &Updated { from: current, to: to.to_string() });
-                            return restart(&ctx, to).await;
+                if policy == Policy::Auto
+                    && checked.install_due(&current, now)
+                    && let Some(latest) = checked.newer(&current).filter(|latest| !failed(&paths, *latest))
+                {
+                    match stage(&releases, &paths, &env, latest).await {
+                        Ok(()) => {
+                            crate::daemon::log(&format!("torrential {latest} is ready to install"));
+                            return restart(&ctx, latest).await;
                         }
-                        Ok(Outcome::Latest(_)) => {}
                         Err(e) => {
                             crate::daemon::log(&format!("update failed: {}", e.message));
                             let mut checked = Checked::read(&paths);
@@ -457,20 +690,17 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, updated_from: Option<S
 }
 
 /// Stops the engine for a restart into `to` once nothing plays and every download is saved.
-async fn restart(ctx: &Ctx, to: Version) -> Version {
+async fn restart(ctx: &Ctx, to: Version) {
     loop {
         if ctx.playing.any() {
-            crate::daemon::log(&format!("the restart into torrential {to} waits until nothing is playing"));
+            crate::daemon::log(&format!("torrential {to} waits until nothing is playing"));
             ctx.news.post(Some(News::Waiting { latest: to }));
         }
         let closed = ctx.playing.close().await;
         match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
-            Ok(()) => {
-                closed.keep();
-                return to;
-            }
+            Ok(()) => return closed.keep(),
             Err(e) => {
-                crate::daemon::log(&format!("the restart into torrential {to} waits: {}", e.message));
+                crate::daemon::log(&format!("torrential {to} waits: {}", e.message));
                 drop(closed);
                 tokio::time::sleep(RESTART_RETRY).await;
             }
@@ -665,6 +895,111 @@ mod tests {
             News::Waiting { latest: version("0.5.1") }.line(),
             "torrential 0.5.1 installs when nothing is playing."
         );
+    }
+
+    #[test]
+    fn an_engine_that_starts_at_any_step_of_an_update_ends_with_one_binary_and_a_settled_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().display().to_string();
+        let env = Env::from_pairs([("HOME", home.as_str()), ("TORRENTIAL_HOME", home.as_str())]);
+        let paths = Paths::resolve(&env, 501, None).unwrap();
+        std::fs::create_dir_all(&paths.state).unwrap();
+        let (installed, previous, binary) =
+            (dir.path().join("torrential"), dir.path().join(".previous"), dir.path().join(".new"));
+        let swap = Swap {
+            from: "0.1.0".into(),
+            to: version("0.1.1"),
+            installed: installed.clone(),
+            previous: previous.clone(),
+        };
+        let staged = Attempt::Staged {
+            from: "0.1.0".into(),
+            to: version("0.1.1"),
+            installed: installed.clone(),
+            binary: binary.clone(),
+        };
+        let failed = Attempt::Failed { version: version("0.1.1") };
+        let read = |path: &Path| std::fs::read_to_string(path).ok();
+        let start = |attempt: &Attempt, files: [Option<&str>; 3], me: &str| {
+            for (path, text) in [&installed, &previous, &binary].into_iter().zip(files) {
+                let _ = std::fs::remove_file(path);
+                if let Some(text) = text {
+                    std::fs::write(path, text).unwrap();
+                }
+            }
+            attempt.write(&paths).unwrap();
+            let step = match at_start(&paths, me) {
+                AtStart::Run => "run",
+                AtStart::Acknowledge(_) => "acknowledge",
+                AtStart::RollBack(_) => "roll back",
+            };
+            (step, Attempt::read(&paths), [read(&installed), read(&previous), read(&binary)])
+        };
+        let files = |installed: Option<&str>, previous: Option<&str>, binary: Option<&str>| {
+            [installed, previous, binary].map(|text| text.map(String::from))
+        };
+
+        assert_eq!(
+            start(&staged, [Some("old"), None, Some("new")], "0.1.0"),
+            ("run", Some(staged.clone()), files(Some("old"), None, Some("new"))),
+            "the engine that staged a release keeps it for later"
+        );
+        assert_eq!(
+            start(&staged, [Some("other"), None, Some("new")], "0.2.0"),
+            ("run", None, files(Some("other"), None, None))
+        );
+        assert_eq!(
+            start(&Attempt::Swapping(swap.clone()), [Some("new"), Some("old"), None], "0.1.1"),
+            ("acknowledge", Some(Attempt::Starting(swap.clone())), files(Some("new"), Some("old"), None))
+        );
+        assert_eq!(
+            start(&Attempt::Starting(swap.clone()), [Some("new"), Some("old"), None], "0.1.1"),
+            ("roll back", Some(failed.clone()), files(Some("old"), None, None)),
+            "a second start without word from the first puts the previous binary back"
+        );
+        assert_eq!(
+            start(&Attempt::Swapping(swap.clone()), [Some("old"), Some("old"), None], "0.1.0"),
+            ("run", None, files(Some("old"), None, None)),
+            "a swap that stopped before the new binary ran may try again"
+        );
+        assert_eq!(
+            start(&Attempt::Starting(swap.clone()), [Some("new"), Some("old"), None], "0.1.0"),
+            ("run", Some(failed.clone()), files(Some("old"), None, None))
+        );
+        assert_eq!(
+            start(&failed, [Some("old"), None, None], "0.1.0"),
+            ("run", Some(failed.clone()), files(Some("old"), None, None))
+        );
+
+        std::fs::write(&previous, "old").unwrap();
+        Attempt::Starting(swap.clone()).write(&paths).unwrap();
+        acknowledge(&paths, &swap);
+        assert_eq!(
+            (Attempt::read(&paths), read(&previous)),
+            (None, None),
+            "an engine that is up lets the previous binary go"
+        );
+    }
+
+    #[test]
+    fn a_binary_counts_only_when_it_says_it_is_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let said = |path: &Path| confirm(path, version("0.1.1")).map_err(|e| e.message);
+
+        assert_eq!(said(&script("right", "#!/bin/sh\necho torrential 0.1.1\n")), Ok(()));
+        assert_eq!(
+            said(&script("older", "#!/bin/sh\necho torrential 0.1.0\n")),
+            Err("the binary of torrential 0.1.1 says it is torrential 0.1.0, so the installed torrential is unchanged"
+                .into())
+        );
+        let garbage = said(&script("garbage", "\u{7f}ELF garbage")).unwrap_err();
+        assert!(garbage.starts_with("the binary of torrential 0.1.1 does not run here ("), "{garbage}");
     }
 
     #[test]

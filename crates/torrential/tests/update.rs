@@ -29,6 +29,34 @@ fn target() -> Option<&'static str> {
     }
 }
 
+/// The torrential under test, linked into a folder of its own. An engine that a release starts
+/// runs from here, so whatever it replaces later leaves the build alone.
+struct Built(tempfile::TempDir);
+
+impl Built {
+    fn new() -> Built {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("torrential");
+        if std::fs::hard_link(env!("CARGO_BIN_EXE_torrential"), &link).is_err() {
+            std::fs::copy(env!("CARGO_BIN_EXE_torrential"), &link).unwrap();
+        }
+        Built(dir)
+    }
+
+    /// A release whose binary says it is torrential `says` and runs the engine as `runs`, or exits
+    /// at once when asked to run the engine and `runs` is nothing.
+    fn release(&self, says: &str, runs: Option<&str>) -> Vec<u8> {
+        let real = self.0.path().join("torrential").display().to_string();
+        let engine =
+            runs.map_or_else(|| "exit 1".to_string(), |v| format!("TORRENTIAL_TEST_VERSION={v} exec '{real}' \"$@\""));
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"torrential {says}\" ;;\n  daemon) {engine} ;;\n  *) \
+             TORRENTIAL_TEST_VERSION={says} exec '{real}' \"$@\" ;;\nesac\n"
+        )
+        .into_bytes()
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -222,7 +250,8 @@ fn update_refreshes_the_installed_skill_and_then_reports_the_latest() {
     if target().is_none() {
         return;
     }
-    let server = Server::start("0.1.1", &std::fs::read(env!("CARGO_BIN_EXE_torrential")).unwrap(), None);
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
     let mut install = Install::new(&server);
     let copy = install.dir.path().join(".agents/skills/torrential");
     std::fs::create_dir_all(&copy).unwrap();
@@ -394,7 +423,8 @@ fn an_agent_hears_of_a_newer_version_once_a_day_and_json_output_never_changes() 
 #[test]
 fn auto_mode_installs_a_found_release_and_the_engine_restarts_itself_into_it() {
     let Some(target) = target() else { return };
-    let server = Server::start("0.1.1", &std::fs::read(env!("CARGO_BIN_EXE_torrential")).unwrap(), None);
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
     let mut install = Install::agent_with_engine(&server);
     install.configure("updates: auto\n");
     install.found("0.1.1");
@@ -412,17 +442,18 @@ fn auto_mode_installs_a_found_release_and_the_engine_restarts_itself_into_it() {
     assert_eq!(first.stderr, "# updated torrential from 0.1.0 to 0.1.1\n");
     assert_eq!(second.stderr, "");
     assert_eq!(install.engine(), (old_pid, "0.1.1".into()), "the engine restarted in place, so launchd keeps it");
-    let [tarball, sum] = assets(target);
-    assert_eq!(server.asked(), ["/latest".to_string(), tarball, sum]);
+    assert_eq!(install.files_in_bin(), ["torrential"], "the new engine let the previous binary go");
+    assert!(!install.state().join("updating.json").exists());
+    assert_eq!(server.asked(), assets(target), "a release found within the day needs no new check");
 }
 
 #[test]
 fn an_update_waits_until_no_stream_is_open_then_installs_and_restarts() {
     use std::io::{Read, Write};
     let Some(target) = target() else { return };
-    let (release, gate) = mpsc::channel();
-    let binary = std::fs::read(env!("CARGO_BIN_EXE_torrential")).unwrap();
-    let server = Server::gated("0.1.1", &binary, None, Some(gate));
+    let (answer, gate) = mpsc::channel();
+    let built = Built::new();
+    let server = Server::gated("0.1.1", &built.release("0.1.1", Some("0.1.1")), None, Some(gate));
     let mut install = Install::agent_with_engine(&server);
     // A fixed port, like the real one, so the web app's address outlives the restart.
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -449,7 +480,7 @@ fn an_update_waits_until_no_stream_is_open_then_installs_and_restarts() {
     player.write_all(ask.as_bytes()).unwrap();
     let mut head = [0; 12];
     player.read_exact(&mut head).unwrap();
-    release.send(()).unwrap();
+    answer.send(()).unwrap();
     eventually("the engine says the update waits", || {
         news().is_some_and(|news| news["notice"] == "torrential 0.1.1 installs when nothing is playing.")
     });
@@ -463,7 +494,7 @@ fn an_update_waits_until_no_stream_is_open_then_installs_and_restarts() {
     assert_ne!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode, "the engine replaced the binary");
     assert_eq!(news().unwrap(), serde_json::json!({"version": "0.1.1", "notice": "Updated torrential to 0.1.1."}));
     let [tarball, sum] = assets(target);
-    assert_eq!(server.asked(), ["/latest".to_string(), "/latest".into(), tarball, sum]);
+    assert_eq!(server.asked(), ["/latest".to_string(), tarball, sum]);
 }
 
 #[test]
@@ -471,7 +502,8 @@ fn an_engine_on_a_fallback_port_keeps_it_across_the_restart_into_an_update() {
     if target().is_none() {
         return;
     }
-    let server = Server::start("0.1.1", &std::fs::read(env!("CARGO_BIN_EXE_torrential")).unwrap(), None);
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
     let mut install = Install::agent_with_engine(&server);
     let taken = TcpListener::bind("127.0.0.1:0").unwrap();
     install.set("TORRENTIAL_TEST_HTTP_PORT", &taken.local_addr().unwrap().port().to_string());
@@ -489,4 +521,74 @@ fn an_engine_on_a_fallback_port_keeps_it_across_the_restart_into_an_update() {
 
     assert_ne!(before, format!("http://127.0.0.1:{}", taken.local_addr().unwrap().port()));
     assert_eq!(address(&install), before, "open pages keep reaching the engine");
+}
+
+impl Install {
+    fn attempt(&self) -> Option<serde_json::Value> {
+        serde_json::from_slice(&std::fs::read(self.state().join("updating.json")).ok()?).ok()
+    }
+
+    fn downloads_of_the_release(server: &Server) -> usize {
+        server.asked().iter().filter(|path| path.ends_with(".tar.gz")).count()
+    }
+}
+
+#[test]
+fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_again() {
+    if target().is_none() {
+        return;
+    }
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.0", Some("0.1.0")), None);
+    let install = Install::agent_with_engine(&server);
+    install.configure("updates: auto\n");
+    install.found("0.1.1");
+    let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
+
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    let (pid, _) = install.engine();
+    eventually("the engine gave the release up", || install.attempt().is_some());
+    std::thread::sleep(Duration::from_secs(3));
+    let after = (install.running(), Install::downloads_of_the_release(&server));
+    assert_eq!(install.run(&["engine", "stop"]).code, 0);
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    let (next_pid, next_version) = install.engine();
+    std::thread::sleep(Duration::from_secs(3));
+
+    assert_eq!(install.attempt(), Some(serde_json::json!({"step": "failed", "version": "0.1.1"})));
+    assert_eq!(after, (Some((pid, "0.1.0".into())), 1), "the engine kept running and fetched the release once");
+    assert_ne!(next_pid, pid);
+    assert_eq!(next_version, "0.1.0");
+    assert_eq!(Install::downloads_of_the_release(&server), 1, "a new engine does not try it again");
+    assert_eq!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode);
+    assert_eq!(install.files_in_bin(), ["torrential"]);
+    let log = std::fs::read_to_string(install.state().join("engine.log")).unwrap();
+    assert!(log.contains("says it is torrential 0.1.0"), "{log}");
+}
+
+#[test]
+fn a_release_that_exits_at_start_is_rolled_back_and_not_tried_again() {
+    if target().is_none() {
+        return;
+    }
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.release("0.1.1", None), None);
+    let install = Install::agent_with_engine(&server);
+    install.configure("updates: auto\n");
+    install.found("0.1.1");
+    let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
+
+    assert_eq!(install.run(&["status", "--json"]).code, 0);
+    let (pid, _) = install.engine();
+    eventually("the previous engine is back", || {
+        install.running().is_some_and(|(now, version)| now != pid && version == "0.1.0")
+    });
+    std::thread::sleep(Duration::from_secs(3));
+
+    assert_eq!(install.attempt(), Some(serde_json::json!({"step": "failed", "version": "0.1.1"})));
+    assert_eq!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode, "the previous binary is back in place");
+    assert_eq!(install.files_in_bin(), ["torrential"]);
+    assert_eq!(Install::downloads_of_the_release(&server), 1, "the engine does not try it again");
+    let jobs = install.run(&["status", "--json"]);
+    assert_eq!((jobs.code, jobs.stderr.as_str()), (0, ""));
 }

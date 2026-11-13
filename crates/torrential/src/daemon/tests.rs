@@ -1144,8 +1144,10 @@ async fn an_update_restarts_the_engine_only_once_every_download_is_saved() {
     h.get(h.torrent_file(&film), &[]).await.unwrap();
     h.until("downloading", |jobs| jobs[0].status.name() == "downloading").await;
     let db = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
-    db.execute_batch("CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;")
-        .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
+    )
+    .unwrap();
 
     let refused = h.running.ctx.owner.ask(|reply| Command::Restart { reply }).await;
     let carried_on = h.until("downloading again", |jobs| jobs[0].status.name() == "downloading").await;

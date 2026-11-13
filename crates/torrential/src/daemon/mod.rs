@@ -24,6 +24,7 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +36,7 @@ use crate::config::Config;
 use crate::env::Env;
 use crate::machine::Detector;
 use crate::paths::{self, Paths};
-use crate::update::{self, Version};
+use crate::update::{self, AtStart};
 use admission::Disk;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
@@ -213,24 +214,33 @@ pub fn run(env: &Env) -> u8 {
     let held = match Held::take(env, &paths) {
         Ok(Some(held)) => held,
         Ok(None) => {
+            // Nothing for launchd or systemd to start again: the other engine serves this home.
             log(&format!("another engine owns {}", paths.state.display()));
-            return ErrorCode::DaemonUnavailable.exit_code();
+            return 0;
         }
         Err(e) => return fail_start(Some(&paths), &e),
     };
-    match serve(env, &paths, &held) {
-        Ok(None) => {
+    let start = update::at_start(&paths, &env.version());
+    if let AtStart::RollBack(swap) = &start {
+        log(&format!("torrential {} did not start, so the engine goes back to {}", swap.to, swap.from));
+        return exec(&held, &swap.installed);
+    }
+    match serve(env, &paths, &held, &start) {
+        Ok(Ended::Stopped) => {
             let _ = std::fs::remove_file(paths.socket());
             0
         }
-        Ok(Some(to)) => match exe {
-            Ok(exe) => restart(env, &held, &exe, to),
-            Err(e) => fail_start(Some(&paths), &e),
+        Ok(Ended::Restart) => restart(&paths, &held, exe),
+        Err(e) => match update::unacknowledged(&paths).filter(|_| matches!(start, AtStart::Acknowledge(_))) {
+            Some(swap) if update::roll_back(&paths, &swap).is_ok() => {
+                log(&format!("torrential {} failed to start ({e}), so the engine goes back to {}", swap.to, swap.from));
+                exec(&held, &swap.installed)
+            }
+            _ => {
+                let _ = std::fs::remove_file(paths.socket());
+                fail_start(Some(&paths), &e)
+            }
         },
-        Err(e) => {
-            let _ = std::fs::remove_file(paths.socket());
-            fail_start(Some(&paths), &e)
-        }
     }
 }
 
@@ -242,23 +252,100 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     error.code.exit_code()
 }
 
-/// Replaces this process with the binary an update installed. The process ID stays, so launchd
-/// and systemd keep watching it. A test engine's made-up version follows the update.
-fn restart(env: &Env, held: &Held, exe: &Path, to: Version) -> u8 {
-    log(&format!("restarting into torrential {to}"));
-    let mut engine = std::process::Command::new(exe);
-    engine.args(["daemon", "run"]).env("TORRENTIAL_UPDATED_FROM", env.version());
-    held.hand_over(&mut engine);
-    if env.var("TORRENTIAL_TEST_VERSION").is_some() {
-        engine.env("TORRENTIAL_TEST_VERSION", to.to_string());
+/// Puts the release an update staged in place and execs it. The process ID stays, so launchd and
+/// systemd keep watching it. A guard from the binary it replaced brings that one back if the new
+/// engine never comes up.
+fn restart(paths: &Paths, held: &Held, exe: Result<std::path::PathBuf, Error>) -> u8 {
+    let swap = match update::swap(paths) {
+        Ok(swap) => swap,
+        Err(e) => {
+            log(&e.message);
+            return match exe {
+                Ok(exe) => exec(held, &exe),
+                Err(e) => fail_start(Some(paths), &e),
+            };
+        }
+    };
+    log(&format!("restarting into torrential {}", swap.to));
+    let mut guard = std::process::Command::new(&swap.previous);
+    guard.args(["daemon", "guard", &std::process::id().to_string()]).env_remove(HANDOVER).stdin(Stdio::null());
+    if let Err(e) = detach(&mut guard) {
+        log(&format!("cannot watch the restart into torrential {}: {e}", swap.to));
     }
+    let code = exec(held, &swap.installed);
+    match update::roll_back(paths, &swap) {
+        Ok(()) => exec(held, &swap.installed),
+        Err(_) => code,
+    }
+}
+
+/// Replaces this process with the engine in `exe`, handing it the lock and the listeners. Returns
+/// only when the exec fails.
+fn exec(held: &Held, exe: &Path) -> u8 {
+    let mut engine = std::process::Command::new(exe);
+    engine.args(["daemon", "run"]);
+    held.hand_over(&mut engine);
     let e = engine.exec();
-    log(&format!("cannot restart into torrential {to}: {e}"));
+    log(&format!("cannot start {}: {e}", exe.display()));
     ErrorCode::DaemonUnavailable.exit_code()
 }
 
-/// Returns the version an update installed, when that is why the engine stopped.
-fn serve(env: &Env, paths: &Paths, held: &Held) -> Result<Option<Version>, Error> {
+/// Starts `command` in a new session as a grandchild, so it outlives this process and leaves no
+/// zombie behind.
+fn detach(command: &mut std::process::Command) -> std::io::Result<()> {
+    // SAFETY: setsid, fork, and _exit are async-signal-safe, the only kind of call allowed between
+    // fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            match libc::fork() {
+                -1 => Err(std::io::Error::last_os_error()),
+                0 => Ok(()),
+                _ => libc::_exit(0),
+            }
+        });
+    }
+    command.spawn()?.wait().map(drop)
+}
+
+/// How long the engine an update restarted into has to say it is up.
+const GUARD_FOR: Duration = Duration::from_secs(60);
+
+/// Watches the engine an update restarted into, from the binary that update replaced. If that
+/// engine exits, or has not said it is up within a minute, the guard puts the previous binary
+/// back, records the release as failed, and runs the engine from the previous binary.
+pub fn guard(env: &Env, pid: u32) -> u8 {
+    let Ok(paths) = Paths::from_process(env) else { return ErrorCode::Usage.exit_code() };
+    let alive = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    let deadline = std::time::Instant::now() + GUARD_FOR;
+    while update::unacknowledged(&paths).is_some() {
+        let late = std::time::Instant::now() > deadline;
+        if late && alive(pid) {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        // Whoever holds the lock owns the update: an engine that holds it says it is up or rolls back.
+        if (late || !alive(pid))
+            && let Ok(Some(lock)) = lock(&paths.lock())
+        {
+            let Some(swap) = update::unacknowledged(&paths) else { return 0 };
+            log(&format!("torrential {} did not come up, so the engine goes back to {}", swap.to, swap.from));
+            if let Err(e) = update::roll_back(&paths, &swap) {
+                log(&e.message);
+                return ErrorCode::StorageError.exit_code();
+            }
+            drop(lock);
+            let e = std::process::Command::new(&swap.installed).args(["daemon", "run"]).env_remove(HANDOVER).exec();
+            log(&format!("cannot start {}: {e}", swap.installed.display()));
+            return ErrorCode::DaemonUnavailable.exit_code();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    0
+}
+
+fn serve(env: &Env, paths: &Paths, held: &Held, at_start: &AtStart) -> Result<Ended, Error> {
     let settings = Config::load(paths, env)?;
     match crate::client::service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
@@ -296,7 +383,7 @@ fn serve(env: &Env, paths: &Paths, held: &Held) -> Result<Option<Version>, Error
         .map_err(|e| Error::internal(format!("cannot start the async runtime: {e}")))?;
     let version = env.version();
     let ports = Ports::from_env(env, paths, &settings, runtime.handle())?;
-    let (engine, updated) = runtime.block_on(async {
+    let (engine, ended) = runtime.block_on(async {
         let socket = paths.socket();
         let listener = held
             .socket
@@ -325,23 +412,26 @@ fn serve(env: &Env, paths: &Paths, held: &Held) -> Result<Option<Version>, Error
             }
         });
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let updated_from = env.var("TORRENTIAL_UPDATED_FROM").map(String::from);
-        let mut updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), updated_from));
-        // The update watcher returns the version it installed right after the owner agreed to stop for it.
-        let updated = match running.owner.await {
-            Ok(Ended::Restart) => (&mut updates).await.ok(),
+        let updated_from = match at_start {
+            AtStart::Acknowledge(swap) => {
+                update::acknowledge(paths, swap);
+                log(&format!("torrential {} is up, so the previous binary is gone", swap.to));
+                Some(swap.from.clone())
+            }
             _ => None,
         };
+        let updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), updated_from));
+        let ended = running.owner.await.unwrap_or(Ended::Stopped);
         accept.abort();
         running.http.abort();
         signals.abort();
         updates.abort();
-        Ok::<_, Error>((running.engine, updated))
+        Ok::<_, Error>((running.engine, ended))
     })?;
     drop(runtime);
     let _ = engine.join();
     log("engine stopped");
-    Ok(updated)
+    Ok(ended)
 }
 
 fn shut_down(owner: &OwnerHandle) {
