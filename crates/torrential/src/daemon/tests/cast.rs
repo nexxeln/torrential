@@ -36,6 +36,9 @@ fn lan() -> Option<Ipv4Addr> {
 /// What the fake TV has been told, and what it is doing.
 #[derive(Default)]
 struct Screen {
+    /// What its device description calls it.
+    name: &'static str,
+    udn: &'static str,
     /// Each action's name and body, oldest first.
     actions: Vec<(String, String)>,
     uri: String,
@@ -70,25 +73,14 @@ const SINK: &str =
 
 impl FakeTv {
     async fn start(ip: Ipv4Addr, sink: &'static str) -> Self {
+        Self::named(ip, sink, "Fake TV", "uuid:fake-tv").await
+    }
+
+    async fn named(ip: Ipv4Addr, sink: &'static str, name: &'static str, udn: &'static str) -> Self {
         let http = TcpListener::bind((ip, 0)).await.unwrap();
-        let location = format!("http://{}/description.xml", http.local_addr().unwrap());
-        let udp = UdpSocket::bind((ip, 0)).await.unwrap();
-        let screen = Arc::new(Mutex::new(Screen::default()));
-        let tv = Self { ssdp: udp.local_addr().unwrap(), http: http.local_addr().unwrap(), screen };
-        tv.screen.lock().unwrap().transport = "NO_MEDIA_PRESENT";
-        tokio::spawn(async move {
-            let mut buf = [0; 2048];
-            while let Ok((length, from)) = udp.recv_from(&mut buf).await {
-                if String::from_utf8_lossy(&buf[..length]).contains("ST: urn:schemas-upnp-org:device:MediaRenderer:1") {
-                    let answer = format!(
-                        "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: {location}\r\n\
-                         ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\
-                         USN: uuid:fake-tv::urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n"
-                    );
-                    let _ = udp.send_to(answer.as_bytes(), from).await;
-                }
-            }
-        });
+        let at = http.local_addr().unwrap();
+        let screen = Arc::new(Mutex::new(Screen { name, udn, transport: "NO_MEDIA_PRESENT", ..Screen::default() }));
+        let tv = Self { ssdp: answering(ip, vec![found(at, udn)]).await, http: at, screen };
         let screen = tv.screen.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = http.accept().await {
@@ -119,6 +111,32 @@ impl FakeTv {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+}
+
+/// What a TV whose HTTP server is at `http` answers to a search for TVs.
+fn found(http: SocketAddr, udn: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://{http}/description.xml\r\n\
+         ST: {RENDERER}\r\nUSN: {udn}::{RENDERER}\r\n\r\n"
+    )
+}
+
+/// Answers each search for TVs on `ip` with every one of `answers`, as a network with that many
+/// TVs does, and returns where the searches go.
+async fn answering(ip: Ipv4Addr, answers: Vec<String>) -> SocketAddr {
+    let udp = UdpSocket::bind((ip, 0)).await.unwrap();
+    let at = udp.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0; 2048];
+        while let Ok((length, from)) = udp.recv_from(&mut buf).await {
+            if String::from_utf8_lossy(&buf[..length]).contains(&format!("ST: {RENDERER}")) {
+                for answer in &answers {
+                    let _ = udp.send_to(answer.as_bytes(), from).await;
+                }
+            }
+        }
+    });
+    at
 }
 
 /// One HTTP request: its head and its body, or `None` for a connection that closed first.
@@ -158,7 +176,11 @@ async fn answer(mut stream: TcpStream, screen: Arc<Mutex<Screen>>, sink: &'stati
     let Some((head, body)) = request(&mut stream).await else { return };
     screen.lock().unwrap().requests.push(asked(&head));
     let (status, reply) = if head.starts_with("GET /description.xml") {
-        ("200 OK", description("Fake TV", "uuid:fake-tv", "", None))
+        let (name, udn) = {
+            let shown = screen.lock().unwrap();
+            (shown.name, shown.udn)
+        };
+        ("200 OK", description(name, udn, "", None))
     } else {
         let action = header(&head, "soapaction").unwrap_or_default();
         let action = action.trim_matches('"').rsplit('#').next().unwrap_or_default().to_string();
@@ -453,7 +475,11 @@ async fn cast(h: &Harness, request: CastRequest) -> Result<Cast, Error> {
 }
 
 async fn control(h: &Harness, action: CastAction) -> Result<Cast, Error> {
-    match h.ask(Request::CastControl { tv: None, action }).await {
+    control_on(h, None, action).await
+}
+
+async fn control_on(h: &Harness, tv: Option<&str>, action: CastAction) -> Result<Cast, Error> {
+    match h.ask(Request::CastControl { tv: tv.map(str::to_string), action }).await {
         Response::Cast { cast } => Ok(*cast),
         Response::Error { error } => Err(error),
         other => panic!("not a cast: {other:?}"),
@@ -896,4 +922,48 @@ async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
 
     control(&h, CastAction::Stop).await.unwrap();
     h.until("a play leaves once the cast lets go", |jobs| jobs.len() == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn of_two_tvs_casting_one_film_the_one_cast_to_last_keeps_its_place() {
+    let Some(ip) = lan() else { return };
+    let living = FakeTv::named(ip, SINK, "Living Room TV", "uuid:living-room").await;
+    let bedroom = FakeTv::named(ip, SINK, "Bedroom TV", "uuid:bedroom").await;
+    let both = answering(ip, vec![found(living.http, "uuid:living-room"), found(bedroom.http, "uuid:bedroom")]).await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(Vec::new()),
+        Outside { tvs: Find::At(both), ..Outside::default() },
+    );
+    let film = torrent(89, "Night", &[("Night.mkv", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let on =
+        |tv: &str| CastRequest { tv: Some(tv.into()), video: Some(night()), ..by_hand(Target::Prefix(prefix(&film))) };
+
+    cast(&h, on("living")).await.unwrap();
+    living.set(|screen| screen.position = 600.0);
+    until(&h, "ten minutes in on the living room TV", |cast| {
+        cast.tv_name == "Living Room TV" && cast.position == Some(600.0)
+    })
+    .await;
+    control_on(&h, Some("living"), CastAction::Pause).await.unwrap();
+    assert_eq!(kept(&h), Some((600.0, Some(5_760.0))));
+
+    cast(&h, on("bedroom")).await.unwrap();
+    bedroom.until("the seek to where the film stopped", |screen| screen.position == 600.0).await;
+    bedroom.set(|screen| screen.position = 1_200.0);
+    until(&h, "twenty minutes in on the bedroom TV", |cast| {
+        cast.tv_name == "Bedroom TV" && cast.position == Some(1_200.0)
+    })
+    .await;
+    control_on(&h, Some("bedroom"), CastAction::Stop).await.unwrap();
+    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))));
+
+    // The paused cast asks its TV where it is every second and would save every five.
+    tokio::time::sleep(Duration::from_millis(6_500)).await;
+    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "the living room TV, paused at ten minutes, saves nothing");
+    control_on(&h, Some("living"), CastAction::Stop).await.unwrap();
+    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "not even as it stops");
 }

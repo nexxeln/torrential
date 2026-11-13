@@ -79,6 +79,9 @@ struct State {
     casts: BTreeMap<String, Entry>,
     /// How each file a cast grant serves goes to the TV, by the grant's path.
     served: HashMap<String, Dlna>,
+    /// The cast that keeps each video's place in the watch history: of the casts playing it, the
+    /// one started last.
+    keeping: HashMap<VideoRef, u64>,
     next: u64,
 }
 
@@ -527,6 +530,7 @@ impl Run {
             served.push((grant.path().to_string(), Dlna { mime: format!("text/{kind}"), caption: None, video: false }));
         }
         let _serving = Serving::new(&ctx.casts, served);
+        let _keeping = found.video.as_ref().map(|video| Keeping::new(&ctx.casts, video, self.id));
         let duration = web_watch::probed(ctx, found.id, found.file).and_then(|media| media.duration);
         let film = found.video.as_ref().is_some_and(|video| video.episode.is_none());
         let kind = found.subtitle.as_ref().map(|(_, path)| extension(path));
@@ -726,13 +730,14 @@ impl Run {
         upnp::call(&self.ctx.casts.http, service, action, args, &self.tv.tv.name).await
     }
 
-    /// Keeps where the TV is in the watch history, as the web player keeps it.
+    /// Keeps where the TV is in the watch history, as the web player keeps it, unless a cast
+    /// of the same video started since.
     fn save(&self, found: &Found) {
         let cast = self.view.borrow().clone();
         let (Some(video), Some(position), Some(duration)) = (&found.video, cast.position, cast.duration) else {
             return;
         };
-        if position <= WORTH_SAVING {
+        if position <= WORTH_SAVING || self.ctx.casts.state().keeping.get(video) != Some(&self.id) {
             return;
         }
         let watched = Watched {
@@ -1053,6 +1058,32 @@ impl Drop for Serving<'_> {
         let mut state = self.casts.state();
         for path in &self.paths {
             state.served.remove(path);
+        }
+    }
+}
+
+/// A cast's claim on its video's place in the watch history, until it is dropped. A cast started
+/// after another of the same video takes the place from it, and keeps it once that one is gone.
+struct Keeping<'a> {
+    casts: &'a Casts,
+    video: VideoRef,
+    id: u64,
+}
+
+impl<'a> Keeping<'a> {
+    fn new(casts: &'a Casts, video: &VideoRef, id: u64) -> Self {
+        let mut state = casts.state();
+        let keeper = state.keeping.entry(video.clone()).or_insert(id);
+        *keeper = (*keeper).max(id);
+        Self { casts, video: video.clone(), id }
+    }
+}
+
+impl Drop for Keeping<'_> {
+    fn drop(&mut self) {
+        let mut state = self.casts.state();
+        if state.keeping.get(&self.video) == Some(&self.id) {
+            state.keeping.remove(&self.video);
         }
     }
 }
