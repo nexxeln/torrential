@@ -104,20 +104,23 @@ function ContinueCard({ item }: { item: ContinueItem }) {
       <Link
         href={playPath(item.video)}
         aria-label={[title.name, what, left].filter(Boolean).join(", ")}
-        className="group/card flex flex-col gap-2.5 rounded-lg tv:transition-transform tv:focus:scale-105 motion-reduce:tv:transition-none"
+        className="group/card block rounded-lg tv:focus:outline-none"
       >
-        <div className="relative aspect-video overflow-hidden rounded-lg bg-raised outline-1 -outline-offset-1 outline-white/10 group-hover/card:outline-white/30">
-          {episode?.thumbnail ? <Picture src={artUrl(title.id, episode)} alt="" className="absolute inset-0 size-full object-cover" fallback={background} /> : background}
-          {started && (
-            <div className="absolute inset-x-0 bottom-0 bg-linear-to-t from-black/70 to-transparent px-3 pt-6 pb-3">
-              <Meter fraction={item.resume_at! / item.duration!} label="Watched" />
-            </div>
-          )}
-        </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 px-0.5">
-          <p className="truncate text-base font-medium text-ink sm:text-sm">{title.name}</p>
-          <p className="text-sm text-pencil tabular-nums">{left}</p>
-          <p className="col-span-full truncate text-sm text-pencil tabular-nums">{what}</p>
+        {/* On a TV the card grows with its ring when it has focus, and the link keeps the place arrow keys measure. */}
+        <div className="flex flex-col gap-2.5 rounded-lg tv:transition-transform tv:group-focus/card:scale-105 tv:group-focus/card:outline-[0.1875rem] tv:group-focus/card:outline-offset-[0.1875rem] tv:group-focus/card:outline-ink motion-reduce:tv:transition-none">
+          <div className="relative aspect-video overflow-hidden rounded-lg bg-raised outline-1 -outline-offset-1 outline-white/10 group-hover/card:outline-white/30">
+            {episode?.thumbnail ? <Picture src={artUrl(title.id, episode)} alt="" className="absolute inset-0 size-full object-cover" fallback={background} /> : background}
+            {started && (
+              <div className="absolute inset-x-0 bottom-0 bg-linear-to-t from-black/70 to-transparent px-3 pt-6 pb-3">
+                <Meter fraction={item.resume_at! / item.duration!} label="Watched" />
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 px-0.5">
+            <p className="truncate text-base font-medium text-ink sm:text-sm">{title.name}</p>
+            <p className="text-sm text-pencil tabular-nums">{left}</p>
+            <p className="col-span-full truncate text-sm text-pencil tabular-nums">{what}</p>
+          </div>
         </div>
       </Link>
     </li>

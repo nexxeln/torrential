@@ -60,14 +60,17 @@ export function TitleGrid({ titles, label, stale = false, onLeaveTop, list }: Pr
           <Link
             href={titlePath(card.id)}
             aria-label={[card.name, cardFacts(card)].filter(Boolean).join(", ")}
-            className="group/card flex flex-col gap-2 rounded-lg tv:transition-transform tv:focus:scale-105 motion-reduce:tv:transition-none"
+            className="group/card block rounded-lg tv:focus:outline-none"
           >
-            <Poster card={card} />
-            <div className="flex min-w-0 flex-col px-0.5">
-              <p className="line-clamp-2 text-base font-medium text-pretty text-ink sm:text-sm" title={card.name}>
-                {card.name}
-              </p>
-              <p className="min-h-lh text-sm text-pencil tabular-nums">{cardFacts(card)}</p>
+            {/* On a TV the card grows with its ring when it has focus, and the link keeps the place arrow keys measure. */}
+            <div className="flex flex-col gap-2 rounded-lg tv:transition-transform tv:group-focus/card:scale-105 tv:group-focus/card:outline-[0.1875rem] tv:group-focus/card:outline-offset-[0.1875rem] tv:group-focus/card:outline-ink motion-reduce:tv:transition-none">
+              <Poster card={card} />
+              <div className="flex min-w-0 flex-col px-0.5">
+                <p className="line-clamp-2 text-base font-medium text-pretty text-ink sm:text-sm" title={card.name}>
+                  {card.name}
+                </p>
+                <p className="min-h-lh text-sm text-pencil tabular-nums">{cardFacts(card)}</p>
+              </div>
             </div>
           </Link>
         </li>
