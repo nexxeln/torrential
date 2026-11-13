@@ -13,7 +13,7 @@ use super::engine_port::{
     parse_fake,
 };
 use super::owner::OwnerConfig;
-use super::owner::plays::Plays;
+use super::owner::plays::{IDLE_AFTER, Plays};
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -49,6 +49,9 @@ struct Outside {
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     timing: Timing,
+    /// What the plays folder holds, and how long a play no one streams keeps downloading.
+    plays_max: u64,
+    idle_after: Duration,
 }
 
 impl Default for Outside {
@@ -58,11 +61,13 @@ impl Default for Outside {
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
+            plays_max: 20 * GIB,
+            idle_after: IDLE_AFTER,
         }
     }
 }
 
-fn config(dir: &std::path::Path) -> OwnerConfig {
+fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
     OwnerConfig {
         default_dir: dir.join("downloads"),
         probe_dir: dir.join("probes"),
@@ -72,7 +77,7 @@ fn config(dir: &std::path::Path) -> OwnerConfig {
         save_resume_every: Duration::from_millis(100),
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
-        plays: Plays { root: dir.join("plays") },
+        plays: Plays { root: dir.join("plays"), max: outside.plays_max, idle_after: outside.idle_after },
     }
 }
 
@@ -156,7 +161,7 @@ impl Harness {
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, store, ports, config(dir.path()), outside.timing, "0.1.0".into(), 0).unwrap()
+        start(&handle, store, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {

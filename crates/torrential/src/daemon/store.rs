@@ -2,7 +2,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
+use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleId, TitleLink, TorrentId};
 
 use super::admission::Cap;
 use super::book::{Home, Intent, JobRecord, Linked, Play};
@@ -512,6 +512,19 @@ impl Store {
     /// Notes that the person asked for a play by hand, so it never leaves the plays folder by itself.
     pub fn by_hand(&mut self, id: TorrentId) -> Result<(), Error> {
         self.write(|tx| tx.execute("UPDATE plays SET by_hand = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
+    }
+
+    /// The titles saved to the library.
+    pub fn saved_titles(&self) -> Result<std::collections::BTreeSet<TitleId>, Error> {
+        let mut stmt = self.conn.prepare("SELECT title FROM library").map_err(|e| self.fail(e))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| self.fail(e))?;
+        let mut saved = std::collections::BTreeSet::new();
+        for row in rows {
+            let title = row.map_err(|e| self.fail(e))?;
+            saved
+                .insert(title.parse().map_err(|_| corrupt(&self.path, &format!("saved title {title} is unreadable")))?);
+        }
+        Ok(saved)
     }
 
     /// Links a download that already existed to the title a play joined it for.

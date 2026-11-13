@@ -1,27 +1,43 @@
-//! torrential's own folder for plays. Each play downloads into a folder of its own inside it, and
-//! torrential deletes only inside it, unless the person asks.
+//! torrential's own folder for plays. Each play downloads into a folder of its own inside it.
+//! Plays no one streams stop downloading, the plays watched longest ago leave once the folder is
+//! over its limit, and torrential deletes only inside it, unless the person asks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, Kept};
 use torrential_core::{Error, ErrorCode, TorrentId};
 
-use super::super::book::{Home, JobEntry, Play};
+use super::super::admission;
+use super::super::book::{Home, Intent, JobEntry, Observed, Play};
 use super::super::files;
 use super::super::log;
+use super::super::server::OwnerHandle;
 use super::super::store::Pending;
-use super::{Finish, Owner, Reply, claim_key, now};
+use super::{Command, Finish, Owner, Reply, claim_key, now};
 
-/// The plays folder.
+/// How long a play no one streams keeps downloading. Long enough that a break, or a phone that
+/// locked, comes back to a play still downloading. Short enough that a film left after a few
+/// minutes soon stops taking bandwidth and disk.
+pub const IDLE_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// How often the owner looks for plays to pause or to take out of the plays folder.
+const TEND_EVERY: Duration = Duration::from_secs(1);
+
+/// The plays folder and its limits.
 #[derive(Clone, Debug)]
 pub struct Plays {
     pub root: PathBuf,
+    /// The most the plays that may leave take up before those watched longest ago leave.
+    pub max: u64,
+    /// How long a play no one streams keeps downloading.
+    pub idle_after: Duration,
 }
 
 impl Plays {
@@ -266,18 +282,69 @@ fn prune(dir: &Path, inside: &Path) {
     }
 }
 
+/// A play's share of the plays folder, for choosing which plays leave.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Share {
+    pub id: TorrentId,
+    pub bytes: u64,
+    /// Unix seconds.
+    pub watched_at: i64,
+    /// Someone streams it, or a title play is testing it.
+    pub busy: bool,
+}
+
+/// The plays that leave so the rest fit in `max`, those watched longest ago first. A busy play
+/// never leaves, and neither does the one watched last, so a play larger than `max` still plays
+/// and is there to go on with.
+pub fn leaving(mut shares: Vec<Share>, max: u64) -> Vec<TorrentId> {
+    let mut total: u64 = shares.iter().map(|s| s.bytes).sum();
+    shares.sort_by_key(|s| (s.watched_at, s.id));
+    shares.pop();
+    let mut leaving = Vec::new();
+    for share in shares.into_iter().filter(|s| !s.busy) {
+        if total <= max {
+            break;
+        }
+        total -= share.bytes;
+        leaving.push(share.id);
+    }
+    leaving
+}
+
+/// Someone streaming a download, from their request for its bytes until the answer ends.
+pub struct Viewer<'a> {
+    owner: &'a OwnerHandle,
+    id: TorrentId,
+}
+
+impl<'a> Viewer<'a> {
+    pub fn new(owner: &'a OwnerHandle, id: TorrentId) -> Self {
+        owner.tell(Command::Viewing { id, open: true });
+        Self { owner, id }
+    }
+}
+
+impl Drop for Viewer<'_> {
+    fn drop(&mut self) {
+        self.owner.tell(Command::Viewing { id: self.id, open: false });
+    }
+}
+
 /// What the owner keeps track of for plays and deletions.
 pub struct Tending {
+    /// How many streams of each download are open now.
+    viewers: BTreeMap<TorrentId, usize>,
     /// Deletions on record, each waiting until the engine lets go of its download.
     pub(super) doomed: Vec<Pending>,
     /// `rm`s that answer once their deletions are done.
     removals: Vec<Removal>,
+    tended_at: Option<Instant>,
 }
 
 impl Tending {
     /// What a removal cut short left on record is still to be deleted.
     pub fn new(doomed: Vec<Pending>) -> Self {
-        Self { doomed, removals: Vec::new() }
+        Self { viewers: BTreeMap::new(), doomed, removals: Vec::new(), tended_at: None }
     }
 }
 
@@ -338,12 +405,46 @@ impl Owner {
         }
     }
 
+    /// Starts the idle clock of the plays a person resumed again.
+    pub(super) fn touch_plays(&mut self, refs: &[String]) {
+        if refs.is_empty() {
+            return;
+        }
+        for id in self.resolve_jobs(refs, "resume").unwrap_or_default() {
+            self.watched_now(id);
+        }
+    }
+
     fn watched_now(&mut self, id: TorrentId) {
         let Some(job) = self.jobs.get_mut(&id) else { return };
         let Home::Plays(play) = &mut job.record.home else { return };
         play.watched_at = now();
         if let Err(error) = self.store.watched(id, play.watched_at) {
             log(&format!("cannot note when {id} was watched: {}", error.message));
+        }
+    }
+
+    /// Someone opened or closed a stream of `id`. A play someone opens resumes if it stopped.
+    pub(super) fn viewing(&mut self, id: TorrentId, open: bool) {
+        let count = self.tending.viewers.entry(id).or_default();
+        let before = *count;
+        *count = if open { before + 1 } else { before.saturating_sub(1) };
+        let after = *count;
+        if after == 0 {
+            self.tending.viewers.remove(&id);
+        }
+        // The first stream to open and the last to close mark when the play was watched.
+        if (open && before == 0) || (!open && after == 0) {
+            self.watched_now(id);
+        }
+        let Some(job) = self.jobs.get(&id) else { return };
+        let stopped = job.record.intent == Intent::Paused || job.observed == Observed::Parked;
+        if open
+            && stopped
+            && matches!(job.record.home, Home::Plays(_))
+            && let Err(error) = self.resume(&[id.to_hex()], false)
+        {
+            log(&format!("{id} is streaming but cannot resume: {}", error.message));
         }
     }
 
@@ -426,6 +527,71 @@ impl Owner {
                 || writes.unwrap_or_default().iter().any(|target| target.starts_with(path) || claim_key(target) == key)
         })
     }
+
+    /// Pauses the plays no one has streamed for a while, and takes the plays watched longest ago
+    /// out of the plays folder while it is over its limit. A play the person started by hand, or
+    /// whose title is in the library, is the person's: it does neither, and does not count.
+    pub(super) fn tend_plays(&mut self, at: Instant) {
+        if self.stopping.is_some() || self.tending.tended_at.is_some_and(|last| at.duration_since(last) < TEND_EVERY) {
+            return;
+        }
+        self.tending.tended_at = Some(at);
+        let saved = match self.store.saved_titles() {
+            Ok(saved) => saved,
+            Err(error) => {
+                log(&format!("cannot read the library, so no play leaves or pauses: {}", error.message));
+                return;
+            }
+        };
+        let (clock, idle_after) = (now(), self.config.plays.idle_after);
+        let mut idle = Vec::new();
+        let mut shares = Vec::new();
+        for job in self.jobs.values() {
+            let Home::Plays(play) = job.record.home else { continue };
+            let in_library = job.record.title.as_ref().is_some_and(|linked| saved.contains(&linked.link.title));
+            if play.by_hand || in_library {
+                continue;
+            }
+            let id = job.id();
+            let busy = self.tending.viewers.contains_key(&id) || self.under_test.contains_key(&id);
+            let unwatched = Duration::from_secs(clock.saturating_sub(play.watched_at).max(0) as u64);
+            if !busy && job.record.intent == Intent::Running && unwatched >= idle_after {
+                idle.push(id);
+            }
+            shares.push(Share { id, bytes: self.play_bytes(job), watched_at: play.watched_at, busy });
+        }
+        let after = crate::output::format::elapsed(idle_after);
+        for id in idle {
+            log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
+            self.pause(vec![id.to_hex()], oneshot::channel().0);
+        }
+        let leaving = leaving(shares, self.config.plays.max);
+        if leaving.is_empty() {
+            return;
+        }
+        let max = crate::output::format::size(Some(self.config.plays.max));
+        for id in &leaving {
+            log(&format!("{} left the plays folder to keep it under {max}", self.named(*id)));
+        }
+        let refs: Vec<String> = leaving.iter().map(TorrentId::to_hex).collect();
+        if let Err(error) = self.remove(&refs, false) {
+            log(&format!("the plays watched longest ago stay, for they cannot be removed: {}", error.message));
+        }
+        self.finish_deletions();
+    }
+
+    /// What a play takes up on disk now.
+    fn play_bytes(&self, job: &JobEntry) -> u64 {
+        let allocated = job.metainfo.as_deref().zip(job.wanted()).map_or(0, |(metainfo, wanted)| {
+            admission::allocated_bytes(metainfo, &job.record.dir, &wanted, self.disk.as_ref())
+        });
+        allocated.max(job.verified())
+    }
+
+    fn named(&self, id: TorrentId) -> String {
+        let name = self.jobs.get(&id).and_then(|job| job.record.name.clone());
+        name.unwrap_or_else(|| id.to_hex()[..6].to_string())
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +604,11 @@ mod tests {
     }
 
     fn plays(dir: &Path) -> Plays {
-        Plays { root: dir.join("plays") }
+        Plays { root: dir.join("plays"), max: 1 << 30, idle_after: IDLE_AFTER }
+    }
+
+    fn share(n: u8, bytes: u64, watched_at: i64, busy: bool) -> Share {
+        Share { id: id(n), bytes, watched_at, busy }
     }
 
     #[test]
@@ -453,6 +623,17 @@ mod tests {
         for name in ["abababababababab", "abababababababab-", "ABABABABABABABAB-0", "abab-0", "..", "notes.txt"] {
             assert!(!play_folder(OsStr::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn the_plays_watched_longest_ago_leave_until_the_rest_fit() {
+        let shares =
+            vec![share(1, 6, 30, false), share(2, 6, 10, false), share(3, 6, 20, true), share(4, 6, 40, false)];
+        assert_eq!(leaving(shares.clone(), 24), Vec::<TorrentId>::new());
+        assert_eq!(leaving(shares.clone(), 18), [id(2)]);
+        assert_eq!(leaving(shares.clone(), 12), [id(2), id(1)], "3 is busy");
+        assert_eq!(leaving(shares, 0), [id(2), id(1)], "and the play watched last never leaves");
+        assert_eq!(leaving(vec![share(9, 50, 1, false)], 20), Vec::<TorrentId>::new(), "one play over the cap stays");
     }
 
     #[test]
@@ -509,7 +690,7 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         std::fs::create_dir(tmp.path().join("data")).unwrap();
         symlink(&real, tmp.path().join("data/plays")).unwrap();
-        let plays = Plays { root: tmp.path().join("data/plays") };
+        let plays = Plays { root: tmp.path().join("data/plays"), ..plays(tmp.path()) };
         let folder = plays.new_folder(id(4)).unwrap();
         std::fs::write(folder.join("film.mp4"), b"film").unwrap();
         let done = Deletion::Play { folder: folder.clone() }.run(&plays.root, |_| false);

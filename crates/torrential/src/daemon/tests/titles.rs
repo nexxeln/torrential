@@ -53,6 +53,11 @@ pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
 
 /// `night`, with `timing` for its plays.
 fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
+    night_with(Outside { timing, ..Outside::default() })
+}
+
+/// `night`, with what `outside` sets.
+pub(super) fn night_with(outside: Outside) -> (Harness, [FakeTorrentFile; 4]) {
     let night = [
         torrent(0xa1, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", &[("Night.1968.720p.mp4", 2 * GIB)]),
         torrent(0xa2, "Night.of.the.Living.Dead.1968.DVD9", &[("VIDEO_TS/NIGHT.iso", 4 * GIB)]),
@@ -73,7 +78,7 @@ fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
     catalog.push(listed(&remake, "knaben", Some(90)));
     let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
     let search = search_port::Fake::scripted(catalog, script, BTreeMap::new());
-    let h = Harness::with_outside(search, Outside { timing, ..Outside::default() });
+    let h = Harness::with_outside(search, outside);
     for t in &night[1..] {
         h.swarm.publish(t.clone());
     }

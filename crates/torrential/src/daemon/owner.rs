@@ -175,6 +175,7 @@ pub enum Command {
     Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
     StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
+    Viewing { id: TorrentId, open: bool },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
     Disconnected { keep_until: Option<Instant> },
@@ -419,6 +420,7 @@ impl Owner {
             }
             Command::Resume { refs, all, reply } => {
                 self.adopt(&refs, "resume");
+                self.touch_plays(&refs);
                 let _ = reply.send(self.resume(&refs, all));
             }
             Command::Remove { refs, delete, reply } => self.rm(refs, delete, reply),
@@ -433,6 +435,7 @@ impl Owner {
             Command::StreamFile { id, index, reply } => {
                 let _ = reply.send(self.stream_file(id, index));
             }
+            Command::Viewing { id, open } => self.viewing(id, open),
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Connected => self.connections += 1,
             Command::Disconnected { keep_until } => {
@@ -1733,6 +1736,7 @@ impl Owner {
         self.check_idle(now);
         self.save_progress(now);
         self.finish_deletions();
+        self.tend_plays(now);
     }
 
     fn save_progress(&mut self, now: Instant) {

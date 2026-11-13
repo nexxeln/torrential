@@ -271,7 +271,14 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         save_resume_every,
         stall_after,
         writes_stop_within: WRITES_STOP_WITHIN,
-        plays: owner::plays::Plays { root: paths.plays() },
+        plays: owner::plays::Plays {
+            root: paths.plays(),
+            max: settings.plays_max.0,
+            idle_after: env
+                .var("TORRENTIAL_TEST_PLAYS_IDLE")
+                .and_then(torrential_core::units::parse_duration)
+                .unwrap_or(owner::plays::IDLE_AFTER),
+        },
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

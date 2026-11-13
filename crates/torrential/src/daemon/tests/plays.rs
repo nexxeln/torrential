@@ -1,15 +1,17 @@
 //! Where plays download, how they leave the plays folder, and what `rm` deletes.
 
+use std::time::Duration;
+
 use serde_json::json;
-use torrential_core::Place;
 use torrential_core::protocol::{Change, PlayRequest, Request, Response};
+use torrential_core::{Place, Target};
 
 use super::super::admission::GIB;
 use super::super::owner::plays::Deletion;
 use super::super::store::{Store, Tombstone};
-use super::titles::night;
+use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
-use super::{Harness, MIB, prefix, torrent, written};
+use super::{Harness, MIB, Outside, Player, prefix, torrent, written};
 
 impl Harness {
     async fn rm(&self, refs: Vec<String>, delete: bool) -> Vec<Change> {
@@ -17,6 +19,11 @@ impl Harness {
             Response::Changed { changes } => changes,
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// The name and state of each download, in the order status lists them.
+    async fn named_states(&self) -> Vec<(String, &'static str)> {
+        self.status().await.into_iter().map(|job| (job.name.unwrap_or_default(), job.status.name())).collect()
     }
 }
 
@@ -91,4 +98,62 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
     assert_eq!((h.status().await.len(), folder.exists()), (0, false));
     let store = Store::open(&database).unwrap();
     assert_eq!(store.deletions().unwrap(), [], "it is done, so a later start has nothing to delete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_play_watched_longest_ago_leaves_once_the_plays_folder_is_over_its_limit() {
+    let (h, night) = night_with(Outside { plays_max: 3 * GIB, ..Outside::default() });
+    h.swarm.set_rate(100 * GIB);
+    assert_eq!(post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await.0, 200);
+    h.play_title("tt0063350", Some(&night[3]), None).await;
+    let got = torrent(0xe1, "got", &[("got.mp4", GIB)]);
+    let older = torrent(0xe2, "older", &[("older.mp4", 2 * GIB)]);
+    let newer = torrent(0xe3, "newer", &[("newer.mp4", 2 * GIB)]);
+    for t in [&got, &older, &newer] {
+        h.swarm.publish(t.clone());
+    }
+    post(&h, "/api/play", json!({ "ref": magnet_link(&got) })).await;
+    h.get(Target::Prefix(prefix(&got)), &[]).await.unwrap();
+    post(&h, "/api/play", json!({ "ref": magnet_link(&older) })).await;
+    h.until("every play is done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+    // When a play was watched is kept to the second.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(h.status().await.len(), 3, "the plays that may leave take 2 GiB of 3 GiB");
+
+    post(&h, "/api/play", json!({ "ref": magnet_link(&newer) })).await;
+    h.until("the play watched longest ago leaves", |jobs| jobs.len() == 3).await;
+    let named = ["night_of_the_living_dead", "got", "newer"].map(|name| (name.to_string(), "done"));
+    h.until("newer is done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+    assert_eq!(h.named_states().await, named, "a saved title's play and one got by hand stay");
+    assert_eq!([&older, &newer].map(|t| h.play_folder(t).exists()), [false, true]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_no_one_streams_pauses_and_streaming_it_again_resumes_it_but_a_saved_titles_play_goes_on() {
+    let (h, night) = night_with(Outside { idle_after: Duration::from_secs(1), ..Outside::default() });
+    h.swarm.set_rate(20 * MIB);
+    post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await;
+    h.play_title("tt0063350", Some(&night[3]), None).await;
+    let film = torrent(0xf1, "film", &[("film.mkv", 2 * GIB)]);
+    h.swarm.publish(film.clone());
+    post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
+    let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
+    // A range far past what has arrived keeps the stream open, as a player waiting for it does.
+    let stream = |player: Player, path: String| {
+        let mut player = player;
+        tokio::spawn(async move { player.get(&path, "bytes=2000000000-2000000099").await })
+    };
+
+    let watching = stream(Player::connect(&h).await, path.clone());
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let downloading = ["night_of_the_living_dead", "film"].map(|name| (name.to_string(), "downloading"));
+    assert_eq!(h.named_states().await, downloading, "someone streams the film");
+
+    watching.abort();
+    h.until("no one streams the film, so it pauses", |jobs| jobs[1].status.name() == "paused").await;
+    let paused = [("night_of_the_living_dead".to_string(), "downloading"), ("film".to_string(), "paused")];
+    assert_eq!(h.named_states().await, paused);
+
+    let _watching = stream(Player::connect(&h).await, path);
+    h.until("streaming the film again resumes it", |jobs| jobs[1].status.name() == "downloading").await;
 }
