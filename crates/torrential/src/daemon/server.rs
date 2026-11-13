@@ -7,13 +7,13 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::error::Details;
 use torrential_core::protocol::{
-    Event, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream, TitleFrame,
-    TitlePage, TitlePlayed, TitleRequest, TitleSources, WIRE_VERSION,
+    Continue, Event, FilesReply, GetOutcome, GetReply, GetRequest, Home, PlayReply, PlayRequest, Request, Response,
+    Stream, TitleFrame, TitlePage, TitlePlayed, TitleRequest, TitleSources, WIRE_VERSION,
 };
 use torrential_core::text::sanitize;
 use torrential_core::watching::next;
 use torrential_core::{
-    AttemptEvent, Error, ErrorCode, HexPrefix, Release, ReleaseId, SearchQuery, SearchResult, Target, TitleCard,
+    AttemptEvent, Error, ErrorCode, HexPrefix, Next, Release, ReleaseId, SearchQuery, SearchResult, Target, TitleCard,
     TitleId, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
@@ -31,6 +31,8 @@ use crate::output::views::title_name;
 use crate::wire;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Titles listed under Continue on the home screens.
+const CONTINUE_MOST: usize = 20;
 pub const METADATA_WAIT: Duration = Duration::from_secs(60);
 pub(super) const HEARTBEAT: Duration = Duration::from_secs(15);
 
@@ -110,6 +112,7 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         }
         Request::PlayTitle(request) => play_title(ctx, request, Finish::Stream, mpsc::unbounded_channel().0).await,
         Request::GetTitle(request) => play_title(ctx, request, Finish::Keep, mpsc::unbounded_channel().0).await,
+        Request::Home => home(ctx).await.map(|home| Response::Home { home: Box::new(home) }),
     };
     result.unwrap_or_else(|error| Response::Error { error })
 }
@@ -301,6 +304,24 @@ pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Erro
         watched,
         details,
     })
+}
+
+/// For each title watched lately, its video to go on with, and the saved titles. A finished film,
+/// and a series the person has caught up with, are left out.
+pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
+    let now = super::owner::now();
+    let mut going_on = Vec::new();
+    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
+        let Ok(details) = ctx.titles.catalog.title(&recent.video.title).await else { continue };
+        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
+        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
+        let episode = video
+            .episode
+            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
+        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
+        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
+    }
+    Ok(Home { going_on, saved: ctx.titles.shelf.saved()? })
 }
 
 /// The releases of the film or episode `video` names, in the order a play tries them.

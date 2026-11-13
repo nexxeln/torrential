@@ -926,6 +926,7 @@ async fn closing_the_connection_while_a_source_sends_nothing_pauses_its_download
 
 #[tokio::test(flavor = "multi_thread")]
 async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes_next() {
+    use torrential_core::protocol::{Request, Response};
     let h = Harness::new();
     let watch = |video: &str, position: f64, duration: f64| json!({ "video": video, "position": position, "duration": duration });
     let (status, saved) = post(&h, "/api/watched", watch("tt9999901:1:1", 2630.0, 2640.0)).await;
@@ -952,6 +953,8 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
             "saved": [],
         })
     );
+    let Response::Home { home: socket } = h.ask(Request::Home).await else { panic!("the socket answers home") };
+    assert_eq!(serde_json::to_value(socket).unwrap(), home, "the terminal UI reads the home the web app reads");
     let (_, page) = get(&h, "/api/title?id=tt9999901").await;
     assert_eq!(
         json!([

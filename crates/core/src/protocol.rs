@@ -85,6 +85,8 @@ pub enum Request {
     /// The same play, answered as `get` answers, for a download kept without a player. Once a
     /// source starts, it downloads as `get` downloads, not in playing order.
     GetTitle(TitleRequest),
+    /// The films and episodes to go on with, and the saved titles.
+    Home,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -169,6 +171,9 @@ pub enum Response {
         reply: Box<GetReply>,
         title: Box<TitlePlayed>,
     },
+    Home {
+        home: Box<Home>,
+    },
     Ok,
     Error {
         error: Error,
@@ -187,6 +192,27 @@ pub struct TitlePage {
     pub next: Option<Next>,
     /// The downloads made by playing this title.
     pub downloads: Vec<Job>,
+}
+
+/// What the home screens list: for each title watched lately, its video to go on with, and the
+/// saved titles. The socket's `home` and `GET /api/home` both answer with it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Home {
+    /// The most recently watched first.
+    #[serde(rename = "continue")]
+    pub going_on: Vec<Continue>,
+    pub saved: Vec<TitleCard>,
+}
+
+/// A film or episode to go on with.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Continue {
+    pub title: TitleCard,
+    pub video: VideoRef,
+    pub episode: Option<EpisodeInfo>,
+    /// `None` when the video has not been started, as the episode after a finished one.
+    pub resume_at: Option<f64>,
+    pub duration: Option<f64>,
 }
 
 /// A film's or an episode's releases, in the order a play tries them.
