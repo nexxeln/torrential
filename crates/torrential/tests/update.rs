@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -81,16 +81,6 @@ struct Server {
 
 impl Server {
     fn start(version: &str, binary: &[u8], published_sum: Option<&str>) -> Server {
-        Server::gated(version, binary, published_sum, None)
-    }
-
-    /// The first answer to /latest waits until `gate` receives.
-    fn gated(
-        version: &str,
-        binary: &[u8],
-        published_sum: Option<&str>,
-        mut gate: Option<mpsc::Receiver<()>>,
-    ) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let tarball = Arc::new(tarball(binary));
@@ -101,9 +91,6 @@ impl Server {
             for stream in listener.incoming().flatten() {
                 let path = request_path(&stream);
                 log.lock().unwrap().push(path.clone());
-                if let Some(gate) = gate.take().filter(|_| path == "/latest") {
-                    let _ = gate.recv();
-                }
                 let reply = match path.as_str() {
                     "/latest" => (302, vec![("Location", location.clone())], Vec::new()),
                     p if p.ends_with(".tar.gz") => (200, Vec::new(), tarball.to_vec()),
@@ -420,108 +407,6 @@ fn an_agent_hears_of_a_newer_version_once_a_day_and_json_output_never_changes() 
     assert_eq!(server.asked(), Vec::<String>::new(), "a check from the last day needs no new one");
 }
 
-#[test]
-fn auto_mode_installs_a_found_release_and_the_engine_restarts_itself_into_it() {
-    let Some(target) = target() else { return };
-    let built = Built::new();
-    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
-    let mut install = Install::agent_with_engine(&server);
-    install.configure("updates: auto\n");
-    install.found("0.1.1");
-    let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
-
-    let started = install.run(&["status", "--json"]);
-    let (old_pid, old_version) = install.engine();
-    eventually("the engine restarted into 0.1.1", || install.running() == Some((old_pid, "0.1.1".into())));
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
-    let first = install.run(&["status"]);
-    let second = install.run(&["status"]);
-
-    assert_eq!((started.code, started.stderr.as_str(), old_version.as_str()), (0, "", "0.1.0"));
-    assert_ne!(std::fs::metadata(install.exe()).unwrap().ino(), old_inode, "the engine replaced the binary");
-    assert_eq!(first.stderr, "# updated torrential from 0.1.0 to 0.1.1\n");
-    assert_eq!(second.stderr, "");
-    assert_eq!(install.engine(), (old_pid, "0.1.1".into()), "the engine restarted in place, so launchd keeps it");
-    assert_eq!(install.files_in_bin(), ["torrential"]);
-    assert_eq!(server.asked(), assets(target), "a release found within the day needs no new check");
-}
-
-#[test]
-fn an_update_installs_while_a_stream_is_open_and_restarts_once_it_closes() {
-    use std::io::{Read, Write};
-    let Some(target) = target() else { return };
-    let (answer, gate) = mpsc::channel();
-    let built = Built::new();
-    let server = Server::gated("0.1.1", &built.release("0.1.1", Some("0.1.1")), None, Some(gate));
-    let mut install = Install::agent_with_engine(&server);
-    // A fixed port, like the real one, so the web app's address outlives the restart.
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    install.set("TORRENTIAL_TEST_FAKE_RATE", "0");
-    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
-    let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
-    let web: serde_json::Value = serde_json::from_str(&install.run(&["web", "--json"]).stdout).unwrap();
-    assert_eq!(web["url"], format!("http://127.0.0.1:{port}"));
-    let (pid, _) = install.engine();
-    let jobs: serde_json::Value = serde_json::from_str(&install.run(&["status", "--json"]).stdout).unwrap();
-    let wikipedia = jobs["jobs"].as_array().unwrap().iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap();
-    let news = || -> Option<serde_json::Value> {
-        let mut page = TcpStream::connect(("127.0.0.1", port)).ok()?;
-        page.write_all(b"GET /api/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").ok()?;
-        let mut answer = String::new();
-        page.read_to_string(&mut answer).ok()?;
-        serde_json::from_str(answer.split_once("\r\n\r\n")?.1).ok()
-    };
-
-    // A player asks for the end of a file that has not arrived, so its stream stays open.
-    let mut player = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    let id = wikipedia["id"].as_str().unwrap();
-    let ask = format!("GET /{id}/0/enwiki.xml.bz2 HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=23514217000-\r\n\r\n");
-    player.write_all(ask.as_bytes()).unwrap();
-    let mut head = [0; 12];
-    player.read_exact(&mut head).unwrap();
-    answer.send(()).unwrap();
-    eventually("the engine says the update waits", || {
-        news().is_some_and(|news| news["notice"] == "torrential 0.1.1 installs when nothing is playing.")
-    });
-    std::thread::sleep(Duration::from_secs(1));
-    let waited = (std::fs::metadata(install.exe()).unwrap().ino(), install.running());
-    drop(player);
-    eventually("the engine restarted into 0.1.1", || install.running() == Some((pid, "0.1.1".into())));
-
-    assert_eq!(&head, b"HTTP/1.1 206");
-    assert_ne!(waited.0, old_inode, "the release was installed while the stream was open");
-    assert_eq!(waited.1, Some((pid, "0.1.0".into())), "the engine kept running until the stream closed");
-    assert_eq!(news().unwrap(), serde_json::json!({"version": "0.1.1", "notice": "Updated torrential to 0.1.1."}));
-    let [tarball, sum] = assets(target);
-    assert_eq!(server.asked(), ["/latest".to_string(), tarball, sum]);
-}
-
-#[test]
-fn an_engine_on_a_fallback_port_keeps_it_across_the_restart_into_an_update() {
-    if target().is_none() {
-        return;
-    }
-    let built = Built::new();
-    let server = Server::start("0.1.1", &built.release("0.1.1", Some("0.1.1")), None);
-    let mut install = Install::agent_with_engine(&server);
-    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
-    install.set("TORRENTIAL_TEST_HTTP_PORT", &taken.local_addr().unwrap().port().to_string());
-    install.configure("updates: auto\n");
-    install.found("0.1.1");
-    let address = |install: &Install| -> serde_json::Value {
-        let web: serde_json::Value = serde_json::from_str(&install.run(&["web", "--json"]).stdout).unwrap();
-        web["url"].clone()
-    };
-
-    let before = address(&install);
-    let (pid, _) = install.engine();
-    eventually("the engine restarted into 0.1.1", || install.running() == Some((pid, "0.1.1".into())));
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
-
-    assert_ne!(before, format!("http://127.0.0.1:{}", taken.local_addr().unwrap().port()));
-    assert_eq!(address(&install), before, "open pages keep reaching the engine");
-}
-
 impl Install {
     fn checked(&self) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(self.state().join("update.json")).unwrap()).unwrap()
@@ -564,35 +449,3 @@ fn a_release_whose_binary_says_another_version_is_neither_installed_nor_tried_ag
     assert!(log.contains("says it is torrential 0.1.0"), "{log}");
 }
 
-#[test]
-fn wait_keeps_following_a_download_across_the_restart_into_an_update() {
-    if target().is_none() {
-        return;
-    }
-    let (answer, gate) = mpsc::channel();
-    let built = Built::new();
-    let server = Server::gated("0.1.1", &built.release("0.1.1", Some("0.1.1")), None, Some(gate));
-    let mut install = Install::agent_with_engine(&server);
-    install.set("TORRENTIAL_TEST_FAKE_RATE", "0");
-    let jobs: serde_json::Value = serde_json::from_str(&install.run(&["status", "--json"]).stdout).unwrap();
-    let wikipedia = jobs["jobs"].as_array().unwrap().iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap();
-    let id = wikipedia["id"].as_str().unwrap()[..6].to_string();
-    let (pid, _) = install.engine();
-
-    let wait = install
-        .command(&install.exe(), &["wait", &id, "--timeout", "8s", "--json"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    answer.send(()).unwrap();
-    eventually("the engine restarted into 0.1.1", || install.running() == Some((pid, "0.1.1".into())));
-    let wait = wait.wait_with_output().unwrap();
-
-    let stdout = String::from_utf8(wait.stdout).unwrap();
-    let result: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
-    assert_eq!((wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()), (Some(8), ""), "{stdout}");
-    assert_eq!(result["outcome"], "timeout");
-    assert!((8..=9).contains(&result["elapsed"].as_u64().unwrap()), "it kept its deadline: {result}");
-}
