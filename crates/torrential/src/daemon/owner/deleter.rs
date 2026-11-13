@@ -444,7 +444,7 @@ impl Deleter {
                     Ok(_) => {}
                     Err(e) => return Outcome::Again(kept(format!("it cannot be read: {}", io::Error::from(e)))),
                 }
-                let left = empty(&folder, &in_use.files);
+                let left = empty(&folder, &in_use.files, made.device);
                 drop(folder);
                 if left.why.is_none() && rustix::fs::unlinkat(&root.fd, name.as_str(), AtFlags::REMOVEDIR).is_ok() {
                     *bytes = 0;
@@ -558,8 +558,9 @@ struct Left {
     why: Option<&'static str>,
 }
 
-/// Deletes everything in `folder` without following a link, and keeps the files `keep` names.
-fn empty(folder: &OwnedFd, keep: &HashSet<Identity>) -> Left {
+/// Deletes everything in `folder` on the disk `device` without following a link, and keeps the
+/// files `keep` names. It never goes into another disk mounted inside.
+fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
     let mut left = Left { bytes: 0, why: None };
     fn fail(left: &mut Left, why: &'static str) {
         left.why.get_or_insert(why);
@@ -578,10 +579,16 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>) -> Left {
     for name in names {
         let name = OsStr::from_bytes(&name);
         let Ok(stat) = rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) else { continue };
-        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+        let directory = FileType::from_raw_mode(stat.st_mode) == FileType::Directory;
+        if Identity::of(&stat).device != device || mount_root(folder, name) {
+            fail(
+                &mut left,
+                if directory { "a folder in it is on another disk" } else { "a file in it is on another disk" },
+            );
+        } else if directory {
             match open_folder(folder, name) {
                 Ok(inner) => {
-                    let inside = empty(&inner, keep);
+                    let inside = empty(&inner, keep, device);
                     left.bytes += inside.bytes;
                     if let Some(why) = inside.why {
                         fail(&mut left, why);
@@ -605,6 +612,25 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>) -> Left {
         }
     }
     left
+}
+
+/// Whether `name` in `folder` is where a file system, or a part of one, is mounted. Only Linux
+/// tells, and only Linux mounts a part of the same disk, which needs root.
+fn mount_root(folder: &OwnedFd, name: &OsStr) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{StatxAttributes, StatxFlags};
+        let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
+        rustix::fs::statx(folder, name, flags, StatxFlags::empty()).is_ok_and(|found| {
+            found.stx_attributes_mask.contains(StatxAttributes::MOUNT_ROOT)
+                && found.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (folder, name);
+        false
+    }
 }
 
 /// Opens the folder `inside` leads to below `folder` and names its last part, going down one
@@ -741,6 +767,56 @@ mod tests {
         assert_eq!(std::fs::read_to_string(folder.join("notes.txt")).unwrap(), "the person's own notes");
         assert_eq!(std::fs::read_to_string(root.join("plays/moved/film.mp4")).unwrap(), "film");
         assert_eq!(store.deletions().unwrap(), [], "it is not tried again");
+    }
+
+    /// A small disk image mounted at a folder until it is dropped, or `None` when the system
+    /// cannot mount one.
+    #[cfg(target_os = "macos")]
+    struct Mounted(PathBuf);
+
+    #[cfg(target_os = "macos")]
+    impl Mounted {
+        fn at(point: &Path, image: &Path) -> Option<Mounted> {
+            let hdiutil = |args: &[&std::ffi::OsStr]| {
+                std::process::Command::new("hdiutil").args(args).status().is_ok_and(|status| status.success())
+            };
+            std::fs::create_dir_all(point).unwrap();
+            let size = ["create", "-quiet", "-size", "1m", "-fs", "HFS+", "-volname", "torrential-test"];
+            let made = hdiutil(&[size.map(std::ffi::OsStr::new).as_slice(), &[image.as_os_str()]].concat());
+            let attach = ["attach", "-quiet", "-nobrowse", "-mountpoint"].map(std::ffi::OsStr::new);
+            (made && hdiutil(&[attach.as_slice(), &[point.as_os_str(), image.as_os_str()]].concat()))
+                .then(|| Mounted(point.to_path_buf()))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for Mounted {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(&self.0).status();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_disk_mounted_inside_a_play_folder_is_left_alone() {
+        let Place { root, store, .. } = &mut place();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), store).unwrap();
+        let (folder, made) = deleter.make_play(id(1)).unwrap();
+        write(&folder.join("film.mp4"), "film");
+        let Some(_disk) = Mounted::at(&folder.join("extras"), &root.join("disk.dmg")) else {
+            eprintln!("hdiutil cannot mount a disk image here, so this test proves nothing");
+            return;
+        };
+        write(&folder.join("extras/keep.txt"), "on another disk");
+
+        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 })).unwrap();
+        let why = "a folder in it is on another disk, so torrential tries again";
+        assert_eq!(
+            run(&mut deleter, store, &InUse::default()),
+            [Report { kept: vec![(folder.clone(), why.into())], ..Report::default() }]
+        );
+        assert_eq!(std::fs::read_to_string(folder.join("extras/keep.txt")).unwrap(), "on another disk");
+        assert!(!folder.join("film.mp4").exists(), "what is on the play folder's own disk goes");
     }
 
     #[test]
