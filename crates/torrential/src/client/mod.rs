@@ -351,9 +351,9 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             if let Some(conn) = connect::existing(&paths, env)? {
                 connect::stop(conn)?;
             }
-            service_report(service::install(env, &paths.log())?, mode)
+            service_report(service::install(env, &paths)?, mode)
         }
-        DaemonCommand::Uninstall => service_report(service::uninstall(env)?, mode),
+        DaemonCommand::Uninstall => service_report(service::uninstall(env, &paths)?, mode),
         DaemonCommand::Run { .. } => Ok(crate::daemon::run(env)),
         DaemonCommand::Launch => Ok(launch::launch_stage(env)),
     }

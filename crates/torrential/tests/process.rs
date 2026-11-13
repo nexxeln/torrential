@@ -218,6 +218,75 @@ fn the_engine_exits_after_its_idle_timeout() {
     assert!(std::fs::read_to_string(home.state().join("engine.log")).unwrap().contains("engine stopped"));
 }
 
+#[test]
+fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
+    let mut home =
+        Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0"), ("CLAUDECODE", "1")]);
+    let dir = home.dir.path().to_path_buf();
+    home.unset("TORRENTIAL_HOME");
+    for (var, folder) in [
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_RUNTIME_DIR", "run"),
+    ] {
+        home.set(var, &dir.join(folder).display().to_string());
+    }
+    // Stand-ins for launchctl and systemctl, which record how they were called.
+    let (bin, calls) = (dir.join("bin"), dir.join("calls"));
+    std::fs::create_dir(&bin).unwrap();
+    for program in ["launchctl", "systemctl"] {
+        let script = format!("#!/bin/sh\necho \"{program} $*\" >> '{}'\n", calls.display());
+        std::fs::write(bin.join(program), script).unwrap();
+        std::fs::set_permissions(bin.join(program), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    home.set("TORRENTIAL_TEST_SERVICE_BIN", &bin.display().to_string());
+    let unit = if cfg!(target_os = "macos") {
+        dir.join("Library/LaunchAgents/dev.torrential.engine.plist")
+    } else {
+        dir.join(".config/systemd/user/torrential.service")
+    };
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_torrential")).unwrap();
+
+    let first = home.run(&["status"]);
+    let second = home.run(&["status"]);
+    let added = std::fs::read_to_string(&unit).unwrap();
+    let uninstall = home.json(&["engine", "uninstall", "--json"]);
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let after_uninstall = home.run(&["status"]);
+    let left_out = !unit.exists();
+    let install = home.json(&["engine", "install", "--json"]);
+
+    assert_eq!(
+        (first.code, first.stderr.as_str()),
+        (0, "# the engine now starts at login; torrential engine uninstall turns that off\n")
+    );
+    assert_eq!(second.stderr, "");
+    assert!(added.contains(&exe.display().to_string()), "{added}");
+    if cfg!(target_os = "linux") {
+        let link = dir.join(".config/systemd/user/default.target.wants/torrential.service");
+        assert_eq!(std::fs::read_link(link).unwrap(), unit);
+    }
+    assert_eq!(uninstall["result"], "uninstalled");
+    assert_eq!((after_uninstall.code, after_uninstall.stderr.as_str()), (0, ""));
+    assert!(left_out, "an engine started after uninstall leaves the service out");
+    assert_eq!(install["result"], "installed");
+    assert!(unit.exists());
+    let uid = unsafe { libc::geteuid() };
+    let expected = if cfg!(target_os = "macos") {
+        format!(
+            "launchctl bootout gui/{uid}/dev.torrential.engine\nlaunchctl bootout gui/{uid}/dev.torrential.engine\n\
+             launchctl bootstrap gui/{uid} {}\n",
+            unit.display()
+        )
+    } else {
+        "systemctl --user disable --now torrential.service\nsystemctl --user daemon-reload\n\
+         systemctl --user daemon-reload\nsystemctl --user enable --now torrential.service\n"
+            .to_string()
+    };
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), expected, "adding the service at start ran neither");
+}
+
 fn magnet(size: u64) -> String {
     format!("magnet:?xt=urn:btih:{ARCH}&dn=archlinux-2026.10.01-x86_64.iso&xl={size}")
 }

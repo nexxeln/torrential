@@ -240,6 +240,11 @@ fn serve(env: &Env, paths: &Paths) -> Result<(), Startup> {
         None => return Err(Startup::AlreadyRunning(format!("another engine owns {}", paths.state.display()))),
     };
     let _ = std::fs::remove_file(paths.startup_error());
+    match crate::client::service::add_at_start(env, paths) {
+        Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
+        Ok(None) => {}
+        Err(e) => log(&format!("cannot add a login service: {}", e.message)),
+    }
     prepare_runtime_dir(&paths.runtime)?;
     let seed = fake(env) && !paths.database().exists();
     let mut store = Store::open(&paths.database())?;

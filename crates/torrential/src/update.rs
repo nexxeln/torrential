@@ -457,10 +457,12 @@ pub fn notice(paths: &Paths, env: &Env, audience: Audience, now: i64) -> Option<
 pub fn print_notice(mode: Mode, env: &Env) {
     let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
-    match (notice(&paths, env, audience, now()), audience) {
-        (Some(line), Audience::Person) => anstream::eprintln!("{}", paint(Token::Muted, &line)),
-        (Some(line), Audience::Agent) => eprintln!("{line}"),
-        (None, _) => {}
+    let lines = [crate::client::service::notice(&paths, audience), notice(&paths, env, audience, now())];
+    for line in lines.into_iter().flatten() {
+        match audience {
+            Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),
+            Audience::Agent => eprintln!("{line}"),
+        }
     }
 }
 
