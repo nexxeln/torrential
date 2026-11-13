@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::id::ReleaseId;
 use crate::profile::Profile;
 use crate::quality::Quality;
+use crate::title::{Span, Wanted};
+use crate::watching::Skip;
 
 /// A torrent offered by one or more search sources, merged by infohash. Its JSON
 /// also carries the [`Quality`] its name gives.
@@ -29,6 +31,16 @@ pub struct Release {
     pub torrent_url: Option<String>,
     /// A page about the item at its source, for people.
     pub info_url: Option<String>,
+    /// What of the wanted title this release holds. Only in a title's sources.
+    #[serde(default)]
+    pub span: Option<Span>,
+    /// How likely its swarm is to send data now. Only in a title's sources.
+    #[serde(default)]
+    pub swarm: Option<Swarm>,
+    /// Why it did not start when a play here last tried it, if that was lately. Only in a title's
+    /// sources, which put it last.
+    #[serde(default)]
+    pub failed: Option<Skip>,
 }
 
 impl Release {
@@ -54,6 +66,12 @@ impl Serialize for Release {
             magnet: &'a Option<String>,
             torrent_url: &'a Option<String>,
             info_url: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            span: Option<Span>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            swarm: Option<Swarm>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            failed: &'a Option<Skip>,
         }
         let Release {
             id,
@@ -68,6 +86,9 @@ impl Serialize for Release {
             magnet,
             torrent_url,
             info_url,
+            span,
+            swarm,
+            failed,
         } = self;
         Fields {
             id,
@@ -83,8 +104,36 @@ impl Serialize for Release {
             magnet,
             torrent_url,
             info_url,
+            span: *span,
+            swarm: *swarm,
+            failed,
         }
         .serialize(serializer)
+    }
+}
+
+/// How likely a release's swarm is to send data now. Lower plays first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Swarm {
+    Strong,
+    Fair,
+    Weak,
+    Unknown,
+}
+
+impl Swarm {
+    /// The tier of a swarm with `seeders`, listed by a lawful catalog or not. `None` for a swarm
+    /// known to have no seeder outside a lawful catalog. A lawful catalog that does not count
+    /// seeders serves its files from web seeds over HTTP, as dependable as any swarm.
+    pub fn of(seeders: Option<u32>, lawful: bool) -> Option<Swarm> {
+        match (seeders, lawful) {
+            (Some(20..), _) | (None, true) => Some(Swarm::Strong),
+            (Some(5..=19), _) => Some(Swarm::Fair),
+            (Some(1..=4), _) => Some(Swarm::Weak),
+            (Some(0), true) | (None, false) => Some(Swarm::Unknown),
+            (Some(0), false) => None,
+        }
     }
 }
 
@@ -183,6 +232,11 @@ pub struct SearchQuery {
     /// detected about the machine, so a result's query holds the profile it ranked for.
     #[serde(default)]
     pub profile: Profile,
+    /// Set by the engine for a title's sources, never by a client. Searches each of the title's
+    /// queries in place of `text`, keeps the releases that are this title, and ranks them for
+    /// playing now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wanted: Option<Wanted>,
 }
 
 impl SearchQuery {
@@ -202,6 +256,7 @@ impl SearchQuery {
             adult: false,
             fresh: false,
             profile: Profile::default(),
+            wanted: None,
         }
     }
 }
@@ -285,6 +340,9 @@ mod tests {
             magnet: None,
             torrent_url: None,
             info_url: None,
+            span: None,
+            swarm: None,
+            failed: None,
         }
     }
 
@@ -312,6 +370,69 @@ mod tests {
         let mut asked = found(vec![iso]);
         asked.query.category = Some(Category::Video);
         assert!(asked.is_video(), "--category video");
+    }
+
+    fn keys(value: &serde_json::Value) -> BTreeSet<&str> {
+        value.as_object().unwrap().keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn a_raw_search_result_writes_no_span_or_wanted_title() {
+        let raw = found(vec![named("Night of the Living Dead (1968)", Some(Category::Video))]);
+        let json = serde_json::to_value(&raw).unwrap();
+        assert_eq!(
+            keys(&json["query"]),
+            BTreeSet::from([
+                "adult",
+                "category",
+                "fresh",
+                "limit",
+                "max_size",
+                "min_seeds",
+                "profile",
+                "sort",
+                "sources",
+                "text",
+                "timeout_ms",
+            ])
+        );
+        assert_eq!(
+            keys(&json["releases"][0]),
+            BTreeSet::from([
+                "category",
+                "flags",
+                "id",
+                "info_url",
+                "leechers",
+                "magnet",
+                "name",
+                "published",
+                "quality",
+                "seeders",
+                "size",
+                "sources",
+                "torrent_url",
+            ])
+        );
+        assert_eq!(serde_json::from_value::<SearchResult>(json).unwrap(), raw);
+
+        let mut sources = raw;
+        sources.releases[0].span = Some(Span::Film);
+        sources.query.wanted = Some(Wanted {
+            name: "Night of the Living Dead".into(),
+            year: Some(1968),
+            episode: None,
+            namesakes: crate::title::Namesakes::Leading,
+            runtime: None,
+            season_episodes: None,
+            countries: Default::default(),
+        });
+        let json = serde_json::to_value(&sources).unwrap();
+        assert_eq!(
+            (&json["releases"][0]["span"], &json["query"]["wanted"]["namesakes"]),
+            (&"film".into(), &"leading".into())
+        );
+        assert_eq!(serde_json::from_value::<SearchResult>(json).unwrap(), sources);
     }
 
     #[test]

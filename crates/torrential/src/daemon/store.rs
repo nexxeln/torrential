@@ -2,10 +2,10 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TorrentId};
+use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
-use super::book::{Intent, JobRecord};
+use super::book::{Intent, JobRecord, Linked};
 use super::search_port::SavedLink;
 
 const MIGRATIONS: &[&str] = &[
@@ -56,6 +56,34 @@ CREATE TABLE results (
     "ALTER TABLE jobs ADD COLUMN files_verified TEXT;",
     "ALTER TABLE jobs ADD COLUMN max_size_from_setup INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE results ADD COLUMN link TEXT;",
+    r#"
+CREATE TABLE job_titles (
+    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    span TEXT NOT NULL,
+    release TEXT,
+    played INTEGER NOT NULL DEFAULT 0 CHECK (played IN (0, 1)),
+    linked_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX job_titles_by_title ON job_titles(title);
+CREATE TABLE watched (
+    video TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    position REAL NOT NULL CHECK (position >= 0),
+    duration REAL CHECK (duration IS NULL OR duration > 0),
+    release TEXT,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX watched_by_title ON watched(title, updated_at);
+CREATE TABLE library (
+    title TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('film', 'series')),
+    name TEXT NOT NULL,
+    year INTEGER,
+    rating REAL,
+    saved_at INTEGER NOT NULL
+) STRICT;
+"#,
 ];
 
 #[derive(Clone, PartialEq, Debug)]
@@ -138,6 +166,11 @@ impl Store {
         sql_error(&self.path, e)
     }
 
+    /// The database file, which the shelf opens a second connection to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     fn write<T>(&mut self, f: impl FnOnce(&Transaction) -> rusqlite::Result<T>) -> Result<T, Error> {
         let Self { conn, path } = self;
         let tx = conn.transaction().map_err(|e| sql_error(path, e))?;
@@ -151,8 +184,10 @@ impl Store {
             .conn
             .prepare(
                 "SELECT j.id, j.info_hash, j.name, j.dir, j.selection, j.max_size, j.magnet, j.intent, j.finished_at, \
-                 j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup FROM jobs j \
+                 j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup, \
+                 t.title, t.span, t.release, t.played FROM jobs j \
                  LEFT JOIN metainfo m ON m.id = j.id \
+                 LEFT JOIN job_titles t ON t.job = j.id \
                  ORDER BY j.added_at",
             )
             .map_err(|e| self.fail(e))?;
@@ -175,6 +210,12 @@ impl Store {
                     r.get::<_, Option<String>>(13)?,
                     r.get::<_, Option<Vec<u8>>>(14)?,
                     r.get::<_, bool>(15)?,
+                    (
+                        r.get::<_, Option<String>>(16)?,
+                        r.get::<_, Option<String>>(17)?,
+                        r.get::<_, Option<String>>(18)?,
+                        r.get::<_, Option<bool>>(19)?,
+                    ),
                 ))
             })
             .map_err(|e| self.fail(e))?;
@@ -197,6 +238,7 @@ impl Store {
                 files_verified,
                 bytes,
                 from_setup,
+                title,
             ) = row.map_err(|e| self.fail(e))?;
             let bad = |what: &str| corrupt(&self.path, &format!("job {id} has an unreadable {what}"));
             let intent = match (intent.as_str(), finished_at, error) {
@@ -224,6 +266,7 @@ impl Store {
                     .map(|f| serde_json::from_str(&f))
                     .transpose()
                     .map_err(|_| bad("file progress"))?,
+                title: linked(title).map_err(|_| bad("title link"))?,
             };
             jobs.push(StoredJob { record, metainfo: bytes });
         }
@@ -258,6 +301,9 @@ impl Store {
             insert_aliases(tx, record.id, &record.info_hash)?;
             if let Some(bytes) = metainfo {
                 upsert_metainfo(tx, record.id, bytes, now)?;
+            }
+            if let Some(linked) = &record.title {
+                insert_link(tx, record.id, &linked.link, now)?;
             }
             tx.execute("DELETE FROM tombstones WHERE id = ?1", [record.id.to_hex()])?;
             Ok(())
@@ -392,6 +438,15 @@ impl Store {
         })
     }
 
+    /// Links a download that already existed to the title a play joined it for.
+    pub fn link(&mut self, id: TorrentId, link: &TitleLink, now: i64) -> Result<(), Error> {
+        self.write(|tx| insert_link(tx, id, link, now))
+    }
+
+    pub fn played(&mut self, id: TorrentId) -> Result<(), Error> {
+        self.write(|tx| tx.execute("UPDATE job_titles SET played = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
+    }
+
     pub fn remove_duplicate(&mut self, id: TorrentId) -> Result<(), Error> {
         self.write(|tx| tx.execute("DELETE FROM jobs WHERE id = ?1", [id.to_hex()]).map(drop))
     }
@@ -469,7 +524,7 @@ impl Store {
     }
 }
 
-fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
+pub(super) fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
     use rusqlite::ErrorCode as Sql;
     match e.sqlite_error_code() {
         Some(Sql::DatabaseCorrupt | Sql::NotADatabase) => corrupt(path, &e.to_string()),
@@ -501,6 +556,30 @@ fn intent_columns(intent: &Intent) -> (&'static str, Option<i64>, Option<String>
         Intent::Done { finished_at } => ("done", Some(*finished_at), None),
         Intent::Failed { error } => ("failed", None, Some(json(error))),
     }
+}
+
+fn insert_link(tx: &Transaction, id: TorrentId, link: &TitleLink, now: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO job_titles (job, title, span, release, played, linked_at) \
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        params![
+            id.to_hex(),
+            link.title.as_str(),
+            link.span.to_string(),
+            link.release.as_ref().map(|r| r.to_ref()),
+            now
+        ],
+    )
+    .map(drop)
+}
+
+type LinkColumns = (Option<String>, Option<String>, Option<String>, Option<bool>);
+
+fn linked(columns: LinkColumns) -> Result<Option<Linked>, ()> {
+    let (Some(title), Some(span), release, Some(played)) = columns else { return Ok(None) };
+    let release = release.map(|r| serde_json::from_value(serde_json::Value::String(r))).transpose().map_err(drop)?;
+    let link = TitleLink { title: title.parse().map_err(drop)?, span: span.parse().map_err(drop)?, release };
+    Ok(Some(Linked { link, played }))
 }
 
 fn alias_keys(info_hash: &InfoHash) -> Vec<String> {
@@ -561,6 +640,7 @@ fn save_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use torrential_core::ReleaseId;
 
     fn record(n: u8) -> JobRecord {
         JobRecord {
@@ -576,6 +656,7 @@ mod tests {
             verified: 0,
             piece_map: None,
             files_verified: None,
+            title: None,
         }
     }
 
@@ -605,6 +686,34 @@ mod tests {
         let saved = JobRecord { verified: 9, piece_map: Some(map), files_verified: Some(vec![4, 5]), ..record(5) };
         assert_eq!(jobs[2].record, saved);
         assert_eq!(store.resume(TorrentId::from_bytes([3; 20])).unwrap().as_deref(), Some(&b"resume"[..]));
+    }
+
+    #[test]
+    fn a_title_link_keeps_whether_it_played_and_goes_with_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        let link = TitleLink {
+            title: "tt9999901".parse().unwrap(),
+            span: "s1".parse().unwrap(),
+            release: Some(ReleaseId::Torrent(TorrentId::from_bytes([1; 20]))),
+        };
+        let made = Linked { link: link.clone(), played: false };
+        store.insert(&JobRecord { title: Some(made.clone()), ..record(1) }, None, 100).unwrap();
+        store.insert(&record(3), None, 100).unwrap();
+        store.link(TorrentId::from_bytes([3; 20]), &link, 110).unwrap();
+        store.played(TorrentId::from_bytes([3; 20])).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
+        assert_eq!(titles, [Some(made), Some(Linked { link, played: true })]);
+
+        let gone = Tombstone { id: TorrentId::from_bytes([1; 20]), name: None, path: None, removed_at: 120 };
+        store.remove(&gone).unwrap();
+        let left: Vec<TorrentId> = store.jobs().unwrap().into_iter().map(|j| j.record.id).collect();
+        assert_eq!(left, [TorrentId::from_bytes([3; 20])]);
+        let links: i64 = store.conn.query_row("SELECT count(*) FROM job_titles", [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 1);
     }
 
     #[test]

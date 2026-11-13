@@ -3,6 +3,7 @@ import { PlayIcon } from "@heroicons/react/24/solid";
 import {
   memo,
   type PointerEvent,
+  type ReactNode,
   type RefObject,
   useCallback,
   useEffect,
@@ -56,6 +57,53 @@ const DOUBLE_MS = 220;
 /** Scroll-wheel distance for one 5% step of volume. */
 const WHEEL_STEP = 60;
 const HINT_MS = 12000;
+/** What N and P say when nothing plays after or before, as `[after, before]`. */
+const ENDS = {
+  episode: ["This is the last episode", "This is the first episode"],
+  film: ["Nothing plays after this film", "Nothing plays before this film"],
+  torrent: ["This is the last video of the torrent", "This is the first video of the torrent"],
+} as const;
+
+/** A name for what plays, over the picture. */
+export interface Heading {
+  title: string;
+  /** Under the title: an episode's number and name, or a film's year. */
+  detail: string | null;
+}
+
+/** Where a video starts, and where the place it stopped is kept. */
+export interface Memory {
+  /** Seconds. */
+  start: number;
+  /** Starting at `start` picks up an earlier visit, which the player says, with a way to start over. */
+  resumed: boolean;
+  save: (time: number, duration: number) => void;
+  forget: () => void;
+}
+
+/** A video before or after this one. */
+export interface Neighbor {
+  name: string;
+  go: () => void;
+}
+
+/** A film or an episode played by title, instead of a file of a torrent. */
+export interface Titled {
+  kind: "film" | "episode";
+  heading: Heading;
+  /** The episodes N and P move to, and the one the end of the video counts down to. */
+  previous: Neighbor | null;
+  next: Neighbor | null;
+  memory: Memory;
+  /** Shown before the first frame. */
+  cover: ReactNode;
+  /** A picture to show until the source's own first frame, such as the last frame of the source it replaces. */
+  poster: string | null;
+  /** More layers over the picture, which can use the player's context. */
+  overlay: ReactNode;
+  /** Another source is being found, which the overlay says, so the wait says nothing about this one's swarm. */
+  replacing: boolean;
+}
 
 interface Props {
   play: PlayInfo;
@@ -63,6 +111,8 @@ interface Props {
   /** Asks the engine for the video again, from the start of the session. */
   onReload: () => void;
   onBack: () => void;
+  /** Without it, the player names the release, moves through the torrent's videos, and keeps positions in this browser. */
+  titled?: Titled;
 }
 
 function useFullscreen(target: RefObject<HTMLElement | null>): [boolean, () => void] {
@@ -107,6 +157,19 @@ function episodeName(path: string, release: string): string {
   return (whole.startsWith(show) && whole.slice(show.length).trim()) || whole;
 }
 
+/** A torrent's file starts where this browser saw it stop, and keeps its place there. */
+function torrentMemory(play: PlayInfo): Memory {
+  const { id, name, video: file } = play;
+  const stored = position(id, file.index);
+  const start = stored && !stored.finished && stored.time > WORTH_RESUMING ? stored.time : 0;
+  return {
+    start,
+    resumed: start > 0,
+    save: (time, duration) => savePosition({ id, file: file.index, name, path: file.path, time, duration }),
+    forget: () => forgetPosition(id, file.index),
+  };
+}
+
 /**
  * The player once the engine has said what is in the file: the picture, and everything drawn over
  * it. Memoized, because the page above renders with every report of the download's progress.
@@ -116,13 +179,13 @@ export const Playback = memo(function Playback(props: Props) {
   const [element, setElement] = useState<HTMLVideoElement | null>(null);
   return (
     <div ref={frame} className="relative size-full overflow-hidden bg-black select-none">
-      <video ref={setElement} playsInline className="absolute inset-0 size-full" />
+      <video ref={setElement} playsInline poster={props.titled?.poster ?? undefined} className="absolute inset-0 size-full" />
       {element && <Stage element={element} frame={frame} {...props} />}
     </div>
   );
 });
 
-function Stage({ element, frame, play, media, onReload, onBack }: Props & { element: HTMLVideoElement; frame: RefObject<HTMLDivElement | null> }) {
+function Stage({ element, frame, play, media, onReload, onBack, titled }: Props & { element: HTMLVideoElement; frame: RefObject<HTMLDivElement | null> }) {
   const { id, video: file } = play;
   const parts = useMemo<PlayerParts>(
     () => ({ element, video: new VideoStore(element), feedback: new FeedbackStore(), scrub: new Scrub() }),
@@ -140,13 +203,11 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
   const [fullscreen, toggleFullscreen] = useFullscreen(frame);
   const [awake, wake, sleep] = useAwake();
 
-  const resumed = useMemo(() => {
-    const stored = position(id, file.index);
-    return stored && !stored.finished && stored.time > WORTH_RESUMING ? stored.time : 0;
-  }, [id, file.index]);
+  const ownMemory = titled?.memory;
+  const memory = useMemo(() => ownMemory ?? torrentMemory(play), [ownMemory, play]);
   /** The last time played, which a new source starts from and the position memory stores. */
-  const lastTime = useRef(resumed);
-  const [resumeNotice, setResumeNotice] = useState(resumed > 0);
+  const lastTime = useRef(memory.start);
+  const [resumeNotice, setResumeNotice] = useState(memory.resumed);
 
   const timeline = useRef({ duration, fps: media.video?.fps ?? null, chapters: media.chapters });
   timeline.current = { duration, fps: media.video?.fps ?? null, chapters: media.chapters };
@@ -199,8 +260,8 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
   // Where playback is, remembered for the next visit.
   const remember = useCallback(() => {
     if (!duration || lastTime.current <= WORTH_RESUMING / 2) return;
-    savePosition({ id, file: file.index, name: play.name, path: file.path, time: lastTime.current, duration });
-  }, [id, file.index, file.path, play.name, duration]);
+    memory.save(lastTime.current, duration);
+  }, [memory, duration]);
   useEffect(() => {
     const follow = () => {
       if (video.snapshot().started) lastTime.current = element.ended && duration ? duration : element.currentTime;
@@ -300,11 +361,22 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
     [play.files],
   );
   const here = videos.findIndex((f) => f.index === file.index);
-  const next = videos[here + 1] ?? null;
-  const previous = videos[here - 1] ?? null;
-  const goNext = useMemo(() => (next ? () => navigate(watchPath(id, next.index), { replace: true }) : null), [id, next]);
-  const goPrevious = useMemo(() => (previous ? () => navigate(watchPath(id, previous.index), { replace: true }) : null), [id, previous]);
-  const multiple = videos.length > 1;
+  const nextFile = videos[here + 1] ?? null;
+  const previousFile = videos[here - 1] ?? null;
+  const torrentNext = useMemo<Neighbor | null>(
+    () => nextFile && { name: episodeName(nextFile.path, play.name), go: () => navigate(watchPath(id, nextFile.index), { replace: true }) },
+    [id, nextFile, play.name],
+  );
+  const torrentPrevious = useMemo<Neighbor | null>(
+    () => previousFile && { name: episodeName(previousFile.path, play.name), go: () => navigate(watchPath(id, previousFile.index), { replace: true }) },
+    [id, previousFile, play.name],
+  );
+  const next = titled ? titled.next : torrentNext;
+  const previous = titled ? titled.previous : torrentPrevious;
+  const goNext = next?.go ?? null;
+  const goPrevious = previous?.go ?? null;
+  const multiple = !titled && videos.length > 1;
+  const ends = ENDS[titled?.kind ?? "torrent"];
 
   const run = useCallback(
     (action: Command) => {
@@ -329,7 +401,7 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
           return toggleFullscreen();
         case "file": {
           const go = action.direction === 1 ? goNext : goPrevious;
-          return go ? go() : feedback.note(action.direction === 1 ? "This is the last video of the torrent" : "This is the first video of the torrent");
+          return go ? go() : feedback.note(action.direction === 1 ? ends[0] : ends[1]);
         }
         case "subtitles":
           if (subtitles.toggle() === "none") {
@@ -356,7 +428,7 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
           return onBack();
       }
     },
-    [actions, feedback, subtitles, offset, setOffset, media.audio, heard, goNext, goPrevious, toggleFullscreen, sheet, menu.length, filesOpen, closeMenu, onBack],
+    [actions, feedback, subtitles, offset, setOffset, media.audio, heard, goNext, goPrevious, ends, toggleFullscreen, sheet, menu.length, filesOpen, closeMenu, onBack],
   );
   useEffect(() => {
     const pressed = (event: KeyboardEvent) => {
@@ -371,8 +443,12 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
     return () => removeEventListener("keydown", pressed);
   }, [run, wake, sheet]);
 
-  const title = multiple ? episodeName(file.path, play.name) : readable(play.name).title;
-  useMediaSession({ title, album: readable(play.name).title, actions, video, onNext: goNext, onPrevious: goPrevious });
+  const nowPlaying = titled
+    ? titled.kind === "episode"
+      ? { title: titled.heading.detail ?? titled.heading.title, album: titled.heading.title }
+      : { title: titled.heading.title, album: "" }
+    : { title: multiple ? episodeName(file.path, play.name) : readable(play.name).title, album: readable(play.name).title };
+  useMediaSession({ ...nowPlaying, actions, video, onNext: goNext, onPrevious: goPrevious });
   useWakeLock(video);
   const airPlay = useAirPlay(element, how.kind === "direct");
 
@@ -443,8 +519,8 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
         />
 
         <SubtitleLayer track={track} offset={offset} style={style} lifted={showControls} sample={menu.at(-1) === "style"} />
-        {starting && <Starting step={2} name={play.name} readout={<PlayingReadout play={play} />} />}
-        {!stuck && <Buffering play={play} />}
+        {starting && (titled ? titled.cover : <Starting step={2} name={play.name} readout={<PlayingReadout play={play} />} />)}
+        {!stuck && <Buffering play={play} quiet={titled?.replacing ?? false} />}
         <FeedbackLayer />
 
         {!stuck && !waiting && paused && needsClick && (
@@ -459,10 +535,11 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
         )}
         {!stuck && ended && (
           <Ended
-            next={next ? episodeName(next.path, play.name) : null}
+            next={next?.name ?? null}
             onNext={goNext ?? onBack}
             onReplay={() => (actions.seekTo(0), actions.play())}
             onBack={onBack}
+            back={titled ? "Back" : undefined}
           />
         )}
 
@@ -471,7 +548,8 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
           className="absolute inset-x-0 top-0 z-10 transition-opacity duration-300 data-hidden:pointer-events-none data-hidden:opacity-0 motion-reduce:transition-none"
         >
           <TopBar
-            name={starting ? null : play.name}
+            name={starting || titled ? null : play.name}
+            heading={starting ? null : titled?.heading}
             file={multiple ? fileName(file.path) : null}
             readout={starting ? null : <PlayingReadout play={play} />}
             onBack={onBack}
@@ -479,7 +557,8 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
         </div>
         {stats && <Stats media={media} how={how} play={play} subtitle={chosen} offset={offset} audio={heard} />}
 
-        {failure && <Problem title="The video stopped" error={failure} onRetry={() => source.current?.retry()} onBack={onBack} />}
+        {titled?.overlay}
+        {failure && <Problem title="The video stopped" error={failure} onRetry={() => source.current?.retry()} onBack={onBack} back={titled ? "Back" : undefined} />}
         {blocked === "ffmpeg" && (
           <Problem
             title="This file needs ffmpeg"
@@ -491,6 +570,7 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
             }
             onRetry={onReload}
             onBack={onBack}
+            back={titled ? "Back" : undefined}
           >
             <p className="text-sm text-pretty text-soft">
               Browsers cannot read {media.container === "matroska" ? "MKV" : media.container} files by themselves. torrential
@@ -499,7 +579,7 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
           </Problem>
         )}
         {blocked === "browser" && (
-          <Problem title="This browser cannot play the video" onRetry={onReload} onBack={onBack}>
+          <Problem title="This browser cannot play the video" onRetry={onReload} onBack={onBack} back={titled ? "Back" : undefined}>
             <p className="text-sm text-pretty text-soft">
               It has no decoder for {media.video?.codec.toUpperCase() ?? "this format"}. Try another browser, or run{" "}
               <code className="font-mono">torrential play {id.slice(0, 6)}</code> to watch in a desktop player.
@@ -538,12 +618,12 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
           {resumeNotice && (
             <div className="flex px-[max(--spacing(3),2vw)] pb-1">
               <div className="flex animate-appear items-center gap-1 rounded-lg bg-black/60 py-1 pr-1 pl-3 text-sm text-ink tabular-nums motion-reduce:animate-none">
-                Resumed from {clock(resumed)}
+                Resumed from {clock(memory.start)}
                 <Button
                   variant="quiet"
-                  className="px-2 py-0.5"
+                  size="small"
                   onClick={() => {
-                    forgetPosition(id, file.index);
+                    memory.forget();
                     setResumeNotice(false);
                     actions.seekTo(0);
                   }}
@@ -563,6 +643,7 @@ function Stage({ element, frame, play, media, onReload, onBack }: Props & { elem
             filesOpen={filesOpen}
             hasFiles={multiple}
             hasNext={next !== null}
+            nextLabel={titled ? "Next episode (N)" : "Next video (N)"}
             airPlay={airPlay}
             onNext={goNext ?? onBack}
             onMenu={openMenu}

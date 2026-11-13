@@ -12,6 +12,7 @@ pub mod search_port;
 pub mod server;
 pub mod store;
 pub mod subtitle_port;
+pub mod titles;
 pub mod web;
 
 #[cfg(test)]
@@ -58,6 +59,7 @@ pub struct Ports {
     /// Where ffmpeg and ffprobe are now.
     pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
+    pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
 }
 
 impl Ports {
@@ -74,11 +76,26 @@ impl Ports {
             } else {
                 Arc::new(subtitle_port::Live::new(&settings.subtitles)?)
             };
+        let catalog: Arc<dyn titles::catalog_port::CatalogPort> =
+            if fake(env) && env.var("TORRENTIAL_TEST_CATALOG") != Some("live") {
+                Arc::new(titles::catalog_port::Fake::default())
+            } else {
+                let config = torrential_search::catalog::CatalogConfig {
+                    cache_dir: Some(paths.cache.join("catalog")),
+                    ..settings.catalog.clone()
+                };
+                Arc::new(titles::catalog_port::Live::new(&config)?)
+            };
         if fake(env) {
             let rate =
                 env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
+            let swarm = fixture::swarm(rate);
+            // Torrents no peer sends a piece of, so a title play moves past them.
+            for id in env.var("TORRENTIAL_TEST_DEAD").unwrap_or_default().split(',').filter_map(|id| id.parse().ok()) {
+                swarm.withhold(id, u32::MAX);
+            }
             return Ok(Self {
-                engine: Box::new(engine_port::Fake::new(fixture::swarm(rate))),
+                engine: Box::new(engine_port::Fake::new(swarm)),
                 parse: engine_port::parse_fake,
                 search: Arc::new(fixture::search(owner::now())),
                 disk: Box::new(admission::RoomyDisk),
@@ -86,6 +103,7 @@ impl Ports {
                 preferences,
                 tools,
                 subtitles,
+                catalog,
             });
         }
         let network = match env.var("TORRENTIAL_TEST_NETWORK") {
@@ -108,6 +126,7 @@ impl Ports {
             preferences,
             tools,
             subtitles,
+            catalog,
         })
     }
 }
@@ -139,6 +158,7 @@ pub fn start(
     store: Store,
     ports: Ports,
     config: OwnerConfig,
+    timing: titles::Timing,
     version: String,
     http_port: u16,
 ) -> Result<Running, Error> {
@@ -152,6 +172,7 @@ pub fn start(
         .map_err(|e| Error::internal(format!("cannot listen for players on 127.0.0.1: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
+    let shelf = titles::shelf::Shelf::open(store.path())?;
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
     let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, config)?;
@@ -166,6 +187,7 @@ pub fn start(
         version,
         http_port,
         web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
+        titles: titles::Titles::new(ports.catalog, shelf, timing),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players));
     Ok(Running { ctx, owner: task, engine: thread, http })
@@ -236,6 +258,10 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         .unwrap_or(SAVE_RESUME_EVERY);
     let stall_after =
         env.var("TORRENTIAL_TEST_STALL_AFTER").and_then(torrential_core::units::parse_duration).unwrap_or(STALL_AFTER);
+    let timing = match env.var("TORRENTIAL_TEST_TITLE_WAIT").and_then(torrential_core::units::parse_duration) {
+        Some(wait) => titles::Timing { file_list: wait, first_bytes: wait, ..titles::Timing::default() },
+        None => titles::Timing::default(),
+    };
     let config = OwnerConfig {
         default_dir,
         probe_dir: paths.cache.join("probes"),
@@ -261,7 +287,8 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
         let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
-        let running = start(&tokio::runtime::Handle::current(), store, ports, config, version.clone(), http_port)?;
+        let running =
+            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",

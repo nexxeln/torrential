@@ -1,9 +1,9 @@
 <h1 align="center">torrential</h1>
 
-<p align="center">Search torrents and watch them while they download, from your browser, your terminal, or your coding agent.</p>
+<p align="center">Find a film or a show, press Play, and watch it while it downloads. From your browser, your terminal, or your coding agent.</p>
 
 <p align="center">
-  <img src="docs/web-player.png" alt="Sintel playing in the browser while it downloads, with its chapters and the downloaded parts marked on the seek bar" width="800">
+  <img src="docs/web-home.png" alt="The web app's home page, with a film to continue watching and a row of saved films" width="800">
 </p>
 
 ## Install
@@ -33,11 +33,19 @@ nix develop -c cargo install --path crates/torrential
 torrential web
 ```
 
-Search, pick a result, and it plays while it downloads. Jump anywhere and torrential fetches that part first. Subtitles come from the file, or are found online when it has none, and you can shift them when they are out of sync.
+Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. A torrent that gets no data is taken off your downloads again. One that got some, or that you watched part of, is kept. Playing a title never deletes a file or writes over one you already have.
 
 <p align="center">
-  <img src="docs/web-search.png" alt="Search results for Sintel in the web app, ranked for this Mac" width="800">
+  <img src="docs/web-title.png" alt="The page of Night of the Living Dead in the web app, with its poster, synopsis, and a Play button" width="800">
 </p>
+
+It plays while it downloads. Jump anywhere and torrential fetches that part first. It remembers where you stopped in each film and episode, and Play continues there, even from another torrent. Subtitles come from the file, or are found online when it has none.
+
+<p align="center">
+  <img src="docs/web-player.png" alt="Sintel playing in the browser while it downloads, with its chapters and the downloaded parts marked on the seek bar" width="800">
+</p>
+
+To choose a torrent yourself, open Sources on any title. The plain torrent search is one click away, for everything that is not a film or a show.
 
 Browsers cannot read every format. Install [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`) and torrential converts MKV files and surround sound as you watch.
 
@@ -52,10 +60,14 @@ Run `torrential` to open the terminal UI:
 Or run the commands yourself:
 
 ```sh
-torrential search big buck bunny         # each result starts with a short ID
-torrential get fd69b2 --files '*.mp4'    # download only the files you want
-torrential play fd69b2                   # watch in IINA, mpv, or VLC while it downloads
-torrential status                        # list your downloads
+torrential titles night of the living dead   # find a film or a show
+torrential play tt0063350                    # watch it in IINA, mpv, or VLC
+torrential play tt1748166 s01e02             # or one episode
+torrential get tt0063350                     # download it to keep
+
+torrential search arch linux iso             # or search every torrent
+torrential get 9b5212 --files '*.iso'        # and download only the files you want
+torrential status                            # list your downloads
 ```
 
 `torrential --help` lists the rest. Every command takes `--json`.
@@ -66,13 +78,13 @@ torrential status                        # list your downloads
 torrential skill install
 ```
 
-This teaches Claude Code, Codex, Gemini CLI, Cursor, and other agents to use torrential. Then ask in plain words, such as "download the public-domain film Night of the Living Dead, one MP4 only". Downloads run in a background engine, so they continue after the agent's session ends.
+This teaches Claude Code, Codex, Gemini CLI, Cursor, and other agents to use torrential. Then ask in plain words, such as "play Night of the Living Dead" or "download the latest Arch Linux ISO". Downloads run in a background engine, so they continue after the agent's session ends.
 
 ## Settings
 
 Results are ranked for your screen, CPU, and language. `torrential setup` shows what it found and lets you change it.
 
-Everything else is in `~/.config/torrential/config.yaml`:
+Film and show details come from Cinemeta and IMDb. Everything else is in `~/.config/torrential/config.yaml`:
 
 ```yaml
 downloads:
@@ -80,6 +92,8 @@ downloads:
 player: mpv                   # for torrential play: iina, mpv, vlc, or a path
 subtitles:
   online: false               # do not look for subtitles online
+catalog:
+  online: false               # do not look up films and shows online
 updates: auto                 # install new versions by itself, or off
 ```
 

@@ -26,6 +26,8 @@ use output::Mode;
 const SHORT_HELP: &str = "torrential searches torrent indexes and downloads torrents.
 
   torrential search <words>       search for torrents
+  torrential titles <words>       find a film or series
+  torrential play <ID>            play a film, an episode, or a torrent's video
   torrential files <ID>           list a torrent's files
   torrential get <ID>             start a download
   torrential wait <ID>            follow a download until it finishes

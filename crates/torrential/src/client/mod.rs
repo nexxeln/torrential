@@ -5,6 +5,7 @@ pub mod player;
 mod probe;
 pub mod service;
 mod setup;
+mod titles;
 pub mod tui;
 mod update;
 pub mod wait;
@@ -15,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
-use torrential_core::protocol::{FilesReply, GetRequest, Request, Response};
-use torrential_core::{Error, ErrorCode, Preferences, Profile, SearchQuery, Target};
+use torrential_core::protocol::{FilesReply, GetRequest, Request, Response, TitleRequest};
+use torrential_core::{Error, ErrorCode, Job, Preferences, Profile, SearchQuery, Target};
 
 use crate::cli::{Command, DaemonCommand, GetArgs, SearchArgs, Until};
 use crate::daemon::files;
@@ -67,13 +68,25 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             let preferences = crate::config::preferences(&paths()?)?;
             search(engine()?, args, preferences, mode)
         }
+        Command::Titles(args) => titles::titles(engine()?, &args.words, mode),
+        Command::Title(args) => {
+            let video = titles::video(&args.id, None)?;
+            titles::title(engine()?, video, mode)
+        }
+        Command::Sources(args) => {
+            let video = titles::video(&args.video, args.episode.as_deref())?;
+            titles::sources(engine()?, video, mode)
+        }
         Command::Files(args) => {
             let mut files = file_list(&mut engine()?, Target::parse(&args.reference, &cwd)?)?;
             let matched = if args.files.is_empty() { None } else { Some(keep_matching(&mut files, &args.files)?) };
             let doc = views::files(&files, matched.as_ref());
             Ok(emit(mode, &doc, &Typed { kind: "files", body: Files { files, matched } }))
         }
-        Command::Get(args) => get(engine()?, args, mode, &cwd, env),
+        Command::Get(args) => match Target::parse(&args.reference, &cwd)? {
+            Target::Title(_) => get_title(engine, args, mode, env),
+            target => get(engine()?, target, args, mode, &cwd, env),
+        },
         Command::Play(args) => play::run(args, mode, env, &cwd),
         Command::Web(args) => web::run(&engine()?, args, mode, env),
         Command::Status(args) => {
@@ -161,6 +174,7 @@ fn search(mut conn: Conn, args: SearchArgs, preferences: Preferences, mode: Mode
         adult: args.adult,
         fresh: args.fresh,
         profile: Profile { preferences, ..Profile::default() },
+        wanted: None,
     };
     let within = args.timeout + Duration::from_secs(10);
     match answer(conn.call_within(&Request::Search { query, stream: false }, within)?)? {
@@ -172,8 +186,13 @@ fn search(mut conn: Conn, args: SearchArgs, preferences: Preferences, mode: Mode
     }
 }
 
-fn get(mut conn: Conn, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Result<u8, Error> {
-    let target = Target::parse(&args.reference, cwd)?;
+fn get(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Result<u8, Error> {
+    if args.episode.is_some() {
+        return Err(titles::for_a_title("an episode"));
+    }
+    if args.source.is_some() {
+        return Err(titles::for_a_title("--source"));
+    }
     if !args.files.is_empty() {
         crate::daemon::files::compile(&args.files)?;
     }
@@ -194,17 +213,36 @@ fn get(mut conn: Conn, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Resu
         other => return Err(connect::unexpected(&other)),
     };
     let exit = emit(mode, &views::get(&reply, dir.as_deref()), &Response::Get { reply: reply.clone() });
-    let attachable = mode == Mode::Human && !dry_run && !reply.job.status.is_stopped();
-    if attachable {
-        eprintln!("Press Ctrl-C to stop watching. The download continues in the background.");
-        return wait::attach(
-            connect::ensure(&Paths::from_process(env)?, env)?,
-            vec![reply.job.id.to_hex()],
-            Until::Done,
-            None,
-        );
+    if dry_run {
+        return Ok(exit);
     }
-    Ok(exit)
+    follow(exit, &reply.job, mode, env)
+}
+
+/// Downloads a film or an episode from the first of its sources that starts. The flags that pick
+/// files and folders take a torrent.
+fn get_title(engine: impl FnOnce() -> Result<Conn, Error>, args: GetArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
+    let video = titles::video(&args.reference, args.episode.as_deref())?;
+    let torrent_only = [
+        (!args.files.is_empty(), "--files"),
+        (args.dir.is_some(), "--dir"),
+        (args.max_size.is_some(), "--max-size"),
+        (args.dry_run, "--dry-run"),
+    ];
+    if let Some((_, flag)) = torrent_only.into_iter().find(|(given, _)| *given) {
+        return Err(torrential_core::id::not_a_torrent(&video, flag));
+    }
+    let (exit, job) = titles::get(&mut engine()?, TitleRequest { video, source: args.source }, mode)?;
+    follow(exit, &job, mode, env)
+}
+
+/// In a terminal, follows a download `get` started until it finishes.
+fn follow(exit: u8, job: &Job, mode: Mode, env: &Env) -> Result<u8, Error> {
+    if mode != Mode::Human || job.status.is_stopped() {
+        return Ok(exit);
+    }
+    eprintln!("Press Ctrl-C to stop watching. The download continues in the background.");
+    wait::attach(connect::ensure(&Paths::from_process(env)?, env)?, vec![job.id.to_hex()], Until::Done, None)
 }
 
 /// A torrent's files, fetching its metadata if needed, as `torrential files` lists them.
@@ -233,6 +271,7 @@ fn job_refs(references: &[String], cwd: &Path) -> Result<Vec<String>, Error> {
             Target::Magnet(magnet) => Ok(magnet),
             Target::TorrentUrl(_) => Err(not_a_download("a .torrent URL")),
             Target::TorrentFile(_) => Err(not_a_download("a .torrent file")),
+            Target::Title(video) => Err(torrential_core::id::not_a_torrent(&video, "this command")),
         })
         .collect()
 }

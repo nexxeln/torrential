@@ -13,7 +13,7 @@ use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
 use super::super::search_port::{self, FakeSource, fake_catalog};
 use super::super::web::ffmpeg::Tools;
-use super::{Harness, magnet, prefix, torrent, written};
+use super::{Harness, magnet, prefix, titles, torrent, written};
 
 /// One HTTP/1.1 connection from a browser, or from curl.
 struct Page(BufReader<TcpStream>);
@@ -800,4 +800,465 @@ async fn a_finished_file_has_every_part_without_asking_the_engine() {
     post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await;
     h.until("done", |jobs| jobs[0].status.name() == "done").await;
     assert_eq!(get(&h, &format!("/api/pieces?id={id}&file=0")).await, (200, json!({ "pieces": "8".repeat(200) })));
+}
+
+/// The lines of an NDJSON answer.
+fn lines(body: &[u8]) -> Vec<Value> {
+    String::from_utf8(body.to_vec()).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+impl Page {
+    /// The next line of an NDJSON answer, one to a chunk.
+    async fn line(&mut self) -> Option<Value> {
+        let chunk = tokio::time::timeout(Duration::from_secs(10), self.chunk()).await.expect("a line arrives")?;
+        Some(serde_json::from_slice(&chunk).unwrap())
+    }
+}
+
+async fn gone_from_the_engine(h: &Harness, ids: &[torrential_core::TorrentId]) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut held = Vec::new();
+        for id in ids {
+            held.push(h.running.ctx.engine.file_progress(*id).await.is_ok());
+        }
+        if !held.contains(&true) {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn write(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"payload").unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_the_rest() {
+    let (h, night) = titles::night();
+    let mut page = Page::open(&h).await;
+    page.send("POST", "/api/title/play", &["Content-Type: application/json"], r#"{"video":"tt0063350"}"#).await;
+    let (status, headers) = page.head().await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
+    let mut steps = Vec::new();
+    let mut playing = Value::Null;
+    while let Some(line) = page.line().await {
+        steps.push(titles::step(&line));
+        if line["type"] == "playing" {
+            playing = line;
+        }
+    }
+    assert_eq!(
+        steps,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 4",
+            "trying 1 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
+            "check file_list",
+            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
+            "trying 2 of 4 Night.of.the.Living.Dead.1968.DVD9",
+            "check file_list",
+            r#"skipped a2a2a2 {"reason":"no_video"}"#,
+            "trying 3 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
+            "trying 4 of 4 night_of_the_living_dead",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 a4a4a4 file 0 at null",
+        ]
+    );
+    let id = night[3].info_hash.id().to_hex();
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<String>>();
+    assert_eq!(keys(&playing), ["play", "release", "resume_at", "type", "video"].map(String::from).into());
+    let play_keys: Vec<String> = keys(&playing["play"]).into_iter().collect();
+    assert_eq!(
+        play_keys,
+        ["files", "id", "job", "name", "subtitles", "total_size", "video"],
+        "the shape POST /api/play answers"
+    );
+    assert_eq!(
+        json!([playing["release"]["span"], playing["play"]["video"], playing["play"]["subtitles"][0]["path"]]),
+        json!([
+            "film",
+            { "index": 0, "path": "night_of_the_living_dead.mp4", "size": 700 << 20,
+              "url": format!("/{id}/0/night_of_the_living_dead.mp4"), "offset": 0 },
+            "night_of_the_living_dead.srt"
+        ])
+    );
+
+    let tried: Vec<_> = night[..3].iter().map(|t| t.info_hash.id()).collect();
+    assert!(gone_from_the_engine(&h, &tried).await, "no file list probe or trial is left in the engine");
+    let (_, jobs) = get(&h, "/api/jobs").await;
+    let listed: Vec<Value> = jobs["jobs"].as_array().unwrap().iter().map(|j| json!([j["id"], j["title"]])).collect();
+    assert_eq!(listed, [json!([id, { "title": "tt0063350", "span": "film", "release": id }])]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_the_connection_while_a_source_sends_nothing_pauses_its_download_and_keeps_what_it_wrote() {
+    let (h, night) = titles::night();
+    let third = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
+    let body = json!({ "video": "tt0063350", "source": night[2].info_hash.id().to_hex() }).to_string();
+    let mut page = Page::open(&h).await;
+    page.send("POST", "/api/title/play", &["Content-Type: application/json"], &body).await;
+    assert_eq!(page.head().await.0, 200);
+    while let Some(line) = page.line().await {
+        if line == json!({ "type": "check", "check": "first_bytes" }) {
+            break;
+        }
+    }
+    write(&third.join("Night.1968.1080p.mp4"));
+    assert_eq!(h.status().await.len(), 1, "the trial's download runs");
+    drop(page);
+    h.until("the trial is paused", |jobs| jobs[0].status.name() == "paused").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.states().await, ["paused"]);
+    assert_eq!(std::fs::read(third.join("Night.1968.1080p.mp4")).unwrap(), b"payload");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes_next() {
+    let h = Harness::new();
+    let watch = |video: &str, position: f64, duration: f64| json!({ "video": video, "position": position, "duration": duration });
+    let (status, saved) = post(&h, "/api/watched", watch("tt9999901:1:1", 2630.0, 2640.0)).await;
+    assert_eq!(status, 200);
+    let entry = &saved["watched"];
+    assert_eq!(
+        json!([entry["video"], entry["position"], entry["duration"], entry["finished"], entry["at"].is_i64()]),
+        json!(["tt9999901:1:1", 2630.0, 2640.0, true, true])
+    );
+    post(&h, "/api/watched", watch("tt0063350", 1834.2, 5760.0)).await;
+
+    let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "overview": null, "thumbnail": true });
+    let harbor = json!({ "id": "tt9999901", "kind": "series", "name": "Harbor Lights", "year": 2019, "rating": 8.1 });
+    let night =
+        json!({ "id": "tt0063350", "kind": "film", "name": "Night of the Living Dead", "year": 1968, "rating": 7.8 });
+    let (_, home) = get(&h, "/api/home").await;
+    assert_eq!(
+        home,
+        json!({
+            "continue": [
+                { "title": night, "video": "tt0063350", "episode": null, "resume_at": 1834.2, "duration": 5760.0 },
+                { "title": harbor, "video": "tt9999901:1:2", "episode": undertow, "resume_at": null, "duration": null },
+            ],
+            "saved": [],
+        })
+    );
+    let (_, page) = get(&h, "/api/title?id=tt9999901").await;
+    assert_eq!(
+        json!([
+            page["name"],
+            page["saved"],
+            page["watched"][0]["video"],
+            page["watched"][0]["finished"],
+            page["next"],
+            page["downloads"]
+        ]),
+        json!(["Harbor Lights", false, "tt9999901:1:1", true, { "video": "tt9999901:1:2", "resume_at": null }, []])
+    );
+
+    post(&h, "/api/watched", watch("tt9999901:2:1", 2639.0, 2640.0)).await;
+    let (_, page) = get(&h, "/api/title?id=tt9999901").await;
+    assert_eq!(page["next"], Value::Null, "2x2 has not aired, so nothing comes after 2x1");
+    post(&h, "/api/watched", watch("tt0063350", 5750.0, 5760.0)).await;
+    assert_eq!(
+        get(&h, "/api/home").await.1["continue"],
+        json!([]),
+        "a finished film and a caught up series are left out"
+    );
+
+    assert_eq!(
+        post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await,
+        (200, json!({ "saved": true }))
+    );
+    assert_eq!(get(&h, "/api/home").await.1["saved"], json!([night]));
+    assert_eq!(get(&h, "/api/title?id=tt0063350").await.1["saved"], json!(true));
+    assert_eq!(
+        post(&h, "/api/library", json!({ "title": "tt0063350", "saved": false })).await,
+        (200, json!({ "saved": false }))
+    );
+    assert_eq!(get(&h, "/api/home").await.1["saved"], json!([]));
+
+    let refused = [
+        post(&h, "/api/watched", json!({ "video": "tt0063350", "position": -1.0, "duration": null })).await,
+        post(&h, "/api/watched", json!({ "video": "night", "position": 1.0, "duration": null })).await,
+    ];
+    assert_eq!(refused.iter().map(|r| error(r).0).collect::<Vec<_>>(), [400, 400]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_position_or_duration_no_video_can_have_is_refused_and_nothing_is_saved() {
+    let h = Harness::new();
+    let watch = |position: f64, duration: Value| {
+        let body = json!({ "video": "tt0063350", "position": position, "duration": duration });
+        let h = &h;
+        async move {
+            let answer = post(h, "/api/watched", body).await;
+            let (status, code, message) = error(&answer);
+            (status, code.to_string(), message.to_string())
+        }
+    };
+    let usage = |message: &str| (400, "usage".to_string(), message.to_string());
+    let refused = [
+        watch(-1.0, json!(null)).await,
+        watch(3_600_001.0, json!(null)).await,
+        watch(1e30, json!(null)).await,
+        watch(60.0, json!(-5.0)).await,
+        watch(60.0, json!(0.0)).await,
+        watch(60.0, json!(3_600_001.0)).await,
+        watch(60.0, json!(1e30)).await,
+        watch(700.5, json!(600.0)).await,
+    ];
+    assert_eq!(
+        refused,
+        [
+            usage("position -1 is not a time in a video"),
+            usage("position 3600001 is not a time in a video"),
+            usage("position 1000000000000000000000000000000 is not a time in a video"),
+            usage("duration -5 is not the length of a video"),
+            usage("duration 0 is not the length of a video"),
+            usage("duration 3600001 is not the length of a video"),
+            usage("duration 1000000000000000000000000000000 is not the length of a video"),
+            usage("position 700.5 is past the end of a video 600 seconds long"),
+        ]
+    );
+    assert_eq!(get(&h, "/api/title?id=tt0063350").await.1["watched"], json!([]));
+
+    assert_eq!(watch(3_600_000.0, json!(3_600_000.0)).await.0, 200, "1,000 hours is the longest");
+    assert_eq!(watch(600.0, json!(600.0)).await.0, 200);
+    assert_eq!(watch(0.0, json!(null)).await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_position_is_saved_only_for_a_film_or_an_aired_episode_the_catalog_lists() {
+    let h = Harness::new();
+    let mut answers = Vec::new();
+    for video in ["tt9999901:2:2", "tt9999901:2:3", "tt9999901:9:1", "tt9999901", "tt0063350:1:1"] {
+        let answer = post(&h, "/api/watched", json!({ "video": video, "position": 300.0, "duration": 2640.0 })).await;
+        let (status, code, message) = error(&answer);
+        answers.push((status, code.to_string(), message.to_string()));
+    }
+    let usage = |message: &str| (400, "usage".to_string(), message.to_string());
+    assert_eq!(
+        answers,
+        [
+            usage("Harbor Lights S02E02 has not aired yet"),
+            usage("Harbor Lights S02E03 has not aired yet"),
+            usage("S09E01 is not an episode of Harbor Lights"),
+            usage("Harbor Lights is a series, so name one of its episodes"),
+            usage("Night of the Living Dead is a film, so it has no S01E01"),
+        ]
+    );
+    let (_, page) = get(&h, "/api/title?id=tt9999901").await;
+    assert_eq!(
+        (&page["watched"], &page["next"]),
+        (&json!([]), &json!({ "video": "tt9999901:1:1", "resume_at": null }))
+    );
+    assert_eq!(post(&h, "/api/watched", json!({ "video": "tt9999901:2:1", "position": 300.0 })).await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_search() {
+    let (h, _) = titles::night();
+    let (_, found) = get(&h, "/api/titles?q=night%20of%20the%20living%20dead").await;
+    let cards: Vec<Value> = found["titles"].as_array().unwrap().iter().map(|c| json!([c["id"], c["year"]])).collect();
+    assert_eq!(cards, [json!(["tt0063350", 1968]), json!(["tt0100258", 1990])]);
+    assert_eq!(get(&h, "/api/titles?q=zzzz").await, (200, json!({ "titles": [] })), "nothing matches");
+
+    let (status, headers, poster) = fetch(&h, "GET", "/api/title/art?id=tt0063350&kind=poster", &[], "").await;
+    assert_eq!((status, poster.len()), (200, 67));
+    assert!(
+        headers.contains("content-type: image/png\n") && headers.contains("cache-control: private, max-age=2592000\n"),
+        "{headers}"
+    );
+    assert_eq!(fetch(&h, "GET", "/api/title/art?id=tt9999901&kind=thumbnail&season=1&episode=1", &[], "").await.0, 200);
+    let (status, _, missing) = fetch(&h, "GET", "/api/title/art?id=tt0100258&kind=poster", &[], "").await;
+    let missing: Value = serde_json::from_slice(&missing).unwrap();
+    assert_eq!((status, &missing["error"]["code"]), (404, &json!("not_found")));
+    assert_eq!(error(&get(&h, "/api/title/art?id=tt0063350&kind=banner").await).0, 400);
+
+    let (status, headers, body) = fetch(&h, "GET", "/api/title/sources?video=tt0063350&playback=h264", &[], "").await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
+    let done = lines(&body).pop().unwrap();
+    let sources: Vec<Value> = done["result"]["releases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| json!([r["name"], r["span"], r["swarm"]]))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            json!(["Night.of.the.Living.Dead.1968.720p.BluRay.x264", "film", "strong"]),
+            json!(["Night.of.the.Living.Dead.1968.DVD9", "film", "strong"]),
+            json!(["Night.of.the.Living.Dead.1968.1080p.WEB.x264", "film", "strong"]),
+            json!(["night_of_the_living_dead", "film", "strong"]),
+        ]
+    );
+    assert_eq!(done["result"]["query"]["profile"]["preferences"]["playback"], json!("h264"));
+    assert_eq!(error(&get(&h, "/api/title/sources?video=tt9999901:2:2").await).0, 400, "it has not aired");
+
+    let (_, _, raw) = fetch(&h, "GET", "/api/search?q=night", &[], "").await;
+    let raw = lines(&raw).pop().unwrap();
+    let raw = &raw["result"]["releases"][0];
+    assert!(raw.get("span").is_none() && raw.get("swarm").is_none(), "a torrent search names no span or swarm");
+    assert_eq!(
+        error(&post(&h, "/api/play", json!({ "ref": "tt0063350" })).await),
+        (404, "invalid_ref", "tt0063350 is a film or a series, not a torrent")
+    );
+    let (_, refused) = post(&h, "/api/play", json!({ "ref": "tt0063350" })).await;
+    assert_eq!(refused["error"]["hint"], json!("play a film or a series with POST /api/title/play"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_player_plays() {
+    use torrential_core::protocol::{Request, Response, TitleRequest};
+    let film = torrent(0xb1, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264", &[("Night.1968.1080p.mkv", 2 * GIB)]);
+    let catalog = vec![titles::listed(&film, "archive.org", None)];
+    let script = vec![FakeSource::answers("archive.org", 0)];
+    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, Default::default()));
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    let ask = r#"{"video":"tt0063350"}"#;
+    let (status, _, body) = fetch(&h, "POST", "/api/title/play", &["Content-Type: application/json"], ask).await;
+    let steps: Vec<String> = lines(&body).iter().map(titles::step).collect();
+    let skipped = r#"b1b1b1 {"reason":"unplayable","container":"mkv"}"#;
+    assert_eq!(
+        (status, steps),
+        (
+            200,
+            vec![
+                "resolved tt0063350 Night of the Living Dead".to_string(),
+                "searched 1".into(),
+                "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.BluRay.x264".into(),
+                "check file_list".into(),
+                format!("skipped {skipped}"),
+                format!(
+                    "failed no_source: no source of Night of the Living Dead (1968) plays in the browser without \
+                     ffmpeg {:?}",
+                    [skipped]
+                ),
+            ]
+        )
+    );
+
+    let video = "tt0063350".parse().unwrap();
+    let Response::PlayTitle { reply, title } = h.ask(Request::PlayTitle(TitleRequest { video, source: None })).await
+    else {
+        panic!("the command line's play answers a title")
+    };
+    let streams: Vec<&str> = reply.streams.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!((reply.job.id, streams, title.tried), (film.info_hash.id(), vec!["Night.1968.1080p.mkv"], vec![]));
+}
+
+/// The releases `GET /api/title/sources` lists for `video`, each with why it failed lately.
+async fn listed_sources(h: &Harness, video: &str) -> Vec<(String, Value)> {
+    let (status, _, body) = fetch(h, "GET", &format!("/api/title/sources?video={video}"), &[], "").await;
+    let done = lines(&body).pop().unwrap();
+    assert_eq!((status, &done["type"]), (200, &json!("done")));
+    let releases = done["result"]["releases"].as_array().unwrap().iter();
+    releases.map(|r| (r["name"].as_str().unwrap().to_string(), r["failed"].clone())).collect()
+}
+
+/// The releases a title play over HTTP tried, in order.
+async fn tried_by_play(h: &Harness, video: &str) -> Vec<String> {
+    let ask = json!({ "video": video }).to_string();
+    let (_, _, body) = fetch(h, "POST", "/api/title/play", &["Content-Type: application/json"], &ask).await;
+    let trying = lines(&body).into_iter().filter(|line| line["type"] == "trying");
+    trying.map(|line| line["release"]["name"].as_str().unwrap().to_string()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_tries_a_titles_sources_in_the_order_listed_and_the_list_then_puts_those_that_failed_last_with_why() {
+    use torrential_core::protocol::{Request, Response};
+    let (h, night) = titles::night();
+    let name = |n: usize| night[n].name.clone();
+    let fresh: Vec<(String, Value)> = (0..4).map(|n| (name(n), Value::Null)).collect();
+    assert_eq!(listed_sources(&h, "tt0063350").await, fresh);
+    assert_eq!(tried_by_play(&h, "tt0063350").await, (0..4).map(name).collect::<Vec<_>>());
+
+    let after = vec![
+        (name(3), Value::Null),
+        (name(0), json!({ "reason": "no_file_list", "waited_s": 1 })),
+        (name(1), json!({ "reason": "no_video" })),
+        (name(2), json!({ "reason": "no_data", "waited_s": 1 })),
+    ];
+    assert_eq!(listed_sources(&h, "tt0063350").await, after);
+    let video = "tt0063350".parse().unwrap();
+    let Response::Sources { sources } = h.ask(Request::Sources { video }).await else {
+        panic!("the socket answers sources with the releases")
+    };
+    let socket = sources.result.releases.iter().map(|r| (r.name.clone(), serde_json::to_value(&r.failed).unwrap()));
+    assert_eq!(socket.collect::<Vec<_>>(), after, "the command line lists the same order");
+    assert_eq!(tried_by_play(&h, "tt0063350").await, [name(3)], "the download that played plays again first");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_web_app_and_the_socket_read_the_same_title_page() {
+    use torrential_core::protocol::{Request, Response};
+    let h = Harness::new();
+    post(&h, "/api/watched", json!({ "video": "tt0063350", "position": 60.0, "duration": 5760.0 })).await;
+    let (status, page) = get(&h, "/api/title?id=tt0063350").await;
+    let Response::Title { title } = h.ask(Request::Title { id: "tt0063350".parse().unwrap() }).await else {
+        panic!("the socket answers a title with its page")
+    };
+    assert_eq!((status, &page), (200, &serde_json::to_value(&title).unwrap()));
+    let mut page = page;
+    let at = page["watched"][0].as_object_mut().unwrap().remove("at");
+    assert!(at.is_some_and(|at| at.is_i64()));
+    assert_eq!(
+        page,
+        json!({
+            "id": "tt0063350",
+            "kind": "film",
+            "name": "Night of the Living Dead",
+            "year": 1968,
+            "rating": 7.8,
+            "synopsis": "Strangers shelter in a farmhouse while the dead walk outside.",
+            "genres": ["Horror", "Thriller"],
+            "runtime_min": 96,
+            "cast": ["Duane Jones", "Judith O'Dea", "Karl Hardman"],
+            "countries": ["US"],
+            "art": { "poster": true, "background": true, "logo": true },
+            "seasons": [],
+            "saved": false,
+            "watched": [{ "video": "tt0063350", "position": 60.0, "duration": 5760.0, "finished": false }],
+            "next": { "video": "tt0063350", "resume_at": 60.0 },
+            "downloads": []
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_title_lookups_off_title_search_says_so_and_torrent_search_still_works() {
+    use torrential_search::catalog::CatalogConfig;
+    let off = CatalogConfig { online: false, endpoint: None, imdb_endpoint: None, cache_dir: None };
+    let catalog = std::sync::Arc::new(super::super::titles::catalog_port::Live::new(&off).unwrap());
+    let h = Harness::with_titles(catalog);
+    assert_eq!(get(&h, "/api/titles?q=night").await, (200, json!({ "titles": [], "offline": true })));
+    assert_eq!(
+        error(&get(&h, "/api/title?id=tt0063350").await),
+        (400, "usage", "title lookups are off in config.yaml, and tt0063350 is not kept on this machine")
+    );
+    assert_eq!(fetch(&h, "GET", "/api/title/art?id=tt0063350&kind=poster", &[], "").await.0, 404);
+    let film = torrent(64, "film", &[("film.mp4", GIB)]);
+    h.swarm.publish(film.clone());
+    assert_eq!(post(&h, "/api/play", json!({ "ref": magnet_link(&film) })).await.0, 200);
+    let (_, jobs) = get(&h, "/api/jobs").await;
+    assert!(jobs["jobs"][0].get("title").is_none(), "a download made by playing a torrent names no title");
+    let (status, _, body) = fetch(&h, "GET", "/api/search?q=ubuntu", &[], "").await;
+    let done = lines(&body).pop().unwrap();
+    assert_eq!(
+        (status, &done["type"], &done["result"]["releases"][0]["name"]),
+        (200, &json!("done"), &json!("ubuntu-24.04.5-desktop-amd64.iso"))
+    );
 }

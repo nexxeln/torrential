@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { type ApiError, asApiError, search, type SearchResult } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { type ApiError, asApiError, search, type SearchMessage, type SearchResult } from "../api";
 
 export type SearchState =
   | { kind: "idle" }
@@ -10,12 +10,14 @@ export type SearchState =
 
 const LIMIT = 50;
 
-export function useSearch(query: string, everything: boolean): SearchState {
+/** Follows the search stream that `open` starts, and starts it again whenever `key` changes. A null key is idle. */
+export function useSearchStream(key: string | null, open: (signal: AbortSignal) => AsyncGenerator<SearchMessage>): SearchState {
   const [state, setState] = useState<SearchState>({ kind: "idle" });
+  const opener = useRef(open);
+  opener.current = open;
 
   useEffect(() => {
-    const words = query.trim();
-    if (!words) return setState({ kind: "idle" });
+    if (key === null) return setState({ kind: "idle" });
     const stop = new AbortController();
     setState((before) => ({
       kind: "searching",
@@ -24,8 +26,7 @@ export function useSearch(query: string, everything: boolean): SearchState {
       stale: true,
     }));
     (async () => {
-      const options = { category: everything ? undefined : ("video" as const), limit: LIMIT, signal: stop.signal };
-      for await (const message of search(words, options)) {
+      for await (const message of opener.current(stop.signal)) {
         if (stop.signal.aborted) return;
         if (message.type === "update") {
           setState({ kind: "searching", result: message.result, pending: message.pending, stale: false });
@@ -39,7 +40,14 @@ export function useSearch(query: string, everything: boolean): SearchState {
       if (!stop.signal.aborted) setState({ kind: "failed", error: asApiError(thrown) });
     });
     return () => stop.abort();
-  }, [query, everything]);
+  }, [key]);
 
   return state;
+}
+
+export function useSearch(query: string, everything: boolean): SearchState {
+  const words = query.trim();
+  return useSearchStream(words ? `${everything}:${words}` : null, (signal) =>
+    search(words, { category: everything ? undefined : "video", limit: LIMIT, signal }),
+  );
 }

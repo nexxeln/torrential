@@ -179,7 +179,7 @@ impl Item {
                 Ok(seeds) => return Ok(seeds),
                 Err(why) => why,
             },
-            Err(e) => crate::fetch_reason(e, WITHIN),
+            Err(e) => crate::fetch_reason(e),
         };
         Err(Error::new(
             ErrorCode::FetchFailed,

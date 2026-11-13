@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -296,6 +296,8 @@ struct SwarmState {
     damaged: BTreeMap<TorrentId, u32>,
     unavailable: BTreeMap<TorrentId, u32>,
     unsaved: BTreeMap<TorrentId, (Error, u32)>,
+    /// The torrents the engine was asked to download in playing order.
+    streamed: BTreeSet<TorrentId>,
 }
 
 impl Swarm {
@@ -325,7 +327,6 @@ impl Swarm {
         self.0.lock().unwrap().damaged.insert(id, pieces);
     }
 
-    #[cfg(test)]
     pub fn withhold(&self, id: TorrentId, pieces: u32) {
         self.0.lock().unwrap().unavailable.insert(id, pieces);
     }
@@ -333,6 +334,12 @@ impl Swarm {
     #[cfg(test)]
     pub fn refuse_saves(&self, id: TorrentId, error: Error) {
         self.0.lock().unwrap().unsaved.insert(id, (error, 0));
+    }
+
+    /// Whether the engine was asked to download `id` in playing order.
+    #[cfg(test)]
+    pub fn streamed(&self, id: TorrentId) -> bool {
+        self.0.lock().unwrap().streamed.contains(&id)
     }
 
     #[cfg(test)]
@@ -555,7 +562,9 @@ impl EnginePort for Fake {
     }
 
     fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
-        self.torrent(id).map(|_| ())
+        self.torrent(id)?;
+        self.swarm.0.lock().unwrap().streamed.insert(id);
+        Ok(())
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {

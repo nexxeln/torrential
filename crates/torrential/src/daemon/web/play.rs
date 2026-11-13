@@ -6,11 +6,11 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
-use torrential_core::{Error, ErrorCode, Job, TorrentFile};
+use torrential_core::{Error, ErrorCode, Job, TorrentFile, TorrentId};
 
 use super::super::engine_port::Metainfo;
 use super::super::http;
-use super::super::owner::{Command, MetaTarget, Origin, PlayCommand, Source};
+use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
 use super::super::server::{self, Ctx, METADATA_WAIT};
 
 #[derive(Deserialize)]
@@ -68,9 +68,26 @@ pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
     let playable = choose(&metainfo, request.file)?;
     let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
     let setup_max_size = (ctx.web.preferences)().max_size;
-    let play = PlayCommand { source, dir: None, files, setup_max_size };
-    let (job, metainfo) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+    let play = PlayCommand { source, dir: None, files, setup_max_size, title: None, finish: Finish::Stream };
+    let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let info = server::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
+    Ok(playing(ctx, job, &info, &playable).await)
+}
+
+/// How the web player plays `file` of a download that is already playing, as a title play
+/// answers once a source starts.
+pub async fn playing_file(ctx: &Ctx, id: TorrentId, file: u32) -> Result<Playing, Error> {
+    let info = server::metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
+    let playable = choose(&info.metainfo, Some(file))?;
+    let mut jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
+    let job = jobs.pop().ok_or_else(|| Error::new(ErrorCode::NotFound, "the download that played is gone"))?;
+    Ok(playing(ctx, job, &info, &playable).await)
+}
+
+/// Where a download's video and its subtitles are served, and its files. `POST /api/play` and a
+/// title play's `playing` line both answer with it.
+async fn playing(ctx: &Ctx, job: Job, info: &FilesInfo, playable: &Playable) -> Playing {
+    let metainfo = &info.metainfo;
     let streamed = |index: u32| {
         let file = &metainfo.files[index as usize];
         let path = sanitize(&file.path);
@@ -82,15 +99,15 @@ pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
             offset: metainfo.files[..index as usize].iter().map(|f| f.size).sum(),
         }
     };
-    Ok(Playing {
+    Playing {
         id: job.id.to_hex(),
         name: sanitize(&metainfo.name),
-        files: server::listed(ctx, &info).await,
+        files: server::listed(ctx, info).await,
         total_size: metainfo.total(),
         video: streamed(playable.video),
         subtitles: playable.subtitles.iter().map(|&index| streamed(index)).collect(),
         job,
-    })
+    }
 }
 
 /// The file to watch and its subtitles: the one the page chose, or the torrent's main video.

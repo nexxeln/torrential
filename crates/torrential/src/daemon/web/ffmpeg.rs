@@ -90,7 +90,9 @@ pub fn thumbnail(path: &Path, t: f64) -> Vec<String> {
 /// A fragmented MP4 of the file at `url` from `t` seconds on, written to stdout: its video, and
 /// `audio` as AAC.
 pub fn stream(url: &str, media: &Media, t: f64, audio: Option<u32>, picture: Picture, encoder: Encoder) -> Vec<String> {
-    let mut args = strings(&["-v", "error", "-nostdin", "-ss", &seconds(t), "-copyts", "-i", url]);
+    let mut args = strings(&["-v", "error", "-nostdin"]);
+    args.extend(from(t));
+    args.extend(strings(&["-copyts", "-i", url]));
     let mut add = |more: &[&str]| args.extend(strings(more));
     if let Some(video) = &media.video {
         add(&["-map", &format!("0:{}", video.stream)]);
@@ -131,7 +133,9 @@ pub fn stream(url: &str, media: &Media, t: f64, audio: Option<u32>, picture: Pic
 /// WebVTT of the subtitle track `stream` of the file at `url` from `t` seconds on, on the file's
 /// own timeline.
 pub fn embedded_subtitles(url: &str, stream: u32, t: f64) -> Vec<String> {
-    let mut args = strings(&["-v", "error", "-nostdin", "-ss", &seconds(t), "-copyts", "-i", url]);
+    let mut args = strings(&["-v", "error", "-nostdin"]);
+    args.extend(from(t));
+    args.extend(strings(&["-copyts", "-i", url]));
     args.extend(strings(&["-map", &format!("0:{stream}"), "-c:s", "webvtt", "-avoid_negative_ts", "disabled"]));
     args.extend(strings(&["-flush_packets", "1", "-f", "webvtt", "pipe:1"]));
     args
@@ -175,6 +179,13 @@ fn bitrate(height: u32) -> &'static str {
         481..=720 => "4M",
         _ => "8M",
     }
+}
+
+/// The seek that starts a conversion `t` seconds in. A conversion from the start has none: a seek
+/// reads the file's index, which a Matroska file keeps at its end, and playing from the beginning
+/// would wait for the last piece of the download.
+fn from(t: f64) -> Vec<String> {
+    if t.is_finite() && t > 0.0 { strings(&["-ss", &seconds(t)]) } else { Vec::new() }
 }
 
 fn seconds(t: f64) -> String {
@@ -240,16 +251,14 @@ mod tests {
         );
         assert_eq!(
             line(stream(URL, &media("h264", &[("ac3", false)]), 0.0, Some(1), Picture::Copy, Encoder::X264)),
-            format!(
-                "-v error -nostdin -ss 0.000 -copyts -i {URL} -map 0:0 -c:v copy -map 0:1 -c:a aac -ac 2 -b:a 192k {tail}"
-            )
+            format!("-v error -nostdin -copyts -i {URL} -map 0:0 -c:v copy -map 0:1 -c:a aac -ac 2 -b:a 192k {tail}")
         );
         let fit = "-vf scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:\
                    force_divisible_by=2,format=yuv420p -g 48";
         assert_eq!(
             line(stream(URL, &media("mpeg4", &[]), -4.0, Some(7), Picture::H264, Encoder::VideoToolbox)),
             format!(
-                "-v error -nostdin -ss 0.000 -copyts -i {URL} -map 0:0 {fit} -c:v h264_videotoolbox -profile:v high \
+                "-v error -nostdin -copyts -i {URL} -map 0:0 {fit} -c:v h264_videotoolbox -profile:v high \
                  -b:v 8M {tail}"
             )
         );

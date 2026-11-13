@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult, SourceOutcome, SourceReport,
+    Swarm,
 };
 pub use torrential_search::{Progress, SavedLink};
 use torrential_search::{ResultCache, Search, SearchConfig};
@@ -23,7 +25,14 @@ pub trait SearchPort: Send + Sync {
         progress: mpsc::UnboundedSender<Progress>,
     ) -> BoxFuture<'a, Result<SearchResult, Error>>;
     fn fetch_torrent(&self, url: String) -> BoxFuture<'_, Result<Vec<u8>, Error>>;
-    fn mirrors(&self, name: &str, web_seeds: &[String]) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>>;
+    /// Looks up web seeds that serve every file of a torrent. `file` is one file of a torrent
+    /// with several, as a path that starts with the torrent's name.
+    fn mirrors(
+        &self,
+        name: &str,
+        file: Option<&Path>,
+        web_seeds: &[String],
+    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>>;
     fn find(&self, prefix: &HexPrefix) -> Vec<Release>;
     fn torrent_url(&self, release: &Release) -> Result<Option<String>, Error>;
     fn saved_link(&self, id: &ReleaseId) -> Option<SavedLink>;
@@ -67,8 +76,13 @@ impl SearchPort for Live {
         Box::pin(async move { self.search.fetch_torrent(&url).await })
     }
 
-    fn mirrors(&self, name: &str, web_seeds: &[String]) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
-        Some(Box::pin(self.search.mirrors(name, web_seeds)?))
+    fn mirrors(
+        &self,
+        name: &str,
+        file: Option<&Path>,
+        web_seeds: &[String],
+    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
+        Some(Box::pin(self.search.mirrors(name, file, web_seeds)?))
     }
 
     fn find(&self, prefix: &HexPrefix) -> Vec<Release> {
@@ -102,6 +116,7 @@ struct FakeState {
     delay: Duration,
     script: Vec<FakeSource>,
     recent: Vec<Release>,
+    searches: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +144,19 @@ impl Fake {
 
     pub fn scripted(catalog: Vec<Release>, mut script: Vec<FakeSource>, torrents: BTreeMap<String, Vec<u8>>) -> Self {
         script.sort_by_key(|s| s.after);
-        Self(Arc::new(Mutex::new(FakeState { catalog, torrents, delay: Duration::ZERO, script, recent: Vec::new() })))
+        Self(Arc::new(Mutex::new(FakeState {
+            catalog,
+            torrents,
+            delay: Duration::ZERO,
+            script,
+            recent: Vec::new(),
+            searches: 0,
+        })))
+    }
+
+    #[cfg(test)]
+    pub fn searches(&self) -> usize {
+        self.0.lock().unwrap().searches
     }
 
     #[cfg(test)]
@@ -143,7 +170,8 @@ impl Fake {
     }
 
     fn parts(&self) -> (Vec<Release>, Vec<FakeSource>, Duration) {
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        state.searches += 1;
         (state.catalog.clone(), state.script.clone(), state.delay)
     }
 
@@ -169,6 +197,9 @@ pub fn fake_catalog() -> Vec<Release> {
         magnet: Some(format!("magnet:?xt=urn:btih:{hex}&dn={name}&xl={size}")),
         torrent_url: None,
         info_url: None,
+        span: None,
+        swarm: None,
+        failed: None,
     };
     vec![
         release("9b521219bc48550140a666f74a29048ed78e933b", "archlinux-2026.10.01-x86_64.iso", 1_640_497_152, 412),
@@ -184,7 +215,17 @@ fn compose(
     elapsed: Duration,
 ) -> SearchResult {
     let words: Vec<String> = query.text.split_whitespace().map(str::to_lowercase).collect();
-    let matches = |r: &Release| words.iter().all(|w| r.name.to_lowercase().contains(w.as_str()));
+    // A title's search keeps its releases in the catalog's order, each with what of it it holds
+    // and how its swarm stands, and drops a dead swarm as the real search does.
+    let found = |r: &Release| match &query.wanted {
+        Some(wanted) => {
+            let span = Some(wanted.fit(&r.name)?.span);
+            let swarm = Some(Swarm::of(r.seeders, r.sources.iter().any(|s| torrential_search::lawful(s)))?);
+            Some(Release { span, swarm, ..r.clone() })
+        }
+        None => words.iter().all(|w| r.name.to_lowercase().contains(w.as_str())).then(|| r.clone()),
+    };
+    let matches = |r: &Release| found(r).is_some();
     let listed_by = |r: &Release, source: &FakeSource| r.sources.first() == Some(&source.name);
     let sources = answered
         .iter()
@@ -197,8 +238,8 @@ fn compose(
         .collect();
     let matching: Vec<Release> = catalog
         .iter()
-        .filter(|r| matches(r) && answered.iter().any(|s| s.failure.is_none() && listed_by(r, s)))
-        .cloned()
+        .filter(|r| answered.iter().any(|s| s.failure.is_none() && listed_by(r, s)))
+        .filter_map(found)
         .collect();
     let total = matching.len() as u32;
     let releases = matching.into_iter().take(query.limit as usize).collect();
@@ -247,7 +288,12 @@ impl SearchPort for Fake {
         })
     }
 
-    fn mirrors(&self, _: &str, _: &[String]) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
+    fn mirrors(
+        &self,
+        _: &str,
+        _: Option<&Path>,
+        _: &[String],
+    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
         None
     }
 

@@ -1,4 +1,4 @@
-import type { AudioTrack, MediaInfo } from "../api";
+import type { AudioTrack, MediaInfo, Playback } from "../api";
 
 /** How a file reaches the video element. */
 export type Plan =
@@ -44,4 +44,12 @@ export function plan(media: MediaInfo, audio: number | null, direct: boolean): P
   }
   if (source.isTypeSupported(type(H264))) return { kind: "remux", type: type(H264), video: "h264" };
   return { kind: "blocked", reason: "browser" };
+}
+
+/** What this browser decodes, for the engine to rank a title's sources by. */
+export function playback(): Playback {
+  const source = mediaSourceClass();
+  const decodes = (codec: string) => source?.isTypeSupported(`video/mp4; codecs="${codec}"`) ?? false;
+  if (!decodes("hvc1.1.6.L120.90")) return "h264";
+  return decodes("hvc1.2.4.L120.90") && matchMedia("(dynamic-range: high)").matches ? "hevc-hdr" : "hevc";
 }

@@ -13,7 +13,7 @@ use crate::completions::complete_download_ids;
     version,
     about = "Search torrent indexes and download torrents",
     disable_help_subcommand = true,
-    after_help = "Examples:\n  torrential search arch linux iso\n  torrential get 9b5212 --dir ~/isos\n  torrential wait 9b5212\n\nAgents: run torrential skill install to add the torrential skill."
+    after_help = "Examples:\n  torrential search arch linux iso\n  torrential get 9b5212 --dir ~/isos\n  torrential wait 9b5212\n  torrential titles night of the living dead\n  torrential play tt0063350\n\nAgents: run torrential skill install to add the torrential skill."
 )]
 pub struct Cli {
     /// Print JSON on stdout instead of text
@@ -31,6 +31,19 @@ pub enum Command {
         after_help = "Examples:\n  torrential search ubuntu 24.04 desktop --limit 5\n  torrential search night of the living dead --source archive.org"
     )]
     Search(SearchArgs),
+    /// Find films and series by name
+    #[command(
+        after_help = "Examples:\n  torrential titles night of the living dead\n  torrential titles harbor lights --json"
+    )]
+    Titles(TitlesArgs),
+    /// Show a film, or a series and its episodes, with where you stopped
+    #[command(after_help = "Examples:\n  torrential title tt0063350\n  torrential title tt9999901 --json")]
+    Title(TitleArgs),
+    /// List the torrents of a film or an episode, in the order play tries them
+    #[command(
+        after_help = "Examples:\n  torrential sources tt0063350\n  torrential sources tt0903747 s03e05\n  torrential sources tt0903747"
+    )]
+    Sources(SourcesArgs),
     /// List the files in a torrent, fetching its metadata if needed
     #[command(
         after_help = "Examples:\n  torrential files 6bc1af\n  torrential files 6bc1af --files '*.mp4' --files '*.srt'"
@@ -38,12 +51,12 @@ pub enum Command {
     Files(FilesArgs),
     /// Start a download, or change its file selection
     #[command(
-        after_help = "Examples:\n  torrential get 9b5212\n  torrential get 'magnet:?xt=urn:btih:…' --dir ~/isos\n  torrential get 6bc1af --files '*.mp4' --dry-run"
+        after_help = "Examples:\n  torrential get 9b5212\n  torrential get 'magnet:?xt=urn:btih:…' --dir ~/isos\n  torrential get 6bc1af --files '*.mp4' --dry-run\n  torrential get tt0063350"
     )]
     Get(GetArgs),
     /// Play a video in your media player while it downloads
     #[command(
-        after_help = "Examples:\n  torrential play night of the living dead\n  torrential play 6bc1af\n  torrential play 6bc1af --json"
+        after_help = "Examples:\n  torrential play tt0063350\n  torrential play tt0903747 s03e05\n  torrential play tt0063350 --source 4c1e9a\n  torrential play night of the living dead\n  torrential play 6bc1af --json"
     )]
     Play(PlayArgs),
     /// Open the web app, to search and watch in your browser
@@ -145,6 +158,30 @@ pub struct SearchArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct TitlesArgs {
+    /// Words of the name
+    #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+    pub words: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TitleArgs {
+    /// A title ID from torrential titles, such as tt0063350
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SourcesArgs {
+    /// A film or an episode: tt0063350, tt0903747:3:5, or a series ID for its next episode
+    #[arg(value_name = "VIDEO")]
+    pub video: String,
+    /// With a series ID, the episode, such as s03e05 or 3x05
+    #[arg(value_name = "EPISODE")]
+    pub episode: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct SetupArgs {
     /// The screen you watch on, if it is not this machine's display. auto uses the detected display
     #[arg(long, value_enum)]
@@ -185,9 +222,15 @@ pub struct FilesArgs {
 
 #[derive(Args, Debug)]
 pub struct GetArgs {
-    /// An ID prefix, infohash, magnet link, .torrent file, or .torrent URL
+    /// An ID prefix, infohash, magnet link, .torrent file, or .torrent URL, or a title ID such as tt0063350 or tt0903747:3:5
     #[arg(value_name = "REF", add = ArgValueCandidates::new(complete_download_ids))]
     pub reference: String,
+    /// With a series ID, the episode, such as s03e05 or 3x05
+    #[arg(value_name = "EPISODE")]
+    pub episode: Option<String>,
+    /// With a title ID, download only this one of its torrents, by an ID from torrential sources
+    #[arg(long, value_name = "ID")]
+    pub source: Option<String>,
     /// Download only files matching this glob or exact path. `*` matches across folders and case is ignored. Repeat to add more
     #[arg(long, value_name = "GLOB")]
     pub files: Vec<String>,
@@ -204,9 +247,12 @@ pub struct GetArgs {
 
 #[derive(Args, Debug)]
 pub struct PlayArgs {
-    /// A download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for
+    /// A title ID such as tt0063350, tt0903747:3:5, or tt0903747 s03e05, a download or search result ID, magnet link, infohash, or .torrent file or URL, or words to search for
     #[arg(value_name = "WORDS", required = true, num_args = 1.., add = ArgValueCandidates::new(complete_download_ids))]
     pub words: Vec<String>,
+    /// With a title ID, play only this one of its torrents, by an ID from torrential sources
+    #[arg(long, value_name = "ID")]
+    pub source: Option<String>,
     /// The folder to download into, if this starts a new download
     #[arg(long, value_name = "DIR")]
     pub dir: Option<PathBuf>,

@@ -66,7 +66,7 @@ struct FieldSchema {
     help: &'static str,
 }
 
-const FIELDS: [FieldSchema; 3] = [
+const FIELDS: [FieldSchema; 8] = [
     FieldSchema {
         name: "progress.piece_map",
         help: "Where a download's data has arrived, in status, wait, and the TUI's watch stream: 64 characters, one \
@@ -89,6 +89,33 @@ const FIELDS: [FieldSchema; 3] = [
                Within equal relevance, results that fit max_size, the room, and the player come first, then \
                official and lawful sources, then the resolution closest to the screen, then the machine's CPU \
                architecture, then releases in the system language",
+    },
+    FieldSchema {
+        name: "result.releases[].span",
+        help: "In sources, what of the film or series a release holds: film, an episode such as s3e5, a season such \
+               as s3, seasons such as s1-5, or complete",
+    },
+    FieldSchema {
+        name: "result.releases[].failed",
+        help: "In sources, why a release did not start when a play on this machine last tried it, in the last 6 \
+               hours, as in title.tried[].reason. Play tries such a release last",
+    },
+    FieldSchema {
+        name: "title.tried[].reason",
+        help: "In play and get for a title, why the play moved past a release. no_file_list and no_data carry \
+               waited_s, the seconds it waited. no_video means none of its files is the film or the episode. \
+               unplayable carries container, a file that needs ffmpeg when ffmpeg is missing. too_large and failed \
+               carry the error. stalled means it stopped sending data",
+    },
+    FieldSchema {
+        name: "error.details.tried[]",
+        help: "In play and get for a title, when no release started: each release the play tried, as release, its \
+               ID, and reason, why it did not start, as in title.tried[].reason",
+    },
+    FieldSchema {
+        name: "title.watched[]",
+        help: "In title, where you stopped each film or episode: position and duration in seconds, finished once \
+               only the credits are left, and at, the Unix time of the last change",
     },
 ];
 
@@ -202,6 +229,9 @@ mod tests {
             names,
             [
                 "search",
+                "titles",
+                "title",
+                "sources",
                 "files",
                 "get",
                 "play",
@@ -222,19 +252,23 @@ mod tests {
                 "update"
             ]
         );
-        let daemon = &schema()["commands"][14]["subcommands"];
+        let daemon = &named(&schema(), "engine")["subcommands"];
         let subs: Vec<&str> = daemon.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
         assert_eq!(subs, ["status", "stop", "install", "uninstall"]);
+    }
+
+    fn named(schema: &serde_json::Value, name: &str) -> serde_json::Value {
+        schema["commands"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap().clone()
     }
 
     #[test]
     fn describes_flags_with_their_values() {
         let s = schema();
-        let get = &s["commands"][2];
+        let get = named(&s, "get");
         let files = get["flags"].as_array().unwrap().iter().find(|f| f["name"] == "--files").unwrap();
         assert_eq!(files["repeatable"], true);
         assert_eq!(files["value_name"], "GLOB");
-        let wait = &s["commands"][6];
+        let wait = named(&s, "wait");
         let until = wait["flags"].as_array().unwrap().iter().find(|f| f["name"] == "--until").unwrap();
         assert_eq!(until["values"], serde_json::json!(["done", "metadata"]));
         assert_eq!(until["default"], "done");

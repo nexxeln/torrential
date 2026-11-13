@@ -119,15 +119,16 @@ impl Arch {
 #[serde(transparent)]
 pub struct Language(String);
 
-const MARKERS: [(&str, &str, &[&str]); 8] = [
+const MARKERS: [(&str, &str, &[&str]); 9] = [
     ("en", "English", &["english", "eng"]),
-    ("es", "Spanish", &["spanish", "español", "espanol", "castellano", "latino"]),
+    ("es", "Spanish", &["spanish", "español", "espanol", "castellano", "latino", "doblada", "doblado"]),
     ("fr", "French", &["french", "truefrench", "vostfr", "vff", "vfq"]),
     ("de", "German", &["german", "deutsch", "ger"]),
     ("it", "Italian", &["italian", "ita"]),
     ("pt", "Portuguese", &["portuguese", "português", "dublado"]),
     ("ru", "Russian", &["russian", "rus"]),
     ("hi", "Hindi", &["hindi"]),
+    ("sv", "Swedish", &["swedish", "swesub"]),
 ];
 
 impl Language {
@@ -489,6 +490,10 @@ mod tests {
         assert_eq!(marked("Movie 2024 Dual Latino 1080p", "movie"), ["es"]);
         assert_eq!(marked("Movie.2024.1080p.WEB-DL.Rus.Eng", "movie"), ["en", "ru"]);
         assert_eq!(marked("The French Connection 1971 1080p", "the french connection"), Vec::<String>::new());
+        assert_eq!(marked("Movie 2024 Doblada 1080p", "movie"), ["es"]);
+        assert_eq!(marked("Sintel.2010.720p.SWESUB.x264-SMS", "sintel 2010"), ["sv"]);
+        assert_eq!(marked("Sintel, O Filme 2010 HD Dublado PT BR", "sintel 2010"), ["pt"]);
+        assert_eq!(marked("Night of the Living Dead (1968) 1080p Ita Eng MIRCrew", film), ["en", "it"]);
     }
 
     #[test]

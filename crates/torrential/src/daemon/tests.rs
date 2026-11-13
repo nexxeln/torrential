@@ -15,6 +15,8 @@ use super::engine_port::{
 use super::owner::OwnerConfig;
 use super::search_port::{self, fake_catalog};
 use super::store::Store;
+use super::titles::Timing;
+use super::titles::catalog_port::{self, CatalogPort};
 use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
 
@@ -22,6 +24,11 @@ const ROOMY: Space = Space { device: 1, total: 1000 * GIB, free: 500 * GIB };
 const GIB_PIECE: u64 = GIB / 1024;
 const STALL: Duration = Duration::from_secs(1);
 const WRITES_STOP_WITHIN: Duration = Duration::from_secs(1);
+const TIMING: Timing = Timing {
+    file_list: Duration::from_millis(500),
+    first_bytes: Duration::from_millis(500),
+    budget: Duration::from_secs(20),
+};
 
 struct Harness {
     dir: tempfile::TempDir,
@@ -32,12 +39,26 @@ struct Harness {
     outside: Outside,
 }
 
-/// What the web app's API reaches outside the engine, which a test sets.
-#[derive(Clone, Default)]
+/// What the web app's API reaches outside the engine, and how long a title play waits, which a
+/// test sets.
+#[derive(Clone)]
 struct Outside {
     /// Where the engine finds ffmpeg and ffprobe. Nowhere, until a test says.
     tools: Arc<Mutex<Tools>>,
     subtitles: super::subtitle_port::Fake,
+    catalog: Arc<dyn CatalogPort>,
+    timing: Timing,
+}
+
+impl Default for Outside {
+    fn default() -> Self {
+        Self {
+            tools: Arc::default(),
+            subtitles: super::subtitle_port::Fake::default(),
+            catalog: Arc::new(catalog_port::Fake::default()),
+            timing: TIMING,
+        }
+    }
 }
 
 fn config(dir: &std::path::Path) -> OwnerConfig {
@@ -63,9 +84,20 @@ impl Harness {
     }
 
     fn with_search(search: search_port::Fake) -> Self {
+        Self::with_outside(search, Outside::default())
+    }
+
+    fn with_outside(search: search_port::Fake, outside: Outside) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let outside = Outside::default();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
+        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        Self { dir, running, swarm, disk, search, outside }
+    }
+
+    fn with_titles(catalog: Arc<dyn CatalogPort>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = Outside { catalog, ..Outside::default() };
+        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
         let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
@@ -118,9 +150,11 @@ impl Harness {
                 move || tools.lock().unwrap().clone()
             }),
             subtitles: Arc::new(outside.subtitles.clone()),
+            catalog: outside.catalog.clone(),
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
-        start(&tokio::runtime::Handle::current(), store, ports, config(dir.path()), "0.1.0".into(), 0).unwrap()
+        let handle = tokio::runtime::Handle::current();
+        start(&handle, store, ports, config(dir.path()), outside.timing, "0.1.0".into(), 0).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -220,26 +254,40 @@ impl Harness {
     }
 }
 
-#[derive(Clone, Default)]
-struct Gate(Arc<Mutex<(bool, Vec<EngineEvent>)>>);
+/// Holds back some of an engine's events while it is closed.
+#[derive(Clone)]
+struct Gate {
+    state: Arc<Mutex<(bool, Vec<EngineEvent>)>>,
+    holds: fn(&EngineEvent) -> bool,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self::holding(|event| matches!(event, EngineEvent::Paused { .. }))
+    }
+}
 
 impl Gate {
+    fn holding(holds: fn(&EngineEvent) -> bool) -> Self {
+        Self { state: Arc::default(), holds }
+    }
+
     fn close(&self) {
-        self.0.lock().unwrap().0 = true;
+        self.state.lock().unwrap().0 = true;
     }
 
     fn open(&self) {
-        self.0.lock().unwrap().0 = false;
+        self.state.lock().unwrap().0 = false;
     }
 
     fn held(&self) -> usize {
-        self.0.lock().unwrap().1.len()
+        self.state.lock().unwrap().1.len()
     }
 
     async fn until_held(&self, n: usize) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while self.held() < n {
-            assert!(Instant::now() < deadline, "the engine never paused");
+            assert!(Instant::now() < deadline, "the engine never sent the event");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -314,13 +362,12 @@ impl<P: EnginePort> EnginePort for Gated<P> {
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         let events = self.port.poll(max_wait);
-        let (closed, held) = &mut *self.gate.0.lock().unwrap();
+        let (closed, held) = &mut *self.gate.state.lock().unwrap();
         if !*closed {
             return held.drain(..).chain(events).collect();
         }
-        let (paused, others): (Vec<_>, Vec<_>) =
-            events.into_iter().partition(|e| matches!(e, EngineEvent::Paused { .. }));
-        held.extend(paused);
+        let (kept, others): (Vec<_>, Vec<_>) = events.into_iter().partition(self.gate.holds);
+        held.extend(kept);
         others
     }
 }
@@ -339,6 +386,53 @@ fn magnet(torrent: &FakeTorrentFile) -> Target {
 
 fn prefix(t: &FakeTorrentFile) -> String {
     t.info_hash.id().to_hex()[..6].to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_command_answers_usage_for_a_title() {
+    let h = Harness::new();
+    let film = || Target::Title("tt0063350".parse().unwrap());
+    let refs = || vec!["tt0903747:3:5".to_string()];
+    let requests = [
+        Request::Get(GetRequest {
+            target: film(),
+            dir: None,
+            files: Vec::new(),
+            max_size: None,
+            setup_max_size: None,
+            dry_run: false,
+        }),
+        Request::Play(PlayRequest { target: film(), dir: None, files: Vec::new(), setup_max_size: None }),
+        Request::Files { target: film(), timeout_ms: 1_000 },
+        Request::Status { refs: refs() },
+        Request::Pause { refs: refs() },
+        Request::Resume { refs: refs(), all: false },
+        Request::Remove { refs: refs() },
+        Request::Verify { reference: "tt0903747:3:5".into(), repair: false },
+    ];
+    let mut answers = Vec::new();
+    for request in requests {
+        match h.ask(request).await {
+            Response::Error { error } => answers.push((error.code, error.message)),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let usage = |command: &str, title: &str| {
+        (ErrorCode::Usage, format!("{command} takes a torrent, not a title such as {title}"))
+    };
+    assert_eq!(
+        answers,
+        [
+            usage("get", "tt0063350"),
+            usage("play", "tt0063350"),
+            usage("files", "tt0063350"),
+            usage("status", "tt0903747:3:5"),
+            usage("pause", "tt0903747:3:5"),
+            usage("resume", "tt0903747:3:5"),
+            usage("rm", "tt0903747:3:5"),
+            usage("verify", "tt0903747:3:5"),
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1362,7 +1456,7 @@ async fn a_selection_widened_while_the_engine_finishes_is_done_only_once_the_new
     );
 }
 
-const MIB: u64 = 1 << 20;
+pub(super) const MIB: u64 = 1 << 20;
 
 fn written(path: &std::path::Path, size: u64) -> Vec<u8> {
     let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
@@ -1536,4 +1630,5 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
 }
 
+mod titles;
 mod web;

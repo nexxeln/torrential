@@ -45,11 +45,36 @@ pub(crate) fn is_cam(name: &str, category: Option<Category>) -> bool {
     false
 }
 
+/// What a name calls a piece of a film, or something made around it, as a run of words.
+const EXTRAS: [&[&str]; 16] = [
+    &["trailer"],
+    &["trailers"],
+    &["teaser"],
+    &["teasers"],
+    &["promo"],
+    &["clip"],
+    &["clips"],
+    &["snippet"],
+    &["sample"],
+    &["featurette"],
+    &["featurettes"],
+    &["preview"],
+    &["soundtrack"],
+    &["ost"],
+    &["making", "of"],
+    &["behind", "the", "scenes"],
+];
+
+/// Whether a name is a trailer, a clip, or another extra rather than the work itself. Words
+/// the query holds do not count, so Trailer Park Boys is no trailer.
 pub(crate) fn is_extra(name: &str, terms: &Terms) -> bool {
-    const EXTRAS: [&str; 4] = ["trailer", "trailers", "teaser", "sample"];
-    name.split(|c: char| !c.is_alphanumeric())
-        .map(str::to_lowercase)
-        .any(|t| EXTRAS.contains(&t.as_str()) && !terms.words().contains(&t))
+    let words: Vec<String> =
+        name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let asked = |extra: &[&str]| extra.iter().all(|word| terms.words().iter().any(|own| own == word));
+    EXTRAS
+        .iter()
+        .filter(|extra| !asked(extra))
+        .any(|extra| words.windows(extra.len()).any(|run| run.iter().zip(*extra).all(|(word, wanted)| word == wanted)))
 }
 
 pub(crate) fn is_too_small(size: Option<u64>, resolution: Resolution) -> bool {
@@ -92,9 +117,17 @@ mod tests {
     fn spots_trailers_the_query_does_not_ask_for() {
         let film = Terms::parse("night of the living dead 1968");
         assert!(is_extra("Night Of The Living Dead (1968) Trailer HD 1080p", &film));
+        assert!(is_extra("Night Of The Living Dead ( 1968) ORIGINAL TRAILER [ HD 1080p]", &film));
         assert!(is_extra("Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.sample", &film));
+        assert!(is_extra("Night of the Living Dead 1968 Behind the Scenes 720p", &film));
+        assert!(is_extra("Night.of.the.Living.Dead.1968.Making.Of.DVDRip", &film));
+        assert!(is_extra("Big Buck Bunny [10-second snippet]", &Terms::parse("big buck bunny 2008")));
+        assert!(is_extra("Sintel OST 2010 FLAC", &Terms::parse("sintel 2010")));
         assert!(!is_extra("Night Of The Living Dead 720p 1968", &film));
+        assert!(!is_extra("Night Of The Living Dead (1968) Colorized", &film));
+        assert!(!is_extra("His Girl Friday (1940) Criterion + Extras (1080p", &Terms::parse("his girl friday 1940")));
         assert!(!is_extra("Trailer Park Boys S01 1080p", &Terms::parse("trailer park boys")));
+        assert!(!is_extra("The Making of a Lady 2012 720p", &Terms::parse("the making of a lady 2012")));
     }
 
     #[test]

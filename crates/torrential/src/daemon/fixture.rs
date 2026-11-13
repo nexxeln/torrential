@@ -223,6 +223,9 @@ pub fn search(now: i64) -> search_port::Fake {
             magnet: Some(format!("magnet:?xt=urn:btih:{hex}&dn={}", t.name)),
             torrent_url: archive.then(|| torrent_url(t)),
             info_url: archive.then(|| format!("https://archive.org/details/{}", t.name)),
+            span: None,
+            swarm: None,
+            failed: None,
         });
     }
     let script = vec![
@@ -348,6 +351,7 @@ pub fn seed(store: &mut Store, downloads: &Path, now: i64) -> Result<(), Error> 
             verified: landing.verified,
             piece_map: landing.piece_map,
             files_verified: Some(landing.files),
+            title: None,
         };
         store.insert(&record, Some(&seed.torrent.bytes()), added_at)?;
         let resume = arrived.to_string();

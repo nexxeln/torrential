@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use torrential_core::error::Details;
+use torrential_core::title::{Namesakes, Wanted};
 use torrential_core::{Category, ErrorCode, Flag, HexPrefix, SearchQuery, SourceOutcome};
 use torrential_search::{Progress, ResultCache, SavedLink, Search, SearchConfig, TorznabConfig};
 
@@ -640,6 +641,62 @@ async fn progress_shows_each_answer_and_the_final_ranking_is_unchanged() {
     assert_eq!(outcomes(&last)[2], ("nyaa".into(), SourceOutcome::Http { status: 404 }));
     assert_eq!(last.releases, whole.releases);
     assert_eq!(last.releases, updates[1].result.releases);
+}
+
+#[tokio::test]
+async fn a_title_searches_each_of_its_queries_and_reports_each_source_that_lists_video_once() {
+    let row = |hash: char, name: &str, seeders: u32, size: u64| {
+        format!(
+            r#"{{"id":"1","name":"{name}","info_hash":"{}","leechers":"1","seeders":"{seeders}","size":"{size}","num_files":"1","username":"u","added":"1600000000","status":"member","category":"207","imdb":""}}"#,
+            hash.to_string().repeat(40)
+        )
+    };
+    let bluray = row('a', "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP", 40, 6_000_000_000);
+    let dated = format!("[{bluray},{}]", row('b', "Night of the Living Dead (1990) 1080p BluRay", 90, 9_000_000_000));
+    let yearless = format!("[{bluray},{}]", row('c', "Night.of.the.Living.Dead.720p.WEB.x264", 12, 2_000_000_000));
+    let late = |body: String| Reply { delay: Duration::from_millis(300), ..ok(body.into_bytes()) };
+    let server = Server::start(vec![
+        ("/apibay/q.php?q=night%20of%20the%20living%20dead%201968&", vec![ok(dated.into_bytes())]),
+        ("/apibay/q.php?q=night%20of%20the%20living%20dead&", vec![late(yearless)]),
+        ("/knaben/", vec![status(404)]),
+        ("/ubuntu/", vec![status(404)]),
+        ("/academictorrents/", vec![status(404)]),
+    ])
+    .await;
+    let sources = ["knaben", "apibay", "ubuntu", "academictorrents"];
+    let wanted = Wanted {
+        name: "Night of the Living Dead".into(),
+        year: Some(1968),
+        episode: None,
+        namesakes: Namesakes::Leading,
+        runtime: Some(Duration::from_secs(96 * 60)),
+        season_episodes: None,
+        countries: Default::default(),
+    };
+    let q = SearchQuery { wanted: Some(wanted), ..query("night of the living dead", &sources) };
+    let search = Search::new(&server.config(&sources), ResultCache::new()).unwrap();
+    let mut updates: Vec<Progress> = Vec::new();
+
+    let result = search.search_with_progress(&q, || q.profile.clone(), |p| updates.push(p)).await.unwrap();
+
+    let spans: Vec<(&str, String)> =
+        result.releases.iter().map(|r| (r.name.as_str(), r.span.map(|s| s.to_string()).unwrap_or_default())).collect();
+    assert_eq!(
+        spans,
+        [
+            ("Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP", "film".to_string()),
+            ("Night.of.the.Living.Dead.720p.WEB.x264", "film".to_string()),
+        ]
+    );
+    assert_eq!(
+        outcomes(&result),
+        [("knaben".into(), SourceOutcome::Http { status: 404 }), ("apibay".into(), SourceOutcome::Ok { results: 4 })]
+    );
+    assert_eq!(updates.last().map(|p| p.pending.clone()), Some(vec!["apibay".to_string()]));
+    assert_eq!(server.hits("/apibay/q.php?q=night%20of%20the%20living%20dead%201968&"), 1);
+    assert_eq!(server.hits("/apibay/q.php?q=night%20of%20the%20living%20dead&"), 1);
+    assert_eq!(server.hits("/knaben/"), 2);
+    assert_eq!((server.hits("/ubuntu/"), server.hits("/academictorrents/")), (0, 0), "they hold no films");
 }
 
 const UBUNTU_TORRENT: &str = "/ubuntu/24.04/ubuntu-24.04.5-live-server-amd64.iso.torrent";

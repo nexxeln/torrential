@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use torrential_core::error::{Details, EXIT_PENDING};
-use torrential_core::protocol::{Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream};
+use torrential_core::protocol::{
+    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream, TitlePlayed,
+};
 use torrential_core::{
     Error, ErrorCode, FileRisk, Flag, InfoHash, Job, JobStatus, LocatorId, Progress, Release, ReleaseId, SearchQuery,
     SearchResult, Selection, SourceOutcome, SourceReport, TorrentFile, TorrentId,
 };
 
 use super::*;
-use crate::client::play::Hold;
+use crate::client::play::{Hold, Playing};
 use crate::client::wait::Printer;
 use crate::client::{Files, keep_matching};
 use crate::output::{Mode, Typed, render};
@@ -45,6 +47,9 @@ fn release(id: ReleaseId, name: &str) -> Release {
         magnet: None,
         torrent_url: None,
         info_url: None,
+        span: None,
+        swarm: None,
+        failed: None,
     }
 }
 
@@ -300,6 +305,7 @@ fn job(hex: &str, name: Option<&str>, status: JobStatus, progress: Progress) -> 
         progress,
         selection: Selection::All,
         added_at: NOW - 3600,
+        title: None,
     }
 }
 
@@ -957,9 +963,19 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
         streams: vec![stream(1, "Night.mp4", 596_399_542), stream(0, "Night.asr.srt", 52_633)],
     };
     let bare = PlayReply { job: film.clone(), streams: vec![stream(2, "VTS_01_1.mp4", 262_668_288)] };
+    let named = |name: &str, reply: &PlayReply| Playing { name: name.into(), reply: reply.clone(), title: None };
+    let title = TitlePlayed {
+        video: "tt0063350".parse().unwrap(),
+        name: "Night of the Living Dead (1968)".into(),
+        release: release(ReleaseId::Torrent(tid("6bc1af")), "Night of the Living Dead (1968) [DVD]"),
+        tried: Vec::new(),
+        resume_at: None,
+    };
+    let titled = Playing { title: Some(title), ..named("Night of the Living Dead (1968)", &bare) };
     let out = [
-        play("Night of the Living Dead (1968)", &reply, Some(Duration::from_secs(5772))).plain(),
-        play("night_of_the_living_dead_dvd", &bare, None).plain(),
+        play(&named("Night of the Living Dead (1968)", &reply), Some(Duration::from_secs(5772))).plain(),
+        play(&named("night_of_the_living_dead_dvd", &bare), None).plain(),
+        play(&titled, None).plain(),
     ];
     assert_eq!(
         out,
@@ -967,6 +983,8 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
             "6bc1af Night of the Living Dead (1968)\nvideo:     Night.mp4 (568.8 MiB)\nsubtitles: Night.asr.srt\n\
              runtime:   1:36:12\nnext:      torrential status 6bc1af\n",
             "6bc1af night_of_the_living_dead_dvd\nvideo: VTS_01_1.mp4 (250.5 MiB)\nnext:  torrential status 6bc1af\n",
+            "6bc1af Night of the Living Dead (1968)\nsource: Night of the Living Dead (1968) [DVD]\nvideo:  VTS_01_1.mp4 \
+             (250.5 MiB)\nnext:   torrential status 6bc1af\n",
         ]
     );
     assert_eq!(
@@ -991,5 +1009,82 @@ fn a_held_start_says_why_and_for_how_long() {
             "Starts in 29:40 so playback does not pause. Press Enter to start now",
             "Waiting for peers",
         ]
+    );
+}
+
+#[test]
+fn a_title_play_says_each_step_and_why_it_skipped_a_source_in_plain_words() {
+    use torrential_core::{AttemptEvent, Check, Kind, Skip, TitleCard};
+    let card = TitleCard {
+        id: "tt9999901".parse().unwrap(),
+        kind: Kind::Series,
+        name: "Harbor Lights".into(),
+        year: Some(2019),
+        rating: None,
+    };
+    let mut pack = release(ReleaseId::Torrent(tid("a1b2c3")), "Harbor.Lights.S01.1080p.WEB.x264");
+    pack.size = Some(9 * GIB);
+    let id = pack.id;
+    let skipped = |reason| AttemptEvent::Skipped { release: id, reason };
+    let full = Error::new(ErrorCode::DiskFull, "not enough space for Harbor.Lights.S01");
+    let steps = [
+        AttemptEvent::Resolved { video: "tt9999901:1:2".parse().unwrap(), title: card, episode: None },
+        AttemptEvent::Searched { found: 1, sources: Vec::new() },
+        AttemptEvent::Trying { rank: 1, of: 1, release: pack.clone() },
+        AttemptEvent::Check { check: Check::FileList },
+        skipped(Skip::NoFileList { waited_s: 20 }),
+        skipped(Skip::NoVideo),
+        skipped(Skip::Unplayable { container: "mkv".into() }),
+        skipped(Skip::TooLarge { error: full }),
+        skipped(Skip::NoData { waited_s: 30 }),
+        skipped(Skip::Stalled),
+        AttemptEvent::Playing {
+            video: "tt9999901:1:2".parse().unwrap(),
+            release: pack,
+            job: tid("a1b2c3"),
+            file: 1,
+            resume_at: None,
+        },
+    ];
+    let lines: Vec<Option<String>> = steps.iter().map(|s| step(s, "Playing")).collect();
+    assert_eq!(
+        lines,
+        [
+            Some("Finding sources of Harbor Lights S01E02"),
+            Some("Found 1 source"),
+            Some("Trying 1 of 1: a1b2c3 Harbor.Lights.S01.1080p.WEB.x264, 1080p h264, 9.0 GiB"),
+            None,
+            Some("Skipped a1b2c3: no peer sent its file list in 20s"),
+            Some("Skipped a1b2c3: none of its files is the video"),
+            Some("Skipped a1b2c3: its .mkv file needs ffmpeg, which is not installed"),
+            Some("Skipped a1b2c3: not enough space for Harbor.Lights.S01"),
+            Some("Skipped a1b2c3: no data arrived in 30s"),
+            Some("Skipped a1b2c3: it stalled"),
+            Some("Playing a1b2c3 Harbor.Lights.S01.1080p.WEB.x264, 1080p h264, 9.0 GiB"),
+        ]
+        .map(|line| line.map(String::from))
+    );
+}
+
+#[test]
+fn a_title_list_shows_ratings_only_when_a_title_has_one() {
+    use torrential_core::{Kind, TitleCard};
+    let card = |id: &str, name: &str, rating| TitleCard {
+        id: id.parse().unwrap(),
+        kind: Kind::Film,
+        name: name.into(),
+        year: Some(2010),
+        rating,
+    };
+    let unrated = [card("tt1727587", "Sintel", None)];
+    assert_eq!(
+        render(Mode::Plain, &titles(&unrated, "sintel"), &()),
+        "ID\tKIND\tYEAR\tNAME\ntt1727587\tfilm\t2010\tSintel\n# 1 title\nnext: torrential title tt1727587\n"
+    );
+    let mixed = [card("tt1727587", "Sintel", Some(7.4)), card("tt0000001", "Sintel Two", None)];
+    assert_eq!(
+        render(Mode::Plain, &titles(&mixed, "sintel"), &()),
+        "ID\tKIND\tYEAR\tRATING\tNAME\ntt1727587\tfilm\t2010\t7.4\tSintel\ntt0000001\tfilm\t2010\t?\tSintel Two\n\
+         # 2 titles\nnext: torrential title tt1727587\n"
     );
 }

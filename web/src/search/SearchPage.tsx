@@ -1,23 +1,13 @@
-import { MagnifyingGlassIcon, XMarkIcon } from "@heroicons/react/16/solid";
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Release, SearchResult, SourceReport } from "../api";
-import { count, sentence } from "../lib/format";
+import { count, list, sentence } from "../lib/format";
 import { isVideo } from "../lib/release";
-import { navigate, searchPath, watchPath } from "../router";
+import { navigate, torrentsPath, watchPath } from "../router";
 import { Header } from "../ui/Header";
-import { Spinner } from "../ui/Spinner";
 import { Recent } from "./Recent";
 import { ResultRow, useCopied } from "./ResultRow";
+import { SearchField, useSearchText } from "./SearchField";
 import { type SearchState, useSearch } from "./useSearch";
-
-/** Typing pauses this long before a search starts. */
-const TYPING_MS = 300;
-/** Text that names one torrent instead of describing one: a magnet link, an infohash, or a .torrent URL. */
-const TORRENT = /^(magnet:\?\S+|[0-9a-f]{40}|https?:\/\/\S+\.torrent(\?\S*)?)$/i;
-
-function list(names: string[]): string {
-  return new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(names);
-}
 
 function failures(sources: SourceReport[]): string | null {
   const silent = sources.filter((report) => report.outcome !== "ok" && report.outcome !== "cached" && report.outcome !== "irrelevant");
@@ -97,56 +87,14 @@ interface Props {
 
 export function SearchPage({ query, everything }: Props) {
   const input = useRef<HTMLInputElement>(null);
-  const [text, setText] = useState(query);
-  const committed = useRef(query);
   const state = useSearch(query, everything);
-
-  // Back and forward change the query from outside the field.
-  useEffect(() => {
-    if (query !== committed.current) {
-      committed.current = query;
-      setText(query);
-    }
-  }, [query]);
-
-  const commit = (words: string, scope = everything) => {
-    committed.current = words;
-    navigate(searchPath(words, scope), { replace: true });
-  };
-  const torrent = TORRENT.test(text.trim());
-  useEffect(() => {
-    if (torrent || text.trim() === committed.current.trim()) return;
-    const timer = setTimeout(() => commit(text.trim()), TYPING_MS);
-    return () => clearTimeout(timer);
-  });
+  const search = useSearchText(query, (words) => navigate(torrentsPath(words, everything), { replace: true }));
+  const { text } = search;
 
   useEffect(() => {
     document.title = query ? `${query} · torrential` : "torrential";
-    const pressed = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
-      if ((event.target as Element).closest("input, textarea, select")) return;
-      event.preventDefault();
-      input.current?.focus();
-      input.current?.select();
-    };
-    addEventListener("keydown", pressed);
-    return () => removeEventListener("keydown", pressed);
   }, [query]);
 
-  const typed = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Escape" && text) {
-      event.preventDefault();
-      setText("");
-      commit("");
-    } else if (event.key === "Enter" && torrent) {
-      event.stopPropagation();
-      navigate(watchPath(text.trim()));
-    } else if (event.key === "Enter" && text.trim() !== committed.current.trim()) {
-      // Enter before the typing pause ends searches now, instead of opening a result of the previous query.
-      event.stopPropagation();
-      commit(text.trim());
-    }
-  };
   const open = (release: Release) => navigate(watchPath(release.id));
 
   const result = state.kind === "searching" || state.kind === "done" ? state.result : null;
@@ -156,49 +104,16 @@ export function SearchPage({ query, everything }: Props) {
     <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-4 pb-16 sm:px-6">
       <Header current="search" />
       <main className="flex flex-col gap-3 pt-[min(8vh,--spacing(16))]">
-        <search className="sticky top-0 z-10 -mx-1 flex flex-col gap-2 bg-paper px-1 pt-3 pb-2">
-          <div className="grid grid-cols-[--spacing(11)_1fr_auto] items-center">
-            <input
-              ref={input}
-              type="search"
-              name="q"
-              aria-label="Search torrents"
-              placeholder="Search for a film, a show, anything"
-              autoFocus
-              autoComplete="off"
-              spellCheck={false}
-              enterKeyHint="search"
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              onKeyDown={typed}
-              className="col-span-full row-start-1 h-12 w-full appearance-none rounded-xl bg-raised pr-12 pl-11 text-base text-ink inset-ring inset-ring-white/10 placeholder:text-pencil focus:outline-2 focus:-outline-offset-1 focus:outline-action/70 [&::-webkit-search-cancel-button]:hidden"
-            />
-            <div className="pointer-events-none col-start-1 row-start-1 flex justify-center">
-              {busy ? <Spinner className="size-4 text-soft" /> : <MagnifyingGlassIcon className="size-4 fill-pencil" />}
-            </div>
-            <div className="col-start-3 row-start-1 flex items-center pr-2">
-              {text ? (
-                <button
-                  type="button"
-                  aria-label="Clear the search"
-                  onClick={() => (setText(""), commit(""), input.current?.focus())}
-                  className="relative flex size-8 items-center justify-center rounded-lg hover:bg-white/10"
-                >
-                  <XMarkIcon className="size-4 fill-soft" />
-                  <span className="absolute top-1/2 left-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden" aria-hidden="true" />
-                </button>
-              ) : (
-                <kbd className="pointer-events-none mr-1.5 rounded-md px-1.5 py-0.5 font-sans text-xs font-medium text-pencil inset-ring inset-ring-white/10 max-sm:hidden">
-                  /
-                </kbd>
-              )}
-            </div>
-          </div>
-          <div className="flex min-h-7 items-center justify-between gap-4 px-0.5">
-            <p aria-live="polite" className="truncate text-sm text-pencil tabular-nums">
-              {torrent ? "Press Enter to play this torrent" : describe(state)}
-            </p>
-            {query && (
+        <SearchField
+          input={input}
+          search={search}
+          label="Search torrents"
+          placeholder="Search for a film, a show, anything"
+          busy={busy}
+          onKeyDown={search.keyDown}
+          status={describe(state)}
+          aside={
+            query && (
               <fieldset className="flex shrink-0 items-center gap-1 text-sm">
                 <legend className="sr-only">What to search</legend>
                 {[false, true].map((all) => (
@@ -211,15 +126,15 @@ export function SearchPage({ query, everything }: Props) {
                       name="scope"
                       className="sr-only"
                       checked={everything === all}
-                      onChange={() => commit(text.trim(), all)}
+                      onChange={() => navigate(torrentsPath(text.trim(), all), { replace: true })}
                     />
                     {all ? "Everything" : "Video"}
                   </label>
                 ))}
               </fieldset>
-            )}
-          </div>
-        </search>
+            )
+          }
+        />
 
         {state.kind === "idle" && <Recent />}
         {state.kind === "failed" && (

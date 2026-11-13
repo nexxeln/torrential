@@ -2,7 +2,8 @@ import type { Release } from "../api";
 
 const VIDEO_FILE = /\.(mkv|mp4|m4v|mov|webm|avi|ts|m2ts|wmv|mpg|mpeg|ogv)$/i;
 /** Where a release name stops being the title: a year, an episode, or a resolution. */
-const TAGS = /(?<=[\s(\[-])(?:(?:19|20)\d{2}(?=[\s)\]]|$)|S\d{1,2}(?:E\d{1,3})?\b|\d{3,4}p\b|4k\b|uhd\b|complete\b)/i;
+const TAGS = /(?<=[\s.(\[-])(?:(?:19|20)\d{2}(?=[\s.)\]]|$)|S\d{1,2}(?:E\d{1,3})?\b|\d{3,4}p\b|4k\b|uhd\b|complete\b)/i;
+const CLOSING: Record<string, string> = { "(": ")", "[": "]" };
 
 export interface ReadableName {
   /** The words before the first tag: `Night of the Living Dead`. */
@@ -18,8 +19,12 @@ export function readable(name: string): ReadableName {
   const spaced = /\s/.test(base) ? base : base.replace(/[._]+/g, " ");
   const cut = TAGS.exec(spaced);
   if (!cut || cut.index === 0) return { title: spaced.trim(), tags: "" };
-  const title = spaced.slice(0, cut.index).replace(/[\s([\-]+$/, "");
-  const tags = spaced.slice(cut.index).replace(/^[\s)\]]+|[\s([]+$/g, "");
+  const before = spaced.slice(0, cut.index);
+  const title = before.replace(/[\s.([\-]+$/, "");
+  // A year in brackets, as in `Sintel (2010)`, opens in the title and closes in the tags.
+  const closing = CLOSING[before.trimEnd().at(-1) ?? ""];
+  const after = spaced.slice(cut.index);
+  const tags = (closing ? after.replace(closing, "") : after).replace(/^[\s)\]]+|[\s([]+$/g, "");
   return title ? { title, tags } : { title: spaced.trim(), tags: "" };
 }
 

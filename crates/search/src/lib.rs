@@ -7,11 +7,13 @@
 
 mod assemble;
 mod cache;
+pub mod catalog;
 mod classify;
 mod dates;
 mod http;
 mod metainfo;
 mod observation;
+mod redirect;
 mod sources;
 pub mod subtitles;
 mod terms;
@@ -19,11 +21,12 @@ mod terms;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures_util::future::Either;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -35,8 +38,8 @@ use crate::assemble::{Answer, Linked, Run, assemble, merged, vet};
 use crate::cache::AnswerKey;
 pub use crate::cache::ResultCache;
 use crate::http::{FetchError, Http, Retry};
-pub use crate::sources::SavedLink;
 use crate::sources::{Ctx, Failure, Source, Stores};
+pub use crate::sources::{SavedLink, lawful};
 use crate::terms::Terms;
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -133,7 +136,8 @@ impl Search {
     /// Like [`Search::search`], ranked for what `rank_for` returns each time results
     /// change, so a profile that becomes known during the search applies. Calls
     /// `progress` each time sources answer while others are still pending. Answers that
-    /// arrive together make one call.
+    /// arrive together make one call. A query with a wanted title searches each of the
+    /// title's queries at every source, and a source is pending until all have answered.
     pub async fn search_with_progress(
         &self,
         query: &SearchQuery,
@@ -141,16 +145,25 @@ impl Search {
         mut progress: impl FnMut(Progress) + Send,
     ) -> Result<SearchResult, Error> {
         let started = Instant::now();
-        let terms = Terms::parse(&query.text);
-        if terms.is_empty() {
+        let texts: Vec<Terms> = match &query.wanted {
+            Some(wanted) => wanted.queries().iter().map(|text| Terms::parse(text)).collect(),
+            None => vec![Terms::parse(&query.text)],
+        };
+        if texts.iter().any(Terms::is_empty) {
             return Err(
                 Error::new(ErrorCode::Usage, "a search needs at least one word").with_hint("torrential search <words>")
             );
         }
+        // The first query's words weigh relevance, since it names the title most fully.
+        let terms = &texts[0];
         let deadline = started + Duration::from_millis(query.timeout_ms.into());
         let cache = &self.inner.cache;
-        let selected = self.select(&query.sources)?;
-        let lookups = selected.iter().cloned().map(|source| {
+        let mut selected = self.select(&query.sources)?;
+        if query.wanted.is_some() {
+            selected.retain(|source| source.video);
+        }
+        let lookups = selected.iter().flat_map(|source| texts.iter().map(move |terms| (source, terms))).enumerate();
+        let lookups = lookups.map(|(index, (source, terms))| {
             let key = AnswerKey {
                 source: source.meta.name.clone(),
                 scope: source.scope(),
@@ -158,12 +171,11 @@ impl Search {
                 adult: query.adult,
             };
             let cached = if query.fresh { None } else { cache.answer(&key, std::time::Instant::now()) };
-            let terms = &terms;
             async move {
                 if let Some(rows) = cached {
-                    return Run { source: source.meta.clone(), answer: Answer::Cached(rows), elapsed_ms: 0 };
+                    return (index, Run { source: source.meta.clone(), answer: Answer::Cached(rows), elapsed_ms: 0 });
                 }
-                let (answer, complete) = AssertUnwindSafe(self.inner.run(&source, terms, query, deadline))
+                let (answer, complete) = AssertUnwindSafe(self.inner.run(source, terms, query, deadline))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| {
@@ -174,29 +186,33 @@ impl Search {
                 {
                     cache.store(key, rows.clone(), std::time::Instant::now());
                 }
-                Run { source: source.meta.clone(), answer, elapsed_ms: millis(started.elapsed()) }
+                (index, Run { source: source.meta.clone(), answer, elapsed_ms: millis(started.elapsed()) })
             }
         });
         let mut lookups: FuturesUnordered<_> = lookups.collect();
-        let mut runs: Vec<Run> = Vec::with_capacity(selected.len());
-        while let Some(run) = lookups.next().await {
-            runs.push(run);
-            while let Some(Some(run)) = lookups.next().now_or_never() {
-                runs.push(run);
+        // By source, then by text, so runs merge in the same order however they finish.
+        let mut runs: Vec<Option<Run>> = vec![None; selected.len() * texts.len()];
+        while let Some((index, run)) = lookups.next().await {
+            runs[index] = Some(run);
+            while let Some(Some((index, run))) = lookups.next().now_or_never() {
+                runs[index] = Some(run);
             }
-            if runs.len() < selected.len() {
-                let (result, linked) = merged(query, rank_for(), &terms, &runs, millis(started.elapsed()));
+            if !lookups.is_empty() {
+                let answered: Vec<Run> = runs.iter().flatten().cloned().collect();
+                let (result, linked) = merged(query, rank_for(), terms, &answered, millis(started.elapsed()));
                 cache.remember(self.inner.saved_links(linked));
                 let pending = selected
                     .iter()
-                    .filter(|s| !runs.iter().any(|r| r.source.name == s.meta.name))
-                    .map(|s| s.meta.name.clone())
+                    .zip(runs.chunks(texts.len()))
+                    .filter(|(_, runs)| runs.iter().any(Option::is_none))
+                    .map(|(s, _)| s.meta.name.clone())
                     .collect();
                 progress(Progress { result, pending });
             }
         }
         self.inner.stores.save().await;
-        let (result, linked) = assemble(query, rank_for(), &terms, &runs, millis(started.elapsed()))?;
+        let runs: Vec<Run> = runs.into_iter().flatten().collect();
+        let (result, linked) = assemble(query, rank_for(), terms, &runs, millis(started.elapsed()))?;
         cache.remember(self.inner.saved_links(linked));
         Ok(result)
     }
@@ -242,27 +258,31 @@ impl Search {
         // A private tracker may count each request for a .torrent as a grab.
         let body = self.inner.http.fetch(&url, CAP, Instant::now() + WITHIN, Retry::Never).await;
         body.map_err(|e| {
-            Error::new(
-                ErrorCode::FetchFailed,
-                format!("could not fetch the .torrent file: {}", fetch_reason(e, WITHIN)),
-            )
-            .with_hint("check the network connection, or download by magnet link")
+            Error::new(ErrorCode::FetchFailed, format!("could not fetch the .torrent file: {}", fetch_reason(e)))
+                .with_hint("check the network connection, or download by magnet link")
         })
     }
 
-    /// Web seeds on the servers that hold an archive.org torrent's files, to add to its own.
-    /// archive.org's download URL answers each file with a redirect to a server that holds it,
-    /// and libtorrent turns each redirect into a web seed that has only that file, so a piece
-    /// that spans two files sent to different servers has no source. `None` for a torrent that
-    /// does not download from archive.org, and while the archive.org source is disabled.
+    /// Web seeds that serve every file of a torrent, to add to its own. A web seed can answer each
+    /// file with a redirect to a server that holds it, as archive.org's download URL does, and
+    /// libtorrent turns each redirect into a web seed that has only that file, so a piece that
+    /// spans two files has no source. archive.org names the servers of a torrent that downloads
+    /// from it, unless the archive.org source is disabled. For any other torrent, the seeds are the
+    /// folders its web seeds redirect `file` to, where `file` is one of its several files as a path
+    /// that starts with the torrent's name. `None` when there is nothing to ask.
     pub fn mirrors(
         &self,
         name: &str,
+        file: Option<&Path>,
         web_seeds: &[String],
     ) -> Option<impl Future<Output = Result<Vec<String>, Error>> + Send + 'static> {
-        let item = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds))?;
         let inner = self.inner.clone();
-        Some(async move { item.mirrors(&inner.http).await })
+        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds)) {
+            return Some(Either::Left(async move { item.mirrors(&inner.http).await }));
+        }
+        let file = file.filter(|file| web_seeds.iter().any(|seed| redirect::request(seed, file).is_some()))?;
+        let (file, web_seeds) = (file.to_path_buf(), web_seeds.to_vec());
+        Some(Either::Right(async move { Ok(redirect::roots(&inner.http, &file, &web_seeds).await) }))
     }
 
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {
@@ -329,9 +349,12 @@ impl Inner {
     }
 }
 
-fn fetch_reason(e: FetchError, within: Duration) -> String {
+fn fetch_reason(e: FetchError) -> String {
     match e {
-        FetchError::Timeout => format!("no response within {} seconds", within.as_secs()),
+        FetchError::Timeout(waited) => match waited.as_secs_f64().round() as u64 {
+            1 => "no response in 1 second".to_string(),
+            seconds => format!("no response in {seconds} seconds"),
+        },
         FetchError::Status(status) => format!("HTTP {status}"),
         FetchError::Connect(reason) | FetchError::Decode(reason) => text::truncate(&text::sanitize(&reason), 160),
         FetchError::TooLarge(cap) => format!("larger than {} MiB", cap >> 20),

@@ -1,17 +1,15 @@
 //! Finds a film's or a series' IMDb ID from its title, with the suggestions IMDb's own search box
-//! uses. They need no key.
+//! uses.
 
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use serde::Deserialize;
 use tokio::time::Instant;
 use torrential_core::title::{Title, normalized};
 use url::Url;
 
+pub use crate::catalog::imdb::BASE;
+use crate::catalog::imdb::{Suggestion, suggestions};
 use crate::http::{FetchError, Http};
 
 pub const NAME: &str = "imdb";
-pub const BASE: &str = "https://v3.sg.media-imdb.com/";
-const LARGEST: usize = 256 << 10;
 
 /// The kinds of title an episode's series can be, and the kinds a film can be. Anything else,
 /// such as a single episode or a video game, is neither.
@@ -26,22 +24,6 @@ pub struct Matched {
     pub title: Title,
 }
 
-#[derive(Deserialize)]
-struct Suggestions {
-    #[serde(default)]
-    d: Vec<Suggestion>,
-}
-
-#[derive(Deserialize)]
-struct Suggestion {
-    id: String,
-    /// The title. People are listed too, by name.
-    #[serde(default)]
-    l: String,
-    y: Option<u16>,
-    qid: Option<String>,
-}
-
 /// The first of `titles` that IMDb knows under that exact name. `None` when none is: subtitles for
 /// a film that only resembles this one are worse than none.
 pub async fn find(http: &Http, base: &Url, titles: &[Title], deadline: Instant) -> Result<Option<Matched>, FetchError> {
@@ -50,11 +32,7 @@ pub async fn find(http: &Http, base: &Url, titles: &[Title], deadline: Instant) 
         if name.is_empty() {
             continue;
         }
-        let path = format!("suggestion/x/{}.json", utf8_percent_encode(&name, NON_ALPHANUMERIC));
-        let url = base.join(&path).map_err(|e| FetchError::Connect(e.to_string()))?;
-        let body = http.get(&url, LARGEST, deadline).await?;
-        let suggestions: Suggestions = serde_json::from_slice(&body).map_err(|e| FetchError::Decode(e.to_string()))?;
-        if let Some(matched) = pick(title, &suggestions.d) {
+        if let Some(matched) = pick(title, &suggestions(http, base, &name, deadline).await?) {
             return Ok(Some(matched));
         }
     }
@@ -87,7 +65,7 @@ mod tests {
     use torrential_core::title::Episode;
 
     fn listed(id: &str, name: &str, year: Option<u16>, kind: Option<&str>) -> Suggestion {
-        Suggestion { id: id.into(), l: name.into(), y: year, qid: kind.map(String::from) }
+        Suggestion { id: id.into(), l: name.into(), y: year, qid: kind.map(String::from), i: None }
     }
 
     fn film(name: &str, year: Option<u16>) -> Title {

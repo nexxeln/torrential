@@ -50,10 +50,34 @@ export function count(n: number, noun: string): string {
   return `${n.toLocaleString("en")} ${noun}${n === 1 ? "" : "s"}`;
 }
 
-/** The engine writes messages for a terminal: lower case, no period. On a page they read as sentences. */
+/** `a, b, and c`. */
+export function list(names: string[]): string {
+  return new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(names);
+}
+
+/**
+ * The engine writes messages for a terminal: lower case, no period. On a page they read as sentences.
+ * A message that starts with an ID, such as `tt0063350` or an infohash, keeps it as written.
+ */
 export function sentence(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
-  const capital = trimmed[0]!.toUpperCase() + trimmed.slice(1);
+  const capital = /^\S*\d/.test(trimmed) ? trimmed : trimmed[0]!.toUpperCase() + trimmed.slice(1);
   return /[.!?…]$/.test(capital) ? capital : `${capital}.`;
+}
+
+/** A running time: `1h 36m`, `2h`, `14m`. */
+export function minutes(count: number): string {
+  const whole = Math.max(0, Math.round(count));
+  const [h, m] = [Math.floor(whole / 60), whole % 60];
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+const DAY = new Intl.DateTimeFormat("en", { day: "numeric", month: "short", year: "numeric" });
+
+/** A calendar date: `17 Oct 1991`. */
+export function day(unixSeconds: number): string {
+  const parts = Object.fromEntries(DAY.formatToParts(unixSeconds * 1000).map((part) => [part.type, part.value]));
+  return `${parts.day} ${parts.month} ${parts.year}`;
 }

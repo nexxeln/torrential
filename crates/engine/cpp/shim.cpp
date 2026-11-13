@@ -221,6 +221,16 @@ lt::session_params make_params(SessionSettings const& s) {
   // libtorrent counts interesting web seeds in order, including connected ones,
   // so redirected seeds can fill the slots. 0 raises the limit from 3 to 100.
   p.set_int(lt::settings_pack::max_web_seed_connections, 0);
+  // A web seed picks its next pieces only when its queued requests run low,
+  // and by default it picks 16 MiB at a time, so a piece a reader waits for
+  // waits behind up to 16 MiB of others. libtorrent raises this to the piece
+  // size, so a seed picks one piece, or 1 MiB, at a time.
+  p.set_int(lt::settings_pack::urlseed_max_request_bytes, 1024 * 1024);
+  // libtorrent sends a piece a reader waits for only to a peer whose queued
+  // requests take under 2 s, and by default it keeps 3 s queued with every
+  // peer. A web seed then never qualifies, and a slow peer that took blocks
+  // of the piece holds them for seconds before another peer is asked.
+  p.set_int(lt::settings_pack::request_queue_time, 1);
   p.set_int(lt::settings_pack::alert_queue_size, 10000);
   p.set_int(lt::settings_pack::alert_mask, lt::alert_category::status | lt::alert_category::error |
                                                lt::alert_category::storage | lt::alert_category::dht);
@@ -551,8 +561,11 @@ bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file,
     deadline_ms += 100;
   }
   // A reader goes on to the bytes after the range. Sequential picking skips
-  // the pieces with deadlines, so they still come first.
-  h.set_sequential_range(first, file_last);
+  // the pieces with deadlines, so they still come first. A range that ends
+  // the file moves nothing: a player reads a file's last bytes for its index
+  // and then returns to where it plays, and a range of one piece would leave
+  // every other peer picking at random.
+  if (last < file_last) h.set_sequential_range(first, file_last);
   return written;
 }
 

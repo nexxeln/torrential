@@ -1,12 +1,14 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, HashMap};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
 use torrential_core::error::Details;
+use torrential_core::title::{Namesakes, Span, Wanted};
 use torrential_core::{
     Arch, Category, Error, ErrorCode, Flag, InfoHash, Language, LocatorId, Profile, Quality, Release, ReleaseId,
-    Resolution, SearchQuery, SearchResult, Sort, SourceReport, TorrentId,
+    Resolution, SearchQuery, SearchResult, Sort, SourceOutcome, SourceReport, Swarm, TorrentId,
 };
 
 use crate::classify;
@@ -16,12 +18,14 @@ use crate::terms::{self, Relevance, Terms};
 
 const MAX_TRACKERS: usize = 32;
 
+#[derive(Clone)]
 pub(crate) struct Run {
     pub source: Arc<SourceMeta>,
     pub answer: Answer,
     pub elapsed_ms: u32,
 }
 
+#[derive(Clone)]
 pub(crate) enum Answer {
     Fresh(Arc<Vec<Observation>>),
     Cached(Arc<Vec<Observation>>),
@@ -58,8 +62,8 @@ pub(crate) fn merged(
     elapsed_ms: u32,
 ) -> (SearchResult, Vec<Linked>) {
     let mut runs: Vec<&Run> = runs.iter().collect();
-    runs.sort_by_key(|r| r.source.authority);
-    let sources: Vec<SourceReport> = runs.iter().map(|r| report(r)).collect();
+    runs.sort_by(|a, b| (a.source.authority, &a.source.name).cmp(&(b.source.authority, &b.source.name)));
+    let sources: Vec<SourceReport> = runs.chunk_by(|a, b| a.source.name == b.source.name).map(report).collect();
     let sightings = runs.iter().flat_map(|run| {
         let rows: &[Observation] = match &run.answer {
             Answer::Fresh(rows) | Answer::Cached(rows) => rows,
@@ -77,14 +81,34 @@ pub(crate) fn merged(
     (result, kept.into_iter().map(|c| (c.release, c.private_url)).collect())
 }
 
-fn report(run: &Run) -> SourceReport {
+/// One source's report over its runs, one for each of a title's queries.
+fn report(runs: &[&Run]) -> SourceReport {
     let count = |rows: &Vec<Observation>| u32::try_from(rows.len()).unwrap_or(u32::MAX);
-    let outcome = match &run.answer {
-        Answer::Fresh(rows) => torrential_core::SourceOutcome::Ok { results: count(rows) },
-        Answer::Cached(rows) => torrential_core::SourceOutcome::Cached { results: count(rows) },
+    let outcome = |run: &Run| match &run.answer {
+        Answer::Fresh(rows) => SourceOutcome::Ok { results: count(rows) },
+        Answer::Cached(rows) => SourceOutcome::Cached { results: count(rows) },
         Answer::Failed(failure) => failure.outcome(),
     };
-    SourceReport { source: run.source.name.clone(), outcome, elapsed_ms: run.elapsed_ms }
+    let first = runs[0];
+    let outcome = runs[1..].iter().fold(outcome(first), |sum, run| joined(sum, outcome(run)));
+    let elapsed_ms = runs.iter().map(|r| r.elapsed_ms).max().unwrap_or(first.elapsed_ms);
+    SourceReport { source: first.source.name.clone(), outcome, elapsed_ms }
+}
+
+/// Two runs of one source as one outcome. Their rows add up, fresh wins over cached, and an
+/// answer wins over a failure. Of two failures, the first says why.
+fn joined(first: SourceOutcome, then: SourceOutcome) -> SourceOutcome {
+    match (first, then) {
+        (SourceOutcome::Cached { results: a }, SourceOutcome::Cached { results: b }) => {
+            SourceOutcome::Cached { results: a.saturating_add(b) }
+        }
+        (
+            SourceOutcome::Ok { results: a } | SourceOutcome::Cached { results: a },
+            SourceOutcome::Ok { results: b } | SourceOutcome::Cached { results: b },
+        ) => SourceOutcome::Ok { results: a.saturating_add(b) },
+        (failed, answered) if !failed.is_ok() && answered.is_ok() => answered,
+        (first, _) => first,
+    }
 }
 
 fn all_failed(sources: Vec<SourceReport>) -> Error {
@@ -104,12 +128,84 @@ pub(crate) struct Candidate {
     private_info: bool,
     relevance: Relevance,
     extra_words: u16,
+    /// A trailer, a clip, or another extra, by a word the query does not hold.
+    extra: bool,
     downloads: Option<u64>,
     lawful: bool,
     quality: Quality,
     resolution: Option<Resolution>,
     arches: Vec<Arch>,
     languages: Vec<Language>,
+    /// Set only in a title's search, for a release of the wanted title.
+    title: Option<TitleFit>,
+}
+
+/// How a release of the wanted title plays here. Its span is in `release.span`.
+struct TitleFit {
+    swarm: Swarm,
+    /// Other titles share the name and this release names no year.
+    undated: bool,
+    /// The bitrate is in the usual band for its resolution, or unknown.
+    in_band: bool,
+    /// Words in the name beyond the title, its year, and tags, as an alternate version has.
+    other_words: usize,
+}
+
+/// Below this many Mbit/s a release is a fake or a broken file.
+const FAKE_MBPS: f64 = 0.25;
+
+/// The Mbit/s at each resolution that looks right and streams comfortably. A small encode of a
+/// popular release sits low in it, and a remux runs above it.
+fn band(resolution: Option<Resolution>) -> RangeInclusive<f64> {
+    match resolution {
+        Some(Resolution::Sd) => 0.3..=4.0,
+        Some(Resolution::P720) => 0.6..=8.0,
+        Some(Resolution::P1080) => 1.0..=16.0,
+        Some(Resolution::P2160) => 3.0..=40.0,
+        None => 0.3..=16.0,
+    }
+}
+
+/// Mbit/s per film or episode, from the size and the catalog's runtime. `None` when either is
+/// unknown, and for a release of every season, whose episodes are not counted.
+fn bitrate(size: Option<u64>, span: Span, wanted: &Wanted) -> Option<f64> {
+    let episodes = match span {
+        Span::Film | Span::Episode(_) => 1,
+        Span::Season(_) => wanted.season_episodes?,
+        Span::Seasons { first, last } => wanted.season_episodes? * (last - first + 1),
+        Span::Complete => return None,
+    };
+    let seconds = wanted.runtime?.as_secs_f64() * f64::from(episodes);
+    (seconds > 0.0).then(|| size.map(|size| size as f64 * 8.0 / seconds / 1e6))?
+}
+
+/// Play preference for a release of the wanted title. Derived `Ord`, so lower plays first.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct PlayRank {
+    cam: bool,
+    unfit: bool,
+    /// The name marks languages, and none is the system's or the original English.
+    foreign: bool,
+    swarm: Swarm,
+    undated: bool,
+    standing: Reverse<u8>,
+    /// Ahead of the screen's resolution: a remux that fits the screen still does not stream.
+    off_band: bool,
+    other_words: usize,
+    span: u8,
+    closeness: u8,
+    /// Most first. `Reverse` puts unknown after every count.
+    seeders: Reverse<Option<u32>>,
+}
+
+/// How much more than the film or episode a release holds: none, a season, several, or all.
+fn breadth(span: Option<Span>) -> u8 {
+    match span {
+        None | Some(Span::Film | Span::Episode(_)) => 0,
+        Some(Span::Season(_)) => 1,
+        Some(Span::Seasons { .. }) => 2,
+        Some(Span::Complete) => 3,
+    }
 }
 
 impl Candidate {
@@ -195,8 +291,8 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
     let extra_words = terms.extra_words(&name);
     let quality = Quality::parse(&name);
     let size = first(group, |o| o.size);
-    let resolution =
-        quality.resolution.filter(|r| !classify::is_extra(&name, terms) && !classify::is_too_small(size, *r));
+    let extra = classify::is_extra(&name, terms);
+    let resolution = quality.resolution.filter(|r| !extra && !classify::is_too_small(size, *r));
     let arches = Arch::named_in(&name);
     let languages = Language::named_in(&name, terms.words());
     Candidate {
@@ -217,15 +313,20 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
             sources: authorities.into_iter().map(|(_, name)| name.to_string()).collect(),
             torrent_url: link.map(|(_, _, url, _)| url.to_string()),
             info_url: info.map(|(.., url)| url.to_string()),
+            span: None,
+            swarm: None,
+            failed: None,
         },
         relevance,
         extra_words,
+        extra,
         downloads: group.iter().filter_map(|(_, o)| o.downloads).max(),
         lawful: group.iter().any(|(s, _)| s.lawful),
         quality,
         resolution,
         arches,
         languages,
+        title: None,
     }
 }
 
@@ -253,6 +354,10 @@ fn filter(candidates: Vec<Candidate>, q: &SearchQuery) -> (Vec<Candidate>, u32) 
                 && q.min_seeds.is_none_or(|min| r.seeders.is_some_and(|s| s >= min))
                 && q.max_size.is_none_or(|max| r.size.is_some_and(|s| s <= max))
         })
+        .filter_map(|c| match &q.wanted {
+            Some(wanted) => fitted(c, wanted),
+            None => Some(c),
+        })
         .filter(|c| {
             let hide = !q.adult && c.release.flags.contains(&Flag::Adult);
             hidden_adult += u32::from(hide);
@@ -262,19 +367,61 @@ fn filter(candidates: Vec<Candidate>, q: &SearchQuery) -> (Vec<Candidate>, u32) 
     (kept, hidden_adult)
 }
 
+/// The candidate as a release of the wanted title, or `None` when it is another title or an
+/// extra such as its trailer, when its swarm is known to be dead, or when its bitrate says it
+/// is a fake.
+fn fitted(mut c: Candidate, wanted: &Wanted) -> Option<Candidate> {
+    if c.extra {
+        return None;
+    }
+    let reading = wanted.fit(&c.release.name)?;
+    let swarm = Swarm::of(c.release.seeders, c.lawful)?;
+    let bitrate = bitrate(c.release.size, reading.span, wanted);
+    if bitrate.is_some_and(|mbps| mbps < FAKE_MBPS) {
+        return None;
+    }
+    c.release.span = Some(reading.span);
+    c.release.swarm = Some(swarm);
+    c.title = Some(TitleFit {
+        swarm,
+        undated: wanted.namesakes == Namesakes::Leading && reading.year.is_none(),
+        in_band: bitrate.is_none_or(|mbps| band(c.quality.resolution).contains(&mbps)),
+        other_words: wanted.other_words(&c.release.name),
+    });
+    Some(c)
+}
+
+/// In a title's search the play order leads: not a cam, fits, not in another language, swarm,
+/// names the year, standing, bitrate, a plain name, span, screen, and seeders. The chain after
+/// it orders every search.
 fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
     let fits = |c: &Candidate| profile.fits(c.release.size, c.quality);
     let is_video = |c: &Candidate| c.release.category == Some(Category::Video) || c.quality.resolution.is_some();
     let video_search = candidates.iter().filter(|c| is_video(c)).count() * 2 > candidates.len();
     let closeness = |c: &Candidate| if video_search { profile.closeness(c.resolution) } else { 0 };
+    let play = |c: &Candidate| {
+        c.title.as_ref().map(|t| PlayRank {
+            cam: c.release.flags.contains(&Flag::Cam),
+            unfit: !fits(c),
+            foreign: profile.language_rank(&c.languages) == 2,
+            swarm: t.swarm,
+            undated: t.undated,
+            standing: Reverse(standing(c)),
+            off_band: !t.in_band,
+            other_words: t.other_words,
+            span: breadth(c.release.span),
+            closeness: profile.closeness(c.resolution),
+            seeders: Reverse(c.release.seeders),
+        })
+    };
     candidates.sort_by(|a, b| {
         let (ra, rb) = (&a.release, &b.release);
-        let primary = match sort {
+        let primary = play(a).cmp(&play(b)).then(match sort {
             Sort::Relevance => Ordering::Equal,
             Sort::Seeds => known_first_desc(ra.seeders, rb.seeders),
             Sort::Size => known_first_desc(ra.size, rb.size),
             Sort::Age => known_first_desc(ra.published, rb.published),
-        };
+        });
         primary
             .then_with(|| b.relevance.cmp(&a.relevance))
             .then_with(|| fits(b).cmp(&fits(a)))

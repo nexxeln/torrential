@@ -6,8 +6,8 @@ import { isVideo, readable } from "../lib/release";
 import { Link, watchPath } from "../router";
 import { Chip } from "../ui/Chip";
 
-const RESOLUTIONS: Record<Resolution, string> = { sd: "SD", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
-const CODECS: Record<NameCodec, string> = { h264: "H.264", hevc: "HEVC", av1: "AV1" };
+export const RESOLUTIONS: Record<Resolution, string> = { sd: "SD", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
+export const CODECS: Record<NameCodec, string> = { h264: "H.264", hevc: "HEVC", av1: "AV1" };
 const FLAGS: Record<Flag, { label: string; tone: "good" | "bad" | "plain"; title: string }> = {
   official: { label: "Official", tone: "good", title: "Published by the project that made it" },
   trusted: { label: "Trusted", tone: "good", title: "The index marks the uploader as trusted" },
@@ -29,12 +29,18 @@ interface Props {
   copied: boolean;
   onPoint: () => void;
   onCopy: () => void;
+  /** Where a video release plays. Its own download by default. */
+  href?: string;
+  /** The release a title's Play tries first. */
+  pick?: boolean;
+  /** Why the release did not start when Play last tried it, as a sentence. */
+  failed?: string;
 }
 
 const ROW =
   "grid w-full grid-cols-1 items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 text-left hover:bg-white/5 data-selected:bg-white/8 sm:grid-cols-[minmax(0,1fr)_auto]";
 
-export function ResultRow({ release, selected, copied, onPoint, onCopy }: Props) {
+export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pick, failed }: Props) {
   const row = useRef<HTMLLIElement>(null);
   useEffect(() => {
     if (selected) row.current?.scrollIntoView({ block: "nearest" });
@@ -50,6 +56,12 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy }: Props)
           {name.title} <span className="font-normal text-pencil">{name.tags}</span>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-sm text-pencil">
+          {pick && (
+            <Chip tone="good" title="Play tries this source first">
+              Pick
+            </Chip>
+          )}
+          {failed && <Chip title={failed}>Did not start earlier</Chip>}
           {quality.resolution && <Chip>{RESOLUTIONS[quality.resolution]}</Chip>}
           {quality.codec && <Chip>{CODECS[quality.codec]}</Chip>}
           {quality.hdr && <Chip>HDR</Chip>}
@@ -86,7 +98,7 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy }: Props)
     <li ref={row} className="scroll-my-24">
       {playable ? (
         <Link
-          href={watchPath(release.id)}
+          href={href ?? watchPath(release.id)}
           data-selected={selected ? "" : undefined}
           aria-current={selected ? "true" : undefined}
           onPointerMove={onPoint}
