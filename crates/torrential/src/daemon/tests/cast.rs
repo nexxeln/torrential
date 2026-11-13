@@ -715,6 +715,43 @@ async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_cast_that_takes_the_tv_waits_until_the_one_before_lets_go() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let film = torrent(84, "Night", &[("Night.mkv", 2 * MIB), ("Extra.mkv", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
+    written(&h.downloads().join("Night/Extra.mkv"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    tvs(&h, true).await;
+
+    tv.set(|screen| screen.slow = Some(("SetAVTransportURI", Duration::from_secs(2))));
+    let first = CastRequest { file: Some(0), ..by_hand(Target::Prefix(prefix(&film))) };
+    let second = CastRequest { file: Some(1), ..by_hand(Target::Prefix(prefix(&film))) };
+    let both = async {
+        tokio::join!(cast(&h, first), async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            cast(&h, second).await
+        })
+    };
+    let (first, second) = tokio::time::timeout(Duration::from_secs(30), both).await.expect("both casts answer");
+    assert_eq!(first.unwrap().state, CastState::Ended { error: None }, "the first cast left the TV to the second");
+    let second = second.unwrap();
+    assert_eq!((second.state, second.file), (CastState::Playing, Some(1)));
+    let sets: Vec<String> = {
+        let screen = tv.screen.lock().unwrap();
+        let sent = screen.actions.iter().filter(|(action, _)| action == "SetAVTransportURI");
+        sent.map(|(_, body)| if body.contains("Extra.mkv") { "Extra" } else { "Night" }.to_string()).collect()
+    };
+    assert_eq!(sets, ["Night", "Extra"], "the late SetAVTransportURI of the first cast came before the second's");
+    tv.until("the second video on the screen", |screen| screen.uri.ends_with("/Extra.mkv")).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(tv.screen.lock().unwrap().uri.ends_with("/Extra.mkv"), "and stays there");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;

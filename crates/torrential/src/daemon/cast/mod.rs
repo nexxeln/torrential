@@ -260,17 +260,18 @@ impl Casts {
         let (view_tx, view) = watch::channel(cast);
         let (steps_tx, steps) = broadcast::channel(64);
         let (control_tx, control) = mpsc::unbounded_channel();
-        let id = {
+        let (id, before) = {
             let mut state = self.state();
             state.next += 1;
             let id = state.next;
             let entry = Entry { id, view: view.clone(), control: control_tx };
-            if let Some(old) = state.casts.insert(tv.tv.id.clone(), entry) {
+            let before = state.casts.insert(tv.tv.id.clone(), entry).map(|old| {
                 let _ = old.control.send(Control::Leave);
-            }
-            id
+                old.view
+            });
+            (id, before)
         };
-        let run = Run { ctx, tv, view: view_tx, id };
+        let run = Run { ctx, tv, view: view_tx, id, before };
         tokio::spawn(run.cast(request, control, steps_tx));
         Ok((view, steps))
     }
@@ -439,6 +440,8 @@ struct Run {
     tv: Arc<Renderer>,
     view: watch::Sender<Cast>,
     id: u64,
+    /// The cast this one took the TV from, which may still be sending it a video.
+    before: Option<watch::Receiver<Cast>>,
 }
 
 impl Run {
@@ -471,6 +474,11 @@ impl Run {
         if let Some(error) = &error {
             super::log(&format!("the cast to {} ended: {error}", self.tv.tv.name));
         }
+        // A cast that takes the TV from this one waits for this end, so it must mean the cast
+        // before has ended too.
+        if let Some(before) = self.before.clone() {
+            ended(before).await;
+        }
         self.view.send_modify(|cast| cast.state = CastState::Ended { error });
         drop(control);
         tokio::time::sleep(ENDED_KEPT).await;
@@ -479,6 +487,12 @@ impl Run {
 
     /// Sends the file to the TV and follows it until the cast ends.
     async fn play(&self, found: &Found, control: &mut mpsc::UnboundedReceiver<Control>) -> Result<(), Error> {
+        if let Some(before) = self.before.clone() {
+            tokio::select! {
+                () = ended(before) => {}
+                () = until_stopped(control) => return Ok(()),
+            }
+        }
         let ctx = &self.ctx;
         let tv = &self.tv.tv;
         let host = facing(&tv.address)?;
@@ -762,6 +776,11 @@ struct Polled {
     duration: Option<f64>,
     uri: Option<String>,
     volume: Option<u8>,
+}
+
+/// Returns once the cast `view` follows has ended, and can send its TV nothing more.
+async fn ended(mut view: watch::Receiver<Cast>) {
+    let _ = view.wait_for(Cast::ended).await;
 }
 
 /// Answers every action but a stop while a cast finds its source, and returns once it is stopped.
