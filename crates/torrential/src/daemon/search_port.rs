@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,7 +25,14 @@ pub trait SearchPort: Send + Sync {
         progress: mpsc::UnboundedSender<Progress>,
     ) -> BoxFuture<'a, Result<SearchResult, Error>>;
     fn fetch_torrent(&self, url: String) -> BoxFuture<'_, Result<Vec<u8>, Error>>;
-    fn mirrors(&self, name: &str, web_seeds: &[String]) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>>;
+    /// Looks up web seeds that serve every file of a torrent. `file` is one file of a torrent
+    /// with several, as a path that starts with the torrent's name.
+    fn mirrors(
+        &self,
+        name: &str,
+        file: Option<&Path>,
+        web_seeds: &[String],
+    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>>;
     fn find(&self, prefix: &HexPrefix) -> Vec<Release>;
     fn torrent_url(&self, release: &Release) -> Result<Option<String>, Error>;
     fn saved_link(&self, id: &ReleaseId) -> Option<SavedLink>;
@@ -68,8 +76,13 @@ impl SearchPort for Live {
         Box::pin(async move { self.search.fetch_torrent(&url).await })
     }
 
-    fn mirrors(&self, name: &str, web_seeds: &[String]) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
-        Some(Box::pin(self.search.mirrors(name, web_seeds)?))
+    fn mirrors(
+        &self,
+        name: &str,
+        file: Option<&Path>,
+        web_seeds: &[String],
+    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
+        Some(Box::pin(self.search.mirrors(name, file, web_seeds)?))
     }
 
     fn find(&self, prefix: &HexPrefix) -> Vec<Release> {
@@ -275,7 +288,12 @@ impl SearchPort for Fake {
         })
     }
 
-    fn mirrors(&self, _: &str, _: &[String]) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
+    fn mirrors(
+        &self,
+        _: &str,
+        _: Option<&Path>,
+        _: &[String],
+    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
         None
     }
 

@@ -266,7 +266,7 @@ impl Libtorrent {
 
     fn mirrors_found(&mut self, id: TorrentId, found: Result<Vec<String>, Error>) {
         match found {
-            Ok(seeds) if self.torrents.contains_key(&id) => {
+            Ok(seeds) if !seeds.is_empty() && self.torrents.contains_key(&id) => {
                 for seed in &seeds {
                     if let Err(e) = self.session.add_web_seed(engine_id(id), seed) {
                         super::log(&format!("{} cannot add the web seed {seed}: {e}", short(id)));
@@ -416,7 +416,13 @@ impl EnginePort for Libtorrent {
         };
         let (files, mirrors) = match &fallback {
             lt::TorrentSource::Metainfo(m) => {
-                (Some(file_indices(m)), self.mirrors.search.mirrors(m.name(), m.web_seeds()))
+                // libtorrent follows the redirect of a torrent's only file to a seed that has all
+                // of it.
+                let file = match m.files() {
+                    [first, _, ..] => Some(first.path.as_path()),
+                    _ => None,
+                };
+                (Some(file_indices(m)), self.mirrors.search.mirrors(m.name(), file, m.web_seeds()))
             }
             _ => (None, None),
         };

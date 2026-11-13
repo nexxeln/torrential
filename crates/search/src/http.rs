@@ -72,6 +72,20 @@ impl Http {
         Ok(body)
     }
 
+    /// Where a request for the first byte of `url` lands once its redirects are followed.
+    pub async fn landing(&self, url: &Url, deadline: Instant) -> Result<Url, FetchError> {
+        let started = Instant::now();
+        let asked = self.client.get(url.clone()).header(reqwest::header::RANGE, "bytes=0-0").send();
+        let response = timeout_at(deadline, asked)
+            .await
+            .map_err(|_| FetchError::Timeout(started.elapsed()))?
+            .map_err(|e| classify(e, started))?;
+        if !response.status().is_success() {
+            return Err(FetchError::Status(response.status().as_u16()));
+        }
+        Ok(response.url().clone())
+    }
+
     pub fn take_recorded(&self) -> Recorded {
         self.recorded
             .as_ref()

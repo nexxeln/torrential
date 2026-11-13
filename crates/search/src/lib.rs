@@ -13,6 +13,7 @@ mod dates;
 mod http;
 mod metainfo;
 mod observation;
+mod redirect;
 mod sources;
 pub mod subtitles;
 mod terms;
@@ -20,11 +21,12 @@ mod terms;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures_util::future::Either;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -261,19 +263,26 @@ impl Search {
         })
     }
 
-    /// Web seeds on the servers that hold an archive.org torrent's files, to add to its own.
-    /// archive.org's download URL answers each file with a redirect to a server that holds it,
-    /// and libtorrent turns each redirect into a web seed that has only that file, so a piece
-    /// that spans two files sent to different servers has no source. `None` for a torrent that
-    /// does not download from archive.org, and while the archive.org source is disabled.
+    /// Web seeds that serve every file of a torrent, to add to its own. A web seed can answer each
+    /// file with a redirect to a server that holds it, as archive.org's download URL does, and
+    /// libtorrent turns each redirect into a web seed that has only that file, so a piece that
+    /// spans two files has no source. archive.org names the servers of a torrent that downloads
+    /// from it, unless the archive.org source is disabled. For any other torrent, the seeds are the
+    /// folders its web seeds redirect `file` to, where `file` is one of its several files as a path
+    /// that starts with the torrent's name. `None` when there is nothing to ask.
     pub fn mirrors(
         &self,
         name: &str,
+        file: Option<&Path>,
         web_seeds: &[String],
     ) -> Option<impl Future<Output = Result<Vec<String>, Error>> + Send + 'static> {
-        let item = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds))?;
         let inner = self.inner.clone();
-        Some(async move { item.mirrors(&inner.http).await })
+        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds)) {
+            return Some(Either::Left(async move { item.mirrors(&inner.http).await }));
+        }
+        let file = file.filter(|file| web_seeds.iter().any(|seed| redirect::request(seed, file).is_some()))?;
+        let (file, web_seeds) = (file.to_path_buf(), web_seeds.to_vec());
+        Some(Either::Right(async move { Ok(redirect::roots(&inner.http, &file, &web_seeds).await) }))
     }
 
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {
