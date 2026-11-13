@@ -152,6 +152,15 @@ fn test_engine(env: &Env) -> bool {
     env.var("TORRENTIAL_TEST_ENGINE").is_some() || env.var("TORRENTIAL_TEST_NETWORK").is_some()
 }
 
+/// How long a play leaving the plays folder waits before it goes: no time, unless a test engine
+/// asks for up to a minute, to do something in between.
+fn deletion_pause(env: &Env) -> Duration {
+    let asked = env.var("TORRENTIAL_TEST_DELETION_PAUSE").filter(|_| test_engine(env));
+    asked.and_then(torrential_core::units::parse_duration).map_or(Duration::ZERO, |pause| pause.min(MAX_DELETION_PAUSE))
+}
+
+const MAX_DELETION_PAUSE: Duration = Duration::from_secs(60);
+
 /// Where the files of a download in a folder the person chose go when they delete them. A test
 /// engine never uses the person's Trash: `TORRENTIAL_TEST_TRASH` names its own, or it keeps one
 /// beside its state.
@@ -298,10 +307,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
                 .unwrap_or(owner::plays::IDLE_AFTER),
         },
         trash: trash(env, paths),
-        deletion_pause: env
-            .var("TORRENTIAL_TEST_DELETION_PAUSE")
-            .and_then(torrential_core::units::parse_duration)
-            .unwrap_or_default(),
+        deletion_pause: deletion_pause(env),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

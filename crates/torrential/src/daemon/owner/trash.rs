@@ -12,7 +12,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
 /// Where the files of a download in a folder the person chose go when they delete them.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Trash {
     /// The Finder Trash, on macOS.
     Finder,

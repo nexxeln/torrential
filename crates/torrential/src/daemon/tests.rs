@@ -1655,3 +1655,25 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
 mod plays;
 mod titles;
 mod web;
+
+#[test]
+fn settings_for_tests_reach_only_an_engine_a_test_started() {
+    use crate::env::Env;
+    let env =
+        |pairs: &[(&str, &str)]| Env::from_pairs([("TORRENTIAL_HOME", "/th")].into_iter().chain(pairs.iter().copied()));
+    let pause = |pairs: &[(&str, &str)]| super::deletion_pause(&env(pairs));
+    let held = ("TORRENTIAL_TEST_DELETION_PAUSE", "30s");
+    assert_eq!(pause(&[held]), Duration::ZERO);
+    assert_eq!(pause(&[held, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(30));
+    let long = ("TORRENTIAL_TEST_DELETION_PAUSE", "2h");
+    assert_eq!(pause(&[long, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(60), "and a minute at most");
+
+    let trash = |pairs: &[(&str, &str)]| {
+        let env = env(pairs);
+        super::trash(&env, &crate::paths::Paths::resolve(&env, 501, None).unwrap())
+    };
+    let named = ("TORRENTIAL_TEST_TRASH", "/tmp/trash");
+    assert_eq!(trash(&[named, ("HOME", "/home/ada")]), Trash::system(std::path::Path::new("/home/ada/.local/share")));
+    assert_eq!(trash(&[named, ("TORRENTIAL_TEST_ENGINE", "fake")]), Trash::At("/tmp/trash".into()));
+    assert_eq!(trash(&[("TORRENTIAL_TEST_NETWORK", "loopback")]), Trash::At("/th/state/trash".into()));
+}
