@@ -126,3 +126,15 @@ export function command(event: KeyboardEvent): Command | null {
   const found = letter ? LETTERS[letter] : NAMED[key];
   return typeof found === "function" ? found(shift) : (found ?? null);
 }
+
+/**
+ * Back on the screens before the video plays: leaves the player, and cancels the key so a TV
+ * browser does not also go back a page by itself.
+ */
+export function leaveOnBack(back: () => void): (event: KeyboardEvent) => void {
+  return (event) => {
+    if (command(event)?.kind !== "leave") return;
+    event.preventDefault();
+    back();
+  };
+}
