@@ -516,12 +516,17 @@ impl Run {
     }
 
     /// Tells the TV to play `url`. A TV that refuses a new video while it plays one gets a Stop
-    /// first.
+    /// first. One that does not answer may still hold what it played before, which a Play would
+    /// bring back, so the cast fails there.
     async fn send(&self, url: &str, metadata: &str) -> Result<(), Error> {
         let set = [("InstanceID", "0"), ("CurrentURI", url), ("CurrentURIMetaData", metadata)];
-        if let Err(Failed::Refused(..)) = self.transport("SetAVTransportURI", &set).await {
-            let _ = self.transport("Stop", &[("InstanceID", "0")]).await;
-            self.transport("SetAVTransportURI", &set).await?;
+        match self.transport("SetAVTransportURI", &set).await {
+            Ok(_) => {}
+            Err(Failed::Refused(..)) => {
+                let _ = self.transport("Stop", &[("InstanceID", "0")]).await;
+                self.transport("SetAVTransportURI", &set).await?;
+            }
+            Err(gone @ Failed::Gone(_)) => return Err(gone.into()),
         }
         self.transport("Play", &[("InstanceID", "0"), ("Speed", "1")]).await?;
         Ok(())

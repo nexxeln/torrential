@@ -713,3 +713,21 @@ async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_
     let sent = liar.count.most_sent.load(Ordering::SeqCst);
     assert!(sent < 16 << 20, "the engine hung up on a huge answer after {sent} bytes");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let film = torrent(85, "Night", &[("Night.mp4", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+
+    tv.set(|screen| screen.hang_up.push("SetAVTransportURI"));
+    let error = cast(&h, by_hand(Target::Prefix(prefix(&film)))).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::NetworkUnavailable);
+    assert!(error.message.starts_with("Fake TV cannot be reached"), "{}", error.message);
+    assert_eq!(tv.actions(), ["GetProtocolInfo", "SetAVTransportURI"], "no Play to bring back what the TV had");
+}
