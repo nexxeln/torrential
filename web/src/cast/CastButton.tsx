@@ -57,8 +57,10 @@ export function CastButton({ start, at, onCast, onOpen, look }: Props) {
     return () => removeEventListener("click", outside, true);
   }, [open]);
 
+  // In the player on a phone, the list hangs from the whole bar of controls, as the button is too
+  // near the left edge for its width.
   return (
-    <div ref={root} className="relative" data-menu-root onKeyDown={keys}>
+    <div ref={root} className={look === "player" ? "sm:relative" : "relative"} data-menu-root onKeyDown={keys}>
       {look === "page" ? (
         <Button size="large" aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
           <TvIcon aria-hidden="true" className="size-4 fill-soft" />
@@ -125,7 +127,7 @@ function Picker({ start, at, above, onCast }: { start: Omit<CastStart, "tv">; at
       role="dialog"
       aria-label="Play on TV"
       data-overlay=""
-      className={`absolute z-30 flex w-72 max-w-[calc(100vw-2rem)] animate-pop flex-col gap-1 rounded-xl bg-raised p-1.5 shadow-xl inset-ring inset-ring-white/10 motion-reduce:animate-none ${above ? "right-0 bottom-full mb-2" : "top-full left-0 mt-2 max-sm:fixed max-sm:inset-x-4 max-sm:top-auto max-sm:bottom-[max(1rem,env(safe-area-inset-bottom))] max-sm:w-auto"}`}
+      className={`absolute z-30 flex w-72 max-w-[calc(100vw-2rem)] animate-pop flex-col gap-1 rounded-xl bg-raised p-1.5 shadow-xl inset-ring inset-ring-white/10 motion-reduce:animate-none ${above ? "right-(--edge-right) bottom-full mb-2 sm:right-0" : "top-full left-0 mt-2 max-sm:fixed max-sm:inset-x-4 max-sm:top-auto max-sm:bottom-[max(1rem,env(safe-area-inset-bottom))] max-sm:w-auto"}`}
     >
       <div className="flex items-center justify-between gap-2 px-2.5 pt-1.5 pb-1">
         <h2 className="text-sm font-medium text-ink">Play on TV</h2>
