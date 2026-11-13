@@ -1,7 +1,8 @@
 import { ArrowPathIcon, TvIcon } from "@heroicons/react/20/solid";
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { type ApiError, asApiError, type Cast, type CastStart, findTvs, startCast, type Tv } from "../api";
 import { sentence } from "../lib/format";
+import { isBack } from "../lib/tv";
 import { ControlButton } from "../player/Controls";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -16,6 +17,8 @@ interface Props {
   at?: () => number | null;
   /** Called once the TV has the cast, so a player here can step aside. */
   onCast?: (cast: Cast) => void;
+  /** Called as the list opens and closes, so a player keeps its controls up while it is open. */
+  onOpen?: (open: boolean) => void;
   /** A large button on a page, or a round one in the player's controls. */
   look: "page" | "player";
 }
@@ -25,29 +28,37 @@ function plays(tv: Tv): string {
 }
 
 /** "Play on TV": opens a list of the TVs on the home network, and plays on the one chosen. */
-export function CastButton({ start, at, onCast, look }: Props) {
+export function CastButton({ start, at, onCast, onOpen, look }: Props) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const toggle = () => setOpen((was) => !was);
+  /** Closes the list. Focus in it goes back to the button, so a remote keeps its place. */
+  const close = () => {
+    if (root.current?.querySelector("[role=dialog]")?.contains(document.activeElement)) {
+      root.current.querySelector<HTMLElement>("[aria-haspopup]")?.focus();
+    }
+    setOpen(false);
+  };
+  // Back closes the list before the page or the player hears it.
+  const keys = (event: KeyboardEvent) => {
+    if (!open || !isBack(event.nativeEvent)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
 
+  useEffect(() => onOpen?.(open), [open, onOpen]);
   useEffect(() => {
     if (!open) return;
     const outside = (event: MouseEvent) => {
       if (!root.current?.contains(event.target as Node)) setOpen(false);
     };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
     addEventListener("click", outside, true);
-    addEventListener("keydown", escape);
-    return () => {
-      removeEventListener("click", outside, true);
-      removeEventListener("keydown", escape);
-    };
+    return () => removeEventListener("click", outside, true);
   }, [open]);
 
   return (
-    <div ref={root} className="relative" data-menu-root>
+    <div ref={root} className="relative" data-menu-root onKeyDown={keys}>
       {look === "page" ? (
         <Button size="large" aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
           <TvIcon aria-hidden="true" className="size-4 fill-soft" />
@@ -113,7 +124,8 @@ function Picker({ start, at, above, onCast }: { start: Omit<CastStart, "tv">; at
     <div
       role="dialog"
       aria-label="Play on TV"
-      className={`absolute z-30 flex w-72 max-w-[calc(100vw-2rem)] animate-pop flex-col gap-1 rounded-xl bg-raised p-1.5 shadow-xl inset-ring inset-ring-white/10 motion-reduce:animate-none ${above ? "right-0 bottom-full mb-2" : "top-full left-0 mt-2"}`}
+      data-overlay=""
+      className={`absolute z-30 flex w-72 max-w-[calc(100vw-2rem)] animate-pop flex-col gap-1 rounded-xl bg-raised p-1.5 shadow-xl inset-ring inset-ring-white/10 motion-reduce:animate-none ${above ? "right-0 bottom-full mb-2" : "top-full left-0 mt-2 max-sm:fixed max-sm:inset-x-4 max-sm:top-auto max-sm:bottom-[max(1rem,env(safe-area-inset-bottom))] max-sm:w-auto"}`}
     >
       <div className="flex items-center justify-between gap-2 px-2.5 pt-1.5 pb-1">
         <h2 className="text-sm font-medium text-ink">Play on TV</h2>

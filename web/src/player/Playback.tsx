@@ -379,10 +379,11 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const [filesOpen, setFilesOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [stats, setStats] = useState(false);
+  const [castOpen, setCastOpen] = useState(false);
   /** The pointer rests on the controls, which keeps them shown. */
   const [onControls, setOnControls] = useState(false);
   const covered = useRef(false);
-  covered.current = menu.length > 0 || filesOpen;
+  covered.current = menu.length > 0 || filesOpen || castOpen;
   const closeMenu = useCallback(() => {
     const root = frame.current?.querySelector("[data-menu-root]");
     const within = root?.contains(document.activeElement);
@@ -536,7 +537,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const blocked = how.kind === "blocked" ? how.reason : null;
   const stuck = failure !== null || blocked !== null;
   const starting = !stuck && !started && waiting;
-  const showControls = !stuck && !starting && (awake || onControls || paused || menu.length > 0 || scrubbing);
+  const showControls = !stuck && !starting && (awake || onControls || paused || menu.length > 0 || castOpen || scrubbing);
   const hidden = showControls || stuck || starting ? undefined : "";
   /** The shortcuts dialog, or on a TV the files panel, covers the bars, so a remote cannot reach them. */
   const overlaid = sheet || (filesOpen && isTv());
@@ -699,6 +700,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
                 look="player"
                 start={{ ref: id, file: file.index, video: titled?.video, subtitle: chosen?.source?.kind === "file" ? chosen.source.index : undefined }}
                 at={() => element.currentTime}
+                onOpen={setCastOpen}
                 onCast={() => {
                   element.pause();
                   onBack();
