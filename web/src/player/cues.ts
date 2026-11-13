@@ -68,6 +68,13 @@ export class CueTrack {
     if (time < this.from - 1 || time > this.reached + FAR) this.load(time);
   };
 
+  /** The cues on screen at some moment from `from` to `to`, such as the next few seconds. */
+  during(from: number, to: number): Cue[] {
+    const found: Cue[] = [];
+    for (const cue of this.cues.values()) if (cue.start < to && cue.end > from) found.push(cue);
+    return found;
+  }
+
   /** The cues to show at `time`, earliest first. */
   at(time: number): Cue[] {
     const active: Cue[] = [];

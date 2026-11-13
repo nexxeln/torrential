@@ -3,16 +3,16 @@
 
 use std::io;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use torrential_core::title::Episode;
-use torrential_core::watching::next;
 use torrential_core::{
-    ArtKind, AttemptEvent, EpisodeInfo, Error, ErrorCode, Kind, Next, Playback, Preferences, ReleaseId, TitleCard,
-    TitleDetails, TitleId, TorrentId, VideoRef, Watched,
+    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, ReleaseId, TitleDetails, TitleId, TorrentId,
+    VideoRef, Viewer, Watched,
 };
 
+use super::super::devices::Asker;
 use super::super::http::{Connection, Request};
 use super::super::owner::{Command, Finish, now};
 use super::super::server::{self, Ctx};
@@ -23,8 +23,6 @@ use crate::output::views::title_name;
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
 const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
-/// Titles listed under Continue on the home page.
-const CONTINUE_MOST: usize = 20;
 
 /// `GET /api/titles?q=`: films and series named like the words. With title lookups off in
 /// config.yaml it finds none, and says it is offline.
@@ -83,18 +81,16 @@ fn art_of(request: &Request) -> Result<(TitleId, ArtKind), Error> {
     Ok((id, kind))
 }
 
-/// `GET /api/title/sources?video=[&playback=]`: the title's releases as `/api/search` streams
-/// them, in the order a play tries them.
-pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+/// `GET /api/title/sources?video=[&width=&height=&scale=&playback=]`: the title's releases as
+/// `/api/search` streams them, in the order a play from that browser tries them.
+pub async fn sources(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -> io::Result<bool> {
     let ctx = conn.ctx;
     let asked = async {
         let video: VideoRef = required(request, "video")?.parse()?;
-        let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
+        let player = listed_for(request, asker)?;
         let title = ctx.titles.resolve(&video, now()).await?;
         let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-        let preferences = (ctx.web.preferences)();
-        let preferences = Preferences { playback: playback.or(preferences.playback), ..preferences };
-        let query = ctx.titles.query(&title, preferences).await?;
+        let query = ctx.titles.query(&title, (ctx.web.preferences)(), player).await?;
         Ok::<_, Error>((query, title.video, jobs))
     };
     let asked = tokio::select! {
@@ -103,9 +99,63 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result
     };
     match asked {
         Ok((query, video, jobs)) => {
-            super::results(conn, request, query, |releases| ctx.titles.line(&jobs, &video, releases)).await
+            let (player, ffmpeg) = (query.profile.player, (ctx.web.tools)().both().is_some());
+            let line = |releases| ctx.titles.line(&jobs, &video, releases, player, ffmpeg);
+            super::results(conn, request, query, line).await
         }
         Err(error) => fail(conn, request, &error).await,
+    }
+}
+
+/// The screen that pressed play and what its player decodes, as the web app measures them.
+#[derive(Deserialize)]
+struct Measured {
+    /// The screen in device pixels.
+    width: u32,
+    height: u32,
+    /// Device pixels to a CSS pixel.
+    scale: f64,
+    playback: Playback,
+}
+
+impl Measured {
+    fn viewer(self) -> Result<Viewer, Error> {
+        let Measured { width, height, scale, playback } = self;
+        let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
+        if width == 0 || height == 0 {
+            return usage(format!("a {width}x{height} screen has no pixels"));
+        }
+        if !(scale.is_finite() && scale > 0.0) {
+            return usage(format!("scale {scale} is not a number of device pixels to a CSS pixel"));
+        }
+        Ok(Viewer::measured(width, height, scale, playback))
+    }
+}
+
+/// Who a source listing ranks for, from its `width`, `height`, `scale`, and `playback`
+/// parameters. The screen's three come with `playback` or not at all.
+fn listed_for(request: &Request, asker: &Asker) -> Result<Player, Error> {
+    let size = (number(request, "width")?, number(request, "height")?, number(request, "scale")?);
+    let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
+    let viewer = match (size, playback) {
+        ((Some(width), Some(height), Some(scale)), Some(playback)) => {
+            Some(Measured { width, height, scale, playback }.viewer()?)
+        }
+        ((None, None, None), _) => None,
+        _ => return Err(Error::new(ErrorCode::Usage, "a viewer needs all of width, height, scale, and playback")),
+    };
+    Ok(player(viewer, playback, asker))
+}
+
+/// Who a web play or source listing ranks for. Every browser decodes what it reports. A browser
+/// on this Mac shows this Mac's display, so only a paired device's screen counts. A tab opened
+/// before browsers reported their screen reports only what it decodes. A request that reports
+/// neither ranks as `torrential play` does.
+fn player(viewer: Option<Viewer>, playback: Option<Playback>, asker: &Asker) -> Player {
+    match (viewer, playback) {
+        (Some(viewer), _) if *asker != Asker::Local => Player::Device(viewer),
+        (Some(Viewer { playback, .. }), _) | (None, Some(playback)) => Player::Browser { playback },
+        (None, None) => Player::External,
     }
 }
 
@@ -118,6 +168,9 @@ fn playback(text: &str) -> Result<Playback, Error> {
 struct Play {
     /// `tt0063350`, `tt0903747:3:5`, or a series for its next episode.
     video: VideoRef,
+    /// The screen that pressed play and what its browser decodes.
+    viewer: Option<Measured>,
+    /// What the browser decodes, from a tab opened before browsers reported their screen.
     playback: Option<Playback>,
     /// Play only this release.
     source: Option<ReleaseId>,
@@ -127,12 +180,14 @@ struct Play {
 
 /// `POST /api/title/play`: a line of JSON for each step of the play, the last being `playing` or
 /// `failed`. Closing the connection stops the play and gives up the source under test.
-pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -> io::Result<bool> {
     let ctx = conn.ctx;
-    let ask = match super::body::<Play>(request) {
-        Ok(Play { video, playback, source, replace }) => {
-            PlayTitle { video, pin: source, replace, playback, containers: Containers::Browser, finish: Finish::Stream }
-        }
+    let ask = super::body::<Play>(request).and_then(|Play { video, viewer, playback, source, replace }| {
+        let player = player(viewer.map(Measured::viewer).transpose()?, playback, asker);
+        Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, finish: Finish::Stream })
+    });
+    let ask = match ask {
+        Ok(ask) => ask,
         Err(error) => return fail(conn, request, &error).await,
     };
     conn.begin(NDJSON, request).await?;
@@ -245,39 +300,7 @@ pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
     Ok(json!({ "saved": request.saved }))
 }
 
-/// A film or episode to go on with.
-#[derive(Serialize)]
-struct Continue {
-    title: TitleCard,
-    video: VideoRef,
-    episode: Option<EpisodeInfo>,
-    /// `None` when the video has not been started, as the episode after a finished one.
-    resume_at: Option<f64>,
-    duration: Option<f64>,
-}
-
-#[derive(Serialize)]
-struct Home {
-    /// The most recently watched first.
-    #[serde(rename = "continue")]
-    going_on: Vec<Continue>,
-    saved: Vec<TitleCard>,
-}
-
 /// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.
-/// A finished film, and a series the person has caught up with, are left out.
 pub async fn home(ctx: &Ctx) -> Result<Value, Error> {
-    let now = now();
-    let mut going_on = Vec::new();
-    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
-        let Ok(details) = ctx.titles.catalog.title(&recent.video.title).await else { continue };
-        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
-        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
-        let episode = video
-            .episode
-            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
-        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
-        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
-    }
-    super::value(Home { going_on, saved: ctx.titles.shelf.saved()? })
+    super::value(server::home(ctx).await?)
 }

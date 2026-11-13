@@ -1,4 +1,5 @@
 pub mod connect;
+mod devices;
 pub mod launch;
 pub mod play;
 pub mod player;
@@ -89,6 +90,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         },
         Command::Play(args) => play::run(args, mode, env, &cwd),
         Command::Web(args) => web::run(&engine()?, args, mode, env),
+        Command::Devices { command } => devices::run(engine()?, command, mode),
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;
@@ -500,9 +502,11 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         Err(error) => checks.push(check("skill", CheckStatus::Fail, error.message)),
     }
     let profile = match (&settings, crate::machine::detect(env)) {
-        (Ok(settings), Ok(machine)) => {
-            views::profile_check(&Profile { detected: Some(machine), preferences: settings.preferences, room: None })
-        }
+        (Ok(settings), Ok(machine)) => views::profile_check(&Profile {
+            detected: Some(machine),
+            preferences: settings.preferences,
+            ..Profile::default()
+        }),
         (Err(_), _) => check("profile", CheckStatus::Skipped, "the config has an error".into()),
         (_, Err(error)) => check("profile", CheckStatus::Fail, error.message),
     };

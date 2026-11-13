@@ -1,5 +1,6 @@
 pub mod admission;
 pub mod book;
+pub mod devices;
 pub mod engine_port;
 pub mod files;
 mod fixture;
@@ -164,13 +165,16 @@ pub fn start(
     http_ports: &[u16],
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
-    let players = http::bind(http_ports)
+    let devices = Arc::new(devices::Devices::open(store.path())?);
+    // Taken before the bind, so a change while the engine starts reaches the accept loop.
+    let mut reach = devices.reach();
+    let players = http::bind(http_ports, *reach.borrow_and_update())
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
             tokio::net::TcpListener::from_std(listener)
         })
-        .map_err(|e| Error::internal(format!("cannot listen for players on 127.0.0.1: {e}")))?;
+        .map_err(|e| Error::internal(format!("cannot listen for players and the web app: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
     let shelf = titles::shelf::Shelf::open(store.path())?;
@@ -191,8 +195,9 @@ pub fn start(
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         playing: playing::Playing::new(),
         news: update::Board::default(),
+        devices,
     });
-    let http = runtime.spawn(http::accept(ctx.clone(), players));
+    let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 

@@ -51,7 +51,7 @@ Browsers cannot read every format. Install [ffmpeg](https://ffmpeg.org) (`brew i
 
 ## In your terminal
 
-Run `torrential` to open the terminal UI:
+Run `torrential` to open the terminal UI. It opens on what you were watching and the titles you saved, finds films and shows by name, and plays them. Press `d` for your downloads:
 
 <p align="center">
   <img src="docs/tui.gif" alt="The terminal UI searches for Big Buck Bunny, picks one file, and downloads it while the gauge fills" width="800">

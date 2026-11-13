@@ -1,18 +1,19 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use torrential_core::protocol::{Change, Event, FilesReply, GetOutcome, GetReply};
+use torrential_core::protocol::{Change, Event, FilesReply, GetOutcome, GetReply, Home, TitlePage, TitlePlayed};
 use torrential_core::text::sanitize;
 use torrential_core::units::count;
 use torrential_core::{
-    Arch, Error, Job, JobStatus, Machine, Preferences, ReleaseId, SearchQuery, SearchResult, TorrentId,
+    Arch, AttemptEvent, Error, Job, JobStatus, Machine, Preferences, ReleaseId, SearchQuery, SearchResult, TitleCard,
+    TitleId, TorrentId, VideoRef,
 };
 
 use crate::format::{first_fit, home_path};
 use crate::layout;
 use crate::state::{
-    DownloadFiles, Edit, Engine, Files, Focus, Input, Item, JobAction, RankedFor, Ranking, Search, SearchPhase, State,
-    Tone, Upgrade,
+    DownloadFiles, Edit, Engine, Files, Focus, Input, Item, JobAction, Page, RankedFor, Ranking, Search, SearchPhase,
+    State, Tone, Upgrade,
 };
 use crate::tree::Tree;
 
@@ -35,11 +36,16 @@ pub enum Msg {
     Saved { edit: Edit, result: Result<Preferences, Error> },
     NewerVersion(String),
     Upgraded(Result<Option<String>, Error>),
+    Home { ask: u64, result: Result<Home, Error> },
+    FoundTitles { search: u64, result: Result<Vec<TitleCard>, Error> },
+    Title { ask: u64, result: Result<Box<TitlePage>, Error> },
+    PlayStep(Box<AttemptEvent>),
+    TitlePlayed(Result<(String, Box<TitlePlayed>), Error>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Effect {
-    Search { search: u64, query: SearchQuery },
+    Search { search: u64, query: Box<SearchQuery> },
     Files(Item),
     Get { release: ReleaseId, files: Option<Vec<String>> },
     Play(Item),
@@ -49,6 +55,10 @@ pub enum Effect {
     Copy(String),
     SavePreferences(Edit),
     Upgrade,
+    Home { ask: u64 },
+    FindTitles { search: u64, words: String },
+    Title { ask: u64, id: TitleId },
+    PlayTitle(VideoRef),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,6 +66,7 @@ pub enum Action {
     Quit,
     Help,
     Search,
+    Titles,
     Downloads,
     Results,
     NextSection,
@@ -165,9 +176,30 @@ impl State {
                 self.upgraded(result);
                 Vec::new()
             }
+            Msg::Home { ask, result } => {
+                self.home_arrived(ask, result);
+                Vec::new()
+            }
+            Msg::FoundTitles { search, result } => {
+                self.titles_found(search, result);
+                Vec::new()
+            }
+            Msg::Title { ask, result } => {
+                self.title_arrived(ask, result.map(|page| *page));
+                Vec::new()
+            }
+            Msg::PlayStep(step) => {
+                self.play_step(*step);
+                Vec::new()
+            }
+            Msg::TitlePlayed(result) => {
+                self.title_played(result.map(|(player, played)| (player, *played)));
+                Vec::new()
+            }
         });
         self.plan_prefetch();
         self.settle(before);
+        self.settle_titles();
         effects
     }
 
@@ -236,7 +268,7 @@ impl State {
             Some(_) => layout::ranking_span(&placed),
             None => self.cursor.and_then(|item| layout::span(&placed, item)),
         };
-        self.scroll = layout::settle(&placed, lines, scroll, viewport);
+        self.scroll = layout::settle(layout::total(&placed), lines, scroll, viewport);
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -259,6 +291,9 @@ impl State {
         if key.code == KeyCode::F(1) {
             return self.act(Action::Help);
         }
+        if self.page == Page::Titles {
+            return self.titles_key(key);
+        }
         if self.focus == Focus::Query {
             return self.query_key(key);
         }
@@ -279,6 +314,7 @@ impl State {
             Char('q') => Action::Quit,
             Char('?') => Action::Help,
             Char('/') => Action::Search,
+            Char('t') => Action::Titles,
             Char('d') => Action::Downloads,
             Char('r') => Action::Results,
             Tab => Action::NextSection,
@@ -317,6 +353,7 @@ impl State {
                 self.focus = Focus::Query;
                 self.query.caret = self.query.text.chars().count();
             }
+            Action::Titles => return self.show_titles(),
             Action::Downloads => return self.enter(Section::Downloads),
             Action::Results => return self.enter(Section::Results),
             Action::NextSection => return self.cycle(1),
@@ -693,7 +730,6 @@ impl State {
 
     fn query_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         use KeyCode::*;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             Enter => return self.run_search(),
             Esc if self.help => {
@@ -701,46 +737,11 @@ impl State {
                 return Vec::new();
             }
             Esc if !self.items().is_empty() => return self.enter_list(),
+            Esc if self.query.text.is_empty() => return self.show_titles(),
             Down | Tab => return self.enter_list(),
             BackTab => return self.cycle(-1),
-            _ => {}
-        }
-        let input = &mut self.query;
-        match key.code {
-            Esc => *input = Input::default(),
-            Char('u') if ctrl => *input = Input::default(),
-            Char('a') if ctrl => input.caret = 0,
-            Char('e') if ctrl => input.caret = input.text.chars().count(),
-            Char('k') if ctrl => input.text = input.text.chars().take(input.caret).collect(),
-            Char('w') if ctrl => {
-                let before: Vec<char> = input.text.chars().take(input.caret).collect();
-                let mut cut = before.len();
-                while cut > 0 && before[cut - 1] == ' ' {
-                    cut -= 1;
-                }
-                while cut > 0 && before[cut - 1] != ' ' {
-                    cut -= 1;
-                }
-                let after: String = input.text.chars().skip(input.caret).collect();
-                input.text = before[..cut].iter().collect::<String>() + &after;
-                input.caret = cut;
-            }
-            Left => input.caret = input.caret.saturating_sub(1),
-            Right => input.caret = (input.caret + 1).min(input.text.chars().count()),
-            Home => input.caret = 0,
-            End => input.caret = input.text.chars().count(),
-            Backspace if input.caret > 0 => {
-                input.caret -= 1;
-                input.text = remove_char(&input.text, input.caret);
-            }
-            Delete if input.caret < input.text.chars().count() => input.text = remove_char(&input.text, input.caret),
-            Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                let mut chars: Vec<char> = input.text.chars().collect();
-                chars.insert(input.caret, c);
-                input.text = chars.into_iter().collect();
-                input.caret += 1;
-            }
-            _ => {}
+            Esc => self.query = Input::default(),
+            _ => edit(&mut self.query, key),
         }
         Vec::new()
     }
@@ -791,7 +792,7 @@ impl State {
             self.cursor = None;
         }
         let query = SearchQuery { limit: RESULT_LIMIT, ..SearchQuery::new(text) };
-        vec![Effect::Search { search: id, query }]
+        vec![Effect::Search { search: id, query: Box::new(query) }]
     }
 
     fn merge(&mut self, id: u64, result: SearchResult, phase: SearchPhase) {
@@ -817,6 +818,7 @@ impl State {
     fn watch(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Snapshot { jobs } => {
+                let back = self.engine != Engine::Ready;
                 self.engine = Engine::Ready;
                 for job in &jobs {
                     self.note_arrival(job);
@@ -824,16 +826,19 @@ impl State {
                 self.downloads = jobs;
                 self.resort();
                 self.pending.retain(|id, _| self.downloads.iter().any(|j| j.id == *id));
+                let mut effects = Vec::new();
                 if !self.touched
                     && self.focus == Focus::Query
                     && self.cursor.is_none()
                     && let Some(first) = self.downloads.first().map(|j| j.id)
                 {
-                    let mut effects = self.select(Item::Download(first));
-                    effects.push(Effect::FreeSpace);
-                    return effects;
+                    effects = self.select(Item::Download(first));
                 }
-                vec![Effect::FreeSpace]
+                effects.push(Effect::FreeSpace);
+                if back && self.page == Page::Titles {
+                    effects.push(self.titles.ask_home());
+                }
+                effects
             }
             Event::Job { job } => {
                 let id = job.id;
@@ -1004,6 +1009,47 @@ impl State {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// Applies a key typed into a search box: text, the caret, and the readline keys.
+pub(crate) fn edit(input: &mut Input, key: KeyEvent) {
+    use KeyCode::*;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        Char('u') if ctrl => *input = Input::default(),
+        Char('a') if ctrl => input.caret = 0,
+        Char('e') if ctrl => input.caret = input.text.chars().count(),
+        Char('k') if ctrl => input.text = input.text.chars().take(input.caret).collect(),
+        Char('w') if ctrl => {
+            let before: Vec<char> = input.text.chars().take(input.caret).collect();
+            let mut cut = before.len();
+            while cut > 0 && before[cut - 1] == ' ' {
+                cut -= 1;
+            }
+            while cut > 0 && before[cut - 1] != ' ' {
+                cut -= 1;
+            }
+            let after: String = input.text.chars().skip(input.caret).collect();
+            input.text = before[..cut].iter().collect::<String>() + &after;
+            input.caret = cut;
+        }
+        Left => input.caret = input.caret.saturating_sub(1),
+        Right => input.caret = (input.caret + 1).min(input.text.chars().count()),
+        Home => input.caret = 0,
+        End => input.caret = input.text.chars().count(),
+        Backspace if input.caret > 0 => {
+            input.caret -= 1;
+            input.text = remove_char(&input.text, input.caret);
+        }
+        Delete if input.caret < input.text.chars().count() => input.text = remove_char(&input.text, input.caret),
+        Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+            let mut chars: Vec<char> = input.text.chars().collect();
+            chars.insert(input.caret, c);
+            input.text = chars.into_iter().collect();
+            input.caret += 1;
+        }
+        _ => {}
     }
 }
 

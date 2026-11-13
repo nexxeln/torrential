@@ -4,6 +4,7 @@ mod layout;
 mod runtime;
 mod state;
 mod theme;
+mod titles;
 mod tree;
 mod update;
 mod view;

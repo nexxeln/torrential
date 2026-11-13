@@ -289,6 +289,11 @@ impl Catalog {
         Ok(self.described(id).await?.details)
     }
 
+    /// The copy of a title's details kept on this machine, however old, without asking Cinemeta.
+    pub async fn kept_title(&self, id: &TitleId) -> Option<TitleDetails> {
+        Some(self.kept(id).await?.1.details)
+    }
+
     /// A picture Cinemeta named for this title, fetched once and kept. Only from an `https`
     /// address on a host the catalogs keep pictures on, at most 5 MiB, and only bytes that start
     /// like JPEG, PNG, or WebP.

@@ -3,7 +3,7 @@ import { useJob } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { goBack } from "../router";
 import { Problem, Readout, Starting, TopBar } from "./Chrome";
-import { command } from "./keys";
+import { leaveOnBack } from "./keys";
 import { Playback } from "./Playback";
 import { useSession } from "./session";
 
@@ -35,9 +35,7 @@ export function Player({ target, file }: Props) {
   const ready = session.stage === "ready";
   useEffect(() => {
     if (ready) return;
-    const pressed = (event: KeyboardEvent) => {
-      if (command(event)?.kind === "leave") back();
-    };
+    const pressed = leaveOnBack(back);
     addEventListener("keydown", pressed);
     return () => removeEventListener("keydown", pressed);
   }, [ready, back]);

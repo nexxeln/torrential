@@ -402,6 +402,32 @@ hint: run the command again
   },
   "next": null
 }
+=== not_paired, exit 6
+error[not_paired]: that is not the code on the Mac, so check it and enter it again
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "not_paired",
+    "message": "that is not the code on the Mac, so check it and enter it again"
+  },
+  "next": null
+}
+=== local_only, exit 6
+error[local_only]: only the Mac running torrential can add or remove devices
+hint: open torrential on the Mac to do it
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "local_only",
+    "message": "only the Mac running torrential can add or remove devices",
+    "hint": "open torrential on the Mac to do it"
+  },
+  "next": null
+}
 === internal, exit 1
 error[internal]: the engine thread stopped
 --- json

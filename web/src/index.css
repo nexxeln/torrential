@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Styles for a TV driven by a remote, which main.tsx marks on the root element. */
+@custom-variant tv (&:where([data-tv], [data-tv] *));
+
 @font-face {
   font-family: "InterVariable";
   font-style: normal;
@@ -78,8 +81,57 @@
     outline-offset: 2px;
   }
 
+  /* A TV is read from across a room. Everything sized in rem grows with the screen, to 24 px a rem at 1920 wide. */
+  html[data-tv] {
+    font-size: max(16px, 1.25vw);
+  }
+
+  /* A remote moves focus by itself, so focus always shows, thick and bright enough to find from the sofa. */
+  [data-tv] :focus {
+    outline: 0.1875rem solid var(--color-ink);
+    outline-offset: 0.1875rem;
+  }
+
+  /* The edges of the player's controls, clear of a phone's notch, rounded corners, and home bar. */
+  :root {
+    --edge-left: max(--spacing(3), 2vw, env(safe-area-inset-left));
+    --edge-right: max(--spacing(3), 2vw, env(safe-area-inset-right));
+    --edge-top: max(--spacing(3), 1.5vh, env(safe-area-inset-top));
+    --edge-bottom: max(--spacing(3), 1.5vh, env(safe-area-inset-bottom));
+  }
+
   ::selection {
     background-color: color-mix(in oklab, var(--color-action) 35%, transparent);
+  }
+}
+
+/* A page's side margins, wider than the notch of a phone held sideways. */
+@utility px-page {
+  padding-left: max(--spacing(4), env(safe-area-inset-left));
+  padding-right: max(--spacing(4), env(safe-area-inset-right));
+
+  @variant sm {
+    padding-left: max(--spacing(6), env(safe-area-inset-left));
+    padding-right: max(--spacing(6), env(safe-area-inset-right));
+  }
+}
+
+/* On a touchscreen, a hit area of at least 44 by 44 px around a smaller control, which needs a position of its own. */
+@utility hit-area {
+  &::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, 2.75rem);
+    height: max(100%, 2.75rem);
+    translate: -50% -50%;
+  }
+
+  @variant pointer-fine {
+    &::after {
+      content: none;
+    }
   }
 }
 

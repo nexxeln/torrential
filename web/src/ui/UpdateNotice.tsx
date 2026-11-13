@@ -58,9 +58,13 @@ export function UpdateNotice({ link }: { link: JobsView["link"] }) {
     else setHidden(line);
   };
   return (
-    <p role="status" className="flex min-w-0 items-center gap-2 px-3 text-sm text-pencil">
-      <span className="truncate">{line}</span>
-      <button type="button" onClick={close} className="shrink-0 rounded-sm text-soft hover:text-ink">
+    <p role="status" className="flex min-w-0 items-center gap-2 text-sm text-pencil sm:px-3">
+      <span className="text-pretty sm:truncate">{line}</span>
+      <button
+        type="button"
+        onClick={close}
+        className="shrink-0 rounded-sm text-soft hover:text-ink pointer-coarse:py-2.5"
+      >
         {stale ? "Reload" : "Dismiss"}
       </button>
     </p>

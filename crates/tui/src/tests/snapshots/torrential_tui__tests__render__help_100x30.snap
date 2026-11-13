@@ -12,7 +12,7 @@ expression: shot(&scenario(size))
 "      files │ space pick   a all or none   h l fold folders   enter download                        "
 "   download │ enter files   space pause, resume   P play   v verify   x remove   o open             "
 "            │ y copy path                                                                           "
-"     always │ ? f1 keys   esc back   S ranking   q quit   ctrl+c quit                               "
+"     always │ ? f1 keys   esc back   t films and shows   S ranking   q quit   ctrl+c quit           "
 "            │                                                                                       "
 "            │ Typing filters the results already loaded.                                            "
 "            │ Downloads keep running after you quit.                                                "

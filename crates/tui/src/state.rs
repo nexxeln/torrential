@@ -8,7 +8,15 @@ use torrential_core::{
     TorrentId,
 };
 
+use crate::titles::Titles;
 use crate::tree::Tree;
+
+/// Which screen shows: films and shows, or the downloads with their torrent search.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    Titles,
+    Downloads,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
@@ -320,6 +328,8 @@ pub struct State {
     pub size: (u16, u16),
     pub home: Option<PathBuf>,
     pub engine: Engine,
+    pub page: Page,
+    pub titles: Titles,
     pub downloads: Vec<Job>,
     pub download_files: HashMap<TorrentId, DownloadFiles>,
     pub pending: HashMap<TorrentId, JobAction>,
@@ -362,6 +372,8 @@ impl State {
             size,
             home,
             engine: Engine::Starting,
+            page: Page::Titles,
+            titles: Titles::new(),
             downloads: Vec::new(),
             download_files: HashMap::new(),
             pending: HashMap::new(),
@@ -505,7 +517,8 @@ impl State {
         let loading = self.files.values().any(|f| matches!(f, Files::Loading { .. }));
         let busy_job = self.downloads.iter().any(|j| matches!(j.status, JobStatus::Metadata | JobStatus::Checking));
         let upgrading = matches!(self.upgrade, Some(Upgrade::Installing(_)));
-        starting || searching || loading || busy_job || upgrading || !self.pending.is_empty()
+        let titles = self.titles.spinning();
+        starting || searching || loading || busy_job || upgrading || titles || !self.pending.is_empty()
     }
 
     pub fn say(&mut self, tone: Tone, text: impl Into<String>) {

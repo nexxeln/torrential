@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use torrential_core::protocol::WIRE_VERSION;
 
 const ARCH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 
@@ -306,7 +307,7 @@ fn stand_in(socket: &Path, versions: &'static [&'static str]) -> std::thread::Jo
             while let Some(request) = read_frame(&mut stream) {
                 let reply = match request["op"].as_str().unwrap() {
                     "hello" => format!(
-                        r#"{{"type":"hello","engine_version":"{version}","wire":5,"pid":{},"http_port":0}}"#,
+                        r#"{{"type":"hello","engine_version":"{version}","wire":{WIRE_VERSION},"pid":{},"http_port":0}}"#,
                         std::process::id()
                     ),
                     "shutdown" => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),

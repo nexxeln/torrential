@@ -8,7 +8,7 @@ export function Shortcuts({ onClose }: { onClose: () => void }) {
   useEffect(() => close.current?.focus(), []);
 
   return (
-    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+    <div data-overlay="" className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"

@@ -1,4 +1,4 @@
-import type { AudioTrack, MediaInfo, Playback } from "../api";
+import type { AudioTrack, MediaInfo, Playback, Viewer } from "../api";
 
 /** How a file reaches the video element. */
 export type Plan =
@@ -46,8 +46,13 @@ export function plan(media: MediaInfo, audio: number | null, direct: boolean): P
   return { kind: "blocked", reason: "browser" };
 }
 
-/** What this browser decodes, for the engine to rank a title's sources by. */
-export function playback(): Playback {
+/** The screen this page plays on and what this browser decodes, for the engine to rank a title's sources by. */
+export function viewer(): Viewer {
+  const scale = devicePixelRatio;
+  return { width: Math.round(screen.width * scale), height: Math.round(screen.height * scale), scale, playback: playback() };
+}
+
+function playback(): Playback {
   const source = mediaSourceClass();
   const decodes = (codec: string) => source?.isTypeSupported(`video/mp4; codecs="${codec}"`) ?? false;
   if (!decodes("hvc1.1.6.L120.90")) return "h264";
