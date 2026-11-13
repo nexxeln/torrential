@@ -1509,6 +1509,8 @@ async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg
 
     assert_eq!(first_tried(&h, &phone, &phone_screen).await, remux.name, "a remux here costs no download");
     assert_eq!(first_tried(&h, &tv, &tv_screen).await, hdr.name);
+    *h.outside.tools.lock().unwrap() = Tools { ffmpeg: Some(std::path::PathBuf::from("/bin/sh")), ffprobe: None };
+    assert_eq!(first_tried(&h, &phone, &phone_screen).await, remux.name, "ffmpeg without ffprobe converts nothing");
     StandIns::install(&h, FILM, "");
     assert_eq!(first_tried(&h, &phone, &phone_screen).await, hdr.name, "ffmpeg converts it for the phone");
 }

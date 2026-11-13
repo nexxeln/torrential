@@ -95,7 +95,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    let ffmpeg = (ctx.web.tools)().ffmpeg.is_some();
+    let ffmpeg = (ctx.web.tools)().both().is_some();
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
     if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
@@ -354,7 +354,7 @@ impl Trial<'_> {
         {
             return Err(Skip::Stalled.into());
         }
-        let remux = (ctx.web.tools)().ffmpeg.is_some();
+        let remux = (ctx.web.tools)().both().is_some();
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
 
         report(AttemptEvent::Check { check: Check::Start });
