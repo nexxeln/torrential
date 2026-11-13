@@ -83,6 +83,30 @@ struct Known {
     missed: u8,
 }
 
+impl State {
+    /// Takes in the renderers one search found. A TV that misses `MISSES` searches in a row
+    /// leaves the list, unless a cast plays on it.
+    fn found(&mut self, seen: Vec<Known>) {
+        let seen: BTreeMap<String, Known> = seen.into_iter().map(|k| (k.renderer.tv.id.clone(), k)).collect();
+        let State { tvs, casts, .. } = self;
+        for (id, known) in tvs.iter_mut() {
+            if !seen.contains_key(id) {
+                known.missed = known.missed.saturating_add(1);
+            }
+        }
+        tvs.retain(|id, known| known.missed < MISSES || casts.contains_key(id));
+        tvs.extend(seen);
+        self.searched = Some(Instant::now());
+    }
+
+    /// The TVs by name.
+    fn tvs(&self) -> Vec<Tv> {
+        let mut tvs: Vec<Tv> = self.tvs.values().map(|known| known.renderer.tv.clone()).collect();
+        tvs.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+        tvs
+    }
+}
+
 /// A cast, and the way to its task.
 struct Entry {
     id: u64,
@@ -137,11 +161,9 @@ impl Casts {
     /// The TVs and the casts as known now.
     pub fn list(&self) -> TvList {
         let state = self.state();
-        let mut tvs: Vec<Tv> = state.tvs.values().map(|known| known.renderer.tv.clone()).collect();
-        tvs.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
         let mut casts: Vec<Cast> = state.casts.values().map(|entry| entry.view.borrow().clone()).collect();
         casts.sort_by_key(|cast| cast.started_at);
-        TvList { tvs, casts }
+        TvList { tvs: state.tvs(), casts }
     }
 
     /// The TVs and the casts, after a search of the home network unless one ran in the last 30
@@ -170,23 +192,13 @@ impl Casts {
                 renderer.map(|renderer| (location, renderer))
             });
         }
-        let mut seen = BTreeMap::new();
+        let mut seen = Vec::new();
         while let Some(answer) = found.join_next().await {
             if let Ok(Some((location, renderer))) = answer {
-                seen.insert(renderer.tv.id.clone(), Known { renderer, location, missed: 0 });
+                seen.push(Known { renderer, location, missed: 0 });
             }
         }
-        let mut state = self.state();
-        let State { tvs, casts, .. } = &mut *state;
-        for (id, known) in tvs.iter_mut() {
-            if !seen.contains_key(id) {
-                known.missed = known.missed.saturating_add(1);
-            }
-        }
-        tvs.retain(|id, known| known.missed < MISSES || casts.contains_key(id));
-        tvs.extend(seen);
-        state.searched = Some(Instant::now());
-        drop(state);
+        self.state().found(seen);
         self.list()
     }
 
