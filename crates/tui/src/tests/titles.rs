@@ -187,6 +187,15 @@ fn series(size: (u16, u16)) -> State {
     state
 }
 
+/// What a play says when no player is installed: the address to open instead.
+fn no_player() -> Error {
+    let url = "http://127.0.0.1:47919/4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_living_dead.mp4";
+    Error::new(ErrorCode::NotFound, "no media player found (looked for IINA, mpv, and VLC)").with_hint(format!(
+        "open {url} in any player, or set player: in /Users/ada/.config/torrential/config.yaml to the player's \
+         absolute path"
+    ))
+}
+
 fn list_lines(state: &State) -> Vec<String> {
     let buf = render(state);
     (4..state.size.1 - 2).map(|y| line(&buf, y)).collect()
@@ -510,30 +519,30 @@ fn esc_clears_the_search_box_then_leaves_it_even_when_nothing_was_found() {
 }
 
 #[test]
-fn a_play_that_fails_says_why_and_what_to_do_above_the_list_until_esc() {
+fn a_play_that_fails_says_why_and_what_to_do_in_place_of_the_list_until_esc() {
     let mut state = opened((100, 30));
     state.update(key(KeyCode::Enter));
-    let url = "http://127.0.0.1:47919/4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_living_dead.mp4";
-    let no_player =
-        Error::new(ErrorCode::NotFound, "no media player found (looked for IINA, mpv, and VLC)").with_hint(format!(
-            "open {url} in any player, or set player: in /Users/ada/.config/torrential/config.yaml to the player's \
-             absolute path"
-        ));
-    state.update(Msg::TitlePlayed(Err(no_player)));
+    state.update(Msg::TitlePlayed(Err(no_player())));
     assert_eq!(
-        list_lines(&state)[..7],
+        list_lines(&state)[..5],
         [
             "       play │ Playback failed: no media player found (looked for IINA, mpv, and VLC)",
             "            │ open http://127.0.0.1:47919/4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_",
             "            │ living_dead.mp4 in any player, or set player: in",
             "            │ /Users/ada/.config/torrential/config.yaml to the player's absolute path",
             "            │",
-            "   continue ● Harbor Lights  S01E03 · Third Light                                         22m left",
-            "            │ Night of the Living Dead (1968)                                           1h01m left",
         ]
     );
     assert!(footer(&state).starts_with("              Playback failed: no media player found"), "{}", footer(&state));
+    later(&mut state, 8_000);
+    state.update(Msg::Tick);
+    assert_eq!(footer(&state).trim(), "esc close   / search   d downloads   ? keys");
 
+    state.update(key(KeyCode::Esc));
+    assert_eq!(
+        list_lines(&state)[0],
+        "   continue ● Harbor Lights  S01E03 · Third Light                                         22m left"
+    );
     press(&mut state, "jjj");
     assert_eq!(state.update(key(KeyCode::Char('P'))), [Effect::PlayTitle(video("tt1727587"))]);
     assert_eq!(
@@ -549,14 +558,13 @@ fn a_play_that_fails_says_why_and_what_to_do_above_the_list_until_esc() {
         .with_details(Details::Tried(tried));
     state.update(Msg::TitlePlayed(Err(none)));
     assert_eq!(
-        list_lines(&state)[..6],
+        list_lines(&state)[..5],
         [
             "       play │ Playback failed: no source of Sintel (2010) started",
             "            │ Skipped 4c1e9a: no data arrived in 30s",
             "            │ Skipped b7f20d: none of its files is the video",
             "            │ search the torrents for it by name",
             "            │",
-            "   continue │ Harbor Lights  S01E03 · Third Light                                         22m left",
         ]
     );
     state.update(key(KeyCode::Esc));
@@ -591,6 +599,64 @@ fn a_skipped_source_wraps_on_a_narrow_terminal_like_the_message_and_the_hint() {
             "│ video",
             "│ search the torrents for it by name",
         ]
+    );
+}
+
+#[test]
+fn a_failed_play_taller_than_the_screen_shows_from_its_first_row_and_scrolls_on_its_own() {
+    let mut state = opened((47, 12));
+    state.update(key(KeyCode::Enter));
+    state.update(Msg::TitlePlayed(Err(no_player())));
+    assert_eq!(
+        list_lines(&state),
+        [
+            "│ play",
+            "│ Playback failed: no media player found",
+            "│ (looked for IINA, mpv, and VLC)",
+            "│ open http://127.0.0.1:47919/4c1e9a5d3b8e2f1c",
+            "│ 4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_livi",
+            "↓ ng_dead.mp4 in any player, or set player: in",
+        ]
+    );
+    press(&mut state, "G");
+    assert_eq!(
+        list_lines(&state),
+        [
+            "↑ (looked for IINA, mpv, and VLC)",
+            "│ open http://127.0.0.1:47919/4c1e9a5d3b8e2f1c",
+            "│ 4a5d3b8e2f1c4a5d3b8e2f1c/0/night_of_the_livi",
+            "│ ng_dead.mp4 in any player, or set player: in",
+            "│ /Users/ada/.config/torrential/config.yaml to",
+            "│ the player's absolute path",
+        ]
+    );
+    press(&mut state, "k");
+    assert_eq!(list_lines(&state)[0], "↑ Playback failed: no media player found");
+    assert_eq!(
+        state.update(key(KeyCode::Char('P'))),
+        Vec::new(),
+        "the note covers the list, so there is nothing to play"
+    );
+
+    state.update(key(KeyCode::Esc));
+    assert_eq!(
+        list_lines(&state)[..3],
+        [
+            "│ continue",
+            "● Harbor Lights  S01E03 · Third Lig…  22m left",
+            "│ Night of the Living Dead (1968)   1h01m left"
+        ]
+    );
+
+    state.update(key(KeyCode::Enter));
+    state.update(Msg::TitlePlayed(Err(no_player())));
+    press(&mut state, "/sintel");
+    state.update(key(KeyCode::Enter));
+    state.update(Msg::FoundTitles { search: 1, result: Ok(vec![sintel()]) });
+    assert_eq!(
+        list_lines(&state)[..2],
+        ["│ titles", "● Sintel                                  2010"],
+        "a search puts the note away"
     );
 }
 

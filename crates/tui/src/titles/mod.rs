@@ -61,8 +61,9 @@ pub struct Opened {
 pub enum Play {
     /// What is starting, and the step it waits on.
     Starting { name: String, step: String },
-    /// Why it did not play and what to do, above the list until Esc or the next play.
-    Failed(Error),
+    /// Why it did not play and what to do, in place of the list until Esc or a search. It scrolls
+    /// on its own, since none of its rows takes the cursor.
+    Failed { error: Error, scroll: u16 },
 }
 
 pub struct Titles {
@@ -143,6 +144,24 @@ impl Titles {
         }
     }
 
+    /// How far down the rows that show are scrolled: a failed play's, the open title's, or the
+    /// home lists' and the search's.
+    pub fn scroll(&self) -> u16 {
+        match (&self.play, &self.open) {
+            (Some(Play::Failed { scroll, .. }), _) => *scroll,
+            (_, Some(open)) => open.scroll,
+            _ => self.scroll,
+        }
+    }
+
+    fn scroll_mut(&mut self) -> &mut u16 {
+        match (&mut self.play, &mut self.open) {
+            (Some(Play::Failed { scroll, .. }), _) => scroll,
+            (_, Some(open)) => &mut open.scroll,
+            _ => &mut self.scroll,
+        }
+    }
+
     pub fn spinning(&self) -> bool {
         let searching = self.found.as_ref().is_some_and(|f| f.titles == Load::Loading);
         let opening = self.open.as_ref().is_some_and(|o| o.page == Load::Loading);
@@ -204,6 +223,7 @@ impl State {
         if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return Vec::new();
         }
+        let failed = matches!(self.titles.play, Some(Play::Failed { .. }));
         match key.code {
             Char('q') => self.quit = true,
             Char('?') => self.help = !self.help,
@@ -217,11 +237,12 @@ impl State {
             PageUp => self.move_pick(Move::PageUp),
             Home | Char('g') => self.move_pick(Move::First),
             End | Char('G') => self.move_pick(Move::Last),
+            Esc => return self.back_titles(),
+            _ if failed => {}
             Enter => return self.enter_pick(),
             Char('P') => return self.play_pick(),
             Right | Char('l') => return self.open_pick(),
             Left | Char('h') if self.titles.open.is_some() => return self.close_title(),
-            Esc => return self.back_titles(),
             _ => {}
         }
         Vec::new()
@@ -270,6 +291,9 @@ impl State {
     fn find_titles(&mut self) -> Vec<Effect> {
         let words = sanitize(self.titles.query.text.trim());
         let titles = &mut self.titles;
+        if matches!(titles.play, Some(Play::Failed { .. })) {
+            titles.play = None;
+        }
         titles.typing = false;
         titles.open = None;
         titles.scroll = 0;
@@ -289,7 +313,7 @@ impl State {
     /// Esc: away with a failed play's note, from a title to the list it opened from, from a search
     /// to the home lists, and from the home lists into the search box.
     fn back_titles(&mut self) -> Vec<Effect> {
-        if matches!(self.titles.play, Some(Play::Failed(_))) {
+        if matches!(self.titles.play, Some(Play::Failed { .. })) {
             self.titles.play = None;
             return Vec::new();
         }
@@ -312,11 +336,8 @@ impl State {
         vec![self.titles.ask_home()]
     }
 
+    /// Moves the cursor, or scrolls a failed play's note, which has no row for it to rest on.
     fn move_pick(&mut self, m: Move) {
-        let picks = self.titles.picks();
-        if picks.is_empty() {
-            return;
-        }
         let page = layout::list_height(self).saturating_sub(2).max(1) as isize;
         let delta = match m {
             Move::Up => -1,
@@ -326,6 +347,14 @@ impl State {
             Move::First => isize::MIN / 2,
             Move::Last => isize::MAX / 2,
         };
+        if let Some(Play::Failed { scroll, .. }) = &mut self.titles.play {
+            *scroll = (*scroll as isize + delta).clamp(0, u16::MAX as isize) as u16;
+            return;
+        }
+        let picks = self.titles.picks();
+        if picks.is_empty() {
+            return;
+        }
         let at = self.pick().and_then(|pick| picks.iter().position(|p| *p == pick));
         let to = at.map_or(0, |at| at.saturating_add_signed(delta).min(picks.len() - 1));
         self.set_pick(picks[to].clone());
@@ -448,7 +477,7 @@ impl State {
             },
             Err(error) => {
                 self.say(Tone::Error, format!("Playback failed: {}", error.message));
-                self.titles.play = Some(Play::Failed(error));
+                self.titles.play = Some(Play::Failed { error, scroll: 0 });
             }
         }
     }
@@ -468,11 +497,7 @@ impl State {
         let pick = self.pick();
         let at = pick.and_then(|pick| lines.iter().position(|line| line.pick.as_ref() == Some(&pick)));
         let total = lines.len() as u16;
-        let titles = &mut self.titles;
-        let scroll = match &mut titles.open {
-            Some(open) => &mut open.scroll,
-            None => &mut titles.scroll,
-        };
+        let scroll = self.titles.scroll_mut();
         *scroll = layout::settle(total, at.map(|at| (at as u16, 1)), i32::from(*scroll), screen.list.height);
     }
 }

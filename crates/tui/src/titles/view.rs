@@ -77,13 +77,11 @@ pub fn lines(state: &State, screen: &Screen) -> Vec<Line> {
     let mut sheet = Sheet { narrow: screen.narrow(), word: None, lines: Vec::new() };
     let titles = &state.titles;
     let room = screen.right - screen.at.content;
-    if let Some(Play::Failed(error)) = &titles.play {
-        failed_lines(&mut sheet, error, room.into());
-    }
-    match (&titles.open, &titles.found) {
-        (Some(open), _) => title_lines(&mut sheet, state, open, room),
-        (None, Some(found)) => found_lines(&mut sheet, found),
-        (None, None) => home_lines(&mut sheet, state),
+    match (&titles.play, &titles.open, &titles.found) {
+        (Some(Play::Failed { error, .. }), _, _) => failed_lines(&mut sheet, error, room.into()),
+        (_, Some(open), _) => title_lines(&mut sheet, state, open, room),
+        (_, None, Some(found)) => found_lines(&mut sheet, found),
+        (_, None, None) => home_lines(&mut sheet, state),
     }
     sheet.lines
 }
@@ -105,7 +103,6 @@ fn failed_lines(sheet: &mut Sheet, error: &Error, room: usize) {
     for row in wrap(error.hint.as_deref().unwrap_or_default(), room, usize::MAX) {
         sheet.text(row, PENCIL);
     }
-    sheet.gap();
 }
 
 /// A release's ID as the lists show it: its first six hex digits, after the `u` of a locator.
@@ -365,11 +362,7 @@ pub fn list(buf: &mut Buffer, state: &State, screen: &Screen) {
     let area = screen.list;
     rule(buf, at, area.y, area.bottom());
     let lines = lines(state, screen);
-    let scroll = match &state.titles.open {
-        Some(open) => open.scroll,
-        None => state.titles.scroll,
-    };
-    let scroll = usize::from(scroll).min(lines.len().saturating_sub(area.height.into()));
+    let scroll = usize::from(state.titles.scroll()).min(lines.len().saturating_sub(area.height.into()));
     let cursor = state.pick().filter(|_| !state.titles.typing);
     for (line, y) in lines.iter().skip(scroll).zip(area.y..area.bottom()) {
         if let Some((word, color)) = &line.word {
@@ -419,6 +412,9 @@ pub fn hints(state: &State, screen: &Screen) -> Vec<(&'static str, &'static str)
             true => vec![("enter", "search"), ("f1", "keys")],
             false => vec![("enter", "search"), (down, "list"), ("f1", "keys")],
         };
+    }
+    if matches!(titles.play, Some(Play::Failed { .. })) {
+        return vec![("esc", "close"), ("/", "search"), ("d", "downloads"), ("?", "keys")];
     }
     match state.pick() {
         Some(Pick::Next | Pick::Episode(_)) => {
