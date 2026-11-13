@@ -91,7 +91,9 @@ CREATE TABLE library (
 CREATE TABLE plays (
     job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
     watched_at INTEGER NOT NULL,
-    by_hand INTEGER NOT NULL DEFAULT 0 CHECK (by_hand IN (0, 1))
+    by_hand INTEGER NOT NULL DEFAULT 0 CHECK (by_hand IN (0, 1)),
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE plays_folder (
     one INTEGER PRIMARY KEY CHECK (one = 1),
@@ -100,7 +102,9 @@ CREATE TABLE plays_folder (
 ) STRICT;
 CREATE TABLE deletions (
     job TEXT NOT NULL,
-    play TEXT NOT NULL
+    play TEXT NOT NULL,
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL
 ) STRICT;
 "#,
 ];
@@ -124,6 +128,8 @@ pub struct Recorded {
     pub key: i64,
     pub job: TorrentId,
     pub play: PlayName,
+    /// The folder torrential made for the play, the only one this deletes.
+    pub folder: Identity,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -212,7 +218,7 @@ impl Store {
             .prepare(
                 "SELECT j.id, j.info_hash, j.name, j.dir, j.selection, j.max_size, j.magnet, j.intent, j.finished_at, \
                  j.error, j.added_at, j.verified, j.piece_map, j.files_verified, m.bytes, j.max_size_from_setup, \
-                 t.title, t.span, t.release, t.played, p.watched_at, p.by_hand FROM jobs j \
+                 t.title, t.span, t.release, t.played, p.watched_at, p.by_hand, p.device, p.inode FROM jobs j \
                  LEFT JOIN metainfo m ON m.id = j.id \
                  LEFT JOIN job_titles t ON t.job = j.id \
                  LEFT JOIN plays p ON p.job = j.id \
@@ -244,7 +250,12 @@ impl Store {
                         r.get::<_, Option<String>>(18)?,
                         r.get::<_, Option<bool>>(19)?,
                     ),
-                    (r.get::<_, Option<i64>>(20)?, r.get::<_, Option<bool>>(21)?),
+                    (
+                        r.get::<_, Option<i64>>(20)?,
+                        r.get::<_, Option<bool>>(21)?,
+                        r.get::<_, Option<i64>>(22)?,
+                        r.get::<_, Option<i64>>(23)?,
+                    ),
                 ))
             })
             .map_err(|e| self.fail(e))?;
@@ -298,7 +309,9 @@ impl Store {
                     .map_err(|_| bad("file progress"))?,
                 title: linked(title).map_err(|_| bad("title link"))?,
                 home: match play {
-                    (Some(watched_at), Some(by_hand)) => Home::Plays(Play { watched_at, by_hand }),
+                    (Some(watched_at), Some(by_hand), Some(device), Some(inode)) => {
+                        Home::Plays(Play { watched_at, by_hand, folder: identity(device, inode) })
+                    }
                     _ => Home::Folder,
                 },
             };
@@ -341,8 +354,14 @@ impl Store {
             }
             if let Home::Plays(play) = record.home {
                 tx.execute(
-                    "INSERT INTO plays (job, watched_at, by_hand) VALUES (?1, ?2, ?3)",
-                    params![record.id.to_hex(), play.watched_at, play.by_hand],
+                    "INSERT INTO plays (job, watched_at, by_hand, device, inode) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        record.id.to_hex(),
+                        play.watched_at,
+                        play.by_hand,
+                        play.folder.device as i64,
+                        play.folder.inode as i64
+                    ],
                 )?;
             }
             tx.execute("DELETE FROM tombstones WHERE id = ?1", [record.id.to_hex()])?;
@@ -460,15 +479,18 @@ impl Store {
         })
     }
 
-    /// Removes a download, and puts on record that its play's folder is to be deleted, both or
-    /// neither. Answers the deletion's key.
-    pub fn remove(&mut self, tombstone: &Tombstone, play: Option<&PlayName>) -> Result<Option<i64>, Error> {
+    /// Removes a download, and puts on record that its play's folder, the one with that identity,
+    /// is to be deleted, both or neither. Answers the deletion's key.
+    pub fn remove(&mut self, tombstone: &Tombstone, play: Option<(&PlayName, Identity)>) -> Result<Option<i64>, Error> {
         self.write(|tx| {
             let id = tombstone.id.to_hex();
             tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
             let key = match play {
-                Some(play) => {
-                    tx.execute("INSERT INTO deletions (job, play) VALUES (?1, ?2)", [&id, play.as_str()])?;
+                Some((play, folder)) => {
+                    tx.execute(
+                        "INSERT INTO deletions (job, play, device, inode) VALUES (?1, ?2, ?3, ?4)",
+                        params![id, play.as_str(), folder.device as i64, folder.inode as i64],
+                    )?;
                     Some(tx.last_insert_rowid())
                 }
                 None => None,
@@ -492,17 +514,20 @@ impl Store {
     pub fn deletions(&self) -> Result<Vec<Recorded>, Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT rowid, job, play FROM deletions ORDER BY rowid")
+            .prepare("SELECT rowid, job, play, device, inode FROM deletions ORDER BY rowid")
             .map_err(|e| self.fail(e))?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get(3)?, r.get(4)?))
+            })
             .map_err(|e| self.fail(e))?;
         let mut recorded = Vec::new();
         for row in rows {
-            let (key, job, play) = row.map_err(|e| self.fail(e))?;
+            let (key, job, play, device, inode) = row.map_err(|e| self.fail(e))?;
             let bad = || corrupt(&self.path, &format!("deletion {key} is unreadable"));
             let play = PlayName::parse(&play).ok_or_else(bad)?;
-            recorded.push(Recorded { key, job: job.parse().map_err(|_| bad())?, play });
+            let job = job.parse().map_err(|_| bad())?;
+            recorded.push(Recorded { key, job, play, folder: identity(device, inode) });
         }
         Ok(recorded)
     }
@@ -514,9 +539,7 @@ impl Store {
     /// The plays folder the engine used last.
     pub fn plays_folder(&self) -> Result<Option<Identity>, Error> {
         self.conn
-            .query_row("SELECT device, inode FROM plays_folder", [], |r| {
-                Ok(Identity { device: r.get::<_, i64>(0)? as u64, inode: r.get::<_, i64>(1)? as u64 })
-            })
+            .query_row("SELECT device, inode FROM plays_folder", [], |r| Ok(identity(r.get(0)?, r.get(1)?)))
             .optional()
             .map_err(|e| self.fail(e))
     }
@@ -684,6 +707,11 @@ pub(super) fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
         _ => Error::new(ErrorCode::StateCorrupt, format!("{}: {e}", path.display()))
             .with_hint(format!("see {}", path.with_file_name("engine.log").display())),
     }
+}
+
+/// A file's identity as the store keeps it, in two signed columns.
+fn identity(device: i64, inode: i64) -> Identity {
+    Identity { device: device as u64, inode: inode as u64 }
 }
 
 fn corrupt(path: &Path, reason: &str) -> Error {
@@ -936,9 +964,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let mut store = Store::open(&path).unwrap();
+        let folder = Identity { device: u64::MAX, inode: 7 };
         let play = JobRecord {
             dir: "/th/data/plays/0101010101010101-0".into(),
-            home: Home::Plays(Play { watched_at: 100, by_hand: false }),
+            home: Home::Plays(Play { watched_at: 100, by_hand: false, folder }),
             ..record(1)
         };
         store.insert(&play, None, 100).unwrap();
@@ -946,13 +975,13 @@ mod tests {
         store.watched(play.id, 250).unwrap();
         store.by_hand(play.id).unwrap();
         let homes: Vec<Home> = store.jobs().unwrap().into_iter().map(|j| j.record.home).collect();
-        assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true }), Home::Folder]);
+        assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true, folder }), Home::Folder]);
         let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
         let name = PlayName::parse("0101010101010101-0").unwrap();
-        let key = store.remove(&tomb, Some(&name)).unwrap().unwrap();
+        let key = store.remove(&tomb, Some((&name, folder))).unwrap().unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name }]);
+        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder }]);
         assert_eq!(store.jobs().unwrap().len(), 1);
         store.deleted(key).unwrap();
         assert_eq!(store.deletions().unwrap(), []);
@@ -965,7 +994,8 @@ mod tests {
         let first = Identity { device: 1, inode: 2 };
         assert_eq!(store.plays_folder().unwrap(), None);
         store.use_plays_folder(first).unwrap();
-        let play = JobRecord { home: Home::Plays(Play { watched_at: 100, by_hand: false }), ..record(1) };
+        let folder = Identity { device: 1, inode: 9 };
+        let play = JobRecord { home: Home::Plays(Play { watched_at: 100, by_hand: false, folder }), ..record(1) };
         store.insert(&play, None, 100).unwrap();
         store.use_plays_folder(first).unwrap();
         assert_eq!(store.jobs().unwrap()[0].record.home, play.home, "the same folder keeps its plays");

@@ -110,8 +110,8 @@ impl Root {
 /// What removing a download leaves to delete.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Doom {
-    /// A play's folder, and everything in it.
-    Play { dir: PathBuf, bytes: u64 },
+    /// A play's folder, and everything in it, when it is still the folder made for the play.
+    Play { dir: PathBuf, folder: Identity, bytes: u64 },
     /// The files a download wrote into a folder the person chose, as paths inside it.
     Files { dir: PathBuf, files: Vec<PathBuf> },
 }
@@ -200,7 +200,7 @@ struct Pending {
 enum What {
     /// A play's folder, on record from the download's removal on. `None` when the download's
     /// folder is not one directly in the plays folder.
-    Play { key: Option<i64>, name: Option<PlayName>, dir: PathBuf, bytes: u64 },
+    Play { key: Option<i64>, name: Option<PlayName>, dir: PathBuf, folder: Identity, bytes: u64 },
     /// Files in a folder the person chose, each as it was when they asked, or why it stays. Only
     /// in memory, so a stop before they go leaves them where they are.
     Files { dir: PathBuf, files: Vec<(PathBuf, Result<Pin, String>)> },
@@ -249,7 +249,8 @@ impl Deleter {
             .into_iter()
             .map(|recorded| {
                 let dir = plays.join(recorded.play.as_str());
-                let what = What::Play { key: Some(recorded.key), name: Some(recorded.play), dir, bytes: 0 };
+                let (key, name, folder) = (Some(recorded.key), Some(recorded.play), recorded.folder);
+                let what = What::Play { key, name, dir, folder, bytes: 0 };
                 Pending { job: recorded.job, what, ran: true, failed: None }
             })
             .collect();
@@ -267,8 +268,8 @@ impl Deleter {
         self.root().map(drop)
     }
 
-    /// Makes a new, empty folder for a play of `id`.
-    pub fn make_play(&self, id: TorrentId) -> Result<PathBuf, Error> {
+    /// Makes a new, empty folder for a play of `id`, and answers where it is and which it is.
+    pub fn make_play(&self, id: TorrentId) -> Result<(PathBuf, Identity), Error> {
         let refused = |why: &str| Error::new(ErrorCode::StorageError, format!("no play can start, for {why}"));
         let root = self.plays.as_ref().map_err(|why| refused(why))?;
         root.intact().map_err(|why| {
@@ -276,14 +277,23 @@ impl Deleter {
         })?;
         for n in 0u32.. {
             let name = format!("{}-{n}", &id.to_hex()[..STEM]);
+            let unmade = |e: Errno| {
+                let message = format!("cannot make a folder in {}: {}", root.path.display(), io::Error::from(e));
+                Error::new(ErrorCode::StorageError, message)
+            };
             match rustix::fs::mkdirat(&root.fd, name.as_str(), Mode::from_raw_mode(0o755)) {
-                Ok(()) => return Ok(root.path.join(name)),
+                Ok(()) => {}
                 Err(Errno::EXIST) => continue,
-                Err(e) => {
-                    let message = format!("cannot make a folder in {}: {}", root.path.display(), io::Error::from(e));
-                    return Err(Error::new(ErrorCode::StorageError, message));
-                }
+                Err(e) => return Err(unmade(e)),
             }
+            let made = open_folder(&root.fd, name.as_str()).and_then(|folder| rustix::fs::fstat(&folder));
+            return match made {
+                Ok(stat) => Ok((root.path.join(name), Identity::of(&stat))),
+                Err(e) => {
+                    let _ = rustix::fs::unlinkat(&root.fd, name.as_str(), AtFlags::REMOVEDIR);
+                    Err(unmade(e))
+                }
+            };
         }
         unreachable!("a free folder name turns up long before u32 runs out")
     }
@@ -319,10 +329,10 @@ impl Deleter {
                 store.remove(tombstone, None)?;
                 return Ok(());
             }
-            Some(Doom::Play { dir, bytes }) => {
+            Some(Doom::Play { dir, folder, bytes }) => {
                 let name = self.plays.as_ref().ok().and_then(|root| root.name(&dir));
-                let key = store.remove(tombstone, name.as_ref())?;
-                What::Play { key, name, dir, bytes }
+                let key = store.remove(tombstone, name.as_ref().map(|name| (name, folder)))?;
+                What::Play { key, name, dir, folder, bytes }
             }
             Some(Doom::Files { dir, files }) => {
                 store.remove(tombstone, None)?;
@@ -406,7 +416,7 @@ impl Deleter {
                 let why = "it is not a folder directly in the plays folder".to_string();
                 Outcome::Refused(Report { kept: vec![(dir.clone(), why)], ..Report::default() })
             }
-            What::Play { name: Some(name), dir, bytes, .. } => {
+            What::Play { name: Some(name), dir, folder: made, bytes, .. } => {
                 let kept = |why: String| Report { kept: vec![(dir.clone(), why)], ..Report::default() };
                 let root = match self.root() {
                     Ok(root) => root,
@@ -425,6 +435,9 @@ impl Deleter {
                     Err(e) => return Outcome::Again(kept(format!("it cannot be opened: {}", io::Error::from(e)))),
                 };
                 match rustix::fs::fstat(&folder) {
+                    Ok(stat) if Identity::of(&stat) != *made => {
+                        return Outcome::Refused(kept("it is not the folder torrential made for the play".into()));
+                    }
                     Ok(stat) if in_use.folders.contains(&Identity::of(&stat)) => {
                         return Outcome::Again(kept("another download uses it".into()));
                     }
@@ -692,14 +705,14 @@ mod tests {
         let outside = root.join("outside");
         write(&outside.join("films/keep.mp4"), "keep");
         write(&outside.join("keep.mp4"), "keep");
-        let folder = deleter.make_play(id(1)).unwrap();
+        let (folder, made) = deleter.make_play(id(1)).unwrap();
         assert_eq!(folder, root.join("plays/0101010101010101-0"));
-        assert_eq!(deleter.make_play(id(1)).unwrap(), root.join("plays/0101010101010101-1"));
+        assert_eq!(deleter.make_play(id(1)).unwrap().0, root.join("plays/0101010101010101-1"));
         write(&folder.join("Film/film.mp4"), "film");
         symlink(outside.join("keep.mp4"), folder.join("Film/film.srt")).unwrap();
         symlink(outside.join("films"), folder.join("Film/extras")).unwrap();
 
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), bytes: 4 })).unwrap();
+        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 })).unwrap();
         assert_eq!(deleter.play_bytes(), 4);
         assert_eq!(
             run(&mut deleter, store, &InUse::default()),
@@ -709,6 +722,25 @@ mod tests {
         assert_eq!(std::fs::read_to_string(outside.join("keep.mp4")).unwrap(), "keep");
         assert_eq!(std::fs::read_to_string(outside.join("films/keep.mp4")).unwrap(), "keep");
         assert_eq!((deleter.play_bytes(), store.deletions().unwrap()), (0, vec![]));
+    }
+
+    #[test]
+    fn a_play_folder_on_record_that_was_replaced_before_a_start_is_left_alone() {
+        let Place { root, store, .. } = &mut place();
+        let deleter = Deleter::open(&root.join("plays"), trash(root), store).unwrap();
+        let (folder, made) = deleter.make_play(id(1)).unwrap();
+        write(&folder.join("film.mp4"), "film");
+        let name = PlayName::parse("0101010101010101-0").unwrap();
+        store.remove(&tomb(1), Some((&name, made))).unwrap();
+        drop(deleter);
+        std::fs::rename(&folder, root.join("plays/moved")).unwrap();
+        write(&folder.join("notes.txt"), "the person's own notes");
+
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), store).unwrap();
+        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
+        assert_eq!(std::fs::read_to_string(folder.join("notes.txt")).unwrap(), "the person's own notes");
+        assert_eq!(std::fs::read_to_string(root.join("plays/moved/film.mp4")).unwrap(), "film");
+        assert_eq!(store.deletions().unwrap(), [], "it is not tried again");
     }
 
     #[test]
@@ -725,7 +757,8 @@ mod tests {
         assert_eq!(deleter.make_play(id(2)).unwrap_err().message, format!("no play can start, for {why}"));
 
         let dir = root.join("data/plays/0101010101010101-0");
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: dir.clone(), bytes: 4 })).unwrap();
+        let folder = Identity { device: 1, inode: 1 };
+        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: dir.clone(), folder, bytes: 4 })).unwrap();
         let why = "it is not a folder directly in the plays folder";
         let kept = Report { kept: vec![(dir, why.into())], ..Report::default() };
         assert_eq!(run(&mut deleter, store, &InUse::default()), [kept]);

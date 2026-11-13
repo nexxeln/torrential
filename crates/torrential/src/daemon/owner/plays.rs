@@ -128,8 +128,8 @@ impl Owner {
         match to {
             Destination::Folder(dir) => Ok((dir, Home::Folder)),
             Destination::Plays => {
-                let folder = self.tending.deleter.make_play(id)?;
-                Ok((Some(folder), Home::Plays(Play { watched_at: now(), by_hand: false })))
+                let (dir, folder) = self.tending.deleter.make_play(id)?;
+                Ok((Some(dir), Home::Plays(Play { watched_at: now(), by_hand: false, folder })))
             }
         }
     }
@@ -145,7 +145,9 @@ impl Owner {
     /// in a folder the person chose only when they `delete` them.
     pub(super) fn doom(&self, job: &JobEntry, delete: bool) -> Option<Doom> {
         match job.record.home {
-            Home::Plays(_) => Some(Doom::Play { dir: job.record.dir.clone(), bytes: self.play_bytes(job) }),
+            Home::Plays(play) => {
+                Some(Doom::Play { dir: job.record.dir.clone(), folder: play.folder, bytes: self.play_bytes(job) })
+            }
             Home::Folder if delete => {
                 let (metainfo, wanted) = (job.metainfo.as_deref()?, job.wanted()?);
                 let chosen = metainfo.files.iter().zip(wanted).filter(|(_, wanted)| *wanted);

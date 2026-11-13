@@ -8,6 +8,7 @@ use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Place, Progress
 use super::admission::Cap;
 use super::engine_port::{Metainfo, Stats};
 use super::files;
+use super::owner::deleter::Identity;
 
 const ETA_AFTER: Duration = Duration::from_secs(10);
 
@@ -105,6 +106,8 @@ pub struct Play {
     /// The person asked for it by hand with `get`, so it never leaves the plays folder or stops
     /// by itself.
     pub by_hand: bool,
+    /// The folder torrential made for it, which is the only one deleted for it.
+    pub folder: Identity,
 }
 
 /// The title a download was made for, and whether it ever reached playing.

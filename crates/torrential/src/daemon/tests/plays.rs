@@ -1,6 +1,6 @@
 //! Where plays download, how they leave the plays folder, and what `rm` deletes.
 
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use torrential_core::{ErrorCode, Place, Target, TorrentId};
 use super::super::admission::{GIB, reserve};
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
 use super::super::owner::Command;
-use super::super::owner::deleter::PlayName;
+use super::super::owner::deleter::{Identity, PlayName};
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
@@ -125,7 +125,8 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
             let mut store = Store::open(&database).unwrap();
             let tomb = Tombstone { id: film.info_hash.id(), name: None, path: None, removed_at: 1 };
             let name = PlayName::parse(folder.file_name().unwrap().to_str().unwrap()).unwrap();
-            store.remove(&tomb, Some(&name)).unwrap();
+            let made = std::fs::metadata(&folder).unwrap();
+            store.remove(&tomb, Some((&name, Identity { device: made.dev(), inode: made.ino() }))).unwrap();
         })
         .await;
     assert_eq!((h.status().await.len(), folder.exists()), (0, false));
@@ -507,4 +508,27 @@ async fn a_file_put_in_place_of_one_rm_delete_was_asked_for_stays_and_does_not_g
     }
     assert_eq!(std::fs::read_to_string(&disc).unwrap(), "the person's own file");
     assert_eq!((trash.join("files/notes.txt").exists(), trash.join("files/disc.iso").exists()), (true, false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_play_folder_moved_away_with_another_folder_put_at_its_name_has_nothing_deleted() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let film = torrent(0x12, "film", &[("film.mp4", MIB)]);
+    h.play_web(&film).await;
+    let folder = h.play_folder(&film);
+    written(&folder.join("film/film.mp4"), MIB);
+    h.until("the film is done", |jobs| jobs[0].status.name() == "done").await;
+    let moved = h.dir.path().join("moved");
+    std::fs::rename(&folder, &moved).unwrap();
+    written(&folder.join("film/film.mp4"), 4);
+
+    let removed = h.rm(vec![prefix(&film)], false).await;
+    let refused = "it is not the folder torrential made for the play";
+    assert_eq!(
+        (removed[0].deleted.clone(), removed[0].kept.clone()),
+        (vec![], vec![Kept { path: folder.clone(), reason: refused.into() }])
+    );
+    assert_eq!(std::fs::read(folder.join("film/film.mp4")).unwrap().len(), 4, "the folder at its name stays");
+    assert!(moved.join("film/film.mp4").exists(), "and so does the folder moved away");
 }
