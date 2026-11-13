@@ -1636,7 +1636,7 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn while_a_film_streams_the_other_downloads_share_what_it_leaves() {
+async fn while_a_film_streams_the_other_downloads_trickle() {
     let h = Harness::new();
     h.swarm.set_rate(8 * MIB);
     let iso = torrent(99, "iso", &[("disc.iso", 40 * GIB)]);
@@ -1649,9 +1649,7 @@ async fn while_a_film_streams_the_other_downloads_share_what_it_leaves() {
     let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
     let mut player = Player::connect(&h).await;
     let watching = tokio::spawn(async move { player.get(&path, "bytes=40000000000-40000000099").await });
-    h.until("the iso drops to a tenth of the 16 MiB/s both went", |jobs| rates(jobs) == [16 * MIB / 10, 8 * MIB]).await;
-    // The film takes 8 of the 16 MiB/s and keeps a quarter free to speed up into, which leaves 4.
-    h.until("the iso grows back to what the film leaves", |jobs| rates(jobs) == [4 * MIB, 8 * MIB]).await;
+    h.until("the iso down to 64 KiB/s", |jobs| rates(jobs) == [64 * 1024, 8 * MIB]).await;
 
     watching.abort();
     h.until("the iso back at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
