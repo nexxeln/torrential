@@ -15,7 +15,7 @@ use torrential_core::Target;
 use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
 use super::super::search_port::{self, FakeSource, fake_catalog};
-use super::super::web::fetch::{Build, Fetch, VERSION};
+use super::super::web::fetch::{Build, Fetch};
 use super::super::web::ffmpeg::{INSTALL, Tools};
 use super::{Harness, Outside, magnet, prefix, titles, torrent, written};
 
@@ -455,8 +455,13 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
     assert_eq!(tools.calls().len(), 3, "a refused request runs nothing");
 }
 
-/// A .tar.xz holding stand-ins for ffmpeg and ffprobe, as a pinned build does. The stand-in
-/// ffprobe prints `probe`, and each appends its arguments to `calls`.
+/// The version of the stand-in build, which names the folder it unpacks into.
+const VERSION: &str = "8.1-test";
+/// Where the stand-in build's archive keeps its programs, as BtbN's Linux builds do.
+const BIN: &str = "ffmpeg-8.1-test/bin";
+
+/// A .tar.xz holding stand-ins for ffmpeg and ffprobe in `BIN`, as a pinned build does. The
+/// stand-in ffprobe prints `probe`, and each appends its arguments to `calls`.
 fn archive(calls: &Path, probe: &str, ffmpeg: &str) -> Vec<u8> {
     let script = |name: &str, body: &str| format!("#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n", calls.display());
     let mut tar = tar::Builder::new(Vec::new());
@@ -466,7 +471,7 @@ fn archive(calls: &Path, probe: &str, ffmpeg: &str) -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
         header.set_size(body.len() as u64);
         header.set_mode(0o755);
-        tar.append_data(&mut header, name, body.as_bytes()).unwrap();
+        tar.append_data(&mut header, format!("{BIN}/{name}"), body.as_bytes()).unwrap();
     }
     let mut xz = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::default()).unwrap();
     std::io::Write::write_all(&mut xz, &tar.into_inner().unwrap()).unwrap();
@@ -506,7 +511,13 @@ async fn serve(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
 
 fn build(url: String, archive: &[u8]) -> Build {
     use sha2::Digest;
-    Build { url, sha256: format!("{:x}", sha2::Sha256::digest(archive)), size: archive.len() as u64 }
+    Build {
+        version: VERSION.into(),
+        url,
+        bin: BIN.into(),
+        sha256: format!("{:x}", sha2::Sha256::digest(archive)),
+        size: archive.len() as u64,
+    }
 }
 
 fn names(dir: &Path) -> Vec<String> {

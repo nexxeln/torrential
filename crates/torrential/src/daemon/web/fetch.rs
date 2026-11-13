@@ -18,15 +18,22 @@ use torrential_core::{Error, ErrorCode};
 use super::ffmpeg::{self, INSTALL, Programs, Tools};
 use crate::env::Env;
 
-/// jellyfin-ffmpeg's portable builds, which link only to the system's own libraries: glibc on
-/// Linux, and `/usr/lib` and the system frameworks on macOS.
-const RELEASE: &str = "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2";
-pub const VERSION: &str = "8.1.3-2";
+/// jellyfin-ffmpeg's portable macOS build, which links only to `/usr/lib` and the system frameworks
+/// and leaves out fdk-aac.
+const JELLYFIN: &str = "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2";
+/// BtbN's GPL Linux builds, which link only to glibc and have no nonfree parts. The pin is a month's
+/// last build, which BtbN keeps for two years. It deletes other daily builds after two weeks.
+const BTBN: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59";
 
 struct Pin {
     os: &'static str,
     arch: &'static str,
+    /// The ffmpeg version, which names the folder the build unpacks into.
+    version: &'static str,
+    release: &'static str,
     file: &'static str,
+    /// The folder in the archive that holds ffmpeg and ffprobe, empty for its top.
+    bin: &'static str,
     sha256: &'static str,
     size: u64,
     /// The glibc loader the programs start with, from the system's root folder. A Linux without
@@ -34,13 +41,16 @@ struct Pin {
     loader: Option<&'static str>,
 }
 
-/// One for each platform torrential releases for, by `std::env::consts` names. The hashes are the
-/// ones GitHub lists for the release's files.
+/// One for each platform torrential releases for, by `std::env::consts` names. The sizes and hashes
+/// are the ones each release publishes for its files.
 const PINS: [Pin; 3] = [
     Pin {
         os: "macos",
         arch: "aarch64",
+        version: "8.1.3-2",
+        release: JELLYFIN,
         file: "jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz",
+        bin: "",
         sha256: "d898cc819e7c4e9219d6410ddbdaada0838f14bec6ff89e283639915394cb43f",
         size: 32_904_768,
         loader: None,
@@ -48,17 +58,23 @@ const PINS: [Pin; 3] = [
     Pin {
         os: "linux",
         arch: "x86_64",
-        file: "jellyfin-ffmpeg_8.1.3-2_portable_linux64-gpl.tar.xz",
-        sha256: "1df84d04c4322902dba81c290508cdf3d89524d210b9fe03154bea6c4e3bfbb6",
-        size: 60_657_368,
+        version: "n8.1.3-27-g8dca1586f4",
+        release: BTBN,
+        file: "ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz",
+        bin: "ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1/bin",
+        sha256: "41e9c565594c390622cf968d82fa4135d9e9a11d06c1515644288cbc844e3380",
+        size: 152_246_308,
         loader: Some("lib64/ld-linux-x86-64.so.2"),
     },
     Pin {
         os: "linux",
         arch: "aarch64",
-        file: "jellyfin-ffmpeg_8.1.3-2_portable_linuxarm64-gpl.tar.xz",
-        sha256: "6522585818059cc886363fb1dee86ac9b8579fec3b914337fb92974ef9eb9884",
-        size: 54_093_080,
+        version: "n8.1.3-27-g8dca1586f4",
+        release: BTBN,
+        file: "ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1.tar.xz",
+        bin: "ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1/bin",
+        sha256: "a08c0ee6e1c4e02139344b303002dcc7c37cf125d639f1fbd15dabee40fcb525",
+        size: 127_720_576,
         loader: Some("lib/ld-linux-aarch64.so.1"),
     },
 ];
@@ -75,7 +91,11 @@ const REPORT_EVERY: Duration = Duration::from_millis(200);
 /// A .tar.xz holding ffmpeg and ffprobe, and what it must hash to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Build {
+    /// The ffmpeg version, which names the folder the build unpacks into.
+    pub version: String,
     pub url: String,
+    /// The folder in the archive that holds ffmpeg and ffprobe.
+    pub bin: PathBuf,
     /// Lowercase hex.
     pub sha256: String,
     /// Bytes. A download of any other size is not this build.
@@ -89,7 +109,13 @@ impl Build {
         if pin.loader.is_some_and(|loader| !system.join(loader).exists()) {
             return None;
         }
-        Some(Build { url: format!("{RELEASE}/{}", pin.file), sha256: pin.sha256.to_string(), size: pin.size })
+        Some(Build {
+            version: pin.version.to_string(),
+            url: format!("{}/{}", pin.release, pin.file),
+            bin: PathBuf::from(pin.bin),
+            sha256: pin.sha256.to_string(),
+            size: pin.size,
+        })
     }
 }
 
@@ -314,10 +340,10 @@ impl Manifest {
     }
 }
 
-/// The programs `root`'s folder for this version holds, when only this user can change the
-/// folders and the programs are those its manifest records for `pin`.
+/// The programs `root`'s folder for `pin` holds, when only this user can change the folders and the
+/// programs are those its manifest records for `pin`.
 fn check(root: &Path, pin: &Build) -> Option<Programs> {
-    let folder = root.join(VERSION);
+    let folder = root.join(&pin.version);
     for dir in [root.parent().unwrap_or(root), root, &folder] {
         private(dir).ok()?;
     }
@@ -344,19 +370,19 @@ impl From<Error> for Failure {
 }
 
 /// Downloads `build`, checks its hash, unpacks ffmpeg and ffprobe with a manifest of them, and
-/// checks that they run, into `root`'s folder for this version. Anything else in `root` is removed.
-/// A failure leaves nothing.
+/// checks that they run, into `root`'s folder for the build. Anything else in `root` is removed. A
+/// failure leaves nothing.
 async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Result<Programs, Failure> {
-    let folder = root.join(VERSION);
+    let folder = root.join(&build.version);
     let started = Instant::now();
     let fetched: Result<Programs, Failure> = async {
         let partial = Partial::create(root)?;
-        super::super::log(&format!("fetching ffmpeg {VERSION} from {}", build.url));
+        super::super::log(&format!("fetching ffmpeg {} from {}", build.version, build.url));
         let archive = partial.path.join(ARCHIVE);
         download(build, &archive, report).await?;
         let (into, unpacked) = (partial.path.clone(), build.clone());
         tokio::task::spawn_blocking(move || {
-            unpack(&archive, &into)?;
+            unpack(&archive, &unpacked.bin, &into)?;
             Manifest::of(&into, &unpacked)?.write(&into)
         })
         .await
@@ -372,7 +398,9 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
     }
     .await;
     match &fetched {
-        Ok(_) => super::super::log(&format!("fetched ffmpeg {VERSION} in {} s", started.elapsed().as_secs())),
+        Ok(_) => {
+            super::super::log(&format!("fetched ffmpeg {} in {} s", build.version, started.elapsed().as_secs()));
+        }
         Err(Failure::Again(error) | Failure::Refused(error)) => {
             super::super::log(&format!("cannot fetch ffmpeg: {}", error.message));
         }
@@ -438,15 +466,15 @@ fn unwritable(path: &Path, e: &io::Error) -> Error {
         .with_hint("free some space or fix the folder's permissions, then try again")
 }
 
-/// Writes the archive's ffmpeg and ffprobe into `into`, and nothing else from it.
-fn unpack(archive: &Path, into: &Path) -> io::Result<()> {
+/// Writes the ffmpeg and ffprobe in the archive's `bin` folder into `into`, and nothing else from it.
+fn unpack(archive: &Path, bin: &Path, into: &Path) -> io::Result<()> {
     let xz = lzma_rust2::XzReader::new(BufReader::new(File::open(archive)?), true);
     let mut tar = tar::Archive::new(xz);
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         let path = path.strip_prefix(".").unwrap_or(&path);
-        let program = PROGRAMS.into_iter().find(|program| path == Path::new(program));
+        let program = PROGRAMS.into_iter().find(|program| path == bin.join(program));
         if let Some(program) = program.filter(|_| entry.header().entry_type().is_file()) {
             let mut file = OpenOptions::new().write(true).create_new(true).mode(0o700).open(into.join(program))?;
             io::copy(&mut entry, &mut file)?;
@@ -591,13 +619,35 @@ mod tests {
             std::fs::write(system.path().join(loader), "").unwrap();
         }
         let pinned = |os, arch| {
-            Build::pinned(os, arch, system.path()).map(|build| build.url.rsplit('/').next().unwrap().to_string())
+            Build::pinned(os, arch, system.path())
+                .map(|build| (build.version, build.url, build.bin.display().to_string()))
         };
-        assert_eq!(pinned("macos", "aarch64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz"));
-        assert_eq!(pinned("linux", "x86_64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_linux64-gpl.tar.xz"));
+        let pin = |version: &str, url: &str, bin: &str| Some((version.to_string(), url.to_string(), bin.to_string()));
+        let btbn = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59";
         assert_eq!(
-            pinned("linux", "aarch64").as_deref(),
-            Some("jellyfin-ffmpeg_8.1.3-2_portable_linuxarm64-gpl.tar.xz")
+            pinned("macos", "aarch64"),
+            pin(
+                "8.1.3-2",
+                "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2/\
+                 jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz",
+                ""
+            )
+        );
+        assert_eq!(
+            pinned("linux", "x86_64"),
+            pin(
+                "n8.1.3-27-g8dca1586f4",
+                &format!("{btbn}/ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz"),
+                "ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1/bin"
+            )
+        );
+        assert_eq!(
+            pinned("linux", "aarch64"),
+            pin(
+                "n8.1.3-27-g8dca1586f4",
+                &format!("{btbn}/ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1.tar.xz"),
+                "ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1/bin"
+            )
         );
         assert_eq!(pinned("macos", "x86_64"), None);
         assert_eq!(pinned("windows", "x86_64"), None);
@@ -615,10 +665,12 @@ mod tests {
             std::fs::create_dir_all(system.path().join(loader).parent().unwrap()).unwrap();
             std::fs::write(system.path().join(loader), "").unwrap();
         }
-        assert_eq!(pinned("linux", "x86_64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_linux64-gpl.tar.xz"));
         assert_eq!(
-            pinned("linux", "aarch64").as_deref(),
-            Some("jellyfin-ffmpeg_8.1.3-2_portable_linuxarm64-gpl.tar.xz")
+            [pinned("linux", "x86_64"), pinned("linux", "aarch64")],
+            [
+                Some("ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz".to_string()),
+                Some("ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1.tar.xz".to_string())
+            ]
         );
     }
 
@@ -645,8 +697,9 @@ mod tests {
     fn an_installed_ffmpeg_wins_over_the_fetched_one() {
         let dir = tempfile::tempdir().unwrap();
         let (installed, root) = (dir.path().join("bin"), dir.path().join("ffmpeg"));
-        let fetched = root.join(VERSION);
-        let build = Build { url: String::new(), sha256: "ab".repeat(32), size: 0 };
+        let build =
+            Build { version: "8.1".into(), url: String::new(), bin: PathBuf::new(), sha256: "ab".repeat(32), size: 0 };
+        let fetched = root.join(&build.version);
         for folder in [&installed, &fetched] {
             DirBuilder::new().recursive(true).mode(0o700).create(folder).unwrap();
             for program in PROGRAMS {
@@ -668,6 +721,71 @@ mod tests {
             [missing(Fetch::Build(build.clone())), missing(Fetch::Off(build)), missing(Fetch::Unavailable)],
             [Readiness::Fetch, Readiness::Missing, Readiness::Missing]
         );
+    }
+
+    /// Unpacks the programs in `bin` from a .tar.xz of `files`, each a path and its text, and `links`,
+    /// each a path and where it points. Answers what unpacking said, and each file it wrote as
+    /// `name: text`.
+    fn unpacked(files: &[(&str, &str)], links: &[(&str, &str)], bin: &str) -> (Result<(), String>, Vec<String>) {
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, text) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(text.len() as u64);
+            header.set_mode(0o755);
+            tar.append_data(&mut header, path, text.as_bytes()).unwrap();
+        }
+        for (path, target) in links {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            tar.append_link(&mut header, path, target).unwrap();
+        }
+        let mut xz = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::default()).unwrap();
+        io::Write::write_all(&mut xz, &tar.into_inner().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (archive, into) = (dir.path().join(ARCHIVE), dir.path().join("into"));
+        std::fs::write(&archive, xz.finish().unwrap()).unwrap();
+        std::fs::create_dir(&into).unwrap();
+        let said = unpack(&archive, Path::new(bin), &into).map_err(|e| e.to_string());
+        let mut wrote: Vec<String> = std::fs::read_dir(&into)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                format!("{name}: {}", std::fs::read_to_string(&path).unwrap())
+            })
+            .collect();
+        wrote.sort();
+        (said, wrote)
+    }
+
+    #[test]
+    fn only_the_ffmpeg_and_ffprobe_in_the_builds_folder_come_out_of_its_archive() {
+        let btbn = [
+            ("ffmpeg", "a decoy at the top"),
+            ("ffmpeg-n8.1/bin/ffmpeg", "ffmpeg"),
+            ("ffmpeg-n8.1/bin/ffplay", "ffplay"),
+            ("ffmpeg-n8.1/bin/ffprobe", "ffprobe"),
+            ("ffmpeg-n8.1/doc/ffprobe", "a decoy in another folder"),
+            ("ffmpeg-n8.1/LICENSE.txt", "GPL"),
+        ];
+        let (said, wrote) = unpacked(&btbn, &[], "ffmpeg-n8.1/bin");
+        assert_eq!(said, Ok(()));
+        assert_eq!(wrote, ["ffmpeg: ffmpeg", "ffprobe: ffprobe"]);
+
+        let jellyfin = [("ffmpeg", "ffmpeg"), ("ffprobe", "ffprobe"), ("LICENSE", "GPL")];
+        let (said, wrote) = unpacked(&jellyfin, &[], "");
+        assert_eq!(said, Ok(()));
+        assert_eq!(wrote, ["ffmpeg: ffmpeg", "ffprobe: ffprobe"]);
+    }
+
+    #[test]
+    fn a_link_in_the_archive_is_not_unpacked_as_a_program() {
+        let files = [("ffmpeg-n8.1/bin/ffmpeg", "ffmpeg"), ("ffmpeg-n8.1/bin/real", "ffprobe")];
+        let (said, wrote) = unpacked(&files, &[("ffmpeg-n8.1/bin/ffprobe", "real")], "ffmpeg-n8.1/bin");
+        assert_eq!(said, Err("the archive has no ffprobe".to_string()));
+        assert_eq!(wrote, ["ffmpeg: ffmpeg"]);
     }
 
     #[cfg(target_os = "macos")]

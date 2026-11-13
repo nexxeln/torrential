@@ -10,7 +10,7 @@ use torrential_core::{Error, ErrorCode};
 use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
-use crate::daemon::web::fetch::{self, Fetch, Ffmpeg, Found, VERSION};
+use crate::daemon::web::fetch::{self, Fetch, Ffmpeg, Found};
 use crate::daemon::web::ffmpeg::Tools;
 use crate::env::Env;
 use crate::output::theme::Token;
@@ -86,7 +86,8 @@ pub fn check(env: &Env, paths: &Paths, fetch: bool) -> Check {
         Found::Missing(Fetch::Build(build)) => (
             CheckStatus::Ok,
             format!(
-                "not installed; torrential fetches ffmpeg {VERSION} ({}) the first time a file needs converting",
+                "not installed; torrential fetches ffmpeg {} ({}) the first time a file needs converting",
+                build.version,
                 torrential_core::units::format_size(build.size)
             ),
         ),
