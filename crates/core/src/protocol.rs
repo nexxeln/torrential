@@ -10,13 +10,14 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{EpisodeInfo, TitleCard, TitleDetails, TitleId, VideoRef};
+use crate::device::DeviceList;
 use crate::error::Error;
 use crate::id::Target;
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
-pub const WIRE_VERSION: u32 = 5;
+pub const WIRE_VERSION: u32 = 6;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -85,6 +86,14 @@ pub enum Request {
     /// The same play, answered as `get` answers, for a download kept without a player. Once a
     /// source starts, it downloads as `get` downloads, not in playing order.
     GetTitle(TitleRequest),
+    /// The phones and TVs this machine let in, and the pairing offer open now.
+    Devices,
+    /// Opens a pairing offer for one more device, in place of any open one.
+    AddDevice,
+    /// Locks a device out at once.
+    RemoveDevice {
+        id: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -168,6 +177,10 @@ pub enum Response {
     GetTitle {
         reply: Box<GetReply>,
         title: Box<TitlePlayed>,
+    },
+    Devices {
+        #[serde(flatten)]
+        list: DeviceList,
     },
     Ok,
     Error {
@@ -357,6 +370,16 @@ mod tests {
         assert_eq!(serde_json::from_str::<TitleFrame>(&text).unwrap(), step);
         let reply: TitleFrame = serde_json::from_str(r#"{"type":"ok"}"#).unwrap();
         assert_eq!(reply, TitleFrame::Reply(Box::new(Response::Ok)));
+    }
+
+    #[test]
+    fn a_device_list_reads_as_one_flat_document() {
+        let list = Response::Devices { list: crate::DeviceList::default() };
+        let text = serde_json::to_string(&list).unwrap();
+        assert_eq!(text, r#"{"type":"devices","devices":[],"offer":null,"unreachable":null}"#);
+        assert_eq!(serde_json::from_str::<Response>(&text).unwrap(), list);
+        let remove = serde_json::to_value(Request::RemoveDevice { id: "3f9a0c2e".into() }).unwrap();
+        assert_eq!(remove, serde_json::json!({"op": "remove_device", "id": "3f9a0c2e"}));
     }
 
     #[test]

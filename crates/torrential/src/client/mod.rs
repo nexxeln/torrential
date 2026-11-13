@@ -1,4 +1,5 @@
 pub mod connect;
+mod devices;
 pub mod launch;
 pub mod play;
 pub mod player;
@@ -89,6 +90,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         },
         Command::Play(args) => play::run(args, mode, env, &cwd),
         Command::Web(args) => web::run(&engine()?, args, mode, env),
+        Command::Devices { command } => devices::run(engine()?, command, mode),
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;

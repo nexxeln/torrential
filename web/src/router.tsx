@@ -10,6 +10,8 @@ export type Route =
   | { page: "torrents"; query: string; everything: boolean }
   | { page: "watch"; ref: string; file: number | null }
   | { page: "downloads" }
+  /** The phones and TVs that watch from this Mac, and the code that adds one. */
+  | { page: "devices" }
   | { page: "missing" };
 
 const CHANGED = "torrential:navigate";
@@ -49,6 +51,7 @@ function parse(href: string): Route {
     return { page: "watch", ref: parts[1]!, file: file === null ? null : Number(file) };
   }
   if (parts[0] === "downloads" && parts.length === 1) return { page: "downloads" };
+  if (parts[0] === "devices" && parts.length === 1) return { page: "devices" };
   return { page: "missing" };
 }
 

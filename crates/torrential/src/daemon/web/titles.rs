@@ -13,6 +13,7 @@ use torrential_core::{
     TitleDetails, TitleId, TorrentId, VideoRef, Viewer, Watched,
 };
 
+use super::super::devices::Asker;
 use super::super::http::{Connection, Request};
 use super::super::owner::{Command, Finish, now};
 use super::super::server::{self, Ctx};
@@ -85,12 +86,11 @@ fn art_of(request: &Request) -> Result<(TitleId, ArtKind), Error> {
 
 /// `GET /api/title/sources?video=[&width=&height=&scale=&playback=]`: the title's releases as
 /// `/api/search` streams them, in the order a play from that browser tries them.
-pub async fn sources(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+pub async fn sources(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -> io::Result<bool> {
     let ctx = conn.ctx;
-    let here = from_this_machine(conn);
     let asked = async {
         let video: VideoRef = required(request, "video")?.parse()?;
-        let player = listed_for(request, here)?;
+        let player = listed_for(request, asker)?;
         let title = ctx.titles.resolve(&video, now()).await?;
         let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
         let query = ctx.titles.query(&title, (ctx.web.preferences)(), player).await?;
@@ -137,7 +137,7 @@ impl Measured {
 
 /// Who a source listing ranks for, from its `width`, `height`, `scale`, and `playback`
 /// parameters. The screen's three come with `playback` or not at all.
-fn listed_for(request: &Request, here: bool) -> Result<Player, Error> {
+fn listed_for(request: &Request, asker: &Asker) -> Result<Player, Error> {
     let size = (number(request, "width")?, number(request, "height")?, number(request, "scale")?);
     let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
     let viewer = match (size, playback) {
@@ -147,24 +147,19 @@ fn listed_for(request: &Request, here: bool) -> Result<Player, Error> {
         ((None, None, None), _) => None,
         _ => return Err(Error::new(ErrorCode::Usage, "a viewer needs all of width, height, scale, and playback")),
     };
-    Ok(player(viewer, playback, here))
+    Ok(player(viewer, playback, asker))
 }
 
 /// Who a web play or source listing ranks for. Every browser decodes what it reports. A browser
-/// on this machine shows this machine's display, so only another device's screen counts. A tab
-/// opened before browsers reported their screen reports only what it decodes. A request that
-/// reports neither ranks as `torrential play` does.
-fn player(viewer: Option<Viewer>, playback: Option<Playback>, here: bool) -> Player {
+/// on this Mac shows this Mac's display, so only a paired device's screen counts. A tab opened
+/// before browsers reported their screen reports only what it decodes. A request that reports
+/// neither ranks as `torrential play` does.
+fn player(viewer: Option<Viewer>, playback: Option<Playback>, asker: &Asker) -> Player {
     match (viewer, playback) {
-        (Some(viewer), _) if !here => Player::Device(viewer),
+        (Some(viewer), _) if *asker != Asker::Local => Player::Device(viewer),
         (Some(Viewer { playback, .. }), _) | (None, Some(playback)) => Player::Browser { playback },
         (None, None) => Player::External,
     }
-}
-
-/// Whether `conn` comes from this machine, over loopback.
-fn from_this_machine(conn: &Connection<'_>) -> bool {
-    conn.remote.to_canonical().is_loopback()
 }
 
 fn playback(text: &str) -> Result<Playback, Error> {
@@ -188,11 +183,10 @@ struct Play {
 
 /// `POST /api/title/play`: a line of JSON for each step of the play, the last being `playing` or
 /// `failed`. Closing the connection stops the play and gives up the source under test.
-pub async fn play(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
+pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -> io::Result<bool> {
     let ctx = conn.ctx;
-    let here = from_this_machine(conn);
     let ask = super::body::<Play>(request).and_then(|Play { video, viewer, playback, source, replace }| {
-        let player = player(viewer.map(Measured::viewer).transpose()?, playback, here);
+        let player = player(viewer.map(Measured::viewer).transpose()?, playback, asker);
         Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, finish: Finish::Stream })
     });
     let ask = match ask {
