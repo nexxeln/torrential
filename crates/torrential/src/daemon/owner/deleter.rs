@@ -206,6 +206,16 @@ enum What {
     Files { dir: PathBuf, files: Vec<(PathBuf, Result<Pin, String>)> },
 }
 
+impl What {
+    /// What a play's folder still to delete takes up on disk.
+    fn bytes(&self) -> u64 {
+        match self {
+            What::Play { bytes, .. } => *bytes,
+            What::Files { .. } => 0,
+        }
+    }
+}
+
 /// How a run of one deletion ended.
 enum Outcome {
     Done(Report),
@@ -255,7 +265,7 @@ impl Deleter {
             .map(|recorded| {
                 let dir = plays.join(recorded.play.as_str());
                 let (key, name, folder) = (Some(recorded.key), Some(recorded.play), recorded.folder);
-                let what = What::Play { key, name, dir, folder, bytes: 0 };
+                let what = What::Play { key, name, dir, folder, bytes: recorded.bytes };
                 Pending { job: recorded.job, what, ran: true, failed: None }
             })
             .collect();
@@ -336,7 +346,7 @@ impl Deleter {
             }
             Some(Doom::Play { dir, folder, bytes }) => {
                 let name = self.plays.as_ref().ok().and_then(|root| root.name(&dir));
-                let key = store.remove(tombstone, name.as_ref().map(|name| (name, folder)))?;
+                let key = store.remove(tombstone, name.as_ref().map(|name| (name, folder, bytes)))?;
                 What::Play { key, name, dir, folder, bytes }
             }
             Some(Doom::Files { dir, files }) => {
@@ -362,7 +372,7 @@ impl Deleter {
 
     /// What the plays folders still to delete take up on disk.
     pub fn play_bytes(&self) -> u64 {
-        self.pending.iter().map(|pending| if let What::Play { bytes, .. } = pending.what { bytes } else { 0 }).sum()
+        self.pending.iter().map(|pending| pending.what.bytes()).sum()
     }
 
     /// Runs each deletion whose download is not in `draining`. `in_use` is what other downloads
@@ -380,6 +390,7 @@ impl Deleter {
                 self.pending.push(pending);
                 continue;
             }
+            let before = pending.what.bytes();
             let (report, again) = match self.step(&mut pending.what, in_use) {
                 Outcome::Done(report) | Outcome::Refused(report) => (report, false),
                 Outcome::Again(report) => (report, true),
@@ -403,6 +414,12 @@ impl Deleter {
                 reports.push((pending.job, report));
             }
             if again {
+                if let What::Play { key: Some(key), bytes, .. } = pending.what
+                    && bytes != before
+                    && let Err(error) = store.left_to_delete(key, bytes)
+                {
+                    log(&format!("cannot note what a deletion left: {}", error.message));
+                }
                 pending.ran = true;
                 self.pending.push(pending);
             } else if let Some(key) = key
@@ -455,7 +472,10 @@ impl Deleter {
                     *bytes = 0;
                     return Outcome::Done(Report { deleted: vec![dir.clone()], ..Report::default() });
                 }
-                *bytes = left.bytes;
+                // What could not be measured may take up anything, so the estimate stays.
+                if let Some(measured) = left.bytes {
+                    *bytes = measured;
+                }
                 let why = left.why.unwrap_or("it could not be deleted");
                 Outcome::Again(kept(format!("{why}, so torrential tries again")))
             }
@@ -558,17 +578,24 @@ fn pin(dir: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Result<Pin, String>)> {
 
 /// What deleting everything in a folder left.
 struct Left {
-    /// What it takes up on disk.
-    bytes: u64,
+    /// What it takes up on disk, unless part of it could not be measured.
+    bytes: Option<u64>,
     why: Option<&'static str>,
 }
 
 /// Deletes everything in `folder` on the disk `device` without following a link, and keeps the
 /// files `keep` names. It never goes into another disk mounted inside.
 fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
-    let mut left = Left { bytes: 0, why: None };
+    let mut left = Left { bytes: Some(0), why: None };
     fn fail(left: &mut Left, why: &'static str) {
         left.why.get_or_insert(why);
+    }
+    fn unmeasured(left: &mut Left, why: &'static str) {
+        left.bytes = None;
+        fail(left, why);
+    }
+    fn count(left: &mut Left, stat: &rustix::fs::Stat) {
+        left.bytes = left.bytes.map(|bytes| bytes + stat.st_blocks as u64 * 512);
     }
     let names: Vec<Vec<u8>> = match rustix::fs::Dir::read_from(folder) {
         Ok(mut entries) => std::iter::from_fn(|| entries.read())
@@ -577,13 +604,20 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
             .filter(|name| name != b"." && name != b"..")
             .collect(),
         Err(_) => {
-            fail(&mut left, "it cannot be read");
+            unmeasured(&mut left, "it cannot be read");
             return left;
         }
     };
     for name in names {
         let name = OsStr::from_bytes(&name);
-        let Ok(stat) = rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) else { continue };
+        let stat = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(Errno::NOENT) => continue,
+            Err(_) => {
+                unmeasured(&mut left, "a file in it cannot be read");
+                continue;
+            }
+        };
         let directory = FileType::from_raw_mode(stat.st_mode) == FileType::Directory;
         if Identity::of(&stat).device != device || mount_root(folder, name) {
             fail(
@@ -594,14 +628,14 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
             match open_folder(folder, name) {
                 Ok(inner) => {
                     let inside = empty(&inner, keep, device);
-                    left.bytes += inside.bytes;
+                    left.bytes = left.bytes.zip(inside.bytes).map(|(bytes, inside)| bytes + inside);
                     if let Some(why) = inside.why {
                         fail(&mut left, why);
                         continue;
                     }
                 }
                 Err(_) => {
-                    fail(&mut left, "a folder in it cannot be opened");
+                    unmeasured(&mut left, "a folder in it cannot be opened");
                     continue;
                 }
             }
@@ -609,10 +643,10 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
                 fail(&mut left, "a folder in it could not be deleted");
             }
         } else if keep.contains(&Identity::of(&stat)) {
-            left.bytes += stat.st_blocks as u64 * 512;
+            count(&mut left, &stat);
             fail(&mut left, "another download uses a file in it");
         } else if rustix::fs::unlinkat(folder, name, AtFlags::empty()).is_err() {
-            left.bytes += stat.st_blocks as u64 * 512;
+            count(&mut left, &stat);
             fail(&mut left, "a file in it could not be deleted");
         }
     }
@@ -762,7 +796,7 @@ mod tests {
         let (folder, made) = deleter.make_play(id(1)).unwrap();
         write(&folder.join("film.mp4"), "film");
         let name = PlayName::parse("0101010101010101-0").unwrap();
-        store.remove(&tomb(1), Some((&name, made))).unwrap();
+        store.remove(&tomb(1), Some((&name, made, 4))).unwrap();
         drop(deleter);
         std::fs::rename(&folder, root.join("plays/moved")).unwrap();
         write(&folder.join("notes.txt"), "the person's own notes");
@@ -822,6 +856,27 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(folder.join("extras/keep.txt")).unwrap(), "on another disk");
         assert!(!folder.join("film.mp4").exists(), "what is on the play folder's own disk goes");
+    }
+
+    #[test]
+    fn a_play_folder_left_that_cannot_be_measured_counts_what_it_took_up_even_after_a_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let Place { root, store, .. } = &mut place();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), store).unwrap();
+        let (folder, made) = deleter.make_play(id(1)).unwrap();
+        write(&folder.join("Film/film.mp4"), "film");
+        write(&folder.join("film.srt"), "subtitles");
+        let shut = |mode| std::fs::set_permissions(folder.join("Film"), std::fs::Permissions::from_mode(mode)).unwrap();
+        shut(0o000);
+        let took = 3 << 30;
+        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: took })).unwrap();
+        run(&mut deleter, store, &InUse::default());
+        let restarted = Deleter::open(&root.join("plays"), trash(root), store).unwrap().play_bytes();
+        shut(0o755);
+        assert_eq!((deleter.play_bytes(), restarted), (took, took));
     }
 
     #[test]

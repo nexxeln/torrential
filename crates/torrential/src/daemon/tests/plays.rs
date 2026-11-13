@@ -126,7 +126,8 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
             let tomb = Tombstone { id: film.info_hash.id(), name: None, path: None, removed_at: 1 };
             let name = PlayName::parse(folder.file_name().unwrap().to_str().unwrap()).unwrap();
             let made = std::fs::metadata(&folder).unwrap();
-            store.remove(&tomb, Some((&name, Identity { device: made.dev(), inode: made.ino() }))).unwrap();
+            let folder = Identity { device: made.dev(), inode: made.ino() };
+            store.remove(&tomb, Some((&name, folder, MIB))).unwrap();
         })
         .await;
     assert_eq!((h.status().await.len(), folder.exists()), (0, false));

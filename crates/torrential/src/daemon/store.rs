@@ -104,7 +104,8 @@ CREATE TABLE deletions (
     job TEXT NOT NULL,
     play TEXT NOT NULL,
     device INTEGER NOT NULL,
-    inode INTEGER NOT NULL
+    inode INTEGER NOT NULL,
+    bytes INTEGER NOT NULL
 ) STRICT;
 "#,
 ];
@@ -130,6 +131,8 @@ pub struct Recorded {
     pub play: PlayName,
     /// The folder torrential made for the play, the only one this deletes.
     pub folder: Identity,
+    /// The most it takes up on disk.
+    pub bytes: u64,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -479,17 +482,22 @@ impl Store {
         })
     }
 
-    /// Removes a download, and puts on record that its play's folder, the one with that identity,
-    /// is to be deleted, both or neither. Answers the deletion's key.
-    pub fn remove(&mut self, tombstone: &Tombstone, play: Option<(&PlayName, Identity)>) -> Result<Option<i64>, Error> {
+    /// Removes a download, and puts on record that its play's folder, the one with that identity
+    /// and taking up at most that many bytes, is to be deleted, both or neither. Answers the
+    /// deletion's key.
+    pub fn remove(
+        &mut self,
+        tombstone: &Tombstone,
+        play: Option<(&PlayName, Identity, u64)>,
+    ) -> Result<Option<i64>, Error> {
         self.write(|tx| {
             let id = tombstone.id.to_hex();
             tx.execute("DELETE FROM jobs WHERE id = ?1", [&id])?;
             let key = match play {
-                Some((play, folder)) => {
+                Some((play, folder, bytes)) => {
                     tx.execute(
-                        "INSERT INTO deletions (job, play, device, inode) VALUES (?1, ?2, ?3, ?4)",
-                        params![id, play.as_str(), folder.device as i64, folder.inode as i64],
+                        "INSERT INTO deletions (job, play, device, inode, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![id, play.as_str(), folder.device as i64, folder.inode as i64, bytes as i64],
                     )?;
                     Some(tx.last_insert_rowid())
                 }
@@ -514,22 +522,30 @@ impl Store {
     pub fn deletions(&self) -> Result<Vec<Recorded>, Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT rowid, job, play, device, inode FROM deletions ORDER BY rowid")
+            .prepare("SELECT rowid, job, play, device, inode, bytes FROM deletions ORDER BY rowid")
             .map_err(|e| self.fail(e))?;
         let rows = stmt
             .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get(3)?, r.get(4)?))
+                let names = (r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?);
+                Ok((names, r.get(3)?, r.get(4)?, r.get::<_, i64>(5)?))
             })
             .map_err(|e| self.fail(e))?;
         let mut recorded = Vec::new();
         for row in rows {
-            let (key, job, play, device, inode) = row.map_err(|e| self.fail(e))?;
+            let ((key, job, play), device, inode, bytes) = row.map_err(|e| self.fail(e))?;
             let bad = || corrupt(&self.path, &format!("deletion {key} is unreadable"));
             let play = PlayName::parse(&play).ok_or_else(bad)?;
             let job = job.parse().map_err(|_| bad())?;
-            recorded.push(Recorded { key, job, play, folder: identity(device, inode) });
+            recorded.push(Recorded { key, job, play, folder: identity(device, inode), bytes: bytes as u64 });
         }
         Ok(recorded)
+    }
+
+    /// Notes that what is left of a deletion's folder takes up `bytes`.
+    pub fn left_to_delete(&mut self, key: i64, bytes: u64) -> Result<(), Error> {
+        self.write(|tx| {
+            tx.execute("UPDATE deletions SET bytes = ?2 WHERE rowid = ?1", params![key, bytes as i64]).map(drop)
+        })
     }
 
     pub fn deleted(&mut self, key: i64) -> Result<(), Error> {
@@ -985,10 +1001,11 @@ mod tests {
         assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true, folder }), Home::Folder]);
         let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
         let name = PlayName::parse("0101010101010101-0").unwrap();
-        let key = store.remove(&tomb, Some((&name, folder))).unwrap().unwrap();
+        let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
+        store.left_to_delete(key, 200).unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder }]);
+        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder, bytes: 200 }]);
         assert_eq!(store.jobs().unwrap().len(), 1);
         store.deleted(key).unwrap();
         assert_eq!(store.deletions().unwrap(), []);
