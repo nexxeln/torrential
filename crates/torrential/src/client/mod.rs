@@ -329,10 +329,8 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             Ok(emit(mode, &views::daemon_status(&report), &Typed { kind: "daemon", body: &report }))
         }
         DaemonCommand::Stop => {
-            let (result, pid) = match connect::running(&paths, env)? {
-                Some(conn) => ("stopped", Some(connect::stop(conn, connect::Stop::Asked)?)),
-                None => ("already_stopped", None),
-            };
+            let pid = connect::stop_asked(&paths, env)?;
+            let result = if pid.is_some() { "stopped" } else { "already_stopped" };
             #[derive(Serialize)]
             struct Stopped {
                 result: &'static str,

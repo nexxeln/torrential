@@ -124,9 +124,6 @@ pub struct Engine {
     pub env: Env,
 }
 
-/// How long an engine that refuses connections, as one does while it restarts, has to answer again.
-const BACK_WITHIN: Duration = Duration::from_secs(30);
-
 /// Follows `refs`, and follows them again when the engine restarts.
 fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Events), Error> {
     let (jobs, mut stream) = watch(conn, refs)?;
@@ -176,7 +173,7 @@ fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Er
 /// ends the wait at once.
 fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, UnixStream), Error> {
     let stopped = || Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting");
-    let deadline = Instant::now() + BACK_WITHIN;
+    let deadline = Instant::now() + connect::BACK_WITHIN;
     loop {
         match connect::existing(&engine.paths, &engine.env) {
             Ok(Some(conn)) => match watch(conn, ids.to_vec()) {

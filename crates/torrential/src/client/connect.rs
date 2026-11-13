@@ -13,6 +13,8 @@ use crate::update::Version;
 use crate::wire;
 
 pub const DEFAULT_REPLY_WITHIN: Duration = Duration::from_secs(30);
+/// How long an engine that refuses connections, as one does while it restarts, has to answer again.
+pub const BACK_WITHIN: Duration = Duration::from_secs(30);
 
 pub struct Conn {
     stream: UnixStream,
@@ -153,6 +155,23 @@ pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(pid)
+}
+
+/// Stops the engine as the person asks, and returns the process ID of the last engine it stopped.
+/// An engine that switches to an update keeps its socket, which refuses connections until the login
+/// service starts the new engine, so this waits across that gap and stops the new one too.
+pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
+    let deadline = Instant::now() + BACK_WITHIN;
+    let mut stopped = None;
+    loop {
+        if let Some(conn) = running(paths, env)? {
+            stopped = Some(stop(conn, Stop::Asked)?);
+        }
+        if !paths.socket().exists() || Instant::now() > deadline {
+            return Ok(stopped);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn alive(pid: u32) -> bool {

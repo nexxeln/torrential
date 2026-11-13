@@ -56,6 +56,16 @@ impl Built {
         .into_bytes()
     }
 
+    /// A release like `release` that waits `seconds` before it runs, as an engine slow to start does.
+    fn slow(&self, version: &str, seconds: u32) -> Vec<u8> {
+        let real = self.0.path().join("torrential").display().to_string();
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"torrential {version}\" ;;\n  *) sleep {seconds}; \
+             TORRENTIAL_TEST_VERSION={version} exec '{real}' \"$@\" ;;\nesac\n"
+        )
+        .into_bytes()
+    }
+
     /// A release like `release` that writes its process ID to `marks/pid`, and that hangs instead of
     /// exiting once its engine stops, after it leaves `marks/hangs`.
     fn hanging(&self, version: &str, marks: &Path) -> Vec<u8> {
@@ -381,7 +391,7 @@ fn an_unwritable_folder_is_refused_before_the_download() {
     assert_eq!(server.asked(), ["/latest"]);
 }
 
-fn eventually(what: &str, done: impl Fn() -> bool) {
+fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !done() {
         assert!(std::time::Instant::now() < deadline, "timed out waiting until {what}");
@@ -632,6 +642,19 @@ impl Install {
         serde_json::from_str(answer.split_once("\r\n\r\n")?.1).ok()
     }
 
+    /// Each engine that started in this home, as its version, process ID, and web port.
+    fn starts(&self) -> Vec<(String, u32, u16)> {
+        let log = std::fs::read_to_string(self.state().join("engine.log")).unwrap_or_default();
+        log.lines()
+            .filter_map(|line| {
+                let (version, rest) = line.split_once(" engine ")?.1.split_once(" started, pid ")?;
+                let (pid, rest) = rest.split_once(", socket ")?;
+                let (_, port) = rest.rsplit_once("http://127.0.0.1:")?;
+                Some((version.to_string(), pid.parse().ok()?, port.parse().ok()?))
+            })
+            .collect()
+    }
+
     /// The ID of the test download that never finishes while `TORRENTIAL_TEST_FAKE_RATE` is 0.
     fn wikipedia(&self) -> String {
         let jobs: serde_json::Value = serde_json::from_str(&self.run(&["status", "--json"]).stdout).unwrap();
@@ -802,6 +825,38 @@ fn an_engine_that_finds_the_release_after_another_home_installed_it_starts_it_to
     assert!(logs[1].contains("torrential 0.1.1 is already installed"), "{}", logs[1]);
     assert!(!logs[1].contains("update failed"), "{}", logs[1]);
     assert_eq!((stops, ended), ([0, 0], [Some(0), Some(0)]));
+}
+
+#[test]
+fn a_stop_asked_while_the_login_service_starts_an_update_stops_the_new_engine() {
+    if target().is_none() {
+        return;
+    }
+    let built = Built::new();
+    let server = Server::start("0.1.1", &built.slow("0.1.1", 3), None);
+    let install = Install::agent_with_engine(&server);
+    install.found("0.1.1");
+    let mut service = install.supervise();
+    let log = || std::fs::read_to_string(install.state().join("engine.log")).unwrap_or_default();
+    eventually("the engine stopped for 0.1.1", || {
+        log().contains("installed torrential 0.1.1") && log().contains("engine stopped")
+    });
+
+    // The installed binary is the slow release now, so the stop runs the build.
+    let stop =
+        install.command(Path::new(env!("CARGO_BIN_EXE_torrential")), &["engine", "stop", "--json"]).output().unwrap();
+    let stop: serde_json::Value = serde_json::from_slice(&stop.stdout).unwrap();
+    let started: Vec<(String, u32)> = install.starts().into_iter().map(|(version, pid, _)| (version, pid)).collect();
+    assert_eq!(stop["result"], "stopped", "{stop}");
+    let mut ended = None;
+    eventually("the login service has nothing to run", || {
+        ended = service.try_wait().unwrap();
+        ended.is_some()
+    });
+
+    assert_eq!(started.iter().map(|(version, _)| version.as_str()).collect::<Vec<_>>(), ["0.1.0", "0.1.1"]);
+    assert_eq!(stop["pid"].as_u64(), Some(started[1].1.into()), "the stop names the engine that started for 0.1.1");
+    assert_eq!(ended.map(|status| status.code()), Some(Some(0)));
 }
 
 /// Starts an engine that has found release 0.1.1, and sets `updates: notify` while the request
