@@ -25,6 +25,7 @@ import {
   subtitleOffset,
   type SubtitleStyle,
 } from "../lib/storage";
+import { isTv } from "../lib/tv";
 import { navigate, watchPath } from "../router";
 import { Button } from "../ui/Button";
 import { PlayerActions } from "./actions";
@@ -115,7 +116,18 @@ interface Props {
   titled?: Titled;
 }
 
-function useFullscreen(target: RefObject<HTMLElement | null>): [boolean, () => void] {
+/** Safari on iPhone fills the screen only with its own player, which this opens. */
+type IPhoneVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+type Lockable = ScreenOrientation & { lock?: (orientation: "landscape") => Promise<void> };
+
+/** A phone turns sideways for a wide picture once it fills the screen. Browsers that cannot hold the turn refuse, which changes nothing. */
+function turnSideways(video: HTMLVideoElement): void {
+  if (!matchMedia("(pointer: coarse)").matches || video.videoWidth <= video.videoHeight) return;
+  (screen.orientation as Lockable).lock?.("landscape").catch(() => {});
+}
+
+/** Whether the player fills the screen, and the way to switch, or null where the browser has none. */
+function useFullscreen(target: RefObject<HTMLElement | null>, video: HTMLVideoElement): [boolean, (() => void) | null] {
   const [active, setActive] = useState(false);
   useEffect(() => {
     const changed = () => setActive(document.fullscreenElement === target.current);
@@ -124,9 +136,16 @@ function useFullscreen(target: RefObject<HTMLElement | null>): [boolean, () => v
   }, [target]);
   const toggle = useCallback(() => {
     if (document.fullscreenElement) void document.exitFullscreen();
-    else void target.current?.requestFullscreen().catch(() => {});
-  }, [target]);
-  return [active, toggle];
+    else if (document.fullscreenEnabled) void target.current?.requestFullscreen().then(() => turnSideways(video), () => {});
+    else {
+      try {
+        (video as IPhoneVideo).webkitEnterFullscreen?.();
+      } catch {
+        // Safari refuses until the video's size is known. The next press works.
+      }
+    }
+  }, [target, video]);
+  return [active, document.fullscreenEnabled || "webkitEnterFullscreen" in video ? toggle : null];
 }
 
 /** True for `IDLE_MS` after each `wake`. `sleep` ends it at once. */
@@ -200,7 +219,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const ownDuration = useVideo(video, (state) => state.duration);
   const duration = media.duration ?? ownDuration;
   const scrubbing = useSyncExternalStore(scrub.subscribe, scrub.active);
-  const [fullscreen, toggleFullscreen] = useFullscreen(frame);
+  const [fullscreen, toggleFullscreen] = useFullscreen(frame, element);
   const [awake, wake, sleep] = useAwake();
 
   const ownMemory = titled?.memory;
@@ -398,7 +417,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
         case "speedBy":
           return actions.speedBy(action.steps);
         case "fullscreen":
-          return toggleFullscreen();
+          return toggleFullscreen?.();
         case "file": {
           const go = action.direction === 1 ? goNext : goPrevious;
           return go ? go() : feedback.note(action.direction === 1 ? ends[0] : ends[1]);
@@ -421,6 +440,10 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           return setStats((open) => !open);
         case "shortcuts":
           return setSheet((open) => !open);
+        case "controls":
+          // The bar is inert while hidden, so focus goes to the timeline once it shows.
+          wake();
+          return void requestAnimationFrame(() => frame.current?.querySelector<HTMLElement>("[role=slider]")?.focus());
         case "leave":
           if (sheet) return setSheet(false);
           if (menu.length) return closeMenu();
@@ -428,11 +451,15 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           return onBack();
       }
     },
-    [actions, feedback, subtitles, offset, setOffset, media.audio, heard, goNext, goPrevious, ends, toggleFullscreen, sheet, menu.length, filesOpen, closeMenu, onBack],
+    [actions, feedback, subtitles, offset, setOffset, media.audio, heard, goNext, goPrevious, ends, toggleFullscreen, wake, frame, sheet, menu.length, filesOpen, closeMenu, onBack],
   );
   useEffect(() => {
+    // Every key shows the controls, also one that a menu or a remote's focus keeps to itself.
+    addEventListener("keydown", wake, true);
+    return () => removeEventListener("keydown", wake, true);
+  }, [wake]);
+  useEffect(() => {
     const pressed = (event: KeyboardEvent) => {
-      wake();
       const action = command(event);
       // The shortcut sheet is a dialog: under it, only the keys that close it act.
       if (!action || (sheet && action.kind !== "leave" && action.kind !== "shortcuts")) return;
@@ -441,7 +468,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     };
     addEventListener("keydown", pressed);
     return () => removeEventListener("keydown", pressed);
-  }, [run, wake, sheet]);
+  }, [run, sheet]);
 
   const nowPlaying = titled
     ? titled.kind === "episode"
@@ -483,7 +510,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     } else if (count === 2) {
       // The first click already played or paused if the second came late. Put that back.
       if (!waitingClick) actions.toggle();
-      toggleFullscreen();
+      toggleFullscreen?.();
     }
   };
   useEffect(() => () => clearTimeout(click.current), []);
@@ -494,13 +521,16 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const starting = !stuck && !started && waiting;
   const showControls = !stuck && !starting && (awake || onControls || paused || menu.length > 0 || scrubbing);
   const hidden = showControls || stuck || starting ? undefined : "";
+  /** The shortcuts dialog, or on a TV the files panel, covers the bars, so a remote cannot reach them. */
+  const overlaid = sheet || (filesOpen && isTv());
 
   return (
     <PlayerContext value={parts}>
       <div
         data-idle={showControls || stuck || starting ? undefined : ""}
+        data-player=""
         onPointerMove={(event) => event.pointerType === "mouse" && wake()}
-        className="absolute inset-0 data-idle:cursor-none"
+        className="absolute inset-0 touch-manipulation data-idle:cursor-none"
       >
         <div
           className="absolute inset-0"
@@ -527,6 +557,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           <button
             type="button"
             aria-label="Play"
+            autoFocus={isTv()}
             onClick={() => actions.toggle()}
             className="absolute top-1/2 left-1/2 flex size-20 -translate-1/2 items-center justify-center rounded-full bg-black/55 inset-ring inset-ring-white/20 backdrop-blur-sm hover:bg-black/70"
           >
@@ -545,6 +576,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
 
         <div
           data-hidden={hidden}
+          inert={hidden === "" || overlaid}
           className="absolute inset-x-0 top-0 z-10 transition-opacity duration-300 data-hidden:pointer-events-none data-hidden:opacity-0 motion-reduce:transition-none"
         >
           <TopBar
@@ -591,7 +623,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           <div
             role="group"
             aria-label="Subtitle timing"
-            className="absolute right-[max(--spacing(3),2vw)] bottom-28 z-10 flex animate-appear items-center gap-3 rounded-xl bg-black/70 py-2 pr-2 pl-4 text-sm text-ink backdrop-blur-md motion-reduce:animate-none"
+            className="absolute right-(--edge-right) bottom-28 z-10 flex animate-appear items-center gap-3 rounded-xl bg-black/70 py-2 pr-2 pl-4 text-sm text-ink backdrop-blur-md motion-reduce:animate-none"
           >
             <div className="flex flex-col">
               <p className="font-medium tabular-nums">{offset === 0 ? "Out of sync?" : `Subtitles ${offsetText(offset)}`}</p>
@@ -610,13 +642,13 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
 
         <div
           data-hidden={showControls ? undefined : ""}
-          inert={!showControls}
+          inert={!showControls || overlaid}
           onPointerEnter={(event) => setOnControls(event.pointerType === "mouse")}
           onPointerLeave={() => setOnControls(false)}
           className="absolute inset-x-0 bottom-0 z-10 bg-linear-to-t from-black/85 via-black/45 to-transparent pt-20 transition-opacity duration-300 data-hidden:pointer-events-none data-hidden:opacity-0 motion-reduce:transition-none"
         >
           {resumeNotice && (
-            <div className="flex px-[max(--spacing(3),2vw)] pb-1">
+            <div className="flex pr-(--edge-right) pb-1 pl-(--edge-left)">
               <div className="flex animate-appear items-center gap-1 rounded-lg bg-black/60 py-1 pr-1 pl-3 text-sm text-ink tabular-nums motion-reduce:animate-none">
                 Resumed from {clock(memory.start)}
                 <Button

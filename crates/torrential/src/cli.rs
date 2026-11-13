@@ -62,6 +62,14 @@ pub enum Command {
     /// Open the web app, to search and watch in your browser
     #[command(after_help = "Examples:\n  torrential web\n  torrential web --no-open")]
     Web(WebArgs),
+    /// List, add, or remove the phones and TVs that watch from this Mac
+    #[command(
+        after_help = "Examples:\n  torrential devices\n  torrential devices add\n  torrential devices remove 3f9a0c2e --json"
+    )]
+    Devices {
+        #[command(subcommand)]
+        command: Option<DevicesCommand>,
+    },
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -314,6 +322,20 @@ pub struct VerifyArgs {
     /// Download damaged pieces again
     #[arg(long)]
     pub repair: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DevicesCommand {
+    /// List the paired devices and the open code, the default
+    List,
+    /// Show a code and a QR code that let one more phone or TV in for 5 minutes
+    Add,
+    /// Lock a device out at once
+    Remove {
+        /// A device ID from torrential devices
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

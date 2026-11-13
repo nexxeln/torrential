@@ -156,7 +156,7 @@ export function SeekBar({ play, duration, chapters, frames, aspect, onSeek }: Pr
       aria-valuemax={Math.round(length)}
       aria-disabled={!length}
       data-dragging={dragging ? "" : undefined}
-      className="group/seek relative h-6 cursor-pointer touch-none rounded-sm aria-disabled:cursor-default"
+      className="group/seek relative h-6 cursor-pointer touch-none rounded-sm aria-disabled:cursor-default pointer-coarse:h-11"
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}
@@ -164,7 +164,7 @@ export function SeekBar({ play, duration, chapters, frames, aspect, onSeek }: Pr
       onPointerLeave={() => !dragging && setPointed(null)}
     >
       <div
-        className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-black/35 transition-[height] duration-150 group-hover/seek:h-1.75 group-focus-visible/seek:h-1.75 group-data-dragging/seek:h-1.75 motion-reduce:transition-none"
+        className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-black/35 transition-[height] duration-150 group-hover/seek:h-1.75 group-focus-visible/seek:h-1.75 group-data-dragging/seek:h-1.75 motion-reduce:transition-none pointer-coarse:h-1.5"
         style={{ maskImage: mask, WebkitMaskImage: mask }}
       >
         <div className="absolute inset-0 bg-white/15" />
@@ -175,7 +175,7 @@ export function SeekBar({ play, duration, chapters, frames, aspect, onSeek }: Pr
       </div>
       <div
         ref={thumb}
-        className="pointer-events-none absolute top-1/2 size-3.5 -translate-1/2 scale-0 rounded-full bg-ink ring-1 ring-black/20 transition-transform duration-150 group-hover/seek:scale-100 group-focus-visible/seek:scale-100 group-data-dragging/seek:scale-110 motion-reduce:transition-none"
+        className="pointer-events-none absolute top-1/2 size-3.5 -translate-1/2 scale-0 rounded-full bg-ink ring-1 ring-black/20 transition-transform duration-150 group-hover/seek:scale-100 group-focus-visible/seek:scale-100 group-data-dragging/seek:scale-110 motion-reduce:transition-none pointer-coarse:scale-100 tv:group-focus/seek:scale-100"
       />
       {pointed !== null && time !== null && length > 0 && (
         <Preview

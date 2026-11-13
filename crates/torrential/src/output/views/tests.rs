@@ -873,6 +873,12 @@ fn sample(code: ErrorCode) -> Error {
         )
         .with_next("torrential resume 770e77"),
         ErrorCode::Interrupted => given(code, "interrupted", "run the command again"),
+        ErrorCode::NotPaired => crate::daemon::devices::Refused::WrongCode.error(),
+        ErrorCode::LocalOnly => given(
+            code,
+            "only the Mac running torrential can add or remove devices",
+            "open torrential on the Mac to do it",
+        ),
         ErrorCode::Internal => Error::internal("the engine thread stopped"),
     }
 }

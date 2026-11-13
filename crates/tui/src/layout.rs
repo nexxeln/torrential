@@ -217,9 +217,11 @@ pub fn total(placed: &[Placed]) -> u16 {
     placed.last().map_or(0, |b| b.top + b.height)
 }
 
-pub fn settle(placed: &[Placed], lines: Option<(u16, u16)>, scroll: i32, viewport: u16) -> u16 {
+/// The scroll that keeps `lines`, the cursor's top row and height, in view with some context
+/// around them, in a list `total` rows long.
+pub fn settle(total: u16, lines: Option<(u16, u16)>, scroll: i32, viewport: u16) -> u16 {
     let viewport = i32::from(viewport);
-    let max = (i32::from(total(placed)) - viewport).max(0);
+    let max = (i32::from(total) - viewport).max(0);
     let mut scroll = scroll.clamp(0, max);
     if let Some((top, height)) = lines {
         let context = i32::from(CONTEXT).min((viewport - i32::from(height)).max(0) / 2);

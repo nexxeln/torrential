@@ -1,9 +1,9 @@
-import { type CSSProperties, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 import type { SubtitleStyle } from "../lib/storage";
 import { usePlayer } from "./context";
 import type { CueTrack } from "./cues";
 import { useFrame } from "./frame";
-import type { Cue, Span } from "./vtt";
+import { type Cue, cueText, type Span } from "./vtt";
 
 const BACKING = {
   shadow: "text-over-video",
@@ -48,10 +48,70 @@ interface Props {
   sample: boolean;
 }
 
+/** Seconds of lines the native track holds ahead of the playhead, so each starts on time between `timeupdate` events. */
+const AHEAD = 10;
+/** The text track of each video for Safari's own full screen. A track cannot be removed, so one is kept. */
+const NATIVE = new WeakMap<HTMLVideoElement, TextTrack>();
+
+/**
+ * Safari on iPhone plays full screen in its own player, which covers the page and these lines with
+ * it. While it does, the same lines, shifted by `offset`, go to a text track that player draws.
+ */
+function useNativeLines(element: HTMLVideoElement, track: CueTrack | null, offset: number): void {
+  useEffect(() => {
+    let native: TextTrack | null = null;
+    const shown = new Map<string, VTTCue>();
+    const sync = () => {
+      if (!native) return;
+      const from = element.currentTime - offset;
+      const wanted = new Map((track?.during(from, from + AHEAD) ?? []).map((cue) => [`${cue.start}:${cue.text}`, cue]));
+      for (const [key, line] of shown) {
+        if (wanted.has(key)) continue;
+        native.removeCue(line);
+        shown.delete(key);
+      }
+      for (const [key, cue] of wanted) {
+        if (shown.has(key)) continue;
+        const line = new VTTCue(cue.start + offset, cue.end + offset, cueText(cue));
+        if (cue.place === "top") line.line = 0;
+        if (cue.place === "middle") {
+          line.snapToLines = false;
+          line.line = 50;
+        }
+        native.addCue(line);
+        shown.set(key, line);
+      }
+    };
+    const begin = () => {
+      native = NATIVE.get(element) ?? element.addTextTrack("subtitles", "Subtitles");
+      NATIVE.set(element, native);
+      native.mode = "showing";
+      sync();
+    };
+    const end = () => {
+      if (!native) return;
+      for (const line of shown.values()) native.removeCue(line);
+      shown.clear();
+      native.mode = "disabled";
+      native = null;
+    };
+    if ((element as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen) begin();
+    const stop = new AbortController();
+    element.addEventListener("webkitbeginfullscreen", begin, { signal: stop.signal });
+    element.addEventListener("webkitendfullscreen", end, { signal: stop.signal });
+    for (const name of ["timeupdate", "seeked"]) element.addEventListener(name, sync, { signal: stop.signal });
+    return () => {
+      stop.abort();
+      end();
+    };
+  }, [element, track, offset]);
+}
+
 /** The subtitle lines over the picture. Follows the playhead every frame and renders when the lines change. */
 export function SubtitleLayer({ track, offset, style, lifted, sample }: Props) {
   const { element } = usePlayer();
   const [cues, setCues] = useState<Cue[]>([]);
+  useNativeLines(element, track, offset);
   const shown = cues.map((cue) => `${cue.start}:${cue.text}`).join("|");
 
   useFrame(() => {

@@ -13,7 +13,7 @@ use crate::{layout, view};
 
 const SIZES: [(u16, u16); 5] = [(80, 24), (100, 30), (160, 45), (47, 40), (47, 19)];
 
-fn shot(state: &State) -> String {
+pub(super) fn shot(state: &State) -> String {
     let (w, h) = state.size;
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
@@ -24,7 +24,7 @@ fn shot(state: &State) -> String {
     terminal.backend().to_string()
 }
 
-fn snapshots(name: &str, scenario: impl Fn((u16, u16)) -> State) {
+pub(super) fn snapshots(name: &str, scenario: impl Fn((u16, u16)) -> State) {
     for size in SIZES {
         insta::assert_snapshot!(format!("{name}_{}x{}", size.0, size.1), shot(&scenario(size)));
     }
@@ -648,7 +648,7 @@ fn every_screen_draws_at_every_size_from_the_smallest_up() {
     }
 }
 
-fn render(state: &State) -> Buffer {
+pub(super) fn render(state: &State) -> Buffer {
     render_in(state, ColorMode::TrueColor)
 }
 
@@ -659,7 +659,7 @@ fn render_in(state: &State, mode: ColorMode) -> Buffer {
     buf
 }
 
-fn find(buf: &Buffer, text: &str) -> (u16, u16) {
+pub(super) fn find(buf: &Buffer, text: &str) -> (u16, u16) {
     let w = buf.area.width;
     for y in 0..buf.area.height {
         let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
@@ -670,11 +670,11 @@ fn find(buf: &Buffer, text: &str) -> (u16, u16) {
     panic!("{text:?} is not on screen");
 }
 
-fn line(buf: &Buffer, y: u16) -> String {
+pub(super) fn line(buf: &Buffer, y: u16) -> String {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()
 }
 
-const MARK: u16 = 12;
+pub(super) const MARK: u16 = 12;
 
 #[test]
 fn the_selected_row_is_bright_and_bold_with_the_mark_beside_it() {

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Flag, NameCodec, Release, Resolution } from "../api";
 import { age, bytes } from "../lib/format";
 import { isVideo, readable } from "../lib/release";
+import { isTv } from "../lib/tv";
 import { Link, watchPath } from "../router";
 import { Chip } from "../ui/Chip";
 
@@ -102,6 +103,7 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pi
           data-selected={selected ? "" : undefined}
           aria-current={selected ? "true" : undefined}
           onPointerMove={onPoint}
+          onFocus={isTv() ? onPoint : undefined}
           className={ROW}
         >
           {body}
@@ -114,6 +116,7 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pi
           aria-label={`Copy the command that downloads ${release.name}`}
           title={`Not a video. Copy "${getCommand(release)}" to download it from a terminal.`}
           onPointerMove={onPoint}
+          onFocus={isTv() ? onPoint : undefined}
           onClick={onCopy}
           className={ROW}
         >

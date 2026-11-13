@@ -4,7 +4,7 @@ import { bytes, count, percent, rate, sentence, span } from "../lib/format";
 import { useJobs } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { Link, watchPath } from "../router";
-import { Button } from "../ui/Button";
+import { Button, buttonClass } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Meter } from "../ui/Meter";
 import { trashed } from "./trashed";
@@ -90,10 +90,7 @@ function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiErro
           </>
         ) : (
           <>
-            <Link
-              href={watchPath(job.id)}
-              className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink inset-ring inset-ring-white/15 hover:bg-white/10"
-            >
+            <Link href={watchPath(job.id)} className={buttonClass({})}>
               Watch
             </Link>
             {job.state !== "done" &&
@@ -130,7 +127,7 @@ export function DownloadsPage() {
   }, []);
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-4 pb-16 sm:px-6">
+    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col px-page pb-16">
       <Header current="downloads" />
       <main className="flex flex-col gap-2 pt-[min(8vh,--spacing(16))]">
         <div className="flex items-baseline justify-between gap-4">

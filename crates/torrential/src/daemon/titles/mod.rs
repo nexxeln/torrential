@@ -33,7 +33,7 @@ pub struct Titles {
     failed: Mutex<HashMap<ReleaseId, (Instant, Skip)>>,
 }
 
-/// Every deadline of a title play. Tests shrink them.
+/// Every deadline of a title play, and of the home lists. Tests shrink them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Timing {
     /// For a source's file list.
@@ -42,6 +42,9 @@ pub struct Timing {
     pub first_bytes: Duration,
     /// For the whole play.
     pub budget: Duration,
+    /// For the catalog lookups of the home lists, all together. Past it, the copies kept on this
+    /// machine answer.
+    pub home: Duration,
 }
 
 impl Default for Timing {
@@ -50,6 +53,7 @@ impl Default for Timing {
             file_list: Duration::from_secs(20),
             first_bytes: Duration::from_secs(30),
             budget: Duration::from_secs(180),
+            home: Duration::from_secs(3),
         }
     }
 }

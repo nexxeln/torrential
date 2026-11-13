@@ -103,3 +103,22 @@ export class VttParser {
     return parsed ? [parsed] : [];
   }
 }
+
+const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+
+/** A cue's lines as WebVTT cue text, styles as tags, for a text track the browser draws itself. */
+export function cueText(cue: Cue): string {
+  return cue.lines
+    .map((line) =>
+      line
+        .map((span) => {
+          let text = span.text.replace(/[&<>]/g, (char) => ESCAPES[char]!);
+          if (span.underline) text = `<u>${text}</u>`;
+          if (span.bold) text = `<b>${text}</b>`;
+          if (span.italic) text = `<i>${text}</i>`;
+          return text;
+        })
+        .join(""),
+    )
+    .join("\n");
+}
