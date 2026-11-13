@@ -592,3 +592,36 @@ fn a_release_that_exits_at_start_is_rolled_back_and_not_tried_again() {
     let jobs = install.run(&["status", "--json"]);
     assert_eq!((jobs.code, jobs.stderr.as_str()), (0, ""));
 }
+
+#[test]
+fn wait_keeps_following_a_download_across_the_restart_into_an_update() {
+    if target().is_none() {
+        return;
+    }
+    let (answer, gate) = mpsc::channel();
+    let built = Built::new();
+    let server = Server::gated("0.1.1", &built.release("0.1.1", Some("0.1.1")), None, Some(gate));
+    let mut install = Install::agent_with_engine(&server);
+    install.set("TORRENTIAL_TEST_FAKE_RATE", "0");
+    let jobs: serde_json::Value = serde_json::from_str(&install.run(&["status", "--json"]).stdout).unwrap();
+    let wikipedia = jobs["jobs"].as_array().unwrap().iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap();
+    let id = wikipedia["id"].as_str().unwrap()[..6].to_string();
+    let (pid, _) = install.engine();
+
+    let wait = install
+        .command(&install.exe(), &["wait", &id, "--timeout", "8s", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    answer.send(()).unwrap();
+    eventually("the engine restarted into 0.1.1", || install.running() == Some((pid, "0.1.1".into())));
+    let wait = wait.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8(wait.stdout).unwrap();
+    let result: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!((wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()), (Some(8), ""), "{stdout}");
+    assert_eq!(result["outcome"], "timeout");
+    assert!((8..=9).contains(&result["elapsed"].as_u64().unwrap()), "it kept its deadline: {result}");
+}

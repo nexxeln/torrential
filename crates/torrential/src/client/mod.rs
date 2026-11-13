@@ -107,10 +107,10 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
                 (None, Mode::Human) => None,
                 (None, _) => Some(wait::DEFAULT_TIMEOUT),
             };
-            let conn = engine()?;
+            let following = (engine()?, wait::Engine { paths: paths()?, env: env.clone() });
             match mode {
-                Mode::Human => wait::attach(conn, refs, args.until, timeout),
-                _ => wait::run(conn, refs, args.until, timeout, &wait::Printer { mode }),
+                Mode::Human => wait::attach(following, refs, args.until, timeout),
+                _ => wait::run(following, refs, args.until, timeout, &wait::Printer { mode }),
             }
         }
         Command::Pause(args) => {
@@ -242,7 +242,9 @@ fn follow(exit: u8, job: &Job, mode: Mode, env: &Env) -> Result<u8, Error> {
         return Ok(exit);
     }
     eprintln!("Press Ctrl-C to stop watching. The download continues in the background.");
-    wait::attach(connect::ensure(&Paths::from_process(env)?, env)?, vec![job.id.to_hex()], Until::Done, None)
+    let paths = Paths::from_process(env)?;
+    let following = (connect::ensure(&paths, env)?, wait::Engine { paths, env: env.clone() });
+    wait::attach(following, vec![job.id.to_hex()], Until::Done, None)
 }
 
 /// A torrent's files, fetching its metadata if needed, as `torrential files` lists them.

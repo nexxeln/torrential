@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -6,11 +7,13 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use torrential_core::protocol::{Event, Request};
 use torrential_core::{Error, ErrorCode, Job, JobStatus, TorrentId};
 
-use super::connect::Conn;
+use super::connect::{self, Conn};
 use crate::cli::Until;
+use crate::env::Env;
 use crate::output::theme::Token;
 use crate::output::views::{self, WaitEnd, Watched};
 use crate::output::{Body, Doc, Mode, json_document, json_line};
+use crate::paths::Paths;
 use crate::wire;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(100);
@@ -115,28 +118,33 @@ impl State {
 
 type Events = mpsc::Receiver<Result<Event, Error>>;
 
-fn events(conn: Conn, request: &Request) -> Result<(Vec<Job>, Events), Error> {
-    let mut conn = conn;
-    conn.send(request)?;
-    let mut stream = conn.into_stream();
-    let lost =
-        |e: std::io::Error| Error::new(ErrorCode::DaemonUnavailable, format!("lost the connection to the engine: {e}"));
-    let first: Option<serde_json::Value> = wire::read(&mut stream).map_err(lost)?;
-    let first = first.ok_or_else(|| lost(std::io::ErrorKind::UnexpectedEof.into()))?;
-    let jobs = match serde_json::from_value::<Event>(first.clone()) {
-        Ok(Event::Snapshot { jobs }) => jobs,
-        _ => match serde_json::from_value(first) {
-            Ok(torrential_core::protocol::Response::Error { error }) => return Err(error),
-            _ => return Err(Error::internal("the engine sent an unexpected first watch event")),
-        },
-    };
+/// Where to find the engine again when the connection to it ends.
+pub struct Engine {
+    pub paths: Paths,
+    pub env: Env,
+}
+
+/// Longer than the engine's heartbeat, so only a silent engine counts as gone.
+const SILENT_FOR: Duration = Duration::from_secs(40);
+/// How long an engine restarting into an update has to answer again.
+const BACK_WITHIN: Duration = Duration::from_secs(60);
+
+/// Follows `refs`, and follows them again when the engine restarts into an update.
+fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Events), Error> {
+    let (jobs, mut stream) = watch(conn, refs)?;
+    let ids: Vec<String> = jobs.iter().map(|job| job.id.to_hex()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         loop {
             let event = match wire::read::<Event>(&mut stream) {
                 Ok(Some(event)) => Ok(event),
-                Ok(None) => Err(Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting")),
-                Err(e) => Err(lost(e)),
+                Ok(None) | Err(_) => match back(&engine, &ids) {
+                    Ok((jobs, again)) => {
+                        stream = again;
+                        Ok(Event::Snapshot { jobs })
+                    }
+                    Err(error) => Err(error),
+                },
             };
             let end = event.is_err();
             if tx.send(event).is_err() || end {
@@ -147,15 +155,55 @@ fn events(conn: Conn, request: &Request) -> Result<(Vec<Job>, Events), Error> {
     Ok((jobs, rx))
 }
 
+/// Asks the engine to follow `refs` and reads the snapshot it answers with.
+fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Error> {
+    conn.send(&Request::Watch { refs })?;
+    let mut stream = conn.into_stream();
+    let lost =
+        |e: std::io::Error| Error::new(ErrorCode::DaemonUnavailable, format!("lost the connection to the engine: {e}"));
+    stream.set_read_timeout(Some(SILENT_FOR)).map_err(lost)?;
+    let first: Option<serde_json::Value> = wire::read(&mut stream).map_err(lost)?;
+    let first = first.ok_or_else(|| lost(std::io::ErrorKind::UnexpectedEof.into()))?;
+    match serde_json::from_value::<Event>(first.clone()) {
+        Ok(Event::Snapshot { jobs }) => Ok((jobs, stream)),
+        _ => match serde_json::from_value(first) {
+            Ok(torrential_core::protocol::Response::Error { error }) => Err(error),
+            _ => Err(Error::internal("the engine sent an unexpected first watch event")),
+        },
+    }
+}
+
+/// Follows the downloads `ids` again once the engine is back. An engine restarting into an update
+/// keeps its socket and answers again within seconds. One that stopped leaves no socket to find.
+fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, UnixStream), Error> {
+    let stopped = || Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting");
+    let deadline = Instant::now() + BACK_WITHIN;
+    loop {
+        match connect::existing(&engine.paths, &engine.env) {
+            Ok(Some(conn)) => match watch(conn, ids.to_vec()) {
+                Err(error) if error.code != ErrorCode::DaemonUnavailable => return Err(error),
+                Err(_) => {}
+                found => return found,
+            },
+            Ok(None) => return Err(stopped()),
+            Err(_) => {}
+        }
+        if Instant::now() > deadline {
+            return Err(stopped());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 pub fn run(
-    conn: Conn,
+    (conn, engine): (Conn, Engine),
     refs: Vec<String>,
     until: Until,
     timeout: Option<Duration>,
     printer: &Printer,
 ) -> Result<u8, Error> {
     let started = Instant::now();
-    let (jobs, rx) = events(conn, &Request::Watch { refs })?;
+    let (jobs, rx) = events(conn, refs, engine)?;
     let mut state = State::new(jobs);
     let mut out = std::io::stdout().lock();
     let print = |out: &mut std::io::StdoutLock, text: String| {
@@ -220,9 +268,14 @@ pub fn run(
     }
 }
 
-pub fn attach(conn: Conn, refs: Vec<String>, until: Until, timeout: Option<Duration>) -> Result<u8, Error> {
+pub fn attach(
+    (conn, engine): (Conn, Engine),
+    refs: Vec<String>,
+    until: Until,
+    timeout: Option<Duration>,
+) -> Result<u8, Error> {
     let started = Instant::now();
-    let (jobs, rx) = events(conn, &Request::Watch { refs })?;
+    let (jobs, rx) = events(conn, refs, engine)?;
     let mut state = State::new(jobs);
     let bars = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
     let _ = ctrlc::set_handler(|| {

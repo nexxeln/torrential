@@ -523,6 +523,29 @@ fn wait_times_out_with_exit_8_while_the_download_runs() {
 }
 
 #[test]
+fn wait_ends_soon_after_the_engine_is_stopped() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let wait = home
+        .process(&["wait", "9b5212", "--timeout", "60s"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let started = Instant::now();
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let wait = wait.wait_with_output().unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(10), "wait took {:?}", started.elapsed());
+    assert_eq!(
+        (wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()),
+        (Some(6), "error[daemon_unavailable]: the engine stopped while waiting\n")
+    );
+}
+
+#[test]
 fn search_get_and_wait_rechecks_a_completed_download() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "100GiB")]);
     let search = home.run(&["search", "arch", "linux"]);
