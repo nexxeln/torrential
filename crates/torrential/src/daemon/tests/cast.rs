@@ -21,7 +21,7 @@ use super::super::search_port::{self, FakeSource};
 use super::super::web::ffmpeg::Tools;
 use super::devices::listening;
 use super::titles::listed;
-use super::web::post;
+use super::web::{magnet_link, post};
 use super::{GIB, Harness, MIB, Outside, prefix, torrent, written};
 
 /// The machine's address on the home network, or `None` on one with no network to test over.
@@ -860,4 +860,40 @@ async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends()
     let (status, saved) = post(&h, "/api/watched", tab(1_230.0)).await;
     assert_eq!((status, &saved["kept"]), (200, &serde_json::json!(true)));
     assert_eq!(kept(&h), Some((1_230.0, Some(5_760.0))), "a tab that plays after the cast saves as before");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = Harness::with_outside(
+        search_port::Fake::new(Vec::new()),
+        Outside { tvs: Find::At(tv.ssdp), plays_max: 3 * GIB, ..Outside::default() },
+    );
+    h.swarm.set_rate(100 * GIB);
+    let older = torrent(87, "older", &[("older.mkv", 2 * GIB)]);
+    h.swarm.publish(older.clone());
+    cast(&h, by_hand(h.torrent_file(&older))).await.unwrap();
+    h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
+    control(&h, CastAction::Pause).await.unwrap();
+    tv.until("its fetches of the video", |screen| screen.fetches.len() == 3).await;
+    // When a play was watched is kept to the second.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let newer = torrent(88, "newer", &[("newer.mp4", 2 * GIB)]);
+    h.swarm.publish(newer.clone());
+    let (status, body) = post(&h, "/api/play", serde_json::json!({ "ref": magnet_link(&newer) })).await;
+    assert_eq!(status, 200, "{body}");
+    h.until("the newer play is done", |jobs| jobs.len() == 2 && jobs.iter().all(|job| job.status.name() == "done"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let names: Vec<String> = h.status().await.into_iter().filter_map(|job| job.name).collect();
+    assert_eq!(names, ["older", "newer"], "the TV paused on the older play, which stays");
+    let url = url::Url::parse(&tv.screen.lock().unwrap().uri).unwrap();
+    let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+    let (line, _) = fetch_one(&host, url.path(), "HEAD", None).await;
+    assert!(line.starts_with("HEAD whole -> 200 video/x-mkv"), "the TV can go on: {line}");
+
+    control(&h, CastAction::Stop).await.unwrap();
+    h.until("a play leaves once the cast lets go", |jobs| jobs.len() == 1).await;
 }

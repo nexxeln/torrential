@@ -22,7 +22,7 @@ use torrential_core::{
 };
 
 use super::devices::names::Names;
-use super::owner::{Finish, MetaTarget, now};
+use super::owner::{Command, Finish, MetaTarget, now};
 use super::server::{self, Ctx, METADATA_WAIT};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use super::web::{play, watch as web_watch};
@@ -498,13 +498,17 @@ impl Run {
 
     /// Sends the file to the TV and follows it until the cast ends.
     async fn play(&self, found: &Found, control: &mut mpsc::UnboundedReceiver<Control>) -> Result<(), Error> {
+        let ctx = &self.ctx;
+        // A TV asks for the file a range at a time and holds nothing open while it pauses, so the
+        // cast streams the file until it ends, which keeps its download in the plays folder.
+        let (id, index) = (found.id, found.file);
+        let _streaming = ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await?;
         if let Some(before) = self.before.clone() {
             tokio::select! {
                 () = ended(before) => {}
                 () = until_stopped(control) => return Ok(()),
             }
         }
-        let ctx = &self.ctx;
         let tv = &self.tv.tv;
         let host = facing(&tv.address)?;
         let video = ctx.devices.grant(found.id, found.file, &found.path)?;
