@@ -8,7 +8,7 @@ use torrential_core::{
 
 use super::admission::Cap;
 use super::book::{Home, Intent, JobRecord, Linked, Play};
-use super::owner::deleter::{Identity, PlayName, QuarantineName};
+use super::owner::deleter::{Identity, PlayName};
 use super::search_port::SavedLink;
 
 const MIGRATIONS: &[&str] = &[
@@ -100,13 +100,7 @@ CREATE TABLE plays_folder (
 ) STRICT;
 CREATE TABLE deletions (
     job TEXT NOT NULL,
-    play TEXT,
-    dir BLOB,
-    quarantine TEXT,
-    device INTEGER,
-    inode INTEGER,
-    CHECK ((play IS NULL) = (quarantine IS NOT NULL)),
-    CHECK (quarantine IS NULL OR (dir IS NOT NULL AND device IS NOT NULL AND inode IS NOT NULL))
+    play TEXT NOT NULL
 ) STRICT;
 "#,
 ];
@@ -124,21 +118,12 @@ pub const RESULTS_SECS: i64 = 7 * 86_400;
 pub const METAINFO_SECS: i64 = RESULTS_SECS;
 pub const METAINFO_BYTES: i64 = 64 << 20;
 
-/// A deletion on record that is not yet done.
+/// The deletion of a play's folder in the plays folder, on record until it is done.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Recorded {
     pub key: i64,
     pub job: TorrentId,
-    pub what: Journaled,
-}
-
-/// What a deletion on record deletes.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Journaled {
-    /// A play's folder in the plays folder.
-    Play(PlayName),
-    /// A folder made in `dir` to hold only files moved there to delete.
-    Quarantine { dir: PathBuf, name: QuarantineName, identity: Identity },
+    pub play: PlayName,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -503,63 +488,21 @@ impl Store {
         })
     }
 
-    /// Puts on record a folder made in `dir` to move `job`'s files into and delete. Answers the
-    /// deletion's key.
-    pub fn quarantined(
-        &mut self,
-        job: TorrentId,
-        dir: &Path,
-        name: &QuarantineName,
-        identity: Identity,
-    ) -> Result<i64, Error> {
-        self.write(|tx| {
-            tx.execute(
-                "INSERT INTO deletions (job, dir, quarantine, device, inode) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    job.to_hex(),
-                    dir.as_os_str().as_bytes(),
-                    name.as_str(),
-                    identity.device as i64,
-                    identity.inode as i64
-                ],
-            )?;
-            Ok(tx.last_insert_rowid())
-        })
-    }
-
     /// The deletions on record that are not done, oldest first.
     pub fn deletions(&self) -> Result<Vec<Recorded>, Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT rowid, job, play, dir, quarantine, device, inode FROM deletions ORDER BY rowid")
+            .prepare("SELECT rowid, job, play FROM deletions ORDER BY rowid")
             .map_err(|e| self.fail(e))?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<Vec<u8>>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, Option<i64>>(5)?,
-                    r.get::<_, Option<i64>>(6)?,
-                ))
-            })
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
             .map_err(|e| self.fail(e))?;
         let mut recorded = Vec::new();
         for row in rows {
-            let (key, job, play, dir, quarantine, device, inode) = row.map_err(|e| self.fail(e))?;
+            let (key, job, play) = row.map_err(|e| self.fail(e))?;
             let bad = || corrupt(&self.path, &format!("deletion {key} is unreadable"));
-            let what = match (play, dir, quarantine, device, inode) {
-                (Some(play), None, None, None, None) => Journaled::Play(PlayName::parse(&play).ok_or_else(bad)?),
-                (None, Some(dir), Some(name), Some(device), Some(inode)) => Journaled::Quarantine {
-                    dir: PathBuf::from(std::ffi::OsString::from_vec(dir)),
-                    name: QuarantineName::parse(&name).ok_or_else(bad)?,
-                    identity: Identity { device: device as u64, inode: inode as u64 },
-                },
-                _ => return Err(bad()),
-            };
-            recorded.push(Recorded { key, job: job.parse().map_err(|_| bad())?, what });
+            let play = PlayName::parse(&play).ok_or_else(bad)?;
+            recorded.push(Recorded { key, job: job.parse().map_err(|_| bad())?, play });
         }
         Ok(recorded)
     }
@@ -587,7 +530,7 @@ impl Store {
                 .optional()?;
             if before.is_some_and(|before| before != (identity.device as i64, identity.inode as i64)) {
                 tx.execute("DELETE FROM plays", [])?;
-                tx.execute("DELETE FROM deletions WHERE play IS NOT NULL", [])?;
+                tx.execute("DELETE FROM deletions", [])?;
             }
             tx.execute(
                 "INSERT OR REPLACE INTO plays_folder (one, device, inode) VALUES (1, ?1, ?2)",
@@ -1007,22 +950,11 @@ mod tests {
         let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
         let name = PlayName::parse("0101010101010101-0").unwrap();
         let key = store.remove(&tomb, Some(&name)).unwrap().unwrap();
-        let aside = QuarantineName::parse(".torrential-deleting-00000000000000ff").unwrap();
-        let identity = Identity { device: u64::MAX, inode: 7 };
-        let other = store.quarantined(record(2).id, Path::new("/dl/Set"), &aside, identity).unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
-        let quarantine = Journaled::Quarantine { dir: "/dl/Set".into(), name: aside, identity };
-        assert_eq!(
-            store.deletions().unwrap(),
-            [
-                Recorded { key, job: play.id, what: Journaled::Play(name) },
-                Recorded { key: other, job: record(2).id, what: quarantine }
-            ]
-        );
+        assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name }]);
         assert_eq!(store.jobs().unwrap().len(), 1);
         store.deleted(key).unwrap();
-        store.deleted(other).unwrap();
         assert_eq!(store.deletions().unwrap(), []);
     }
 

@@ -38,8 +38,8 @@ pub struct OwnerConfig {
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
     pub plays: Plays,
-    /// How long a play leaving the plays folder, and files moved aside, wait before they go: no
-    /// time, except in a test that does something in between.
+    /// How long a play leaving the plays folder waits before it goes: no time, except in a test
+    /// that does something in between.
     pub deletion_pause: Duration,
 }
 
@@ -325,7 +325,7 @@ impl Owner {
         config: OwnerConfig,
     ) -> Result<Self, Error> {
         // Opened first, for a plays folder other than the one used before changes what the plays are.
-        let deleter = Deleter::open(&config.plays.root, &mut store, config.deletion_pause)?;
+        let deleter = Deleter::open(&config.plays.root, &mut store)?;
         let mut jobs = BTreeMap::new();
         for stored in store.jobs()? {
             let metainfo = match &stored.metainfo {

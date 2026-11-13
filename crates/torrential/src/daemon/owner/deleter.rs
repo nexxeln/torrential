@@ -1,8 +1,8 @@
 //! The one place torrential deletes what a download wrote. A play's folder is deleted through
 //! the plays folder as the engine opened it when it started. The files of a download in a
-//! folder the person chose are first moved into a folder made for them beside the files, and
-//! that folder is what gets deleted. Nothing here deletes by a path, so a link, or a folder put
-//! in place of another, cannot send a deletion anywhere else.
+//! folder the person chose are deleted through the folders they are in, one folder at a time.
+//! Nothing here deletes by a path, so a link, or a folder put in place of another, cannot send
+//! a deletion anywhere else.
 
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
@@ -10,15 +10,13 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::log;
-use super::super::store::{Journaled, Store, Tombstone};
+use super::super::store::{Store, Tombstone};
 
 /// Which file or folder something is, whatever path reaches it. A folder moved away keeps its
 /// identity. A link, or another folder, put in its place has another.
@@ -52,33 +50,6 @@ impl PlayName {
             && (1..=10).contains(&n.len())
             && n.bytes().all(|b| b.is_ascii_digit());
         ok.then(|| Self(name.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-const QUARANTINE: &str = ".torrential-deleting-";
-
-/// The name of a folder made beside a download's files, to move them into before they are
-/// deleted. Always one part of a path.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct QuarantineName(String);
-
-impl QuarantineName {
-    pub fn parse(name: &str) -> Option<Self> {
-        let rest = name.strip_prefix(QUARANTINE)?;
-        let ok = rest.len() == 16 && rest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        ok.then(|| Self(name.to_string()))
-    }
-
-    fn fresh() -> Self {
-        static MADE: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-        let mixed =
-            nanos ^ (u64::from(std::process::id()) << 40) ^ MADE.fetch_add(1, Ordering::Relaxed).rotate_left(20);
-        Self(format!("{QUARANTINE}{mixed:016x}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -222,12 +193,9 @@ enum What {
     /// A play's folder, on record from the download's removal on. `None` when the download's
     /// folder is not one directly in the plays folder.
     Play { key: Option<i64>, name: Option<PlayName>, dir: PathBuf, bytes: u64 },
-    /// Files in a folder the person chose. Only in memory, so a crash before they are moved aside
-    /// leaves whatever is at their names then alone.
+    /// Files in a folder the person chose. Only in memory, so a stop before they go leaves
+    /// whatever is at their names then alone.
     Files { dir: PathBuf, files: Vec<PathBuf> },
-    /// A folder made in `dir` that holds only files moved there to delete, on record before the
-    /// first one moved in. `moved` are the paths they had.
-    Quarantine { key: i64, dir: PathBuf, name: QuarantineName, identity: Identity, moved: Vec<PathBuf>, after: Instant },
 }
 
 /// How a run of one deletion ended.
@@ -244,16 +212,13 @@ enum Outcome {
 pub struct Deleter {
     plays: Result<Root, String>,
     pending: Vec<Pending>,
-    /// How long files moved aside wait before they are deleted: no time, except in a test that
-    /// stops the engine in between.
-    pause: Duration,
 }
 
 impl Deleter {
     /// Opens the plays folder at `plays` and picks up the deletions a stop cut short. When the
     /// folder there is not the one the engine used before, the plays it had are left as they
     /// are, as downloads in a folder the person chose.
-    pub fn open(plays: &Path, store: &mut Store, pause: Duration) -> Result<Deleter, Error> {
+    pub fn open(plays: &Path, store: &mut Store) -> Result<Deleter, Error> {
         let root = Root::open(plays);
         match &root {
             Ok(root) => match store.plays_folder()? {
@@ -274,24 +239,12 @@ impl Deleter {
             .deletions()?
             .into_iter()
             .map(|recorded| {
-                let what = match recorded.what {
-                    Journaled::Play(name) => {
-                        let dir = plays.join(name.as_str());
-                        What::Play { key: Some(recorded.key), name: Some(name), dir, bytes: 0 }
-                    }
-                    Journaled::Quarantine { dir, name, identity } => What::Quarantine {
-                        key: recorded.key,
-                        dir,
-                        name,
-                        identity,
-                        moved: vec![],
-                        after: Instant::now(),
-                    },
-                };
+                let dir = plays.join(recorded.play.as_str());
+                let what = What::Play { key: Some(recorded.key), name: Some(recorded.play), dir, bytes: 0 };
                 Pending { job: recorded.job, what, ran: true, failed: None }
             })
             .collect();
-        Ok(Deleter { plays: root, pending, pause })
+        Ok(Deleter { plays: root, pending })
     }
 
     fn root(&self) -> Result<&Root, String> {
@@ -373,16 +326,13 @@ impl Deleter {
 
     /// Whether a deletion of a download not in `draining` is waiting to run.
     pub fn ready(&self, draining: &BTreeSet<TorrentId>) -> bool {
-        let now = Instant::now();
-        self.pending.iter().any(|pending| {
-            !draining.contains(&pending.job) && !matches!(pending.what, What::Quarantine { after, .. } if after > now)
-        })
+        self.pending.iter().any(|pending| !draining.contains(&pending.job))
     }
 
     /// The folder of a deletion still waiting for `job`.
     pub fn waiting_in(&self, job: TorrentId) -> Option<&Path> {
         self.pending.iter().find(|pending| pending.job == job && !pending.ran).map(|pending| match &pending.what {
-            What::Play { dir, .. } | What::Files { dir, .. } | What::Quarantine { dir, .. } => dir.as_path(),
+            What::Play { dir, .. } | What::Files { dir, .. } => dir.as_path(),
         })
     }
 
@@ -401,15 +351,12 @@ impl Deleter {
         store: &mut Store,
     ) -> Vec<(TorrentId, Report)> {
         let mut reports = Vec::new();
-        let now = Instant::now();
         for mut pending in std::mem::take(&mut self.pending) {
-            let later = matches!(pending.what, What::Quarantine { after, .. } if after > now);
-            if draining.contains(&pending.job) || later {
+            if draining.contains(&pending.job) {
                 self.pending.push(pending);
                 continue;
             }
-            let job = pending.job;
-            let (report, again) = match self.step(&mut pending.what, job, in_use, store) {
+            let (report, again) = match self.step(&mut pending.what, in_use) {
                 Outcome::Done(report) | Outcome::Refused(report) => (report, false),
                 Outcome::Again(report) => (report, true),
             };
@@ -423,7 +370,6 @@ impl Deleter {
             }
             let key = match &pending.what {
                 What::Play { key, .. } => *key,
-                What::Quarantine { key, .. } => Some(*key),
                 What::Files { .. } => None,
             };
             if again {
@@ -445,7 +391,7 @@ impl Deleter {
         reports
     }
 
-    fn step(&self, what: &mut What, job: TorrentId, in_use: Result<&InUse, &str>, store: &mut Store) -> Outcome {
+    fn step(&self, what: &mut What, in_use: Result<&InUse, &str>) -> Outcome {
         match what {
             What::Play { name: None, dir, .. } => {
                 let why = "it is not a folder directly in the plays folder".to_string();
@@ -488,7 +434,6 @@ impl Deleter {
             }
             What::Files { dir, files } => {
                 let mut report = Report::default();
-                let dir = dir.clone();
                 let in_use = match in_use {
                     Ok(in_use) => in_use,
                     Err(why) => {
@@ -497,7 +442,7 @@ impl Deleter {
                     }
                 };
                 // The download's folder itself may be a link, as ~/Downloads often is.
-                let folder = match rustix::fs::openat(CWD, &dir, folder_flags(), Mode::empty()) {
+                let folder = match rustix::fs::openat(CWD, dir.as_path(), folder_flags(), Mode::empty()) {
                     Ok(folder) => folder,
                     Err(Errno::NOENT) => return Outcome::Done(report),
                     Err(e) => {
@@ -506,9 +451,7 @@ impl Deleter {
                         return Outcome::Refused(report);
                     }
                 };
-                let mut aside: Option<(OwnedFd, i64, QuarantineName, Identity)> = None;
-                let mut moved = Vec::new();
-                for (n, file) in files.iter().enumerate() {
+                for file in files.iter() {
                     let path = dir.join(file);
                     let (parent, last) = match open_parent(&folder, file) {
                         Ok(Some(found)) => found,
@@ -534,122 +477,18 @@ impl Deleter {
                         }
                         Ok(_) => {}
                     }
-                    if aside.is_none() {
-                        match quarantine(&folder, job, &dir, store) {
-                            Ok(made) => aside = Some(made),
-                            Err(why) => {
-                                report.kept.push((path, why));
-                                continue;
-                            }
-                        }
-                    }
-                    let (into, ..) = aside.as_ref().expect("made above");
-                    match rustix::fs::renameat(&parent, last, into, n.to_string()) {
-                        Ok(()) => moved.push(path),
-                        // Another disk is mounted inside the folder. There is nowhere on it to move
-                        // the file to, so it is deleted where it is, without a record.
-                        Err(Errno::XDEV) => match rustix::fs::unlinkat(&parent, last, AtFlags::empty()) {
-                            Ok(()) => {
-                                log(&format!(
-                                    "deleted {} where it was, for it is on another disk than its folder",
-                                    path.display()
-                                ));
-                                report.deleted.push(path);
-                            }
-                            Err(e) => {
-                                report.kept.push((path, format!("it could not be deleted: {}", io::Error::from(e))))
-                            }
-                        },
-                        Err(e) => {
-                            report.kept.push((path, format!("it could not be moved aside: {}", io::Error::from(e))))
-                        }
+                    match rustix::fs::unlinkat(&parent, last, AtFlags::empty()) {
+                        Ok(()) => report.deleted.push(path),
+                        Err(e) => report.kept.push((path, format!("it could not be deleted: {}", io::Error::from(e)))),
                     }
                 }
                 for file in files.iter() {
                     prune(&folder, file);
                 }
-                let Some((_, key, name, identity)) = aside else { return Outcome::Done(report) };
-                *what = What::Quarantine { key, dir, name, identity, moved, after: Instant::now() + self.pause };
-                if !self.pause.is_zero() {
-                    return Outcome::Again(report);
-                }
-                match self.step(what, job, Ok(in_use), store) {
-                    Outcome::Done(rest) => {
-                        report.deleted.extend(rest.deleted);
-                        Outcome::Done(report)
-                    }
-                    Outcome::Again(rest) => {
-                        report.kept.extend(rest.kept);
-                        Outcome::Again(report)
-                    }
-                    Outcome::Refused(rest) => {
-                        report.kept.extend(rest.kept);
-                        Outcome::Refused(report)
-                    }
-                }
-            }
-            What::Quarantine { dir, name, identity, moved, .. } => {
-                let path = dir.join(name.as_str());
-                let kept = |why: String| Report { deleted: vec![], kept: vec![(path.clone(), why)] };
-                let folder = match rustix::fs::openat(CWD, &*dir, folder_flags(), Mode::empty()) {
-                    Ok(folder) => folder,
-                    Err(Errno::NOENT) => return Outcome::Done(Report::default()),
-                    Err(e) => {
-                        return Outcome::Again(kept(format!("its folder cannot be opened: {}", io::Error::from(e))));
-                    }
-                };
-                let aside = match open_folder(&folder, name.as_str()) {
-                    Ok(aside) => aside,
-                    Err(Errno::NOENT) => return Outcome::Done(Report { deleted: moved.clone(), kept: vec![] }),
-                    Err(Errno::LOOP | Errno::NOTDIR) => {
-                        return Outcome::Refused(kept("it is not the folder torrential made".into()));
-                    }
-                    Err(e) => return Outcome::Again(kept(format!("it cannot be opened: {}", io::Error::from(e)))),
-                };
-                if !rustix::fs::fstat(&aside).is_ok_and(|stat| Identity::of(&stat) == *identity) {
-                    return Outcome::Refused(kept("it is not the folder torrential made".into()));
-                }
-                let left = empty(&aside, &HashSet::new());
-                drop(aside);
-                if left.why.is_none() && rustix::fs::unlinkat(&folder, name.as_str(), AtFlags::REMOVEDIR).is_ok() {
-                    let deleted = if moved.is_empty() { vec![path] } else { moved.clone() };
-                    return Outcome::Done(Report { deleted, kept: vec![] });
-                }
-                let why = left.why.unwrap_or("it could not be deleted");
-                Outcome::Again(kept(format!("{why}, so torrential tries again")))
+                Outcome::Done(report)
             }
         }
     }
-}
-
-/// Makes a new folder in `folder` to move files into, and puts it on record before anything
-/// moves in.
-fn quarantine(
-    folder: &OwnedFd,
-    job: TorrentId,
-    dir: &Path,
-    store: &mut Store,
-) -> Result<(OwnedFd, i64, QuarantineName, Identity), String> {
-    let name = loop {
-        let name = QuarantineName::fresh();
-        match rustix::fs::mkdirat(folder, name.as_str(), Mode::from_raw_mode(0o700)) {
-            Ok(()) => break name,
-            Err(Errno::EXIST) => continue,
-            Err(e) => return Err(format!("there is no room to move it aside: {}", io::Error::from(e))),
-        }
-    };
-    let unmade = |why: String| {
-        let _ = rustix::fs::unlinkat(folder, name.as_str(), AtFlags::REMOVEDIR);
-        why
-    };
-    let aside = open_folder(folder, name.as_str()).map_err(|e| unmade(io::Error::from(e).to_string()))?;
-    let identity = rustix::fs::fstat(&aside)
-        .map(|stat| Identity::of(&stat))
-        .map_err(|e| unmade(io::Error::from(e).to_string()))?;
-    let key = store
-        .quarantined(job, dir, &name, identity)
-        .map_err(|error| unmade(format!("the deletion cannot be put on record: {}", error.message)))?;
-    Ok((aside, key, name, identity))
 }
 
 /// What deleting everything in a folder left.
@@ -748,11 +587,8 @@ fn prune(folder: &OwnedFd, inside: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::store::Recorded;
     use super::*;
     use std::os::unix::fs::symlink;
-
-    const NOW: Duration = Duration::ZERO;
 
     struct Place {
         _tmp: tempfile::TempDir,
@@ -789,24 +625,19 @@ mod tests {
     }
 
     #[test]
-    fn a_play_folder_name_and_a_quarantine_name_are_each_one_part_of_a_path() {
+    fn a_play_folder_name_is_always_one_part_of_a_path() {
         assert!(PlayName::parse("abababababababab-0").is_some());
         for name in
             ["abababababababab", "abababababababab-", "ABABABABABABABAB-0", "abab-0", "..", "a/b-0", "notes.txt"]
         {
             assert_eq!(PlayName::parse(name), None, "{name}");
         }
-        let fresh = QuarantineName::fresh();
-        assert_eq!(QuarantineName::parse(fresh.as_str()), Some(fresh.clone()));
-        for name in [".torrential-deleting-", ".torrential-deleting-../../x", "Set"] {
-            assert_eq!(QuarantineName::parse(name), None, "{name}");
-        }
     }
 
     #[test]
     fn a_play_folder_goes_and_a_link_inside_it_is_removed_without_touching_what_it_points_to() {
         let Place { root, store, .. } = &mut place();
-        let mut deleter = Deleter::open(&root.join("plays"), store, NOW).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), store).unwrap();
         let outside = root.join("outside");
         write(&outside.join("films/keep.mp4"), "keep");
         write(&outside.join("keep.mp4"), "keep");
@@ -835,7 +666,7 @@ mod tests {
         write(&root.join("disk/plays/0101010101010101-0/film.mp4"), "film");
         std::fs::create_dir(root.join("data")).unwrap();
         symlink(root.join("disk/plays"), root.join("data/plays")).unwrap();
-        let mut deleter = Deleter::open(&root.join("data/plays"), store, NOW).unwrap();
+        let mut deleter = Deleter::open(&root.join("data/plays"), store).unwrap();
         let why = format!(
             "torrential cannot use the plays folder {}: it is a link, and torrential deletes plays only in a folder of its own",
             root.join("data/plays").display()
@@ -848,54 +679,6 @@ mod tests {
             Report { deleted: vec![], kept: vec![(dir, "it is not a folder directly in the plays folder".into())] };
         assert_eq!(run(&mut deleter, store, &InUse::default()), [kept]);
         assert_eq!(std::fs::read_to_string(root.join("disk/plays/0101010101010101-0/film.mp4")).unwrap(), "film");
-    }
-
-    #[test]
-    fn files_moved_aside_before_a_crash_are_deleted_at_the_next_start_and_what_is_at_their_names_then_stays() {
-        let Place { root, store, .. } = &mut place();
-        let dir = root.join("Downloads");
-        write(&dir.join("Set/a.mkv"), "a");
-        write(&dir.join("Set/docs/b.txt"), "b");
-        let mut deleter = Deleter::open(&root.join("plays"), store, Duration::from_secs(3600)).unwrap();
-        let doom = Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv", "Set/docs/b.txt"]) };
-        deleter.remove(store, &tomb(1), Some(doom)).unwrap();
-        assert_eq!(run(&mut deleter, store, &InUse::default()), [Report::default()]);
-        let [Recorded { what: Journaled::Quarantine { name, .. }, .. }] = &store.deletions().unwrap()[..] else {
-            panic!("one folder of files moved aside is on record")
-        };
-        let aside = dir.join(name.as_str());
-        assert_eq!(std::fs::read_to_string(aside.join("0")).unwrap(), "a");
-        assert!(!dir.join("Set").exists(), "the folders the files leave empty go");
-        drop(deleter);
-
-        write(&dir.join("Set/a.mkv"), "the person's own film");
-        let mut deleter = Deleter::open(&root.join("plays"), store, NOW).unwrap();
-        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
-        assert!(!aside.exists());
-        assert_eq!(std::fs::read_to_string(dir.join("Set/a.mkv")).unwrap(), "the person's own film");
-        assert_eq!(store.deletions().unwrap(), []);
-    }
-
-    #[test]
-    fn a_folder_of_files_moved_aside_that_was_replaced_is_left_alone() {
-        let Place { root, store, .. } = &mut place();
-        let dir = root.join("Downloads");
-        write(&dir.join("a.mkv"), "a");
-        let mut deleter = Deleter::open(&root.join("plays"), store, Duration::from_secs(3600)).unwrap();
-        let doom = Doom::Files { dir: dir.clone(), files: files(&["a.mkv"]) };
-        deleter.remove(store, &tomb(1), Some(doom)).unwrap();
-        run(&mut deleter, store, &InUse::default());
-        let [Recorded { what: Journaled::Quarantine { name, .. }, .. }] = &store.deletions().unwrap()[..] else {
-            panic!("one folder of files moved aside is on record")
-        };
-        let aside = dir.join(name.as_str());
-        std::fs::rename(&aside, root.join("elsewhere")).unwrap();
-        write(&aside.join("mine.txt"), "mine");
-
-        let mut deleter = Deleter::open(&root.join("plays"), store, NOW).unwrap();
-        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
-        assert_eq!(std::fs::read_to_string(aside.join("mine.txt")).unwrap(), "mine");
-        assert_eq!(store.deletions().unwrap(), [], "it is not tried again");
     }
 
     #[test]
@@ -913,7 +696,7 @@ mod tests {
         symlink(outside.join("extras"), dir.join("Set/extras")).unwrap();
         let mut in_use = InUse::default();
         in_use.add(&root.join("Other"), &[dir.join("Set/shared.nfo")]).unwrap();
-        let mut deleter = Deleter::open(&root.join("plays"), store, NOW).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), store).unwrap();
         let all = [
             "Set/a.mkv",
             "Set/docs/b.txt",
@@ -943,8 +726,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(outside.join("extras/d.txt")).unwrap(), "keep");
         assert_eq!(std::fs::read_to_string(dir.join("mine.txt")).unwrap(), "mine");
         assert_eq!(std::fs::read_to_string(dir.join("Set/shared.nfo")).unwrap(), "s");
-        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert!(left.iter().all(|name| !name.to_string_lossy().starts_with(QUARANTINE)), "{left:?}");
     }
 
     #[test]
