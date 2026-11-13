@@ -51,6 +51,10 @@ fn local(qualified: &str) -> &str {
     qualified.rsplit(':').next().unwrap_or(qualified)
 }
 
+/// An entity's `;` comes within this many bytes of its `&`, as in `&#x10FFFF;`. Looking no
+/// further keeps text full of `&` quick to read.
+const ENTITY_WITHIN: usize = 11;
+
 /// Text with its entities and CDATA sections read.
 pub fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -64,7 +68,8 @@ pub fn unescape(text: &str) -> String {
             rest = cdata.get(end + 3..).unwrap_or_default();
             continue;
         }
-        let entity = rest.find(';').filter(|&end| end <= 10).and_then(|end| Some((char_of(&rest[1..end])?, end)));
+        let end = rest.bytes().take(ENTITY_WITHIN).position(|b| b == b';');
+        let entity = end.and_then(|end| Some((char_of(&rest[1..end])?, end)));
         match entity {
             Some((c, end)) => {
                 out.push(c);
@@ -138,5 +143,13 @@ mod tests {
         let didl = r#"<DIDL-Lite><item id="0">"Night" & Day's</item></DIDL-Lite>"#;
         assert_eq!(unescape(&escape(didl)), didl);
         assert_eq!(escape("a<b & \"c\""), "a&lt;b &amp; &quot;c&quot;");
+    }
+
+    #[test]
+    fn text_full_of_ampersands_reads_in_time_with_its_length() {
+        let text = "&".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        assert_eq!(unescape(&text), text);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "took {:?}", started.elapsed());
     }
 }
