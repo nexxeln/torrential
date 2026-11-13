@@ -322,7 +322,11 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         running.http.abort();
         signals.abort();
         updates.abort();
-        let _ = std::fs::remove_file(&socket);
+        // An engine that stops for a newer version leaves its socket, so a client following it
+        // finds one that refuses for a moment instead of none, and waits for the next engine.
+        if ended == Ended::Stopped {
+            let _ = std::fs::remove_file(&socket);
+        }
         Ok::<_, Error>((running.engine, ended))
     })?;
     drop(runtime);

@@ -124,12 +124,10 @@ pub struct Engine {
     pub env: Env,
 }
 
-/// Longer than the engine's heartbeat, so only a silent engine counts as gone.
-const SILENT_FOR: Duration = Duration::from_secs(40);
-/// How long an engine restarting into an update has to answer again.
-const BACK_WITHIN: Duration = Duration::from_secs(60);
+/// How long an engine that refuses connections, as one does while it restarts, has to answer again.
+const BACK_WITHIN: Duration = Duration::from_secs(30);
 
-/// Follows `refs`, and follows them again when the engine restarts into an update.
+/// Follows `refs`, and follows them again when the engine restarts.
 fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Events), Error> {
     let (jobs, mut stream) = watch(conn, refs)?;
     let ids: Vec<String> = jobs.iter().map(|job| job.id.to_hex()).collect();
@@ -161,7 +159,6 @@ fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Er
     let mut stream = conn.into_stream();
     let lost =
         |e: std::io::Error| Error::new(ErrorCode::DaemonUnavailable, format!("lost the connection to the engine: {e}"));
-    stream.set_read_timeout(Some(SILENT_FOR)).map_err(lost)?;
     let first: Option<serde_json::Value> = wire::read(&mut stream).map_err(lost)?;
     let first = first.ok_or_else(|| lost(std::io::ErrorKind::UnexpectedEof.into()))?;
     match serde_json::from_value::<Event>(first.clone()) {
@@ -173,20 +170,20 @@ fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Er
     }
 }
 
-/// Follows the downloads `ids` again once the engine is back. An engine restarting into an update
-/// keeps its socket and answers again within seconds. One that stopped leaves no socket to find.
+/// Follows the downloads `ids` again once the engine answers. An engine that is restarting leaves
+/// its socket and refuses connections for a few seconds, so `back` tries again for a short while.
+/// One that was stopped removes its socket, which ends the wait at once.
 fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, UnixStream), Error> {
     let stopped = || Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting");
     let deadline = Instant::now() + BACK_WITHIN;
     loop {
         match connect::existing(&engine.paths, &engine.env) {
             Ok(Some(conn)) => match watch(conn, ids.to_vec()) {
-                Err(error) if error.code != ErrorCode::DaemonUnavailable => return Err(error),
-                Err(_) => {}
-                found => return found,
+                Err(error) if error.code == ErrorCode::DaemonUnavailable => {}
+                followed => return followed,
             },
-            Ok(None) => return Err(stopped()),
-            Err(_) => {}
+            Ok(None) if !engine.paths.socket().exists() => return Err(stopped()),
+            _ => {}
         }
         if Instant::now() > deadline {
             return Err(stopped());

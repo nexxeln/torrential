@@ -555,6 +555,31 @@ fn wait_ends_soon_after_the_engine_is_stopped() {
 }
 
 #[test]
+fn wait_follows_a_download_again_when_the_engine_comes_back() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    let wait = home
+        .process(&["wait", "9b5212", "--timeout", "8s", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(home.run(&["status"]).code, 0);
+    let wait = wait.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8(wait.stdout).unwrap();
+    let last: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!((wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()), (Some(8), ""), "{stdout}");
+    assert_eq!(last["outcome"], "timeout");
+}
+
+#[test]
 fn search_get_and_wait_rechecks_a_completed_download() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "100GiB")]);
     let search = home.run(&["search", "arch", "linux"]);
