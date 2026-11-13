@@ -20,6 +20,9 @@ use super::magnet::{self, Magnet};
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use streams::{Lease, Streams};
+
+mod streams;
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -170,6 +173,7 @@ pub enum Command {
     Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
     StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
+    Stream { id: TorrentId, index: u32, reply: Reply<(StreamFile, Lease)> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
     Disconnected { keep_until: Option<Instant> },
@@ -274,6 +278,8 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
+    /// The downloads someone streams now, which the other downloads make room for.
+    streams: Streams,
     /// The downloads title plays are testing or have yet to put back. Only in memory: after a
     /// restart no play is running, so nothing is under test and every download stays as it is.
     under_test: BTreeMap<TorrentId, UnderTest>,
@@ -330,6 +336,7 @@ impl Owner {
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
+            streams: Streams::default(),
             under_test: BTreeMap::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
@@ -425,6 +432,10 @@ impl Owner {
             }
             Command::StreamFile { id, index, reply } => {
                 let _ = reply.send(self.stream_file(id, index));
+            }
+            Command::Stream { id, index, reply } => {
+                let file = self.stream_file(id, index);
+                let _ = reply.send(file.map(|file| (file, self.lease(id))));
             }
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Connected => self.connections += 1,
@@ -1702,6 +1713,7 @@ impl Owner {
         self.finish_stop_if_done();
         self.check_idle(now);
         self.save_progress(now);
+        self.prioritize(now);
     }
 
     fn save_progress(&mut self, now: Instant) {
