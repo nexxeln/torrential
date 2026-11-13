@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::watch;
 use torrential_core::TorrentId;
 
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
@@ -95,10 +96,10 @@ impl Peer {
     }
 }
 
-/// Serves connections, and moves the listening socket whenever the devices change where the engine
-/// should listen. Connections already open stay open.
-pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener) {
-    let mut reach = ctx.devices.reach();
+/// Serves connections, and moves the listening socket whenever `reach` changes where the engine
+/// should listen. `reach` was read when `listener` was bound, so a change since then counts.
+/// Connections already open stay open.
+pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut reach: watch::Receiver<Reach>) {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -127,10 +128,20 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener) {
                     return;
                 }
                 let to = *reach.borrow_and_update();
-                drop(listener);
-                listener = listen(to, ctx.http_port).await;
+                if reach_of(&listener) != to {
+                    drop(listener);
+                    listener = listen(to, ctx.http_port).await;
+                }
             }
         }
+    }
+}
+
+/// Where `listener` takes connections from, read from the socket itself.
+fn reach_of(listener: &tokio::net::TcpListener) -> Reach {
+    match listener.local_addr() {
+        Ok(address) if address.ip().is_unspecified() => Reach::Network,
+        _ => Reach::Loopback,
     }
 }
 

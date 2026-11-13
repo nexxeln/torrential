@@ -11,6 +11,7 @@ use torrential_core::protocol::{Request, Response};
 use torrential_core::{DeviceList, ErrorCode};
 
 use super::super::devices::names::Names;
+use super::super::http;
 use super::{GIB, Harness, MIB, torrent, written};
 
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
@@ -330,6 +331,20 @@ async fn a_cast_grant_serves_its_one_file_to_a_tv_until_it_is_dropped() {
     let id = phone.pair(&offer.code).await.json()["device"]["id"].as_str().unwrap().to_string();
     devices(&h, Request::RemoveDevice { id }).await;
     listening(&h, ip, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_code_opened_while_the_engine_starts_listening_still_opens_it_to_the_network() {
+    let Some(ip) = lan() else { return };
+    let mut h = Harness::new();
+    h.running.http.abort();
+    let _ = (&mut h.running.http).await;
+    let ctx = h.running.ctx.clone();
+    let reach = ctx.devices.reach();
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, ctx.http_port)).await.unwrap();
+    devices(&h, Request::AddDevice).await;
+    tokio::spawn(http::accept(ctx, listener, reach));
+    listening(&h, ip, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

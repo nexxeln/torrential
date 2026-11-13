@@ -165,8 +165,9 @@ pub fn start(
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
     let devices = Arc::new(devices::Devices::open(store.path())?);
-    let reach = *devices.reach().borrow();
-    let players = http::bind(http_port, reach)
+    // Taken before the bind, so a change while the engine starts reaches the accept loop.
+    let mut reach = devices.reach();
+    let players = http::bind(http_port, *reach.borrow_and_update())
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
@@ -193,7 +194,7 @@ pub fn start(
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         devices,
     });
-    let http = runtime.spawn(http::accept(ctx.clone(), players));
+    let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
