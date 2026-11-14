@@ -27,12 +27,11 @@ use crate::wire;
 pub fn run(env: &Env) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
     let downloads = Config::load(&paths, env).map_or_else(|_| paths.downloads.clone(), |c| c.downloads_dir(&paths));
-    let exe = update::executable();
     let backend = EngineBackend { paths, downloads, env: env.clone() };
     match torrential_tui::run(backend).map_err(|e| Error::internal(format!("the terminal UI stopped: {e}")))? {
         Exit::Quit => Ok(0),
         Exit::Restart => {
-            let exe = exe?;
+            let exe = update::executable()?;
             let error = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).exec();
             Err(Error::internal(format!("cannot start the new torrential at {}: {error}", exe.display())))
         }

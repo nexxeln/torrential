@@ -26,8 +26,8 @@ const MOST_TRIED: usize = 6;
 /// Sources after the one under test whose file lists are asked for early, so dead swarms in a row
 /// cost one wait.
 const LOOK_AHEAD: usize = 2;
-/// How long the owner may take to answer with a file list it already has. A source whose file
-/// list was asked for early waits at least this long, however long ago that was.
+/// How long a source whose file list was asked for early still waits for it, however long ago
+/// that was.
 const ANSWER_WITHIN: Duration = Duration::from_millis(100);
 /// How often a trial looks for the first bytes of its video.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
@@ -352,10 +352,10 @@ impl Trial<'_> {
         let timing = ctx.titles.timing;
         report(AttemptEvent::Check { check: Check::FileList });
         let deadline = end.min(asked + timing.file_list).max(Instant::now() + ANSWER_WITHIN);
-        let (source, metainfo) = match tokio::time::timeout_at(deadline.into(), files(ctx, release, deadline)).await {
-            Ok(Ok(found)) => found,
-            Ok(Err(error)) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),
-            _ => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
+        let (source, metainfo) = match files(ctx, release, deadline).await {
+            Ok(found) => found,
+            Err(error) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),
+            Err(_) => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
         };
         // A release found by its .torrent link names no torrent until the file is read.
         if let Some(stalled) = ask.replace
@@ -433,7 +433,9 @@ impl Drop for Trial<'_> {
 }
 
 /// The source of `release` and its file list, from a download on this machine, from the
-/// release's .torrent file, or from peers.
+/// release's .torrent file, or from peers, by `deadline`. The owner judges the deadline for a file
+/// list from peers, so one that arrived in time counts however long a slow disk keeps the owner
+/// from answering.
 async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Source, Arc<Metainfo>), Error> {
     if let ReleaseId::Torrent(id) = release.id
         && ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await.is_ok()
@@ -441,7 +443,10 @@ async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Sourc
         let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
         return Ok((Source::Download(id), info.metainfo));
     }
-    match server::release_source(ctx, release.clone(), None).await? {
+    let source = tokio::time::timeout_at(deadline.into(), server::release_source(ctx, release.clone(), None))
+        .await
+        .map_err(|_| Error::new(ErrorCode::MetadataTimeout, "the .torrent file did not arrive in time"))??;
+    match source {
         Source::Magnet(magnet) => {
             let info = server::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
             let source = match info.download {

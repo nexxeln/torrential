@@ -514,7 +514,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--all",
-          "help": "Resume every paused, interrupted, or failed download",
+          "help": "Resume every paused or failed download",
           "takes_value": false,
           "repeatable": false
         }

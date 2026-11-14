@@ -434,7 +434,7 @@ fn fleet() -> Vec<Job> {
         job(
             "c32cdd",
             Some("stackexchange"),
-            JobStatus::Interrupted,
+            JobStatus::Checking,
             Progress { size: Some(99_535_000_000), verified: 79_130_000_000, ..Progress::default() },
         ),
         job(
@@ -479,18 +479,18 @@ fn status_lists_every_state() {
 }
 
 #[test]
-fn status_offers_resume_for_interrupted_and_failed_downloads() {
+fn status_offers_resume_for_failed_downloads() {
     let next = |jobs: &[Job]| {
         let doc = super::jobs(jobs);
         (doc.summary[1..].to_vec(), doc.next)
     };
     let fleet = fleet();
     let (summary, wait) = next(&fleet);
-    assert_eq!(wait.as_deref(), Some("torrential wait 9b5212 d40a19 51e0c7"));
-    assert_eq!(summary.last().unwrap(), "to retry interrupted and failed downloads: torrential resume c32cdd e3a1f0");
+    assert_eq!(wait.as_deref(), Some("torrential wait 9b5212 c32cdd d40a19 51e0c7"));
+    assert_eq!(summary.last().unwrap(), "to retry failed downloads: torrential resume e3a1f0");
 
     let stopped: Vec<Job> = fleet.iter().filter(|j| j.status.is_stopped()).cloned().collect();
-    assert_eq!(next(&stopped).1.as_deref(), Some("torrential resume c32cdd e3a1f0"));
+    assert_eq!(next(&stopped).1.as_deref(), Some("torrential resume e3a1f0"));
 
     let paused: Vec<Job> = fleet.iter().filter(|j| j.status == JobStatus::Paused).cloned().collect();
     assert_eq!(next(&paused), (Vec::new(), Some("torrential resume a282c6".to_string())));
@@ -637,7 +637,7 @@ fn wait_until_done_timeout_error_and_stop() {
             vec![(0, arch(JobStatus::Metadata, Progress::default())), (3, arch(failed, Progress::default()))],
             3,
         ),
-        ("stopped", WaitEnd::Stopped { id: "9b5212".into() }, vec![(0, arch(JobStatus::Interrupted, later))], 0),
+        ("stopped", WaitEnd::Stopped { id: "9b5212".into() }, vec![(0, arch(JobStatus::Paused, later))], 0),
         (
             "metadata",
             WaitEnd::Metadata,

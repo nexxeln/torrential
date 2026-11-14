@@ -317,7 +317,7 @@ pub struct ResumeArgs {
     /// Download IDs from torrential status
     #[arg(value_name = "ID", required_unless_present = "all", add = ArgValueCandidates::new(complete_download_ids))]
     pub references: Vec<String>,
-    /// Resume every paused, interrupted, or failed download
+    /// Resume every paused or failed download
     #[arg(long, conflicts_with = "references")]
     pub all: bool,
 }
@@ -418,7 +418,8 @@ pub enum DaemonCommand {
     /// Run the engine in the foreground
     #[command(hide = true)]
     Run {
-        /// Started by launchd or systemd: resume downloads at startup and never exit when idle
+        /// Started by launchd or systemd, which start the engine again when it exits to switch to an
+        /// installed update
         #[arg(long)]
         service: bool,
     },

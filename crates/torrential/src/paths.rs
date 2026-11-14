@@ -102,6 +102,16 @@ impl Paths {
         self.state.join("engine.error")
     }
 
+    /// Holds the port the engine last served the web app on.
+    pub fn http_port(&self) -> PathBuf {
+        self.state.join("http-port")
+    }
+
+    /// Left by an engine that exits for the login service to start the next one.
+    pub fn switching(&self) -> PathBuf {
+        self.state.join("engine.switching")
+    }
+
     /// Makes the state folder, if it is not there, so that only this user can change it.
     pub fn make_state(&self) -> std::io::Result<()> {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.state)

@@ -12,9 +12,9 @@ use super::engine_port::{
     AddTorrent, EngineEvent, EnginePort, Fake, FakeTorrentFile, MetaFile, Metainfo, ParseTorrent, Swarm, disagreement,
     parse_fake,
 };
-use super::owner::OwnerConfig;
 use super::owner::plays::{IDLE_AFTER, Plays};
 use super::owner::trash::Trash;
+use super::owner::{Command, Ended, MetaTarget, OwnerConfig};
 use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -97,7 +97,6 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
         probe_dir: dir.join("probes"),
         max_active: super::MAX_ACTIVE,
         idle_timeout: None,
-        resume_on_start: false,
         save_resume_every: Duration::from_millis(100),
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
@@ -200,7 +199,7 @@ impl Harness {
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, store, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), 0).unwrap()
+        start(&handle, store, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), &[0]).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -491,7 +490,7 @@ async fn every_command_answers_usage_for_a_title() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_crash_after_the_intent_commit_leaves_one_interrupted_download() {
+async fn a_download_running_at_a_crash_carries_on_when_the_engine_starts_again() {
     let h = Harness::new();
     let film = torrent(1, "film", &[("film.mkv", GIB)]);
     let reply = h.get(magnet(&film), &[]).await.unwrap();
@@ -499,23 +498,22 @@ async fn a_crash_after_the_intent_commit_leaves_one_interrupted_download() {
     let h = h.crash_and_restart().await;
     let jobs = h.status().await;
     assert_eq!(jobs.len(), 1);
-    assert_eq!((jobs[0].id, jobs[0].status.name()), (film.info_hash.id(), "interrupted"));
+    assert_eq!((jobs[0].id, jobs[0].status.name()), (film.info_hash.id(), "metadata"));
     assert_eq!(
         h.changes(Request::Resume { refs: vec![prefix(&film)], all: false }).await.unwrap(),
-        [("010101".into(), "resumed".into())]
+        [("010101".into(), "already_running".into())]
     );
-    assert_eq!(h.states().await, ["metadata"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_get_brings_back_an_interrupted_download() {
+async fn crashes_in_a_row_bring_back_running_downloads_and_leave_paused_ones_paused() {
     let h = Harness::new();
-    let film = torrent(2, "film", &[("film.mkv", GIB)]);
+    let (film, show) = (torrent(2, "film", &[("film.mkv", GIB)]), torrent(3, "show", &[("show.mkv", GIB)]));
     h.get(magnet(&film), &[]).await.unwrap();
-    let h = h.crash_and_restart().await;
-    assert_eq!(h.states().await, ["interrupted"]);
-    assert_eq!(h.get(magnet(&film), &[]).await.unwrap().outcome, GetOutcome::Existing);
-    assert_eq!(h.states().await, ["metadata"]);
+    h.get(magnet(&show), &[]).await.unwrap();
+    h.changes(Request::Pause { refs: vec![prefix(&show)] }).await.unwrap();
+    let h = h.crash_and_restart().await.crash_and_restart().await;
+    assert_eq!(h.states().await, ["metadata", "paused"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1035,8 +1033,8 @@ async fn a_crash_keeps_the_progress_of_the_last_periodic_save() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let before = h.status().await[0].progress.verified;
     let h = h.crash_and_restart().await;
-    let jobs = h.status().await;
-    assert_eq!((jobs[0].status.name(), jobs[0].progress.verified), ("interrupted", before));
+    let jobs = h.until("back in the engine", |jobs| jobs[0].status.name() == "downloading").await;
+    assert_eq!(jobs[0].progress.verified, before);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1051,10 +1049,9 @@ async fn a_crash_keeps_the_piece_map_of_the_last_save_and_done_drops_it() {
     let map = h.status().await[0].progress.piece_map.expect("a running download has a piece map").to_string();
     assert_eq!(map[32..], "-".repeat(32), "b.bin is not selected");
     let h = h.crash_and_restart().await;
-    let jobs = h.status().await;
-    assert_eq!((jobs[0].status.name(), jobs[0].progress.piece_map.map(|m| m.to_string())), ("interrupted", Some(map)));
+    let jobs = h.until("back in the engine", |jobs| jobs[0].status.name() == "downloading").await;
+    assert_eq!(jobs[0].progress.piece_map.map(|m| m.to_string()), Some(map));
     h.swarm.set_rate(100 * GIB);
-    h.changes(Request::Resume { refs: vec![prefix(&set)], all: false }).await.unwrap();
     let jobs = h.until("done", |jobs| jobs[0].status.name() == "done").await;
     assert_eq!(jobs[0].progress.piece_map, None);
 }
@@ -1089,19 +1086,16 @@ fn assert_files_agree(job: &Job, reply: &FilesReply) {
 #[tokio::test(flavor = "multi_thread")]
 async fn each_unfinished_test_download_reports_file_bytes_that_match_its_progress() {
     let h = Harness::seeded();
+    let jobs =
+        h.until("wikipedia is in the engine", |jobs| jobs.iter().any(|j| j.status.name() == "downloading")).await;
     let mut checked = Vec::new();
-    for job in h.status().await.iter().filter(|j| !matches!(j.status, JobStatus::Done { .. })) {
+    for job in jobs.iter().filter(|j| !matches!(j.status, JobStatus::Done { .. })) {
         assert_files_agree(job, &h.files(&job.id.to_hex()[..6]).await);
         checked.push((job.name.clone().unwrap(), job.status.name()));
     }
     let expected =
-        [("stackexchange", "paused"), ("openwebtext-2019", "error"), ("wikipedia-en-2026-09-text", "interrupted")];
+        [("stackexchange", "paused"), ("openwebtext-2019", "error"), ("wikipedia-en-2026-09-text", "downloading")];
     assert_eq!(checked, expected.map(|(name, state)| (name.to_string(), state)));
-    h.changes(Request::Resume { refs: vec!["6f2c81".into()], all: false }).await.unwrap();
-    let jobs =
-        h.until("wikipedia is in the engine", |jobs| jobs.iter().any(|j| j.status.name() == "downloading")).await;
-    let running = jobs.iter().find(|j| j.status.name() == "downloading").unwrap();
-    assert_files_agree(running, &h.files("6f2c81").await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1174,6 +1168,36 @@ async fn a_repair_after_no_source_gives_its_sources_a_full_window_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn file_lists_peers_send_while_the_engine_saves_to_a_slow_disk_count_once_it_catches_up() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let outside = Outside { gate: Some(gate.clone()), ..Outside::default() };
+    let h = Harness::with_outside(search_port::Fake::new(fake_catalog()), outside);
+    let films = [0x91, 0x92, 0x93, 0x94].map(|n| torrent(n, &format!("film{n}"), &[("film.mkv", GIB)]));
+    for film in &films {
+        h.swarm.publish(film.clone());
+    }
+    gate.close();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let asked = films.clone().map(|film| {
+        let ctx = h.running.ctx.clone();
+        let target = MetaTarget::Magnet(super::magnet::from_hash(film.info_hash));
+        tokio::spawn(async move { ctx.owner.ask(|reply| Command::Metadata { target, deadline, reply }).await })
+    });
+    gate.until_held(4).await;
+    let disk = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    disk.execute_batch("BEGIN IMMEDIATE").unwrap();
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(disk);
+
+    let mut found = Vec::new();
+    for ask in asked {
+        found.push(ask.await.unwrap().map(|info| info.metainfo.name.clone()).map_err(|e| e.code));
+    }
+    assert_eq!(found, ["film145", "film146", "film147", "film148"].map(|name| Ok(name.to_string())));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_stop_whose_save_fails_leaves_the_engine_with_the_error_that_stopped_it() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
@@ -1194,6 +1218,66 @@ async fn a_stop_whose_save_fails_leaves_the_engine_with_the_error_that_stopped_i
     let JobStatus::Error { error } = &jobs[0].status else { panic!("{jobs:#?}") };
     assert_eq!((error.code, jobs[0].progress.verified), (ErrorCode::NoSource, GIB - 2 * GIB_PIECE));
     assert_eq!(h.swarm.refused_saves(id), 1, "it left the engine instead of saving again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_restarts_the_engine_only_once_every_download_is_saved() {
+    let mut h = Harness::new();
+    h.swarm.set_rate(GIB_PIECE);
+    let film = torrent(37, "film", &[("film.mkv", GIB)]);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("downloading", |jobs| jobs[0].status.name() == "downloading").await;
+    let db = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
+    )
+    .unwrap();
+
+    let refused = h.running.ctx.owner.ask(|reply| Command::Restart { reply }).await;
+    let carried_on = h.until("downloading again", |jobs| jobs[0].status.name() == "downloading").await;
+    db.execute_batch("DROP TRIGGER no_saves").unwrap();
+    let restarted = h.running.ctx.owner.ask(|reply| Command::Restart { reply }).await;
+    let ended = tokio::time::timeout(Duration::from_secs(5), &mut h.running.owner).await.unwrap().unwrap();
+
+    assert_eq!(
+        refused.map_err(|e| (e.code, e.message)),
+        Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into()))
+    );
+    assert_eq!(carried_on[0].id, film.info_hash.id());
+    assert_eq!((restarted.map_err(|e| e.message), ended), (Ok(()), Ended::Restart));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_stops_the_engine_only_once_a_finished_download_is_saved_too() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::ResumeData { .. }));
+    let (swarm, engine_gate) = (Swarm::new(0), gate.clone());
+    swarm.set_rate(100 * GIB);
+    let engine = move |_: &std::path::Path| -> Box<dyn EnginePort> {
+        Box::new(Gated { port: Fake::new(swarm), gate: engine_gate })
+    };
+    let h = Harness::with_engine(engine, parse_fake);
+    let film = torrent(38, "film", &[("film.mkv", GIB)]);
+    gate.close();
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("every piece is in", |jobs| jobs[0].progress.verified == GIB).await;
+    gate.until_held(1).await;
+    let db = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
+    )
+    .unwrap();
+
+    let ctx = h.running.ctx.clone();
+    let restart = tokio::spawn(async move { ctx.owner.ask(|reply| Command::Restart { reply }).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let waited = !restart.is_finished();
+    gate.open();
+    let refused = tokio::time::timeout(Duration::from_secs(5), restart).await.unwrap().unwrap();
+
+    assert_eq!(
+        (waited, refused.map_err(|e| (e.code, e.message))),
+        (true, Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into())))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1588,6 +1672,35 @@ async fn a_player_gets_a_range_once_the_engine_has_its_pieces() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_player_that_asks_while_an_update_installs_hears_to_try_again() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let notes = torrent(82, "notes", &[("notes.srt", 10_000)]);
+    written(&h.downloads().join("notes/notes.srt"), 10_000);
+    h.get(h.torrent_file(&notes), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let srt = format!("/{}/0/notes.srt", notes.info_hash.id().to_hex());
+    let closed = h.running.ctx.playing.close().await;
+
+    let mut player = Player::connect(&h).await;
+    player.send("GET", &srt, &["Host: 127.0.0.1:47919"]).await;
+    let refused = player.answer(false).await;
+    drop(closed);
+    player.send("GET", &srt, &["Host: 127.0.0.1:47919"]).await;
+    let (status, _, _) = player.answer(false).await;
+
+    assert_eq!(
+        refused,
+        (
+            503,
+            "content-length: 50\ncontent-type: text/plain; charset=utf-8\nretry-after: 5\n".into(),
+            b"torrential is updating, try again in a few seconds".to_vec()
+        )
+    );
+    assert_eq!(status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn one_player_connection_gets_whole_files_ranges_and_refusals() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
@@ -1683,6 +1796,29 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     let film = torrent(98, "film", &[("film.mkv", GIB)]);
     h.play(h.torrent_file(&film), &[0]).await.unwrap();
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
+}
+
+#[test]
+fn an_engine_that_exits_for_the_login_service_counts_as_switching_for_a_minute() {
+    let dir = tempfile::tempdir().unwrap();
+    let at = |name: &str| dir.path().join(name);
+    let paths = crate::paths::Paths {
+        config: at("config"),
+        state: at("state"),
+        cache: at("cache"),
+        data: at("data"),
+        runtime: at("run"),
+        downloads: at("downloads"),
+    };
+    std::fs::create_dir_all(&paths.state).unwrap();
+    let before = super::switching(&paths, 1_000);
+
+    super::leave_switching(&paths, 1_000);
+
+    assert_eq!(
+        (before, super::switching(&paths, 1_000), super::switching(&paths, 1_059), super::switching(&paths, 1_060)),
+        (false, true, true, false)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

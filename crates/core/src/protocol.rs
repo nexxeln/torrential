@@ -71,8 +71,14 @@ pub enum Request {
     Watch {
         refs: Vec<String>,
     },
-    /// Asks the engine to save resume data and exit, for example before an upgrade.
-    Shutdown,
+    /// Asks the engine to save resume data and exit. `asked` says the person asked for it. Without
+    /// it, a newer client asks the engine to make way for its version, which the engine does only
+    /// when nothing plays. Clients before 0.5 leave it out, and also send it to an engine of any
+    /// other version, so an engine newer than the client stays up.
+    Shutdown {
+        #[serde(default)]
+        asked: bool,
+    },
     /// Films and series named like `words`.
     Titles {
         words: String,
@@ -490,6 +496,20 @@ mod tests {
         assert_eq!(serde_json::from_str::<Response>(&text).unwrap(), list);
         let remove = serde_json::to_value(Request::RemoveDevice { id: "3f9a0c2e".into() }).unwrap();
         assert_eq!(remove, serde_json::json!({"op": "remove_device", "id": "3f9a0c2e"}));
+    }
+
+    #[test]
+    fn a_stop_from_torrential_0_4_and_one_for_it_read_both_ways() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "op")]
+        enum Before05 {
+            Shutdown,
+        }
+        let asked = serde_json::to_string(&Request::Shutdown { asked: true }).unwrap();
+        assert_eq!(asked, r#"{"op":"shutdown","asked":true}"#);
+        assert_eq!(serde_json::from_str::<Before05>(&asked).unwrap(), Before05::Shutdown);
+        let old: Request = serde_json::from_str(r#"{"op":"shutdown"}"#).unwrap();
+        assert_eq!(old, Request::Shutdown { asked: false });
     }
 
     #[test]

@@ -299,7 +299,7 @@ pub enum Upgrade {
 pub fn group(status: &JobStatus) -> u8 {
     match status {
         JobStatus::Downloading | JobStatus::Checking | JobStatus::Metadata | JobStatus::Queued => 0,
-        JobStatus::Error { .. } | JobStatus::Interrupted => 1,
+        JobStatus::Error { .. } => 1,
         JobStatus::Paused => 2,
         JobStatus::Done { .. } => 3,
     }
@@ -311,7 +311,6 @@ pub fn label(status: &JobStatus) -> &'static str {
         JobStatus::Checking => "checking",
         JobStatus::Queued => "waiting",
         JobStatus::Error { .. } => "error",
-        JobStatus::Interrupted => "stopped",
         JobStatus::Paused => "paused",
         JobStatus::Done { .. } => "done",
     }

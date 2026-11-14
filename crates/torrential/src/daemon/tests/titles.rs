@@ -14,7 +14,7 @@ use torrential_core::{
 };
 
 use super::super::admission::GIB;
-use super::super::engine_port::{Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
+use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{self, FakeSource};
@@ -1089,6 +1089,40 @@ async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_source_whose_file_list_arrives_in_time_plays_while_a_slow_disk_holds_up_the_engine() {
+    let film = torrent(0xb7, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
+    let catalog = vec![listed(&film, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let h = Harness::with_outside(search, Outside { gate: Some(gate.clone()), ..Outside::default() });
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    gate.close();
+    let slow_disk = async {
+        gate.until_held(1).await;
+        let locked = h.lock_state();
+        gate.open();
+        tokio::time::sleep(TIMING.file_list + std::time::Duration::from_millis(200)).await;
+        drop(locked);
+    };
+
+    let (steps, ()) = tokio::join!(h.play_title("tt0063350", None, None), slow_disk);
+
+    assert_eq!(
+        steps,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 1",
+            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 b7b7b7 file 0 at null",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_play_starts_on_a_lawful_catalog_at_once_and_does_not_wait_for_a_slow_index() {
     let dead = torrent(0xc1, "Night.of.the.Living.Dead.1968.DVDRip.x264", &[("Night.1968.mp4", 700 * MIB)]);
     let good = torrent(0xc2, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
@@ -1250,8 +1284,10 @@ async fn replace_with_no_other_source_fails_and_leaves_the_stalled_download_alon
     h.swarm.set_rate(100 * MIB);
     let first = h.play_title("tt0063350", None, None).await;
     assert_eq!(first.last().unwrap(), "playing tt0063350 a4a4a4 file 0 at null");
+    let id = night[3].info_hash.id();
+    h.until("it is past its check", |jobs| jobs.iter().any(|j| j.id == id && j.status.name() == "downloading")).await;
     let before = h.job(&night[3]).await.unwrap();
-    let steps = h.play_title("tt0063350", None, Some(night[3].info_hash.id())).await;
+    let steps = h.play_title("tt0063350", None, Some(id)).await;
     assert_eq!(
         steps.last().unwrap(),
         concat!(

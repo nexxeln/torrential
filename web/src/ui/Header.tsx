@@ -1,6 +1,7 @@
 import { isActive, useJobs } from "../lib/jobs";
 import { useOnMac } from "../lib/mac";
 import { Link } from "../router";
+import { UpdateNotice } from "./UpdateNotice";
 
 /** The engine listens on loopback for the Mac it runs on. A phone or TV reaches it by the Mac's address on the home network. */
 const ON_MAC = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
@@ -19,7 +20,7 @@ export function Header({ current }: { current: "search" | "downloads" | "devices
       </Link>
       {/* A line about the engine. On a phone it takes a row of its own under the navigation. */}
       <div className="min-w-0 max-sm:order-last max-sm:basis-full sm:flex-1">
-        {link === "lost" && (
+        {link === "lost" ? (
           <p role="status" className="text-sm text-pretty text-error sm:truncate sm:px-3">
             {ON_MAC ? (
               <>
@@ -29,6 +30,8 @@ export function Header({ current }: { current: "search" | "downloads" | "devices
               "The Mac’s torrential cannot be reached. Check that the Mac is awake and on this network."
             )}
           </p>
+        ) : (
+          <UpdateNotice link={link} />
         )}
       </div>
       <nav aria-label="Main" className="-mr-2.5 flex shrink-0 items-center gap-1">

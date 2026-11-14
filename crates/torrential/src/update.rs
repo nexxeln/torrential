@@ -1,21 +1,25 @@
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{IsTerminal, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use torrential_core::protocol::{Request, Response, WIRE_VERSION};
 use torrential_core::{Error, ErrorCode};
 
-use crate::daemon::owner::now;
+use crate::daemon::owner::{self, now};
+use crate::daemon::server::Ctx;
 use crate::env::Env;
 use crate::output::Mode;
 use crate::output::theme::{Token, paint};
 use crate::paths::Paths;
 use crate::skill::{Writes, sha256, write_atomic};
+use crate::wire;
 
 const RELEASES: &str = "https://github.com/nexxeln/torrential/releases";
 const ISSUES: &str = "https://github.com/nexxeln/torrential/issues";
@@ -23,16 +27,21 @@ const DAY: i64 = 24 * 60 * 60;
 const HOUR: i64 = 60 * 60;
 const CHECK_WITHIN: Duration = Duration::from_secs(10);
 const MAX_ASSET: usize = 256 << 20;
+/// How long a switch to an installed update waits after the engine could not save every download.
+const SWITCH_RETRY: Duration = Duration::from_secs(60);
 const CHECKED: &str = "update.json";
 const UPDATED: &str = "updated.json";
+const CONFIRM_WITHIN: Duration = Duration::from_secs(10);
+/// How long a release has, in its trial run as an engine, to answer and then to stop.
+const TRIAL_WITHIN: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
     /// Show a notice when a newer version is available
-    #[default]
     Notify,
-    /// Install newer versions in the background
+    /// Install newer versions in the background, and switch to them when nothing is playing
+    #[default]
     Auto,
     /// Never check for newer versions
     Off,
@@ -103,6 +112,8 @@ pub struct Checked {
     pub checked_at: Option<i64>,
     pub failed_at: Option<i64>,
     pub install_failed_at: Option<i64>,
+    /// A release whose binary failed its checks here, which the engine never fetches again.
+    pub refused: Option<String>,
 }
 
 impl Checked {
@@ -120,8 +131,10 @@ impl Checked {
         answered.max(failed)
     }
 
+    /// The latest release, when it is newer than `current` and has not been refused here.
     pub fn newer(&self, current: &str) -> Option<Version> {
-        Version::parse(self.latest.as_deref()?).filter(|latest| latest.newer_than(current))
+        let refused = self.refused.as_deref().and_then(Version::parse);
+        Version::parse(self.latest.as_deref()?).filter(|latest| latest.newer_than(current) && refused != Some(*latest))
     }
 
     pub fn install_due(&self, current: &str, now: i64) -> bool {
@@ -249,6 +262,97 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
     if !latest.newer_than(&env.version()) {
         return Ok(Outcome::Latest(latest));
     }
+    let (exe, target) = installed()?;
+    let installed = match put_release(releases, env, latest, &exe, target, || true).await? {
+        Put::Installed | Put::NotWanted => latest,
+        Put::Current(installed) => installed,
+        Put::Refused(error) => return Err(error),
+    };
+    let _ = Command::new(&exe)
+        .args(["skill", "refresh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    Ok(Outcome::Updated(installed))
+}
+
+/// What `put_release` found or did.
+enum Put {
+    Installed,
+    /// This release or a newer one is installed already, by another torrential that runs from the
+    /// same executable, such as the engine of another home.
+    Current(Version),
+    /// `wanted` said no before the download or before the binary went in.
+    NotWanted,
+    /// The release's binary does not run here, says it is another release, or fails as an engine.
+    Refused(Error),
+}
+
+/// Downloads release `version` for `target` and puts its binary in place of `exe`, once the new
+/// binary says it is the release and runs as an engine. It asks `wanted` right before the download
+/// and right before the binary goes in, and holds the lock on the folder of `exe` throughout, so
+/// torrentials that share the executable install one release at a time.
+async fn put_release(
+    releases: &Releases,
+    env: &Env,
+    version: Version,
+    exe: &Path,
+    target: &str,
+    wanted: impl Fn() -> bool,
+) -> Result<Put, Error> {
+    let _lock = FolderLock::take(exe.parent().unwrap_or(Path::new("/"))).await?;
+    if let Some(installed) = version_of(exe).await.filter(|installed| *installed >= version) {
+        return Ok(Put::Current(installed));
+    }
+    let writes = Writes::new(env, "torrential update".into());
+    let partial = Partial::create(exe, &writes)?;
+    if !wanted() {
+        return Ok(Put::NotWanted);
+    }
+    partial.write(&fetch(releases, version, target).await?, exe, &writes)?;
+    let tried = async {
+        confirm(&partial.path, version).await?;
+        trial(&partial.path, version, env).await
+    };
+    if let Err(error) = tried.await {
+        return match error.code {
+            ErrorCode::VerificationFailed => Ok(Put::Refused(error)),
+            _ => Err(error),
+        };
+    }
+    if !wanted() {
+        return Ok(Put::NotWanted);
+    }
+    partial.place(exe, &writes)?;
+    Ok(Put::Installed)
+}
+
+/// An exclusive lock on a folder, held until it drops.
+struct FolderLock {
+    _folder: std::fs::File,
+}
+
+impl FolderLock {
+    async fn take(dir: &Path) -> Result<FolderLock, Error> {
+        use std::os::fd::AsRawFd;
+        let failed =
+            |e: std::io::Error| Error::new(ErrorCode::StorageError, format!("cannot lock {}: {e}", dir.display()));
+        let folder = std::fs::File::open(dir).map_err(failed)?;
+        while unsafe { libc::flock(folder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(failed(e));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(FolderLock { _folder: folder })
+    }
+}
+
+/// Where this torrential is installed and which release asset fits this machine, or why it cannot
+/// update itself.
+fn installed() -> Result<(PathBuf, &'static str), Error> {
     let Some(target) = target(std::env::consts::OS, std::env::consts::ARCH) else {
         return Err(Error::new(
             ErrorCode::NotFound,
@@ -264,26 +368,171 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
         )
         .with_hint("update it with Nix, for example nix profile upgrade torrential"));
     }
-    let writes = Writes::new(env, "torrential update".into());
-    let partial = Partial::create(&exe, &writes)?;
-    let asset = format!("torrential-{target}.tar.gz");
-    let tarball = releases.download(latest, &asset).await?;
-    let sums = releases.download(latest, &format!("{asset}.sha256")).await?;
-    verify(&asset, &tarball, &sums)?;
-    partial.replace(&exe, &unpack(&asset, &tarball)?, &writes)?;
-    let _ = Command::new(&exe)
-        .args(["skill", "refresh"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    Ok(Outcome::Updated(latest))
+    Ok((exe, target))
 }
 
+/// Downloads the binary of release `version` for `target` and checks it against its published checksum.
+async fn fetch(releases: &Releases, version: Version, target: &str) -> Result<Vec<u8>, Error> {
+    let asset = format!("torrential-{target}.tar.gz");
+    let tarball = releases.download(version, &asset).await?;
+    let sums = releases.download(version, &format!("{asset}.sha256")).await?;
+    verify(&asset, &tarball, &sums)?;
+    unpack(&asset, &tarball)
+}
+
+/// Runs `binary --version` and accepts it only when it says it is torrential `version`. A binary
+/// for another system, a damaged one, or one from another release fails here, before it replaces
+/// anything.
+async fn confirm(binary: &Path, version: Version) -> Result<(), Error> {
+    match says(binary).await {
+        Ok(said) if said == format!("torrential {version}") => Ok(()),
+        Ok(said) => Err(refused(version, format!("says it is {said}"))),
+        Err(why) => Err(refused(version, why)),
+    }
+}
+
+/// The torrential version `binary --version` says it is.
+async fn version_of(binary: &Path) -> Option<Version> {
+    Version::parse(says(binary).await.ok()?.strip_prefix("torrential ")?)
+}
+
+/// What `binary --version` prints, or why it prints nothing.
+async fn says(binary: &Path) -> Result<String, String> {
+    let mut child = Reaped(
+        Command::new(binary)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("does not run here ({e})"))?,
+    );
+    let status = child.exited(CONFIRM_WITHIN).await.ok_or("does not answer --version")?;
+    let mut said = String::new();
+    let _ = child.0.stdout.take().map(|mut out| out.read_to_string(&mut said));
+    match said.trim() {
+        said if status.success() && !said.is_empty() => Ok(said.to_string()),
+        _ => Err(format!("does not run here ({status})")),
+    }
+}
+
+/// A release's binary as it runs on trial, killed and reaped if this drops before it exits, as it
+/// does when the engine stops in the middle of an update.
+struct Reaped(Child);
+
+impl Reaped {
+    /// Waits up to `within` for the process to exit.
+    async fn exited(&mut self, within: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + within;
+        loop {
+            match self.0.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(20)).await,
+                _ => return None,
+            }
+        }
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts `binary` as an engine in a home and on a port of its own, and accepts it once that engine
+/// answers a status request and then stops cleanly. A release that answers `--version` but fails as
+/// an engine fails here, before it replaces anything.
+async fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> {
+    let home = Scratch(std::env::temp_dir().join(format!("torrential-trial.{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&home.0);
+    let unprepared =
+        |e: std::io::Error| Error::new(ErrorCode::StorageError, format!("cannot prepare {}: {e}", home.0.display()));
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home.0.join("config")).map_err(unprepared)?;
+    std::fs::write(home.0.join("config/config.yaml"), "updates: off\n").map_err(unprepared)?;
+    let paths =
+        Paths::resolve(&env.clone().with("TORRENTIAL_HOME", &home.0.display().to_string()), crate::paths::uid(), None)?;
+    let mut engine = Reaped(
+        Command::new(binary)
+            .args(["daemon", "run"])
+            .env("HOME", &home.0)
+            .env("TORRENTIAL_HOME", &home.0)
+            .env("TORRENTIAL_TEST_HTTP_PORT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| refused(version, format!("does not run here ({e})")))?,
+    );
+    serves(&mut engine, &paths, env).await.map_err(|why| refused(version, why))?;
+    match engine.exited(TRIAL_WITHIN).await {
+        Some(status) if status.success() => Ok(()),
+        Some(status) => Err(refused(version, format!("does not stop its engine cleanly ({status})"))),
+        None => Err(refused(version, format!("does not stop its engine within {}s", TRIAL_WITHIN.as_secs()))),
+    }
+}
+
+/// Waits until `engine`, in `paths`, answers a status request, then asks it to stop.
+async fn serves(engine: &mut Reaped, paths: &Paths, env: &Env) -> Result<(), String> {
+    let deadline = Instant::now() + TRIAL_WITHIN;
+    let mut socket = loop {
+        if let Ok(Some(status)) = engine.0.try_wait() {
+            return Err(format!("does not start an engine ({status})"));
+        }
+        if let Ok(socket) = tokio::net::UnixStream::connect(paths.socket()).await {
+            break socket;
+        }
+        if Instant::now() > deadline {
+            return Err(format!("does not start an engine within {}s", TRIAL_WITHIN.as_secs()));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let answered = async {
+        ask(&mut socket, &Request::Hello { client_version: env.version(), wire: WIRE_VERSION }).await?;
+        ask(&mut socket, &Request::Status { refs: Vec::new() }).await
+    };
+    match tokio::time::timeout(TRIAL_WITHIN, answered).await {
+        Ok(Ok(Some(Response::Jobs { .. }))) => {}
+        // A release with another protocol refuses this torrential's requests, which shows it runs.
+        Ok(Ok(Some(Response::Error { error }))) if error.code == ErrorCode::DaemonVersion => {}
+        _ => return Err("starts an engine that does not answer".into()),
+    }
+    let _ = tokio::time::timeout(TRIAL_WITHIN, ask(&mut socket, &Request::Shutdown { asked: true })).await;
+    Ok(())
+}
+
+/// Sends `request` to the engine on `socket` and reads its answer.
+async fn ask(socket: &mut tokio::net::UnixStream, request: &Request) -> std::io::Result<Option<Response>> {
+    wire::write_async(socket, request).await?;
+    wire::read_async(socket).await
+}
+
+/// A folder removed when this drops.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn refused(version: Version, why: String) -> Error {
+    Error::new(
+        ErrorCode::VerificationFailed,
+        format!("the binary of torrential {version} {why}, so the installed torrential is unchanged"),
+    )
+    .with_hint(format!("report it at {ISSUES}"))
+}
+
+static EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Where this torrential is installed, as it was when the process started. `main` reads it first,
+/// because on Linux, once an update replaces the file, the process's own path reads `<path> (deleted)`.
 pub fn executable() -> Result<PathBuf, Error> {
-    std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary: {e}")))
+    let found =
+        EXECUTABLE.get_or_init(|| std::env::current_exe().and_then(std::fs::canonicalize).map_err(|e| e.to_string()));
+    found.clone().map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary: {e}")))
 }
 
 fn verify(asset: &str, tarball: &[u8], sums: &[u8]) -> Result<(), Error> {
@@ -315,14 +564,13 @@ fn unpack(asset: &str, tarball: &[u8]) -> Result<Vec<u8>, Error> {
 
 struct Partial {
     path: PathBuf,
-    file: File,
 }
 
 impl Partial {
     fn create(exe: &Path, writes: &Writes) -> Result<Partial, Error> {
         let dir = exe.parent().unwrap_or(Path::new("/"));
         let path = dir.join(format!(".torrential.{}.update", std::process::id()));
-        let file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&path).map_err(|e| {
+        OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&path).map_err(|e| {
             let error = writes.error(dir, e);
             match error.code {
                 ErrorCode::StorageError => error.with_hint(format!(
@@ -333,16 +581,28 @@ impl Partial {
                 _ => error,
             }
         })?;
-        Ok(Partial { path, file })
+        Ok(Partial { path })
     }
 
-    fn replace(mut self, exe: &Path, binary: &[u8], writes: &Writes) -> Result<(), Error> {
-        self.file
-            .write_all(binary)
-            .and_then(|()| self.file.set_permissions(std::fs::Permissions::from_mode(0o755)))
-            .and_then(|()| self.file.sync_all())
-            .and_then(|()| std::fs::rename(&self.path, exe))
-            .map_err(|e| writes.error(exe, e))
+    /// Writes `binary`, which is to replace `at`.
+    fn write(&self, binary: &[u8], at: &Path, writes: &Writes) -> Result<(), Error> {
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .and_then(|mut file| {
+                file.write_all(binary)?;
+                file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+                file.sync_all()
+            })
+            .map_err(|e| writes.error(at, e))
+    }
+
+    /// Moves the binary to `at` and syncs the folder, so the move outlasts a power cut.
+    fn place(self, at: &Path, writes: &Writes) -> Result<(), Error> {
+        std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))?;
+        let dir = at.parent().unwrap_or(Path::new("/"));
+        std::fs::File::open(dir).and_then(|folder| folder.sync_all()).map_err(|e| writes.error(dir, e))
     }
 }
 
@@ -352,13 +612,84 @@ impl Drop for Partial {
     }
 }
 
-pub async fn watch(env: Env, paths: Paths) {
-    let Some(releases) = Releases::from_env(&env) else { return };
+/// What the web app says about versions.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum News {
+    /// This engine started after an update installed `to` in place of `from`.
+    Updated { from: String, to: String },
+    /// Release `latest` is installed, and the login service starts it once nothing is playing.
+    Waiting { latest: Version },
+    /// Release `latest` is installed, and starts the next time the engine starts.
+    Installed { latest: Version },
+    /// A newer release that `torrential update` installs.
+    Available { current: String, latest: Version },
+}
+
+impl News {
+    pub fn of(policy: Policy, checked: &Checked, current: &str, updated_from: Option<&str>) -> Option<News> {
+        if policy == Policy::Off {
+            return None;
+        }
+        match checked.newer(current) {
+            Some(latest) => Some(News::Available { current: current.to_string(), latest }),
+            None => updated_from.map(|from| News::Updated { from: from.to_string(), to: current.to_string() }),
+        }
+    }
+
+    pub fn line(&self) -> String {
+        match self {
+            Self::Updated { from, to } => Audience::Person.updated(from, to),
+            Self::Waiting { latest } => format!("torrential {latest} is installed and starts when nothing is playing."),
+            Self::Installed { latest } => {
+                format!("torrential {latest} is installed and starts the next time the engine starts.")
+            }
+            Self::Available { current, latest } => Audience::Person.out(current, *latest),
+        }
+    }
+}
+
+/// The news the update watcher keeps for the web app.
+#[derive(Clone, Default)]
+pub struct Board(Arc<Mutex<Option<News>>>);
+
+impl Board {
+    pub fn post(&self, news: Option<News>) {
+        *self.0.lock().expect("the board is never poisoned") = news;
+    }
+
+    pub fn line(&self) -> Option<String> {
+        self.0.lock().expect("the board is never poisoned").as_ref().map(News::line)
+    }
+}
+
+/// What the web app says the moment an engine starts, before the update watcher has looked at
+/// the network: that this engine is the release just installed, unless updates are off.
+pub fn opening(env: &Env, paths: &Paths) -> Option<News> {
+    if matches!(crate::config::updates(paths), Ok(Policy::Off) | Err(_)) {
+        return None;
+    }
     let current = env.version();
+    let updated = read_json::<Updated>(&paths.state.join(UPDATED)).filter(|u| u.to == current)?;
+    Some(News::Updated { from: updated.from, to: current })
+}
+
+/// Looks for newer releases, and under `updates: auto` installs one. An engine that the login
+/// service started, as `service` says, then stops once nothing is playing and every download is
+/// saved, for the service to start the installed release. Returns once the owner has stopped.
+pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
+    let (current, board) = (env.version(), &ctx.news);
+    let updated_from = read_json::<Updated>(&paths.state.join(UPDATED)).filter(|u| u.to == current).map(|u| u.from);
+    let Some(releases) = Releases::from_env(&env) else {
+        board.post(updated_from.map(|from| News::Updated { from, to: current }));
+        return std::future::pending().await;
+    };
     loop {
         let now = now();
         let wait = match crate::config::updates(&paths) {
-            Ok(Policy::Off) | Err(_) => HOUR,
+            Ok(Policy::Off) | Err(_) => {
+                board.post(None);
+                HOUR
+            }
             Ok(policy) => {
                 if Checked::read(&paths).next_check() <= now
                     && let Err(e) = check(&releases, &paths, now).await
@@ -366,14 +697,39 @@ pub async fn watch(env: Env, paths: Paths) {
                     crate::daemon::log(&format!("update check failed: {}", e.message));
                 }
                 let checked = Checked::read(&paths);
-                if policy == Policy::Auto && checked.install_due(&current, now) {
-                    match install(&releases, &paths, &env, now).await {
-                        Ok(Outcome::Updated(to)) => {
-                            crate::daemon::log(&format!("installed torrential {to}"));
-                            write_json(&paths.state.join(UPDATED), &Updated { from: current, to: to.to_string() });
-                            return;
+                if policy == Policy::Auto
+                    && checked.install_due(&current, now)
+                    && let Some(latest) = checked.newer(&current)
+                {
+                    let put = async {
+                        let (exe, target) = installed()?;
+                        let auto = || matches!(crate::config::updates(&paths), Ok(Policy::Auto));
+                        put_release(&releases, &env, latest, &exe, target, auto).await
+                    };
+                    match put.await {
+                        Ok(Put::Installed) => {
+                            crate::daemon::log(&format!("installed torrential {latest}"));
+                            write_json(
+                                &paths.state.join(UPDATED),
+                                &Updated { from: current.clone(), to: latest.to_string() },
+                            );
+                            return switch(&ctx, latest, service).await;
                         }
-                        Ok(Outcome::Latest(_)) => {}
+                        Ok(Put::Current(installed)) => {
+                            crate::daemon::log(&format!("torrential {installed} is already installed"));
+                            return switch(&ctx, installed, service).await;
+                        }
+                        Ok(Put::NotWanted) => {
+                            crate::daemon::log(&format!(
+                                "updates is no longer auto, so torrential {latest} is not installed"
+                            ));
+                        }
+                        Ok(Put::Refused(e)) => {
+                            crate::daemon::log(&format!("update failed: {}", e.message));
+                            let mut checked = Checked::read(&paths);
+                            checked.refused = Some(latest.to_string());
+                            checked.write(&paths);
+                        }
                         Err(e) => {
                             crate::daemon::log(&format!("update failed: {}", e.message));
                             let mut checked = Checked::read(&paths);
@@ -382,10 +738,37 @@ pub async fn watch(env: Env, paths: Paths) {
                         }
                     }
                 }
-                (Checked::read(&paths).next_check() - now).clamp(60, HOUR)
+                let checked = Checked::read(&paths);
+                board.post(News::of(policy, &checked, &current, updated_from.as_deref()));
+                (checked.next_check() - now).clamp(60, HOUR)
             }
         };
         tokio::time::sleep(Duration::from_secs(wait as u64)).await;
+    }
+}
+
+/// Stops the engine for the login service to start release `to` once nothing plays and every
+/// download is saved. An engine without a login service keeps running until it next starts.
+async fn switch(ctx: &Ctx, to: Version, service: bool) {
+    if !service {
+        crate::daemon::log(&format!("torrential {to} starts the next time the engine starts"));
+        ctx.news.post(Some(News::Installed { latest: to }));
+        return std::future::pending().await;
+    }
+    loop {
+        if ctx.playing.any() {
+            crate::daemon::log(&format!("torrential {to} starts when nothing is playing"));
+            ctx.news.post(Some(News::Waiting { latest: to }));
+        }
+        let closed = ctx.playing.close().await;
+        match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
+            Ok(()) => return closed.keep(),
+            Err(e) => {
+                crate::daemon::log(&format!("torrential {to} waits: {}", e.message));
+                drop(closed);
+                tokio::time::sleep(SWITCH_RETRY).await;
+            }
+        }
     }
 }
 
@@ -457,10 +840,12 @@ pub fn notice(paths: &Paths, env: &Env, audience: Audience, now: i64) -> Option<
 pub fn print_notice(mode: Mode, env: &Env) {
     let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
-    match (notice(&paths, env, audience, now()), audience) {
-        (Some(line), Audience::Person) => anstream::eprintln!("{}", paint(Token::Muted, &line)),
-        (Some(line), Audience::Agent) => eprintln!("{line}"),
-        (None, _) => {}
+    let lines = [crate::client::service::notice(&paths, audience), notice(&paths, env, audience, now())];
+    for line in lines.into_iter().flatten() {
+        match audience {
+            Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),
+            Audience::Agent => eprintln!("{line}"),
+        }
     }
 }
 
@@ -557,6 +942,62 @@ mod tests {
         assert!(!checked("0.1.0", None).install_due("0.1.0", t));
         assert!(!checked("0.1.1", Some(t - HOUR)).install_due("0.1.0", t));
         assert!(checked("0.1.1", Some(t - DAY)).install_due("0.1.0", t));
+    }
+
+    #[test]
+    fn a_refused_release_is_neither_installed_nor_announced_but_the_next_one_is() {
+        let t = 1_790_000_000;
+        let checked =
+            |latest: &str| Checked { latest: Some(latest.into()), refused: Some("0.1.1".into()), ..Checked::default() };
+        assert!(!checked("0.1.1").install_due("0.1.0", t));
+        assert_eq!(News::of(Policy::Notify, &checked("0.1.1"), "0.1.0", None), None);
+        assert!(checked("0.1.2").install_due("0.1.0", t));
+        assert_eq!(
+            News::of(Policy::Notify, &checked("0.1.2"), "0.1.0", None).map(|news| news.line()).as_deref(),
+            Some("torrential 0.1.2 is available (you have 0.1.0). Run torrential update to install it.")
+        );
+    }
+
+    #[test]
+    fn the_web_app_hears_of_a_newer_release_or_the_update_that_started_the_engine() {
+        let checked = |latest: &str| Checked { latest: Some(latest.into()), ..Checked::default() };
+        let line = |policy, latest: &str, from| News::of(policy, &checked(latest), "0.5.0", from).map(|n| n.line());
+        assert_eq!(
+            line(Policy::Notify, "0.5.1", None).as_deref(),
+            Some("torrential 0.5.1 is available (you have 0.5.0). Run torrential update to install it.")
+        );
+        assert_eq!(line(Policy::Auto, "0.5.0", Some("0.4.0")).as_deref(), Some("Updated torrential to 0.5.0."));
+        assert_eq!(line(Policy::Auto, "0.5.0", None), None);
+        assert_eq!(line(Policy::Off, "0.5.1", Some("0.4.0")), None);
+        assert_eq!(
+            News::Waiting { latest: version("0.5.1") }.line(),
+            "torrential 0.5.1 is installed and starts when nothing is playing."
+        );
+        assert_eq!(
+            News::Installed { latest: version("0.5.1") }.line(),
+            "torrential 0.5.1 is installed and starts the next time the engine starts."
+        );
+    }
+
+    #[test]
+    fn a_binary_counts_only_when_it_says_it_is_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let said = |path: &Path| runtime().unwrap().block_on(confirm(path, version("0.1.1"))).map_err(|e| e.message);
+
+        assert_eq!(said(&script("right", "#!/bin/sh\necho torrential 0.1.1\n")), Ok(()));
+        assert_eq!(
+            said(&script("older", "#!/bin/sh\necho torrential 0.1.0\n")),
+            Err("the binary of torrential 0.1.1 says it is torrential 0.1.0, so the installed torrential is unchanged"
+                .into())
+        );
+        let garbage = said(&script("garbage", "\u{7f}ELF garbage")).unwrap_err();
+        assert!(garbage.starts_with("the binary of torrential 0.1.1 does not run here ("), "{garbage}");
     }
 
     #[test]

@@ -6,10 +6,11 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use torrential_core::{Slice, TorrentId};
+use torrential_core::{Error, Slice, TorrentId};
 
 use super::super::book::{Intent, JobEntry, Observed, Phase};
 use super::super::engine_port::{EngineCommand, EngineHandle};
+use super::super::playing::{Open, Playing};
 use super::Owner;
 
 /// A film with less than this on disk ahead of its player holds the other downloads back. It
@@ -48,9 +49,11 @@ impl Reading {
     }
 }
 
-/// Someone streaming a download, from their request for its bytes until the answer ends.
+/// Someone streaming a download, from their request for its bytes until the answer ends. Each one
+/// also counts as playing, which holds off an update's switch.
 pub struct Lease {
     reading: Arc<Mutex<Reading>>,
+    _playing: Open,
 }
 
 impl Lease {
@@ -143,15 +146,22 @@ fn watched(readings: &[Reading], now: Instant) -> bool {
     readings.iter().any(|reading| reading.lead.is_some() && !reading.idle(now))
 }
 
-#[derive(Default)]
 pub struct Streams {
     /// The answers streaming each download. A lease holds each reading for as long as it lasts,
     /// and a download stays until the owner notes that its last stream closed.
     readers: BTreeMap<TorrentId, Vec<Weak<Mutex<Reading>>>>,
+    /// What plays across the engine, which a lease adds to.
+    playing: Playing,
     others: Others,
     /// The downloads the engine holds to a trickle.
     held: BTreeSet<TorrentId>,
     decided_at: Option<Instant>,
+}
+
+impl Streams {
+    pub fn new(playing: Playing) -> Self {
+        Self { readers: BTreeMap::new(), playing, others: Others::default(), held: BTreeSet::new(), decided_at: None }
+    }
 }
 
 /// Whether `job` is taking pieces from peers.
@@ -161,15 +171,17 @@ fn downloading(job: &JobEntry) -> bool {
 }
 
 impl Owner {
-    /// Someone starts streaming `id`, until they drop the lease.
-    pub(super) fn lease(&mut self, id: TorrentId) -> Lease {
+    /// Someone starts streaming `id`, until they drop the lease, unless the engine is stopping for
+    /// an update.
+    pub(super) fn lease(&mut self, id: TorrentId) -> Result<Lease, Error> {
+        let playing = self.streams.playing.open()?;
         let first = !self.streamed_now(id);
         let reading = Arc::default();
         self.streams.readers.entry(id).or_default().push(Arc::downgrade(&reading));
         if first {
             self.first_stream(id);
         }
-        Lease { reading }
+        Ok(Lease { reading, _playing: playing })
     }
 
     /// Whether someone holds a lease on `id`.

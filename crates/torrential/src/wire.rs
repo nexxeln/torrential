@@ -70,16 +70,16 @@ mod tests {
     #[test]
     fn frames_round_trip_and_end_cleanly() {
         let mut buf = Vec::new();
-        write(&mut buf, &Request::Shutdown).unwrap();
+        write(&mut buf, &Request::Shutdown { asked: true }).unwrap();
         let mut cursor = io::Cursor::new(buf);
-        assert_eq!(read::<Request>(&mut cursor).unwrap(), Some(Request::Shutdown));
+        assert_eq!(read::<Request>(&mut cursor).unwrap(), Some(Request::Shutdown { asked: true }));
         assert_eq!(read::<Request>(&mut cursor).unwrap(), None);
     }
 
     #[test]
     fn a_stream_cut_inside_a_frame_is_an_error() {
         let mut frame = Vec::new();
-        write(&mut frame, &Request::Shutdown).unwrap();
+        write(&mut frame, &Request::Shutdown { asked: true }).unwrap();
         for cut in [2, 7] {
             let err = read::<Request>(&mut io::Cursor::new(&frame[..cut])).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "cut at {cut}");

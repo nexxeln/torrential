@@ -55,8 +55,6 @@ function summary(job: Job): string {
       return "Queued";
     case "checking":
       return "Checking";
-    case "interrupted":
-      return "Interrupted";
   }
 }
 

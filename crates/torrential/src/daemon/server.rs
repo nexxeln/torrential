@@ -29,6 +29,7 @@ use super::search_port::{Progress, SearchPort};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use crate::machine::Detector;
 use crate::output::views::title_name;
+use crate::update::Version;
 use crate::wire;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
@@ -68,6 +69,8 @@ pub struct Ctx {
     pub http_port: u16,
     pub web: super::web::State,
     pub titles: super::titles::Titles,
+    pub playing: super::playing::Playing,
+    pub news: crate::update::Board,
     /// The phones and TVs this Mac let in, and the grants casts play from.
     pub devices: Arc<super::devices::Devices>,
     /// The TVs on the home network, and the casts playing on them.
@@ -103,7 +106,7 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             .ask(|reply| Command::Verify { reference, repair, reply })
             .await
             .map(|changes| Response::Changed { changes }),
-        Request::Shutdown => {
+        Request::Shutdown { .. } => {
             let (reply, done) = oneshot::channel();
             owner.tell(Command::Shutdown { reply });
             let _ = done.await;
@@ -565,7 +568,7 @@ pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
 
 async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (mut rd, mut wr) = stream.into_split();
-    let Some(Request::Hello { wire: client_wire, .. }) = wire::read_async::<Request>(&mut rd).await? else {
+    let Some(Request::Hello { client_version, wire: client_wire }) = wire::read_async::<Request>(&mut rd).await? else {
         return Ok(());
     };
     let hello = Response::Hello {
@@ -576,7 +579,11 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     };
     wire::write_async(&mut wr, &hello).await?;
     while let Some(request) = wire::read_async::<Request>(&mut rd).await? {
-        if client_wire != WIRE_VERSION && request != Request::Shutdown {
+        if request == (Request::Shutdown { asked: false }) {
+            wire::write_async(&mut wr, &switch(ctx, &client_version).await).await?;
+            continue;
+        }
+        if client_wire != WIRE_VERSION && !matches!(request, Request::Shutdown { .. }) {
             let error = Error::new(
                 ErrorCode::DaemonVersion,
                 format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {client_wire}"),
@@ -586,6 +593,16 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
             wire::write_async(&mut wr, &Response::Error { error }).await?;
             continue;
         }
+        let _playing = match request {
+            Request::Play(_) | Request::PlayTitle(_) => match ctx.playing.open() {
+                Ok(open) => Some(open),
+                Err(error) => {
+                    wire::write_async(&mut wr, &Response::Error { error }).await?;
+                    continue;
+                }
+            },
+            _ => None,
+        };
         match request {
             Request::Watch { refs } => return watch(ctx, refs, rd, wr).await,
             Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,
@@ -599,6 +616,36 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Answers a stop that a client sends without the person asking, to run its own version instead. An
+/// engine newer than the client keeps running, since torrential 0.4 sends this stop to an engine of
+/// any other version. Any other engine stops only when nothing plays and every download is saved.
+async fn switch(ctx: &Ctx, client: &str) -> Response {
+    if older(client, &ctx.version) {
+        super::log(&format!("torrential {client} asked the engine to stop for its own version"));
+        let error = Error::new(
+            ErrorCode::DaemonVersion,
+            format!("the engine runs the newer torrential {}, so it keeps running", ctx.version),
+        )
+        .with_hint("restart this torrential");
+        return Response::Error { error };
+    }
+    let Some(closed) = ctx.playing.try_close() else {
+        let error = Error::new(ErrorCode::DaemonVersion, format!("torrential switches to {client} when the film ends"));
+        return Response::Error { error };
+    };
+    match ctx.owner.ask(|reply| Command::Restart { reply }).await {
+        Ok(()) => {
+            closed.keep();
+            Response::Ok
+        }
+        Err(error) => Response::Error { error },
+    }
+}
+
+fn older(client: &str, engine: &str) -> bool {
+    Version::parse(engine).is_some_and(|engine| engine.newer_than(client))
 }
 
 async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {

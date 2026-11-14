@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{oneshot, watch};
-use torrential_core::TorrentId;
+use torrential_core::{ErrorCode, TorrentId};
 
 use super::cast::Dlna;
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
@@ -58,10 +58,14 @@ const TYPES: [(&str, &str); 6] = [
     ("srt", "application/x-subrip"),
 ];
 
-/// Binds `port` where `reach` says, or any free port when another program holds it.
-pub fn bind(port: u16, reach: Reach) -> io::Result<TcpListener> {
+/// Binds the first of `ports` that is free where `reach` says, or any free port when other programs
+/// hold them all.
+pub fn bind(ports: &[u16], reach: Reach) -> io::Result<TcpListener> {
     let ip = address(reach);
-    TcpListener::bind((ip, port)).or_else(|_| TcpListener::bind((ip, 0)))
+    match ports.iter().find_map(|&port| TcpListener::bind((ip, port)).ok()) {
+        Some(listener) => Ok(listener),
+        None => TcpListener::bind((ip, 0)),
+    }
 }
 
 fn address(reach: Reach) -> Ipv4Addr {
@@ -578,12 +582,18 @@ impl Connection<'_> {
         }
     }
 
-    /// Serves a download's file, with the type and headers a TV playing a cast reads when `dlna`
-    /// says them.
+    /// Sends file `index` of download `id` to a player on this Mac, a paired device, or a cast, with
+    /// the type and headers a TV playing a cast reads when `dlna` says them. Its lease holds off an
+    /// update's switch, and none is handed out once the switch waits for none.
     async fn file(&mut self, request: Request, id: TorrentId, index: u32, dlna: Option<&Dlna>) -> io::Result<bool> {
         let keep = request.keep_alive;
-        let Ok((file, lease)) = self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await else {
-            return self.empty("404 Not Found", "", keep).await;
+        let (file, lease) = match self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await {
+            Ok(streaming) => streaming,
+            Err(updating) if updating.code == ErrorCode::DaemonUnavailable => {
+                let (message, text) = (updating.message.as_bytes(), "text/plain; charset=utf-8");
+                return self.send("503 Service Unavailable", text, "Retry-After: 5\r\n", message, &request).await;
+            }
+            Err(_) => return self.empty("404 Not Found", "", keep).await,
         };
         let Ok(range) = range(request.range.as_deref(), file.size) else {
             let unsatisfiable = format!("Content-Range: bytes */{}\r\n", file.size);

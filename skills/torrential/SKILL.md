@@ -33,7 +33,7 @@ Anything else, or a particular release:
 1. `torrential search <words>`. Each result starts with an ID, and any unique prefix of 4 or more characters works. Pick by name, size, quality, seeds, and flags: `pd` public domain, `cc` Creative Commons, `cam` camera recording.
 2. `torrential files <id>` lists paths. Never pick a file marked as an executable unless asked.
 3. `torrential get <id> [--files <glob>]`. Repeating it is safe. Use the ID it prints from now on: a search ID that starts with `u` has no infohash yet, so the download gets a new one.
-4. `torrential wait <id>`. Exit 0 means done. Exit 8 means not done yet: wait again, or run the `next:` line if it says paused or interrupted. Exit 7 means a problem, and `torrential status <id>` explains it.
+4. `torrential wait <id>`. Exit 0 means done. Exit 8 means not done yet: wait again, or run the `next:` line if it says paused. Exit 7 means a problem, and `torrential status <id>` explains it.
 5. Report the `path:` from `torrential status <id>`.
 
 Downloads run in a background engine and keep going after your turn. `wait` returns within 100 seconds. Never give it a `--timeout` longer than your tool allows, and never poll with `sleep`. In Claude Code, run `torrential wait <id> --timeout 110m` with `run_in_background` and a `timeout` of 7200000: background commands may run up to 2 hours, foreground ones 10 minutes.

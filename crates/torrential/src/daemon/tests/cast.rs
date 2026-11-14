@@ -674,6 +674,34 @@ async fn a_title_cast_passes_over_a_source_the_tv_cannot_play_and_plays_the_next
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_cast_holds_off_an_update_while_it_finds_its_source_and_none_starts_while_one_installs() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    // Nothing seeds the only source, so the cast goes on finding it.
+    let mkv = torrent(0xb5, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
+    let catalog = vec![listed(&mkv, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let h = harness(&tv, search);
+    let playing = &h.running.ctx.playing;
+
+    let (mut view, _) = h.running.ctx.casts.start(by_hand(Target::Title(night()))).await.unwrap();
+    let held = playing.try_close().is_none();
+    let state = view.borrow().state.clone();
+    let stopped = control(&h, CastAction::Stop).await.unwrap_err();
+    tokio::time::timeout(Duration::from_secs(5), view.wait_for(Cast::ended)).await.unwrap().unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(5), playing.close()).await.expect("the ended cast lets go");
+    let refused = cast(&h, by_hand(Target::Title(night()))).await.unwrap_err();
+    drop(closed);
+
+    assert_eq!((state, held), (CastState::Finding, true));
+    assert_eq!(stopped.message, "the cast stopped before it started");
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::DaemonUnavailable, "torrential is updating, try again in a few seconds")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_title_cast_passes_over_a_download_here_the_tv_cannot_decode_though_ffmpeg_is_there() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;

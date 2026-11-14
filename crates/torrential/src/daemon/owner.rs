@@ -18,6 +18,7 @@ use super::engine_port::{
 };
 use super::files;
 use super::magnet::{self, Magnet};
+use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
@@ -36,8 +37,8 @@ pub struct OwnerConfig {
     pub default_dir: PathBuf,
     pub probe_dir: PathBuf,
     pub max_active: usize,
+    /// Only tests set one. Every other engine runs until it is stopped.
     pub idle_timeout: Option<Duration>,
-    pub resume_on_start: bool,
     pub save_resume_every: Duration,
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
@@ -202,6 +203,15 @@ pub enum Command {
     Connected,
     Disconnected { keep_until: Option<Instant> },
     Shutdown { reply: oneshot::Sender<()> },
+    Restart { reply: Reply<()> },
+}
+
+/// How the owner's run ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ended {
+    Stopped,
+    /// Stopped with every download saved, to start again from an installed update.
+    Restart,
 }
 
 #[derive(Clone, Debug)]
@@ -292,6 +302,11 @@ struct Stopping {
     waiting: BTreeSet<TorrentId>,
     deadline: Instant,
     replies: Vec<oneshot::Sender<()>>,
+    /// An update's restart, which happens only if the stop saves everything and no one else
+    /// asked the engine to stop meanwhile.
+    restart: Option<Reply<()>>,
+    /// A download's progress failed to save during the stop.
+    unsaved: bool,
 }
 
 pub struct Owner {
@@ -311,7 +326,7 @@ pub struct Owner {
     pauses: Vec<PendingPause>,
     tending: Tending,
     stopping: Option<Stopping>,
-    stopped: bool,
+    ended: Option<Ended>,
     engine: EngineHandle,
     parse: ParseTorrent,
     disk: Box<dyn Disk>,
@@ -333,6 +348,7 @@ impl Owner {
         engine: EngineHandle,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
+        playing: Playing,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
         // Opened first, for a plays folder other than the one used before changes what the plays are.
@@ -348,11 +364,7 @@ impl Owner {
                 })?)),
                 None => None,
             };
-            let observed = match stored.record.intent {
-                Intent::Running if !config.resume_on_start => Observed::Parked,
-                _ => Observed::Absent,
-            };
-            jobs.insert(stored.record.id, JobEntry::new(stored.record, metainfo, observed));
+            jobs.insert(stored.record.id, JobEntry::new(stored.record, metainfo, Observed::Absent));
         }
         let now = now();
         let (updates, _) = broadcast::channel(256);
@@ -364,12 +376,12 @@ impl Owner {
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
-            streams: Streams::default(),
+            streams: Streams::new(playing),
             under_test: BTreeMap::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
-            stopped: false,
+            ended: None,
             engine,
             parse,
             disk,
@@ -390,23 +402,42 @@ impl Owner {
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         mut events: mpsc::UnboundedReceiver<EngineEvent>,
-    ) {
+    ) -> Ended {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
-        while !self.stopped {
+        loop {
+            if let Some(ended) = self.ended {
+                return ended;
+            }
+            let due = self.metadata_waiters.iter().map(|w| w.deadline).min();
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => self.command(command),
-                    None => self.begin_stop(None),
+                    None => self.begin_stop(Stopper::Exit(None)),
                 },
                 event = events.recv() => match event {
                     Some(event) => self.engine_event(event),
                     None => {
                         super::log("the engine thread stopped, so the engine process is exiting");
-                        self.stopped = true;
+                        self.ended = Some(Ended::Stopped);
                     }
                 },
-                _ = tick.tick() => self.tick(),
+                _ = tick.tick() => {
+                    self.catch_up(&mut events);
+                    self.tick();
+                }
+                _ = tokio::time::sleep_until(due.unwrap_or_else(Instant::now).into()), if due.is_some() => {
+                    self.catch_up(&mut events);
+                    self.expire_metadata(Instant::now());
+                }
             }
+        }
+    }
+
+    /// Applies what the engine sent while the owner was busy, so it counts before a deadline is judged.
+    fn catch_up(&mut self, events: &mut mpsc::UnboundedReceiver<EngineEvent>) {
+        for _ in 0..events.len() {
+            let Ok(event) = events.try_recv() else { break };
+            self.engine_event(event);
         }
     }
 
@@ -466,8 +497,8 @@ impl Owner {
                 let _ = reply.send(self.stream_file(id, index));
             }
             Command::Stream { id, index, reply } => {
-                let file = self.stream_file(id, index);
-                let _ = reply.send(file.map(|file| (file, self.lease(id))));
+                let streaming = self.stream_file(id, index).and_then(|file| Ok((file, self.lease(id)?)));
+                let _ = reply.send(streaming);
             }
             Command::Library { shelving, reply } => {
                 let _ = reply.send(self.library(shelving));
@@ -478,7 +509,8 @@ impl Owner {
                 self.connections = self.connections.saturating_sub(1);
                 self.keep_until = self.keep_until.max(keep_until);
             }
-            Command::Shutdown { reply } => self.begin_stop(Some(reply)),
+            Command::Shutdown { reply } => self.begin_stop(Stopper::Exit(Some(reply))),
+            Command::Restart { reply } => self.begin_stop(Stopper::Update(reply)),
         }
     }
 
@@ -729,11 +761,6 @@ impl Owner {
         {
             self.job_metadata(id, metainfo);
         }
-        if !dry_run && self.jobs[&id].observed == Observed::Parked {
-            self.jobs.get_mut(&id).expect("found above").observed = Observed::Absent;
-            self.schedule();
-            self.publish(id);
-        }
         let job = &self.jobs[&id];
         let too_large = matches!(&job.record.intent, Intent::Failed { error } if error.code == ErrorCode::TooLarge);
         let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none() && self.lost_files(job);
@@ -914,7 +941,7 @@ impl Owner {
             (Some(_), Some(_)) => {}
         }
         let job = &self.jobs[&id];
-        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
+        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) {
             self.resume(&[id.to_hex()], false)?;
         }
         if let Some(play) = title {
@@ -996,7 +1023,7 @@ impl Owner {
         }
         let settled = match job.observed {
             Observed::InEngine(phase) => phase == Phase::Paused,
-            Observed::Absent | Observed::Parked => !self.draining.contains(&job.id()),
+            Observed::Absent => !self.draining.contains(&job.id()),
         };
         if !settled {
             return OnDisk::Unsettled;
@@ -1105,7 +1132,7 @@ impl Owner {
                             job.observed = Observed::InEngine(Phase::Pausing);
                             self.engine.send(EngineCommand::Pause(id));
                         }
-                        Observed::Absent | Observed::Parked => job.observed = Observed::Absent,
+                        Observed::Absent => {}
                     }
                     self.publish(id);
                     "paused"
@@ -1131,10 +1158,7 @@ impl Owner {
     }
 
     fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
-        let resumable = |j: &JobEntry| {
-            matches!(j.record.intent, Intent::Paused | Intent::Failed { .. })
-                || (j.record.intent == Intent::Running && j.observed == Observed::Parked)
-        };
+        let resumable = |j: &JobEntry| matches!(j.record.intent, Intent::Paused | Intent::Failed { .. });
         let fits = |j: &JobEntry| {
             j.selected_size().map_or(Ok(()), |size| admission::check_size(size, j.record.cap, Some(j.id())))
         };
@@ -1152,18 +1176,10 @@ impl Owner {
             let job = &self.jobs[&id];
             let result = match (&job.record.intent, job.observed) {
                 (Intent::Done { .. }, _) => "already_done",
-                (Intent::Running, Observed::Parked) => {
-                    self.jobs.get_mut(&id).expect("resolved above").observed = Observed::Absent;
-                    "resumed"
-                }
                 (Intent::Running, _) => "already_running",
-                (Intent::Paused | Intent::Failed { .. }, observed) => {
+                (Intent::Paused | Intent::Failed { .. }, _) => {
                     self.store.set_intent(id, &Intent::Running)?;
-                    let job = self.jobs.get_mut(&id).expect("resolved above");
-                    job.record.intent = Intent::Running;
-                    if observed == Observed::Parked {
-                        job.observed = Observed::Absent;
-                    }
+                    self.jobs.get_mut(&id).expect("resolved above").record.intent = Intent::Running;
                     "resumed"
                 }
             };
@@ -1453,6 +1469,11 @@ impl Owner {
     }
 
     fn fail(&mut self, id: TorrentId, error: Error) {
+        if let Some(stopping) = &mut self.stopping
+            && stopping.waiting.contains(&id)
+        {
+            stopping.unsaved = true;
+        }
         let Some(job) = self.jobs.get_mut(&id) else { return };
         job.verify = None;
         job.forget_sources();
@@ -1489,7 +1510,7 @@ impl Owner {
                 }
                 Observed::Absent
             }
-            outside @ (Observed::Absent | Observed::Parked) => outside,
+            Observed::Absent => Observed::Absent,
         };
         self.publish(id);
     }
@@ -1527,7 +1548,7 @@ impl Owner {
             Observed::InEngine(Phase::Finishing { writes_stopped: true }) => return,
             Observed::InEngine(Phase::Checking) if job.verify.is_some() => return,
             Observed::InEngine(_) => job.observed = Observed::InEngine(Phase::Paused),
-            Observed::Absent | Observed::Parked => return,
+            Observed::Absent => return,
         }
         self.engine.send(EngineCommand::SaveResume(id));
         for pause in &mut self.pauses {
@@ -1581,6 +1602,9 @@ impl Owner {
         if finishing && job.selected_size() == Some(verified) {
             let finished_at = now();
             if let Err(error) = self.store.finish(id, finished_at, &data, verified) {
+                if let Some(stopping) = &mut self.stopping {
+                    stopping.unsaved = true;
+                }
                 self.fail(id, error);
                 return;
             }
@@ -1594,6 +1618,9 @@ impl Owner {
             return;
         }
         let saved = self.store.save_resume(id, &data, verified, piece_map, files.as_deref(), now()).is_ok();
+        if !saved && let Some(stopping) = &mut self.stopping {
+            stopping.unsaved = true;
+        }
         let job = self.jobs.get_mut(&id).expect("checked above");
         if saved {
             job.record.verified = verified;
@@ -1770,6 +1797,20 @@ impl Owner {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.expire_metadata(now);
+        self.finish_pauses();
+        self.finish_stop_if_done();
+        self.check_idle(now);
+        self.save_progress(now);
+        self.finish_deletions();
+        self.leave();
+        self.tend_plays(now);
+        self.prioritize(now);
+    }
+
+    /// Answers each wait for a file list whose deadline has passed, and gives up the probes no one
+    /// waits for any longer.
+    fn expire_metadata(&mut self, now: Instant) {
         let (expired, waiting): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.metadata_waiters).into_iter().partition(|w| w.deadline <= now);
         self.metadata_waiters = waiting;
@@ -1788,14 +1829,6 @@ impl Owner {
             self.engine.send(EngineCommand::Remove(id));
             self.draining.insert(id);
         }
-        self.finish_pauses();
-        self.finish_stop_if_done();
-        self.check_idle(now);
-        self.save_progress(now);
-        self.finish_deletions();
-        self.leave();
-        self.tend_plays(now);
-        self.prioritize(now);
     }
 
     fn save_progress(&mut self, now: Instant) {
@@ -1823,13 +1856,18 @@ impl Owner {
         if self.connections > 0 || self.busy() || self.stopping.is_some() {
             self.idle_since = now;
         } else if now.duration_since(self.idle_since) >= timeout && self.keep_until.is_none_or(|until| now >= until) {
-            self.begin_stop(None);
+            self.begin_stop(Stopper::Exit(None));
         }
     }
 
-    fn begin_stop(&mut self, reply: Option<oneshot::Sender<()>>) {
+    fn begin_stop(&mut self, by: Stopper) {
         if let Some(stopping) = &mut self.stopping {
-            stopping.replies.extend(reply);
+            match by {
+                Stopper::Exit(reply) => stopping.replies.extend(reply),
+                Stopper::Update(reply) => {
+                    let _ = reply.send(Err(Error::new(ErrorCode::DaemonUnavailable, "the engine is already stopping")));
+                }
+            }
             return;
         }
         self.put_back_all();
@@ -1849,13 +1887,19 @@ impl Owner {
                     self.engine.send(EngineCommand::Pause(id));
                     waiting.insert(id);
                 }
-                Observed::Absent | Observed::Parked => {}
+                Observed::Absent => {}
             }
         }
+        let (replies, restart) = match by {
+            Stopper::Exit(reply) => (reply.into_iter().collect(), None),
+            Stopper::Update(reply) => (Vec::new(), Some(reply)),
+        };
         self.stopping = Some(Stopping {
             waiting,
             deadline: Instant::now() + self.config.writes_stop_within,
-            replies: reply.into_iter().collect(),
+            replies,
+            restart,
+            unsaved: false,
         });
         self.finish_stop_if_done();
     }
@@ -1866,11 +1910,39 @@ impl Owner {
             return;
         }
         let stopping = self.stopping.take().expect("checked above");
+        let saved = stopping.waiting.is_empty() && !stopping.unsaved;
+        let ended = match stopping.restart {
+            Some(restart) if stopping.replies.is_empty() && !saved => {
+                let error =
+                    Error::new(ErrorCode::StorageError, "the engine could not save the progress of every download");
+                let _ = restart.send(Err(error));
+                self.schedule();
+                return;
+            }
+            Some(restart) if stopping.replies.is_empty() => {
+                let _ = restart.send(Ok(()));
+                Ended::Restart
+            }
+            Some(restart) => {
+                let _ = restart.send(Err(Error::new(ErrorCode::DaemonUnavailable, "the engine is stopping")));
+                Ended::Stopped
+            }
+            None => Ended::Stopped,
+        };
         for reply in stopping.replies {
             let _ = reply.send(());
         }
-        self.stopped = true;
+        self.ended = Some(ended);
     }
+}
+
+/// Who asked the engine to stop.
+enum Stopper {
+    /// A person, a signal, or the idle timeout. The engine stops whatever the last saves did.
+    Exit(Option<oneshot::Sender<()>>),
+    /// An update, which restarts the engine only once every download's progress is saved.
+    /// Otherwise the engine carries on and the update tries again later.
+    Update(Reply<()>),
 }
 
 // Default macOS filesystems ignore case.

@@ -1153,9 +1153,7 @@ fn download_hints(state: &State, screen: &Screen) -> Vec<(&'static str, &'static
         Item::Download(id) => state.job(id),
         Item::Result(_) => None,
     }) {
-        Some(job) if matches!(job.status, JobStatus::Paused | JobStatus::Interrupted | JobStatus::Error { .. }) => {
-            "resume"
-        }
+        Some(job) if matches!(job.status, JobStatus::Paused | JobStatus::Error { .. }) => "resume",
         _ => "pause",
     };
     let downloaded = matches!(state.cursor, Some(Item::Result(ReleaseId::Torrent(t))) if state.job(t).is_some());

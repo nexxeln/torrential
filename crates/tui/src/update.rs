@@ -387,7 +387,7 @@ impl State {
             Action::TogglePause => {
                 if let Some(job) = self.selected_job() {
                     let action = match job.status {
-                        JobStatus::Paused | JobStatus::Interrupted | JobStatus::Error { .. } => JobAction::Resume,
+                        JobStatus::Paused | JobStatus::Error { .. } => JobAction::Resume,
                         JobStatus::Done { .. } => {
                             self.say(Tone::Info, "This download is done.");
                             return Vec::new();

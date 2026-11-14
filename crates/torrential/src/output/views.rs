@@ -387,7 +387,7 @@ pub fn state_cell(status: &JobStatus) -> Cell {
     let token = match status {
         JobStatus::Downloading | JobStatus::Metadata | JobStatus::Checking => Token::Mint,
         JobStatus::Done { .. } => Token::Mint,
-        JobStatus::Queued | JobStatus::Paused | JobStatus::Interrupted => Token::Accent,
+        JobStatus::Queued | JobStatus::Paused => Token::Accent,
         JobStatus::Error { .. } => Token::Error,
     };
     Cell::styled(status.name(), token)
@@ -397,17 +397,13 @@ fn next_for_stopped(status: &JobStatus, id: &str) -> Option<String> {
     match status {
         JobStatus::Error { error } if error.next.is_some() => error.next.as_deref().cloned(),
         JobStatus::Error { error } if error.code == ErrorCode::TooLarge => None,
-        JobStatus::Paused | JobStatus::Interrupted | JobStatus::Error { .. } => Some(format!("torrential resume {id}")),
+        JobStatus::Paused | JobStatus::Error { .. } => Some(format!("torrential resume {id}")),
         _ => None,
     }
 }
 
 fn restartable(status: &JobStatus) -> bool {
-    match status {
-        JobStatus::Interrupted => true,
-        JobStatus::Error { error } => error.code != ErrorCode::TooLarge,
-        _ => false,
-    }
+    matches!(status, JobStatus::Error { error } if error.code != ErrorCode::TooLarge)
 }
 
 fn is_active(status: &JobStatus) -> bool {
@@ -461,7 +457,7 @@ pub fn jobs(jobs: &[Job]) -> Doc {
         Some("torrential search <words>".to_string())
     } else if !active.is_empty() {
         if !restart.is_empty() {
-            summary.push(format!("to retry interrupted and failed downloads: torrential resume {}", restart.join(" ")));
+            summary.push(format!("to retry failed downloads: torrential resume {}", restart.join(" ")));
         }
         Some(format!("torrential wait {}", active.join(" ")))
     } else if !restart.is_empty() {

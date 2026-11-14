@@ -200,7 +200,7 @@ impl Owner {
     pub(super) fn first_stream(&mut self, id: TorrentId) {
         self.watched_now(id);
         if let Some(job) = self.jobs.get(&id)
-            && (job.record.intent == Intent::Paused || job.observed == Observed::Parked)
+            && job.record.intent == Intent::Paused
             && matches!(job.record.home, Home::Plays(_))
             && let Err(error) = self.resume(&[id.to_hex()], false)
         {

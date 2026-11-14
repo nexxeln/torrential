@@ -32,8 +32,6 @@ export function Readout({ job }: { job: Job }) {
       return <div>Checking files on disk</div>;
     case "paused":
       return <div>Download paused</div>;
-    case "interrupted":
-      return <div>Download interrupted</div>;
     case "error":
       return <div className="text-error">{sentence(job.error?.message ?? "The download failed")}</div>;
     case "done":

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use torrential_core::protocol::WIRE_VERSION;
 
 const ARCH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 
@@ -155,6 +156,205 @@ fn a_version_mismatch_restarts_the_engine() {
     assert!(!alive(old_pid), "the old engine exited after saving its state");
 }
 
+fn frame(json: &str) -> Vec<u8> {
+    let mut bytes = (json.len() as u32).to_be_bytes().to_vec();
+    bytes.extend_from_slice(json.as_bytes());
+    bytes
+}
+
+fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json::Value> {
+    use std::io::Read;
+    let mut len = [0; 4];
+    stream.read_exact(&mut len).ok()?;
+    let mut body = vec![0; u32::from_be_bytes(len) as usize];
+    stream.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+#[test]
+fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves_it_running() {
+    let mut home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    home.unset("TORRENTIAL_TEST_VERSION");
+
+    let runs = [home.run(&["status"]), home.run(&["status"])];
+
+    for run in runs {
+        assert_eq!(
+            (run.code, run.stderr.as_str()),
+            (6, "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n")
+        );
+    }
+    assert_eq!(home.engine(), Some((pid, "9.0.0".into())));
+}
+
+#[test]
+fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_running() {
+    use std::io::Write;
+    let home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+
+    // Byte for byte what torrential 0.4.0 sends when it meets an engine of another version.
+    let mut old = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    old.write_all(&frame(r#"{"op":"hello","client_version":"0.4.0","wire":5}"#)).unwrap();
+    let hello = read_frame(&mut old).unwrap();
+    old.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
+    let answer = read_frame(&mut old);
+    std::thread::sleep(Duration::from_secs(2));
+
+    assert_eq!((hello["engine_version"].as_str(), hello["pid"].as_i64()), (Some("9.0.0"), Some(pid.into())));
+    assert_eq!(answer.unwrap()["error"]["code"], "daemon_version");
+    assert!(alive(pid), "the engine kept running");
+    let stop = home.run(&["engine", "stop", "--json"]);
+    assert_eq!(stop.code, 0, "{}", stop.stderr);
+    eventually("an asked stop ends it", Duration::from_secs(10), || !alive(pid));
+}
+
+#[test]
+fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film_ends() {
+    use std::io::{Read, Write};
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let mut home = Home::with(&[
+        ("TORRENTIAL_TEST_ENGINE", "fake"),
+        ("TORRENTIAL_TEST_FAKE_RATE", "0"),
+        ("TORRENTIAL_TEST_HTTP_PORT", &port),
+        ("TORRENTIAL_TEST_VERSION", "0.1.0"),
+    ]);
+    let jobs: serde_json::Value = serde_json::from_str(&home.run(&["status", "--json"]).stdout).unwrap();
+    let jobs = jobs["jobs"].as_array().unwrap();
+    let id = jobs.iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap()["id"].as_str().unwrap();
+    let (pid, _) = home.engine().unwrap();
+    // A player asks for the end of a file that has not arrived, so its stream stays open.
+    let mut player = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    let ask = format!("GET /{id}/0/enwiki.xml.bz2 HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=23514217000-\r\n\r\n");
+    player.write_all(ask.as_bytes()).unwrap();
+    let mut head = [0; 12];
+    player.read_exact(&mut head).unwrap();
+
+    let mut newer = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    newer.write_all(&frame(r#"{"op":"hello","client_version":"0.1.1","wire":5}"#)).unwrap();
+    read_frame(&mut newer).unwrap();
+    newer.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
+    let answer = read_frame(&mut newer).unwrap();
+    home.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    let during = home.run(&["status", "--json"]);
+    let kept = home.engine();
+    drop(player);
+    eventually("the next command switches the engine", Duration::from_secs(20), || {
+        home.run(&["status", "--json"]).code == 0 && home.engine().is_some_and(|(_, version)| version == "0.1.1")
+    });
+
+    assert_eq!(&head, b"HTTP/1.1 206");
+    assert_eq!(
+        (answer["error"]["code"].as_str(), answer["error"]["message"].as_str()),
+        (Some("daemon_version"), Some("torrential switches to 0.1.1 when the film ends"))
+    );
+    assert_eq!((during.code, during.stderr.as_str()), (0, ""), "the newer client used the engine meanwhile");
+    assert_eq!(kept, Some((pid, "0.1.0".into())), "the engine kept its version while the film played");
+    assert_ne!(home.engine().unwrap().0, pid);
+}
+
+#[test]
+fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_switches() {
+    use std::io::Write;
+    let home = Home::new();
+    let socket = home.dir.path().join("th/run/engine.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let asked = std::thread::spawn(move || {
+        let mut ops = Vec::new();
+        for stream in listener.incoming().take(1) {
+            let mut stream = stream.unwrap();
+            while let Some(request) = read_frame(&mut stream) {
+                let op = request["op"].as_str().unwrap().to_string();
+                let reply = match op.as_str() {
+                    "hello" => format!(
+                        r#"{{"type":"hello","engine_version":"0.1.0","wire":99,"pid":{},"http_port":0}}"#,
+                        std::process::id()
+                    ),
+                    _ => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
+                };
+                ops.push(op);
+                stream.write_all(&frame(&reply)).unwrap();
+            }
+        }
+        ops
+    });
+
+    let run = home.run(&["status"]);
+
+    assert_eq!(
+        (run.code, run.stderr.as_str()),
+        (6, "error[daemon_version]: torrential switches to 0.4.0 when the film ends\n")
+    );
+    assert_eq!(asked.join().unwrap(), ["hello", "shutdown"]);
+}
+
+const NEWER_ENGINE: &str =
+    "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n";
+
+/// A stand-in engine on `socket` that answers one connection per version in `versions`, each as
+/// that torrential: hello with the version, a refused switch to shutdown, and no downloads to the rest.
+fn stand_in(socket: &Path, versions: &'static [&'static str]) -> std::thread::JoinHandle<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    std::thread::spawn(move || {
+        for (version, stream) in versions.iter().zip(listener.incoming()) {
+            let mut stream = stream.unwrap();
+            while let Some(request) = read_frame(&mut stream) {
+                let reply = match request["op"].as_str().unwrap() {
+                    "hello" => format!(
+                        r#"{{"type":"hello","engine_version":"{version}","wire":{WIRE_VERSION},"pid":{},"http_port":0}}"#,
+                        std::process::id()
+                    ),
+                    "shutdown" => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
+                    _ => r#"{"type":"jobs","jobs":[]}"#.to_string(),
+                };
+                stream.write_all(&frame(&reply)).unwrap();
+            }
+        }
+    })
+}
+
+#[test]
+fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrential() {
+    use std::os::fd::AsRawFd;
+    let home = Home::new();
+    std::fs::create_dir_all(home.state()).unwrap();
+    // A newer engine holds the home's lock as it starts, so the engine this client launches gives way.
+    let lock = std::fs::File::create(home.state().join("engine.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let client = home
+        .process(&["status"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    eventually("the launched engine gave way", Duration::from_secs(10), || {
+        std::fs::read_to_string(home.state().join("engine.log")).is_ok_and(|log| log.contains("another engine owns"))
+    });
+    let newer = stand_in(&home.dir.path().join("th/run/engine.sock"), &["9.0.0"]);
+
+    let client = client.wait_with_output().unwrap();
+
+    assert_eq!((client.status.code(), String::from_utf8(client.stderr).unwrap().as_str()), (Some(6), NEWER_ENGINE));
+    newer.join().unwrap();
+}
+
+#[test]
+fn a_client_that_an_engine_playing_a_film_turns_away_never_uses_a_newer_one_it_finds_next() {
+    let home = Home::new();
+    let engines = stand_in(&home.dir.path().join("th/run/engine.sock"), &["0.1.0", "9.0.0"]);
+
+    let run = home.run(&["status"]);
+
+    assert_eq!((run.code, run.stderr.as_str()), (6, NEWER_ENGINE));
+    engines.join().unwrap();
+}
+
 #[test]
 fn a_sandboxed_client_refuses_to_start_an_engine() {
     let mut home = Home::with(&[("CODEX_SANDBOX_NETWORK_DISABLED", "1"), ("CODEX_THREAD_ID", "t-1")]);
@@ -218,6 +418,159 @@ fn the_engine_exits_after_its_idle_timeout() {
     assert!(std::fs::read_to_string(home.state().join("engine.log")).unwrap().contains("engine stopped"));
 }
 
+/// A default-home engine with stand-ins for launchctl and systemctl, which record how they were
+/// called, and the paths of its login service.
+struct Service {
+    home: Home,
+    unit: PathBuf,
+    calls: PathBuf,
+}
+
+impl Service {
+    fn new() -> Self {
+        let mut home =
+            Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0"), ("CLAUDECODE", "1")]);
+        let dir = home.dir.path().to_path_buf();
+        home.unset("TORRENTIAL_HOME");
+        for (var, folder) in [
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_STATE_HOME", "state"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_RUNTIME_DIR", "run"),
+        ] {
+            home.set(var, &dir.join(folder).display().to_string());
+        }
+        let (bin, calls) = (dir.join("bin"), dir.join("calls"));
+        std::fs::create_dir(&bin).unwrap();
+        for program in ["launchctl", "systemctl"] {
+            let script = format!("#!/bin/sh\necho \"{program} $*\" >> '{}'\n", calls.display());
+            std::fs::write(bin.join(program), script).unwrap();
+            std::fs::set_permissions(bin.join(program), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        home.set("TORRENTIAL_TEST_SERVICE_BIN", &bin.display().to_string());
+        let unit = if cfg!(target_os = "macos") {
+            dir.join("Library/LaunchAgents/dev.torrential.engine.plist")
+        } else {
+            dir.join(".config/systemd/user/torrential.service")
+        };
+        Self { home, unit, calls }
+    }
+
+    fn link(&self) -> PathBuf {
+        self.home.dir.path().join(".config/systemd/user/default.target.wants/torrential.service")
+    }
+
+    fn calls(&self) -> String {
+        std::fs::read_to_string(&self.calls).unwrap_or_default()
+    }
+}
+
+#[test]
+fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
+    let Service { home, unit, calls } = Service::new();
+    let dir = home.dir.path().to_path_buf();
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_torrential")).unwrap();
+
+    let first = home.run(&["status"]);
+    let second = home.run(&["status"]);
+    let added = std::fs::read_to_string(&unit).unwrap();
+    let uninstall = home.json(&["engine", "uninstall", "--json"]);
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let after_uninstall = home.run(&["status"]);
+    let left_out = !unit.exists();
+    let install = home.json(&["engine", "install", "--json"]);
+
+    assert_eq!(
+        (first.code, first.stderr.as_str()),
+        (0, "# the engine now starts at login; torrential engine uninstall turns that off\n")
+    );
+    assert_eq!(second.stderr, "");
+    assert!(added.contains(&exe.display().to_string()), "{added}");
+    if cfg!(target_os = "linux") {
+        let link = dir.join(".config/systemd/user/default.target.wants/torrential.service");
+        assert_eq!(std::fs::read_link(link).unwrap(), unit);
+    }
+    assert_eq!(uninstall["result"], "uninstalled");
+    assert_eq!((after_uninstall.code, after_uninstall.stderr.as_str()), (0, ""));
+    assert!(left_out, "an engine started after uninstall leaves the service out");
+    assert_eq!(install["result"], "installed");
+    assert!(unit.exists());
+    let uid = unsafe { libc::geteuid() };
+    let expected = if cfg!(target_os = "macos") {
+        format!(
+            "launchctl bootout gui/{uid}/dev.torrential.engine\nlaunchctl bootout gui/{uid}/dev.torrential.engine\n\
+             launchctl bootstrap gui/{uid} {}\n",
+            unit.display()
+        )
+    } else {
+        "systemctl --user disable --now torrential.service\nsystemctl --user daemon-reload\n\
+         systemctl --user daemon-reload\nsystemctl --user enable --now torrential.service\n"
+            .to_string()
+    };
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), expected, "adding the service at start ran neither");
+}
+
+#[test]
+fn engine_install_starts_the_service_the_engine_added_at_its_first_start() {
+    let service = Service::new();
+    assert_eq!(service.home.run(&["status"]).code, 0);
+    let added = std::fs::read_to_string(&service.unit).unwrap();
+
+    let install = service.home.json(&["engine", "install", "--json"]);
+
+    assert_eq!(install["result"], "already_installed");
+    assert_eq!(std::fs::read_to_string(&service.unit).unwrap(), added);
+    let uid = unsafe { libc::geteuid() };
+    let expected = if cfg!(target_os = "macos") {
+        format!(
+            "launchctl bootout gui/{uid}/dev.torrential.engine\nlaunchctl bootstrap gui/{uid} {}\n",
+            service.unit.display()
+        )
+    } else {
+        "systemctl --user daemon-reload\nsystemctl --user enable --now torrential.service\n".to_string()
+    };
+    assert_eq!(service.calls(), expected, "the unit was there, and install still started it");
+}
+
+#[test]
+fn a_login_service_left_half_written_is_finished_at_the_next_start() {
+    let service = Service::new();
+    assert_eq!(service.home.run(&["status"]).code, 0);
+    let whole = std::fs::read_to_string(&service.unit).unwrap();
+    assert_eq!(service.home.run(&["engine", "stop"]).code, 0);
+    std::fs::write(&service.unit, &whole[..whole.len() / 2]).unwrap();
+    if cfg!(target_os = "linux") {
+        std::fs::remove_file(service.link()).unwrap();
+    }
+
+    let next = service.home.run(&["status"]);
+
+    assert_eq!(
+        (next.code, next.stderr.as_str()),
+        (0, "# the engine now starts at login; torrential engine uninstall turns that off\n")
+    );
+    assert_eq!(std::fs::read_to_string(&service.unit).unwrap(), whole);
+    if cfg!(target_os = "linux") {
+        assert_eq!(std::fs::read_link(service.link()).unwrap(), service.unit);
+    }
+    let unit_dir = service.unit.parent().unwrap();
+    let mut left: Vec<_> = std::fs::read_dir(unit_dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    left.retain(|name| name != "default.target.wants");
+    assert_eq!(left, [service.unit.file_name().unwrap()], "no partial file is left behind");
+}
+
+#[test]
+fn a_login_service_someone_else_wrote_is_left_alone() {
+    let service = Service::new();
+    std::fs::create_dir_all(service.unit.parent().unwrap()).unwrap();
+    std::fs::write(&service.unit, "a unit the person wrote\n").unwrap();
+
+    let first = service.home.run(&["status"]);
+
+    assert_eq!((first.code, first.stderr.as_str()), (0, ""));
+    assert_eq!(std::fs::read_to_string(&service.unit).unwrap(), "a unit the person wrote\n");
+}
+
 fn magnet(size: u64) -> String {
     format!("magnet:?xt=urn:btih:{ARCH}&dn=archlinux-2026.10.01-x86_64.iso&xl={size}")
 }
@@ -240,6 +593,83 @@ fn wait_times_out_with_exit_8_while_the_download_runs() {
     assert_eq!(json.code, 8);
     let last: serde_json::Value = serde_json::from_str(json.stdout.lines().last().unwrap()).unwrap();
     assert_eq!((last["type"].as_str(), last["outcome"].as_str()), (Some("result"), Some("timeout")));
+}
+
+#[test]
+fn wait_ends_soon_after_the_engine_is_stopped() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let wait = home
+        .process(&["wait", "9b5212", "--timeout", "60s"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let started = Instant::now();
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let wait = wait.wait_with_output().unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(10), "wait took {:?}", started.elapsed());
+    assert_eq!(
+        (wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()),
+        (Some(6), "error[daemon_unavailable]: the engine stopped while waiting\n")
+    );
+}
+
+#[test]
+fn wait_follows_a_download_again_when_the_engine_comes_back() {
+    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    let wait = home
+        .process(&["wait", "9b5212", "--timeout", "8s", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(home.run(&["status"]).code, 0);
+    let wait = wait.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8(wait.stdout).unwrap();
+    let last: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!((wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()), (Some(8), ""), "{stdout}");
+    assert_eq!(last["outcome"], "timeout");
+}
+
+#[test]
+fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrential() {
+    let mut home = Home::with(&[
+        ("TORRENTIAL_TEST_ENGINE", "fake"),
+        ("TORRENTIAL_TEST_FAKE_RATE", "1MiB"),
+        ("TORRENTIAL_TEST_VERSION", "0.1.0"),
+    ]);
+    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    let wait = home
+        .process(&["wait", "9b5212", "--timeout", "20s"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
+    home.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    assert_eq!(home.run(&["status"]).code, 0);
+    let wait = wait.wait_with_output().unwrap();
+
+    assert_eq!(
+        (wait.status.code(), String::from_utf8(wait.stderr).unwrap().as_str()),
+        (Some(6), "error[daemon_version]: the engine runs the newer torrential 0.1.1, so restart this torrential\n")
+    );
 }
 
 #[test]
@@ -397,20 +827,17 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
 }
 
 #[test]
-fn a_killed_engine_comes_back_with_the_download_interrupted() {
+fn a_killed_engine_comes_back_with_the_download_running() {
     let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let (pid, _) = home.engine().unwrap();
     unsafe { libc::kill(pid, libc::SIGKILL) };
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    let status = home.run(&["status", "9b5212"]);
-    assert_eq!(status.code, 0, "{}", status.stderr);
-    assert!(status.stdout.contains("state:    interrupted"), "{}", status.stdout);
-    assert!(status.stdout.ends_with("next:     torrential resume 9b5212\n"), "{}", status.stdout);
     let resume = home.run(&["resume", "9b5212"]);
+    assert_eq!(resume.code, 0, "{}", resume.stderr);
     assert_eq!(
         resume.stdout,
-        "ID\tRESULT\tNAME\n9b5212\tresumed\tarchlinux-2026.10.01-x86_64.iso\nnext: torrential wait 9b5212\n"
+        "ID\tRESULT\tNAME\n9b5212\talready_running\tarchlinux-2026.10.01-x86_64.iso\nnext: torrential wait 9b5212\n"
     );
 }
 
@@ -438,7 +865,8 @@ fn a_new_fake_installation_starts_with_downloads_that_survive_a_restart() {
     assert!(["6f2c81 checking", "6f2c81 downloading"].contains(&first[4].as_str()), "{first:?}");
     assert_eq!(home.run(&["daemon", "stop"]).code, 0);
     let again: Vec<String> = states();
-    assert_eq!(again, ["c7b9e3 done", "5e02c8 done", "91fd3b paused", "a90d44 error", "6f2c81 interrupted"]);
+    assert_eq!(again[..4], ["c7b9e3 done", "5e02c8 done", "91fd3b paused", "a90d44 error"]);
+    assert!(["6f2c81 checking", "6f2c81 downloading"].contains(&again[4].as_str()), "{again:?}");
 }
 
 #[test]
@@ -489,6 +917,53 @@ fn daemon_stop_is_idempotent() {
     assert_eq!(stop.stdout, format!("result: stopped\npid:    {pid}\n"));
     assert!(!alive(pid));
     assert_eq!(home.run(&["daemon", "stop"]).stdout, "result: already_stopped\n");
+}
+
+#[test]
+fn an_engine_stop_after_the_engine_crashed_says_already_stopped_at_once() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
+    let left_its_socket = home.dir.path().join("th/run/engine.sock").exists();
+
+    let started = Instant::now();
+    let stop = home.run(&["engine", "stop"]);
+
+    assert!(left_its_socket, "the crashed engine left its socket");
+    assert_eq!((stop.code, stop.stdout.as_str()), (0, "result: already_stopped\n"));
+    assert!(started.elapsed() < Duration::from_secs(5), "the stop took {:?}", started.elapsed());
+}
+
+#[test]
+fn an_engine_stop_whose_engine_exits_before_it_answers_stops_the_engine_that_starts_next() {
+    use std::process::Stdio;
+    let home = Home::new();
+    let socket = home.dir.path().join("th/run/engine.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let leaving = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let stop = home.process(&["engine", "stop"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let (mut taken, _) = leaving.accept().unwrap();
+    let hello = read_frame(&mut taken).unwrap();
+
+    let log = home.dir.path().join("next.log");
+    let mut next = home.process(&["daemon", "run"]).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();
+    let pid = next.id();
+    // Reaped as it exits, so the stop sees it gone.
+    let next = std::thread::spawn(move || next.wait().unwrap().code());
+    eventually("the next engine is up", Duration::from_secs(30), || {
+        std::fs::read_to_string(&log).unwrap_or_default().contains(" started, pid ")
+    });
+    drop((taken, leaving));
+    let stop = stop.wait_with_output().unwrap();
+
+    assert_eq!(hello["op"], "hello");
+    assert_eq!(
+        (String::from_utf8(stop.stdout).unwrap(), String::from_utf8(stop.stderr).unwrap()),
+        (format!("result: stopped\npid:    {pid}\n"), String::new())
+    );
+    assert_eq!(next.join().unwrap(), Some(0));
 }
 
 const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
@@ -580,7 +1055,7 @@ fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
     assert_eq!(
         shown.stdout,
         format!(
-            "{mac}\nupdates:  notify\nfile:     {file}\n\
+            "{mac}\nupdates:  auto\nfile:     {file}\n\
              # ranking for this Mac: 1080p screen, HDR, HEVC, arm64, English · overrides: none\n\
              next:     {flags}\n"
         )
@@ -588,7 +1063,7 @@ fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
     assert_eq!(
         saved.stdout,
         format!(
-            "saved\n{mac}\nupdates:  notify\nfile:     {file}\n\
+            "saved\n{mac}\nupdates:  auto\nfile:     {file}\n\
              # ranking for this Mac: 2160p screen, up to 8 GB, arm64, English · overrides: screen tv-4k, max_size \
              8GB\n# get rejects downloads over 8 GB unless --max-size is higher\nnext:     torrential search <words>\n"
         )

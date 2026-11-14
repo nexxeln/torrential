@@ -23,6 +23,7 @@ use torrential_core::{
 
 use super::devices::names::Names;
 use super::owner::{Command, Finish, MetaTarget, now};
+use super::playing::Open;
 use super::server::{self, Ctx, METADATA_WAIT};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use super::web::{play, watch as web_watch};
@@ -235,8 +236,8 @@ impl Casts {
         self.list()
     }
 
-    /// Starts a cast in place of any on the same TV. Returns the cast as it changes, and the steps
-    /// of finding a title's source.
+    /// Starts a cast in place of any on the same TV, unless the engine is stopping for an update.
+    /// Returns the cast as it changes, and the steps of finding a title's source.
     pub async fn start(
         &self,
         request: CastRequest,
@@ -245,6 +246,7 @@ impl Casts {
         if request.start_at.is_some_and(|at| !at.is_finite() || at < 0.0) {
             return Err(Error::new(ErrorCode::Usage, "start_at is not a time in a video"));
         }
+        let playing = ctx.playing.open()?;
         let tv = match self.choose(request.tv.as_deref()) {
             Err(error) if error.code == ErrorCode::NotFound => {
                 self.search(true).await;
@@ -286,7 +288,7 @@ impl Casts {
             (id, before)
         };
         let run = Run { ctx, tv, view: view_tx, id, before };
-        tokio::spawn(run.cast(request, control, steps_tx));
+        tokio::spawn(run.cast(request, control, steps_tx, playing));
         Ok((view, steps))
     }
 
@@ -459,11 +461,14 @@ struct Run {
 }
 
 impl Run {
+    /// Finds the video and plays it on the TV. The cast counts as playing from its start to its
+    /// end, through finding a source and any pause on the TV, so an update waits for it.
     async fn cast(
         self,
         request: CastRequest,
         mut control: mpsc::UnboundedReceiver<Control>,
         steps: broadcast::Sender<AttemptEvent>,
+        playing: Open,
     ) {
         let found = tokio::select! {
             found = find(&self.ctx, &self.tv, &request, &steps, &self.view) => Some(found),
@@ -493,6 +498,7 @@ impl Run {
         if let Some(before) = self.before.clone() {
             ended(before).await;
         }
+        drop(playing);
         self.view.send_modify(|cast| cast.state = CastState::Ended { error });
         drop(control);
         tokio::time::sleep(ENDED_KEPT).await;

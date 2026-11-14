@@ -38,13 +38,19 @@ Run torrential --help for every command, or torrential schema for JSON.
 ";
 
 fn main() -> ExitCode {
+    let _ = update::executable();
     CompleteEnv::with_factory(Cli::command).complete();
     let env = Env::from_process();
     let args: Vec<String> = std::env::args().collect();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(e) if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) => {
+        // The version an engine reports, which an update reads from the installed binary.
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayVersion => {
+            println!("torrential {}", env.version());
+            return ExitCode::SUCCESS;
+        }
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
             let _ = e.print();
             return ExitCode::SUCCESS;
         }
