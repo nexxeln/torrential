@@ -42,6 +42,12 @@ Manage downloads with `status`, `pause`, `resume` (`--all` after a reboot), `ver
 
 A `# update:` line means a newer torrential is out. Tell the user once and offer `torrential update`, or `torrential setup --updates auto` to always update.
 
+## Music search, when permitted
+
+Search release titles with `--category audio`. If an artist-and-track query returns no results, try the known album title or artist; do not infer that the track is unavailable from the first empty query. Report artist-only matches as release candidates until `files` confirms their contents.
+
+Before selecting files, distinguish the requested original, radio edit, live performance, mixed recording, and remix. A similar title or matching artist alone is insufficient. A file-list timeout leaves the contents unverified. `verify` validates torrent piece hashes, not the musical recording or version; do not describe it as an audio-identity check.
+
 ## Watch
 
 `torrential play <title id, torrent id, or search words>` opens the user's player on the video while it downloads, and for a title ID first finds a torrent that starts, as `get` does. Run it only when the user asks to watch something. With `--json` it opens nothing and returns `streams[0].url`, a local URL any player can open while the download continues. A title it plays downloads into torrential's plays folder, which drops the plays watched longest ago once they pass 20 GiB. To keep a file, use `get`.
