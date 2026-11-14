@@ -14,11 +14,12 @@ use super::Owner;
 
 /// A film with less than this on disk ahead of its player holds the other downloads back. It
 /// gives the line time to turn toward the film before the player runs out.
-const BEHIND: Duration = Duration::from_secs(30);
+const BEHIND: Duration = Duration::from_secs(60);
 /// Once every film being watched has this much on disk ahead of its player, the other downloads
 /// go. A film let go at this lead drains for a minute before it holds them back again, so the
-/// caps change at most about once a minute.
-const AHEAD: Duration = Duration::from_secs(90);
+/// caps change at most about once a minute. Its peers take up to half a minute to come back
+/// once the others are held again, which `BEHIND` leaves room for.
+const AHEAD: Duration = Duration::from_secs(120);
 /// A film whose player has taken nothing for this long is paused, and holds nothing back.
 const IDLE: Duration = Duration::from_secs(60);
 /// What a held-back download may take, so its peers stay connected.
@@ -238,18 +239,18 @@ mod tests {
     }
 
     #[test]
-    fn a_film_less_than_30_s_ahead_of_its_player_holds_the_other_downloads_back() {
+    fn a_film_less_than_60_s_ahead_of_its_player_holds_the_other_downloads_back() {
         let now = Instant::now();
-        assert_eq!(decide(Others::Free, [ahead(29)], now), Others::Held);
-        assert_eq!(decide(Others::Free, [ahead(30)], now), Others::Free);
+        assert_eq!(decide(Others::Free, [ahead(59)], now), Others::Held);
+        assert_eq!(decide(Others::Free, [ahead(60)], now), Others::Free);
     }
 
     #[test]
-    fn the_other_downloads_go_once_every_film_is_90_s_ahead_of_its_player() {
+    fn the_other_downloads_go_once_every_film_is_120_s_ahead_of_its_player() {
         let now = Instant::now();
-        assert_eq!(decide(Others::Held, [ahead(89)], now), Others::Held);
-        assert_eq!(decide(Others::Held, [ahead(90)], now), Others::Free);
-        assert_eq!(decide(Others::Held, [ahead(90), ahead(60)], now), Others::Held);
+        assert_eq!(decide(Others::Held, [ahead(119)], now), Others::Held);
+        assert_eq!(decide(Others::Held, [ahead(120)], now), Others::Free);
+        assert_eq!(decide(Others::Held, [ahead(120), ahead(90)], now), Others::Held);
         assert_eq!(decide(Others::Held, [], now), Others::Free);
     }
 
