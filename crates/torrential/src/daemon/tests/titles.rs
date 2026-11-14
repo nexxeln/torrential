@@ -1284,8 +1284,10 @@ async fn replace_with_no_other_source_fails_and_leaves_the_stalled_download_alon
     h.swarm.set_rate(100 * MIB);
     let first = h.play_title("tt0063350", None, None).await;
     assert_eq!(first.last().unwrap(), "playing tt0063350 a4a4a4 file 0 at null");
+    let id = night[3].info_hash.id();
+    h.until("it is past its check", |jobs| jobs.iter().any(|j| j.id == id && j.status.name() == "downloading")).await;
     let before = h.job(&night[3]).await.unwrap();
-    let steps = h.play_title("tt0063350", None, Some(night[3].info_hash.id())).await;
+    let steps = h.play_title("tt0063350", None, Some(id)).await;
     assert_eq!(
         steps.last().unwrap(),
         concat!(
