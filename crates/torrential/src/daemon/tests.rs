@@ -1834,11 +1834,34 @@ async fn while_a_film_is_behind_its_player_the_other_downloads_trickle() {
 
     let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
     let mut player = Player::connect(&h).await;
-    let watching = tokio::spawn(async move { player.get(&path, "bytes=40000000000-40000000099").await });
+    let _watching = tokio::spawn(async move { player.get(&path, "bytes=40000000000-40000000099").await });
     h.until("the iso down to 64 KiB/s", |jobs| rates(jobs) == [64 * 1024, 8 * MIB]).await;
 
-    watching.abort();
-    h.until("the iso back at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
+    h.changes(Request::Pause { refs: vec![prefix(&film)] }).await.unwrap();
+    h.until("the iso back at full speed", |jobs| rates(jobs)[0] == 8 * MIB).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_other_downloads_keep_trickling_between_ffprobes_read_of_a_film_and_its_players() {
+    let h = Harness::new();
+    h.swarm.set_rate(8 * MIB);
+    let iso = torrent(101, "iso", &[("disc.iso", 40 * GIB)]);
+    let film = torrent(102, "film", &[("film.mkv", 40 * GIB)]);
+    h.get(h.torrent_file(&iso), &[]).await.unwrap();
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    let rates = |jobs: &[Job]| jobs.iter().map(|j| j.progress.down_rate).collect::<Vec<_>>();
+    h.until("both at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
+    let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
+    let mut ffprobe = Player::connect(&h).await;
+    let probing = tokio::spawn(async move { ffprobe.get(&path, "bytes=40000000000-40000000099").await });
+    h.until("the iso down to 64 KiB/s", |jobs| rates(jobs) == [64 * 1024, 8 * MIB]).await;
+
+    probing.abort();
+    let player_reads = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < player_reads {
+        assert_eq!(rates(&h.status().await), [64 * 1024, 8 * MIB], "the iso trickles until the player reads");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 mod cast;
