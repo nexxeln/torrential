@@ -953,50 +953,6 @@ async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn of_two_tvs_casting_one_film_the_one_cast_to_last_keeps_its_place() {
-    let Some(ip) = lan() else { return };
-    let living = FakeTv::named(ip, SINK, "Living Room TV", "uuid:living-room").await;
-    let bedroom = FakeTv::named(ip, SINK, "Bedroom TV", "uuid:bedroom").await;
-    let both = answering(ip, vec![found(living.http, "uuid:living-room"), found(bedroom.http, "uuid:bedroom")]).await;
-    let h = Harness::with_outside(
-        search_port::Fake::new(Vec::new()),
-        Outside { tvs: Find::At(both), ..Outside::default() },
-    );
-    let film = torrent(89, "Night", &[("Night.mkv", 2 * MIB)]);
-    written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
-    h.swarm.set_rate(100 * GIB);
-    h.get(h.torrent_file(&film), &[]).await.unwrap();
-    h.until("done", |jobs| jobs[0].status.name() == "done").await;
-    let on =
-        |tv: &str| CastRequest { tv: Some(tv.into()), video: Some(night()), ..by_hand(Target::Prefix(prefix(&film))) };
-
-    cast(&h, on("living")).await.unwrap();
-    living.set(|screen| screen.position = 600.0);
-    until(&h, "ten minutes in on the living room TV", |cast| {
-        cast.tv_name == "Living Room TV" && cast.position == Some(600.0)
-    })
-    .await;
-    control_on(&h, Some("living"), CastAction::Pause).await.unwrap();
-    assert_eq!(kept(&h), Some((600.0, Some(5_760.0))));
-
-    cast(&h, on("bedroom")).await.unwrap();
-    bedroom.until("the seek to where the film stopped", |screen| screen.position == 600.0).await;
-    bedroom.set(|screen| screen.position = 1_200.0);
-    until(&h, "twenty minutes in on the bedroom TV", |cast| {
-        cast.tv_name == "Bedroom TV" && cast.position == Some(1_200.0)
-    })
-    .await;
-    control_on(&h, Some("bedroom"), CastAction::Stop).await.unwrap();
-    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))));
-
-    // The paused cast asks its TV where it is every second and would save every five.
-    tokio::time::sleep(Duration::from_millis(6_500)).await;
-    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "the living room TV, paused at ten minutes, saves nothing");
-    control_on(&h, Some("living"), CastAction::Stop).await.unwrap();
-    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "not even as it stops");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest_fail() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;

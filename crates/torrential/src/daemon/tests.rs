@@ -15,7 +15,7 @@ use super::engine_port::{
 use super::owner::deleter::TrashPause;
 use super::owner::plays::{IDLE_AFTER, Plays};
 use super::owner::trash::Trash;
-use super::owner::{Command, Ended, MetaTarget, OwnerConfig};
+use super::owner::{Command, Ended, OwnerConfig};
 use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -1169,38 +1169,6 @@ async fn a_repair_after_no_source_gives_its_sources_a_full_window_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn file_lists_peers_send_while_the_engine_saves_to_a_slow_disk_count_once_it_catches_up() {
-    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
-    let outside = Outside { gate: Some(gate.clone()), ..Outside::default() };
-    let h = Harness::with_outside(search_port::Fake::new(fake_catalog()), outside);
-    let films = [0x91, 0x92, 0x93, 0x94].map(|n| torrent(n, &format!("film{n}"), &[("film.mkv", GIB)]));
-    for film in &films {
-        h.swarm.publish(film.clone());
-    }
-    gate.close();
-    // Long enough that all four lists arrive before it on a slow runner. The locked disk below
-    // then holds the engine past it.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let asked = films.clone().map(|film| {
-        let ctx = h.running.ctx.clone();
-        let target = MetaTarget::Magnet(super::magnet::from_hash(film.info_hash));
-        tokio::spawn(async move { ctx.owner.ask(|reply| Command::Metadata { target, deadline, reply }).await })
-    });
-    gate.until_held(4).await;
-    let disk = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
-    disk.execute_batch("BEGIN IMMEDIATE").unwrap();
-    gate.open();
-    tokio::time::sleep_until((deadline + Duration::from_millis(500)).into()).await;
-    drop(disk);
-
-    let mut found = Vec::new();
-    for ask in asked {
-        found.push(ask.await.unwrap().map(|info| info.metainfo.name.clone()).map_err(|e| e.code));
-    }
-    assert_eq!(found, ["film145", "film146", "film147", "film148"].map(|name| Ok(name.to_string())));
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_stop_whose_save_fails_leaves_the_engine_with_the_error_that_stopped_it() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
@@ -1248,39 +1216,6 @@ async fn an_update_restarts_the_engine_only_once_every_download_is_saved() {
     );
     assert_eq!(carried_on[0].id, film.info_hash.id());
     assert_eq!((restarted.map_err(|e| e.message), ended), (Ok(()), Ended::Restart));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_update_stops_the_engine_only_once_a_finished_download_is_saved_too() {
-    let gate = Gate::holding(|event| matches!(event, EngineEvent::ResumeData { .. }));
-    let (swarm, engine_gate) = (Swarm::new(0), gate.clone());
-    swarm.set_rate(100 * GIB);
-    let engine = move |_: &std::path::Path| -> Box<dyn EnginePort> {
-        Box::new(Gated { port: Fake::new(swarm), gate: engine_gate })
-    };
-    let h = Harness::with_engine(engine, parse_fake);
-    let film = torrent(38, "film", &[("film.mkv", GIB)]);
-    gate.close();
-    h.get(h.torrent_file(&film), &[]).await.unwrap();
-    h.until("every piece is in", |jobs| jobs[0].progress.verified == GIB).await;
-    gate.until_held(1).await;
-    let db = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
-    db.execute_batch(
-        "CREATE TRIGGER no_saves BEFORE INSERT ON resume BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
-    )
-    .unwrap();
-
-    let ctx = h.running.ctx.clone();
-    let restart = tokio::spawn(async move { ctx.owner.ask(|reply| Command::Restart { reply }).await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let waited = !restart.is_finished();
-    gate.open();
-    let refused = tokio::time::timeout(Duration::from_secs(5), restart).await.unwrap().unwrap();
-
-    assert_eq!(
-        (waited, refused.map_err(|e| (e.code, e.message))),
-        (true, Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into())))
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

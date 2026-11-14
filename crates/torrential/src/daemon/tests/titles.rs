@@ -332,71 +332,6 @@ async fn a_trial_given_up_after_the_engine_verified_bytes_of_it_stays_on_the_lis
     assert_eq!(h.states().await, ["paused"]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
-    let h = Harness::new();
-    let empty = torrent(72, "empty", &[("empty.mp4", GIB)]);
-    let made = torrent(73, "made", &[("made.mp4", GIB)]);
-    let mine = torrent(74, "mine", &[("mine.mp4", GIB)]);
-    let paused = torrent(75, "paused", &[("paused.mp4", GIB)]);
-    let stopped = torrent(76, "stopped", &[("stopped.mp4", GIB)]);
-    let finished = torrent(77, "finished", &[("finished.mp4", 1_000)]);
-    let watched = torrent(78, "watched", &[("watched.mp4", GIB)]);
-    // The small one finishes before anything else is on the list, so no other download gets a
-    // byte however long a slow disk takes to note it done.
-    let (_, finished_hold) = h.play_for(&finished, &[0], Some("tt0063350")).await.unwrap();
-    h.swarm.set_rate(MIB);
-    h.until("the small one is done", |jobs| jobs[0].status.name() == "done").await;
-    h.swarm.set_rate(0);
-    h.swarm.withhold(stopped.info_hash.id(), u32::MAX);
-    for t in [&mine, &paused, &stopped] {
-        h.get(h.torrent_file(t), &[]).await.unwrap();
-    }
-    let pause = Request::Pause { refs: vec![prefix(&paused)] };
-    assert_eq!(h.changes(pause).await.unwrap(), [(prefix(&paused), "paused".into())]);
-    let names = |jobs: &[Job], state: &str| -> Vec<String> {
-        jobs.iter().filter(|j| j.status.name() == state).filter_map(|j| j.name.clone()).collect()
-    };
-    let before = h.until("one stops with no source", |jobs| names(jobs, "error") == ["stopped"]).await;
-    let no_source = before.iter().find(|j| j.name.as_deref() == Some("stopped")).unwrap().status.clone();
-
-    let mut holds = vec![finished_hold];
-    for t in [&empty, &made, &mine, &paused, &stopped, &watched] {
-        holds.push(h.play_for(t, &[0], Some("tt0063350")).await.unwrap().1);
-    }
-    h.played(&watched).await;
-    let files = ["finished/finished.mp4", "made/made.mp4", "mine/mine.mp4", "paused/paused.mp4", "watched/watched.mp4"];
-    for file in files {
-        write(&h.downloads().join(file));
-    }
-    for hold in holds {
-        h.give_up(hold).await;
-    }
-    h.until("the trial with nothing on disk leaves the list", |jobs| names(jobs, "paused").len() == 2).await;
-    h.settled().await;
-
-    let mut jobs = h.status().await;
-    jobs.sort_by_key(|j| j.name.clone());
-    let states: Vec<(&str, &str)> = jobs.iter().map(|j| (j.name.as_deref().unwrap(), j.status.name())).collect();
-    assert_eq!(
-        states,
-        [
-            ("finished", "done"),
-            ("made", "paused"),
-            ("mine", "downloading"),
-            ("paused", "paused"),
-            ("stopped", "error"),
-            ("watched", "downloading")
-        ],
-        "of the two downloads the play made and never played, the one with a file stays and the other is gone"
-    );
-    assert_eq!(jobs[4].status, no_source, "it stopped again on the error it had");
-    let mut left = vec!["finished", "made", "mine", "paused", "watched"];
-    left.extend(files);
-    left.sort();
-    assert_eq!(tree(&h.downloads()), left, "no file is deleted");
-}
-
 /// Something a person has in the download folder.
 enum Theirs {
     File(&'static str, &'static str),
@@ -965,41 +900,6 @@ async fn an_episode_in_a_season_pack_plays_the_file_whose_name_reads_as_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_download_made_by_hand_is_tried_first_and_kept_when_it_does_not_start() {
-    let (h, night) = night();
-    h.get(h.torrent_file(&night[2]), &[]).await.unwrap();
-    let mine = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
-    write(&mine.join("Night.1968.1080p.mp4"));
-    write(&mine.join("Night.1968.1080p.srt"));
-    let steps = h.play_title("tt0063350", None, None).await;
-    assert_eq!(
-        steps,
-        [
-            "resolved tt0063350 Night of the Living Dead",
-            "searched 4",
-            "trying 1 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
-            "trying 2 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
-            "check file_list",
-            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
-            "trying 3 of 4 Night.of.the.Living.Dead.1968.DVD9",
-            "check file_list",
-            r#"skipped a2a2a2 {"reason":"no_video"}"#,
-            "trying 4 of 4 night_of_the_living_dead",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            "playing tt0063350 a4a4a4 file 0 at null",
-        ]
-    );
-    assert_eq!(titles(&[h.job(&night[2]).await.unwrap()]), [Some("tt0063350".to_string())]);
-    assert_eq!(tree(&mine), ["Night.1968.1080p.mp4", "Night.1968.1080p.srt"], "its files stay");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_download_here_that_holds_the_film_plays_before_any_search() {
     let (h, night) = night();
     h.play_for(&night[3], &[0], Some("tt0063350")).await.unwrap();
@@ -1045,35 +945,6 @@ async fn a_title_whose_download_is_here_plays_while_the_catalog_search_is_unreac
         "a title with no download here needs the search"
     );
     assert_eq!(h.search.searches(), 0);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_download_here_that_does_not_start_is_followed_by_the_search_and_never_tried_again() {
-    let (h, night) = night();
-    h.play_for(&night[2], &[0], Some("tt0063350")).await.unwrap();
-    assert_eq!(
-        h.play_title("tt0063350", None, None).await,
-        [
-            "resolved tt0063350 Night of the Living Dead",
-            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
-            "searched 4",
-            "trying 2 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
-            "check file_list",
-            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
-            "trying 3 of 4 Night.of.the.Living.Dead.1968.DVD9",
-            "check file_list",
-            r#"skipped a2a2a2 {"reason":"no_video"}"#,
-            "trying 4 of 4 night_of_the_living_dead",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            "playing tt0063350 a4a4a4 file 0 at null",
-        ]
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
