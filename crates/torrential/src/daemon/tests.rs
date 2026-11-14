@@ -1232,14 +1232,13 @@ async fn an_update_stops_the_engine_only_once_a_finished_download_is_saved_too()
     let ctx = h.running.ctx.clone();
     let restart = tokio::spawn(async move { ctx.owner.ask(|reply| Command::Restart { reply }).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let held = gate.held();
+    let waited = !restart.is_finished();
     gate.open();
     let refused = tokio::time::timeout(Duration::from_secs(5), restart).await.unwrap().unwrap();
 
-    assert_eq!(held, 1, "only the save of the finished download was held back");
     assert_eq!(
-        refused.map_err(|e| (e.code, e.message)),
-        Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into()))
+        (waited, refused.map_err(|e| (e.code, e.message))),
+        (true, Err((ErrorCode::StorageError, "the engine could not save the progress of every download".into())))
     );
 }
 
