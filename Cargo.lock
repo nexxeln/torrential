@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "torrential"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-engine"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cmake",
  "cxx",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-search"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "futures-util",
  "percent-encoding",
@@ -3314,7 +3314,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-tui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crossterm",
  "insta",

@@ -10,8 +10,13 @@ use url::Url;
 use super::ssdp::at;
 use super::xml;
 
-/// How long a TV may take to answer one request. A TV that is off answers none.
+/// How long a TV may take to answer a question about what it plays. A TV that is off answers none.
 const ANSWER_WITHIN: Duration = Duration::from_secs(4);
+/// How long a TV may take to answer an action that changes what it plays. Some TVs open and read
+/// the video before they answer SetAVTransportURI or Play, which can take 10 s or more.
+const ACT_WITHIN: Duration = Duration::from_secs(30);
+/// The actions that change what a TV plays.
+const ACTIONS: [&str; 5] = ["SetAVTransportURI", "Play", "Pause", "Seek", "Stop"];
 /// The most of a description or an answer torrential reads. A TV's run to a few kilobytes.
 const READ_AT_MOST: usize = 256 * 1024;
 const AV_TRANSPORT: &str = "urn:schemas-upnp-org:service:AVTransport:";
@@ -198,7 +203,7 @@ pub async fn call(
     );
     let sent = http
         .post(service.control.clone())
-        .timeout(ANSWER_WITHIN)
+        .timeout(if ACTIONS.contains(&action) { ACT_WITHIN } else { ANSWER_WITHIN })
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
         .header("SOAPAction", format!("\"{}#{action}\"", service.kind))
         .body(body)
