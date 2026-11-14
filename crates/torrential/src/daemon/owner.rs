@@ -302,7 +302,7 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
-    /// The downloads someone streams now, which the other downloads make room for.
+    /// Who streams which download now, and how far ahead of each player its film is.
     streams: Streams,
     /// The downloads title plays are testing or have yet to put back. Only in memory: after a
     /// restart no play is running, so nothing is under test and every download stays as it is.

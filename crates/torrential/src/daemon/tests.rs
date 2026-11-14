@@ -1674,7 +1674,7 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn while_a_film_streams_the_other_downloads_trickle() {
+async fn while_a_film_is_behind_its_player_the_other_downloads_trickle() {
     let h = Harness::new();
     h.swarm.set_rate(8 * MIB);
     let iso = torrent(99, "iso", &[("disc.iso", 40 * GIB)]);
