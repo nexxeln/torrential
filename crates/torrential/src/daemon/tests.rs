@@ -1177,7 +1177,9 @@ async fn file_lists_peers_send_while_the_engine_saves_to_a_slow_disk_count_once_
         h.swarm.publish(film.clone());
     }
     gate.close();
-    let deadline = Instant::now() + Duration::from_millis(300);
+    // Long enough that all four lists arrive before it on a slow runner. The locked disk below
+    // then holds the engine past it.
+    let deadline = Instant::now() + Duration::from_secs(3);
     let asked = films.clone().map(|film| {
         let ctx = h.running.ctx.clone();
         let target = MetaTarget::Magnet(super::magnet::from_hash(film.info_hash));
@@ -1187,7 +1189,7 @@ async fn file_lists_peers_send_while_the_engine_saves_to_a_slow_disk_count_once_
     let disk = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
     disk.execute_batch("BEGIN IMMEDIATE").unwrap();
     gate.open();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep_until((deadline + Duration::from_millis(500)).into()).await;
     drop(disk);
 
     let mut found = Vec::new();
