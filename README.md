@@ -1,9 +1,10 @@
 <h1 align="center">torrential</h1>
 
-<p align="center">Find a film or a show, press Play, and watch it while it downloads. From your browser, your terminal, or your coding agent.</p>
+<p align="center">Your Mac is the library, and every screen in the house plays from it. Find a film or a show, press Play, and watch it while it downloads. Use a browser, a phone, a TV, your terminal, or your coding agent.</p>
 
 <p align="center">
-  <img src="docs/web-home.png" alt="The web app's home page, with a film to continue watching and a row of saved films" width="800">
+  <img src="docs/home.webp" alt="The web app's home page on a Mac, with two titles to continue watching and four saved titles" width="560">
+  <img src="docs/home-phone.webp" alt="The same home page on a phone" width="226">
 </p>
 
 ## Install
@@ -13,6 +14,8 @@ curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh 
 ```
 
 This puts one file at `~/.local/bin/torrential`. It runs on macOS 14 or later on Apple silicon, and on 64-bit Linux.
+
+The engine starts at login and keeps running, so your phone and TV can always reach it. It resumes downloads after a restart and installs updates once nothing plays. `torrential engine uninstall` stops it starting at login.
 
 <details>
 <summary>Build from source</summary>
@@ -27,35 +30,43 @@ nix develop -c cargo install --path crates/torrential
 
 </details>
 
-## In your browser
+## Watch on the Mac
 
 ```sh
 torrential web
 ```
 
-Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your screen and language, checks that it starts, and moves to the next one when it does not. What you play downloads into a folder of torrential's own, which holds 20 GiB. When it is full, the plays you watched longest ago leave first. The titles you saved stay, and so does the film you watched last, even when it alone is larger. A play no one has watched for 10 minutes stops downloading until you play it again. Playing never deletes or writes over a file of yours.
+Search by name and you get one card for each film or show, not a list of torrents. Press Play. torrential picks the torrent that suits your language and the screen that pressed Play, and moves to the next one if it does not start. The film you watch gets the bandwidth before other downloads.
+
+What you play goes to a folder of torrential's own, capped at 20 GiB. When it fills, the plays watched longest ago leave first, but never the film you watched last or a title you saved. A download you start yourself keeps its files, and deleting it moves them to the Trash.
+
+torrential converts MKV files and surround sound for the browser with [ffmpeg](https://ffmpeg.org), and fetches ffmpeg the first time a file needs it.
+
+## Add a phone or a TV
 
 <p align="center">
-  <img src="docs/web-title.png" alt="The page of Night of the Living Dead in the web app, with its poster, synopsis, and a Play button" width="800">
+  <img src="docs/add-device.webp" alt="The Devices page on the Mac, with a QR code, the address mac-mini.local:47919, a six-digit code, and one paired iPhone" width="800">
 </p>
 
-It plays while it downloads. Jump anywhere and torrential fetches that part first. It remembers where you stopped in each film and episode, and Play continues there, even from another torrent. Subtitles come from the file, or are found online when it has none.
+On the Mac, open **Devices** and choose **Add a device**, or run `torrential devices add`. A phone scans the QR code. A TV opens the address in its browser and enters the code. The device needs no account and stores nothing, and the web app fits its touch screen or remote. A device you did not add gets the pairing page and nothing else.
+
+## Play on TV
 
 <p align="center">
-  <img src="docs/web-player.png" alt="Sintel playing in the browser while it downloads, with its chapters and the downloaded parts marked on the seek bar" width="800">
+  <img src="docs/play-on-tv.webp" alt="Night of the Living Dead on a phone, with the Play on TV list showing an LG TV and a Samsung TV" width="280">
 </p>
 
-To choose a torrent yourself, open Sources on any title. The plain torrent search is one click away, for everything that is not a film or a show.
+LG, Samsung, Sony, and most other smart TVs play over DLNA. On a title page, from the Mac or a phone you added, choose **Play on TV** and pick the TV. The phone then works as the remote, and torrential picks a copy in a format the TV plays.
 
-Browsers cannot read every format, so torrential converts MKV files and surround sound with [ffmpeg](https://ffmpeg.org) as you watch. It uses the ffmpeg you have, or fetches its own the first time a file needs it.
+```sh
+torrential tv                    # list the TVs on the home network
+torrential tv play tt0063350     # play a film on the TV
+torrential tv seek 1:02:30       # or pause, resume, volume, and stop
+```
 
 ## In your terminal
 
-Run `torrential` to open the terminal UI. It opens on what you were watching and the titles you saved, finds films and shows by name, and plays them. Press `d` for your downloads:
-
-<p align="center">
-  <img src="docs/tui.gif" alt="The terminal UI searches for Big Buck Bunny, picks one file, and downloads it while the gauge fills" width="800">
-</p>
+Run `torrential` to open the terminal UI on what you were watching and the titles you saved. Press `/` to find a film or a show, Enter to open it and play it in IINA, mpv, or VLC, and `d` for your downloads.
 
 Or run the commands yourself:
 
@@ -78,13 +89,11 @@ torrential status                            # list your downloads
 torrential skill install
 ```
 
-This teaches Claude Code, Codex, Gemini CLI, Cursor, and other agents to use torrential. Then ask in plain words, such as "play Night of the Living Dead" or "download the latest Arch Linux ISO". Downloads run in a background engine, so they continue after the agent's session ends.
+This teaches Claude Code, Codex, Gemini CLI, Cursor, and other agents to use torrential. Then ask in plain words, such as "play Night of the Living Dead on the TV" or "download the latest Arch Linux ISO". Downloads continue after the agent's session ends.
 
 ## Settings
 
-Results are ranked for your screen, CPU, and language. `torrential setup` shows what it found and lets you change it.
-
-Film and show details come from Cinemeta and IMDb. Everything else is in `~/.config/torrential/config.yaml`:
+`torrential setup` shows the screen and language torrential found on the Mac and lets you change them. Film and show details come from Cinemeta and IMDb. Everything else is in `~/.config/torrential/config.yaml`:
 
 ```yaml
 downloads:
@@ -100,8 +109,6 @@ ffmpeg:
   fetch: false                # do not fetch ffmpeg when it is not installed
 updates: notify               # say when a new version is out instead of installing it, or off
 ```
-
-The engine starts when you log in and keeps running. It installs new versions in the background and starts them once nothing is playing. `torrential engine uninstall` stops it starting at login.
 
 ## It never seeds
 
