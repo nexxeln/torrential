@@ -1,6 +1,6 @@
-//! What plays now: every lease the owner hands out for a stream of a file, and each play while it
-//! starts. A switch to a newer version waits until nothing plays, and then lets nothing start until
-//! the engine stops, so a switch never cuts a film off.
+//! What plays now: every lease the owner hands out for a stream of a file, each play while it
+//! starts, and each cast until it ends. A switch to a newer version waits until nothing plays, and
+//! then lets nothing start until the engine stops, so a switch never cuts a film off.
 
 use std::sync::Arc;
 
