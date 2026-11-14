@@ -10,6 +10,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
@@ -19,6 +20,36 @@ use torrential_core::{Error, ErrorCode, TorrentId};
 use super::super::log;
 use super::super::store::{Store, Tombstone};
 use super::trash::Trash;
+
+/// What happens to a file between the check that it is the file to move to the Trash and the
+/// move: nothing, except in a test that changes the file in between.
+#[derive(Clone)]
+pub struct TrashPause(Arc<dyn Fn(&Path) + Send + Sync>);
+
+impl TrashPause {
+    /// Waits `pause`, for a person testing the engine to change the file by hand.
+    pub fn sleep(pause: Duration) -> Self {
+        Self(Arc::new(move |_: &Path| std::thread::sleep(pause)))
+    }
+
+    /// Runs `change` on the file, as a test changes it at that moment.
+    #[cfg(test)]
+    pub fn run(change: impl Fn(&Path) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(change))
+    }
+}
+
+impl Default for TrashPause {
+    fn default() -> Self {
+        Self(Arc::new(|_: &Path| {}))
+    }
+}
+
+impl std::fmt::Debug for TrashPause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TrashPause")
+    }
+}
 
 /// Which file or folder something is, whatever path reaches it. A folder moved away keeps its
 /// identity. A link, or another folder, put in its place has another.
@@ -231,9 +262,7 @@ enum Outcome {
 pub struct Deleter {
     plays: Result<Root, String>,
     trash: Trash,
-    /// How long a file waits between the check that it is the file to move to the Trash and the
-    /// move: no time, except in a test that changes it in between.
-    trash_pause: Duration,
+    trash_pause: TrashPause,
     pending: Vec<Pending>,
 }
 
@@ -242,7 +271,7 @@ impl Deleter {
     /// folder there is not the one the engine used before, the plays it had stay where they are,
     /// stopped, as downloads in a folder the person chose. When it cannot be used, its plays stop
     /// and say why.
-    pub fn open(plays: &Path, trash: Trash, trash_pause: Duration, store: &mut Store) -> Result<Deleter, Error> {
+    pub fn open(plays: &Path, trash: Trash, trash_pause: TrashPause, store: &mut Store) -> Result<Deleter, Error> {
         let root = Root::open(plays);
         let stopped = Error::new(
             ErrorCode::PathConflict,
@@ -543,7 +572,7 @@ impl Deleter {
                             report.kept.push((path, "another download uses it".into()))
                         }
                         Ok(_) => {
-                            std::thread::sleep(self.trash_pause);
+                            (self.trash_pause.0)(&path);
                             match self.trash.put(&parent, last, &path, pin.file) {
                                 Ok(()) => report.trashed.push(path),
                                 Err(why) => report.kept.push((path, why)),
@@ -781,7 +810,7 @@ mod tests {
     #[test]
     fn a_play_folder_goes_and_a_link_inside_it_is_removed_without_touching_what_it_points_to() {
         let Place { root, store, .. } = &mut place();
-        let mut deleter = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let outside = root.join("outside");
         write(&outside.join("films/keep.mp4"), "keep");
         write(&outside.join("keep.mp4"), "keep");
@@ -807,7 +836,7 @@ mod tests {
     #[test]
     fn a_play_folder_on_record_that_was_replaced_before_a_start_is_left_alone() {
         let Place { root, store, .. } = &mut place();
-        let deleter = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap();
+        let deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let (folder, made) = deleter.make_play(id(1)).unwrap();
         write(&folder.join("film.mp4"), "film");
         let name = PlayName::parse("0101010101010101-0").unwrap();
@@ -816,7 +845,7 @@ mod tests {
         std::fs::rename(&folder, root.join("plays/moved")).unwrap();
         write(&folder.join("notes.txt"), "the person's own notes");
 
-        let mut deleter = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
         assert_eq!(std::fs::read_to_string(folder.join("notes.txt")).unwrap(), "the person's own notes");
         assert_eq!(std::fs::read_to_string(root.join("plays/moved/film.mp4")).unwrap(), "film");
@@ -854,7 +883,7 @@ mod tests {
     #[test]
     fn a_disk_mounted_inside_a_play_folder_is_left_alone() {
         let Place { root, store, .. } = &mut place();
-        let mut deleter = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let (folder, made) = deleter.make_play(id(1)).unwrap();
         write(&folder.join("film.mp4"), "film");
         let Some(_disk) = Mounted::at(&folder.join("extras"), &root.join("disk.dmg")) else {
@@ -883,7 +912,7 @@ mod tests {
         };
         let dir = root.join("disk/Downloads");
         write(&dir.join("Set/a.mkv"), "a");
-        let mut deleter = Deleter::open(&root.join("plays"), Trash::Finder, Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), Trash::Finder, TrashPause::default(), store).unwrap();
         deleter.remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv"]) })).unwrap();
 
         let trashed = vec![dir.join("Set/a.mkv")];
@@ -939,7 +968,7 @@ mod tests {
             return;
         }
         let Place { root, store, .. } = &mut place();
-        let mut deleter = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let (folder, made) = deleter.make_play(id(1)).unwrap();
         write(&folder.join("Film/film.mp4"), "film");
         write(&folder.join("film.srt"), "subtitles");
@@ -948,7 +977,8 @@ mod tests {
         let took = 3 << 30;
         deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: took })).unwrap();
         run(&mut deleter, store, &InUse::default());
-        let restarted = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap().play_bytes();
+        let restarted =
+            Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap().play_bytes();
         shut(0o755);
         assert_eq!((deleter.play_bytes(), restarted), (took, took));
     }
@@ -959,7 +989,7 @@ mod tests {
         write(&root.join("disk/plays/0101010101010101-0/film.mp4"), "film");
         std::fs::create_dir(root.join("data")).unwrap();
         symlink(root.join("disk/plays"), root.join("data/plays")).unwrap();
-        let mut deleter = Deleter::open(&root.join("data/plays"), trash(root), Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("data/plays"), trash(root), TrashPause::default(), store).unwrap();
         let why = format!(
             "torrential cannot use the plays folder {}: it is a link, and torrential deletes plays only in a folder of its own",
             root.join("data/plays").display()
@@ -990,7 +1020,7 @@ mod tests {
         symlink(outside.join("extras"), dir.join("Set/extras")).unwrap();
         let mut in_use = InUse::default();
         in_use.add(&root.join("Other"), &[dir.join("Set/shared.nfo")]).unwrap();
-        let mut deleter = Deleter::open(&root.join("plays"), trash(root), Duration::ZERO, store).unwrap();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let all = [
             "Set/a.mkv",
             "Set/docs/b.txt",

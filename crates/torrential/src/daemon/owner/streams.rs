@@ -21,7 +21,8 @@ const BEHIND: Duration = Duration::from_secs(60);
 /// caps change at most about once a minute. Its peers take up to half a minute to come back
 /// once the others are held again, which `BEHIND` leaves room for.
 const AHEAD: Duration = Duration::from_secs(120);
-/// A film whose player has taken nothing for this long is paused, and holds nothing back.
+/// A film whose players have taken nothing and asked for nothing for this long is paused, and
+/// holds nothing back.
 const IDLE: Duration = Duration::from_secs(60);
 /// What a held-back download may take, so its peers stay connected.
 const TRICKLE: NonZeroU32 = NonZeroU32::new(64 * 1024).unwrap();
@@ -31,21 +32,41 @@ const GUESSED_RUNTIME: Duration = Duration::from_secs(45 * 60);
 /// How often the other downloads' limits follow the films, and each lead is measured.
 const DECIDE_EVERY: Duration = Duration::from_secs(1);
 
+/// What a player does with one answer's bytes.
+#[derive(Clone, Copy, Default, Debug)]
+enum Taking {
+    /// Nothing reads through the lease yet. Nothing ever reads through a cast's.
+    #[default]
+    Nothing,
+    /// The player waits for the engine to write the bytes it asked for.
+    Waiting,
+    /// The answer has handed the player bytes it has yet to take, since then.
+    Since(Instant),
+}
+
 /// How far one answer has got through the file it sends a player.
 #[derive(Clone, Copy, Default, Debug)]
 struct Reading {
     /// The next byte the answer sends.
     at: u64,
-    /// When the answer began handing the player bytes it has yet to take.
-    writing_since: Option<Instant>,
+    taking: Taking,
     /// How long the film on disk after `at` plays, once measured.
     lead: Option<Duration>,
 }
 
 impl Reading {
-    /// Whether the player has left the answer's bytes untaken so long that it must be paused.
-    fn idle(&self, now: Instant) -> bool {
-        self.writing_since.is_some_and(|since| now.duration_since(since) >= IDLE)
+    /// When the player last took bytes or asked for more, once it has.
+    fn read_at(&self, now: Instant) -> Option<Instant> {
+        match self.taking {
+            Taking::Nothing => None,
+            Taking::Waiting => Some(now),
+            Taking::Since(since) => Some(since),
+        }
+    }
+
+    /// Whether the player has taken bytes or asked for more within `IDLE`.
+    fn reading(&self, now: Instant) -> bool {
+        self.read_at(now).is_some_and(|at| now.duration_since(at) < IDLE)
     }
 }
 
@@ -53,6 +74,8 @@ impl Reading {
 /// also counts as playing, which holds off an update's switch.
 pub struct Lease {
     reading: Arc<Mutex<Reading>>,
+    /// When a player last read the download through an answer that has ended.
+    ended: Arc<Mutex<Option<Instant>>>,
     _playing: Open,
 }
 
@@ -60,13 +83,13 @@ impl Lease {
     /// The answer waits for the engine to write the bytes at `at`.
     pub fn waiting(&self, at: u64) {
         let mut reading = self.reading.lock().expect("no holder panics");
-        (reading.at, reading.writing_since) = (at, None);
+        (reading.at, reading.taking) = (at, Taking::Waiting);
     }
 
     /// The answer hands the player the bytes at `at`.
     pub fn writing(&self, at: u64) {
         let mut reading = self.reading.lock().expect("no holder panics");
-        (reading.at, reading.writing_since) = (at, Some(Instant::now()));
+        (reading.at, reading.taking) = (at, Taking::Since(Instant::now()));
     }
 
     /// Measures how far the film on disk runs ahead of the answer, at once and then each second
@@ -92,6 +115,14 @@ impl Lease {
             self.reading.lock().expect("no holder panics").lead = Some(measured);
             tokio::time::sleep(DECIDE_EVERY).await;
         }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let read_at = self.reading.lock().expect("no holder panics").read_at(Instant::now());
+        let mut ended = self.ended.lock().expect("no holder panics");
+        *ended = (*ended).max(read_at);
     }
 }
 
@@ -123,12 +154,11 @@ enum Others {
     Held,
 }
 
-/// How the other downloads stand, from how they stood and the readings of the films still
-/// downloading. A lead between the two marks leaves them as they were. A lease no answer has
-/// measured, like the one a cast holds on its download, counts for nothing.
-fn decide(before: Others, readings: impl IntoIterator<Item = Reading>, now: Instant) -> Others {
+/// How the other downloads stand, from how they stood and how far each film being watched runs
+/// ahead of its players. A lead between the two marks leaves them as they were.
+fn decide(before: Others, leads: impl IntoIterator<Item = Duration>) -> Others {
     let mut after = Others::Free;
-    for lead in readings.into_iter().filter(|reading| !reading.idle(now)).filter_map(|reading| reading.lead) {
+    for lead in leads {
         if lead < BEHIND {
             return Others::Held;
         }
@@ -139,17 +169,28 @@ fn decide(before: Others, readings: impl IntoIterator<Item = Reading>, now: Inst
     after
 }
 
-/// Whether someone is watching a download now: a reader an answer has measured, that has taken
-/// something lately. A cast's lease, which nothing reads through, does not count, so a paused
-/// cast's download is held back like any other.
-fn watched(readings: &[Reading], now: Instant) -> bool {
-    readings.iter().any(|reading| reading.lead.is_some() && !reading.idle(now))
+/// How far a download runs ahead of the players watching it, if anyone is. It is watched from a
+/// player's first read until its players have been idle for `IDLE`, through the gap between one
+/// answer and the next, like the one between ffprobe's read and the player's. While no answer
+/// reading it has measured its lead, it counts as behind. `ended` is when a player last read it
+/// through an answer that has ended. A cast's lease, which nothing reads through, does not count,
+/// so a paused cast's download is held back like any other.
+fn watched(readings: &[Reading], ended: Option<Instant>, now: Instant) -> Option<Duration> {
+    let read_at = readings.iter().filter_map(|reading| reading.read_at(now)).chain(ended).max()?;
+    if now.duration_since(read_at) >= IDLE {
+        return None;
+    }
+    let leads = readings.iter().filter(|reading| reading.reading(now)).filter_map(|reading| reading.lead);
+    Some(leads.min().unwrap_or(Duration::ZERO))
 }
 
 pub struct Streams {
     /// The answers streaming each download. A lease holds each reading for as long as it lasts,
     /// and a download stays until the owner notes that its last stream closed.
     readers: BTreeMap<TorrentId, Vec<Weak<Mutex<Reading>>>>,
+    /// When a player last read each download through an answer that has ended. A download stays
+    /// while a lease holds it, or until that read is `IDLE` old.
+    ended: BTreeMap<TorrentId, Arc<Mutex<Option<Instant>>>>,
     /// What plays across the engine, which a lease adds to.
     playing: Playing,
     others: Others,
@@ -160,7 +201,14 @@ pub struct Streams {
 
 impl Streams {
     pub fn new(playing: Playing) -> Self {
-        Self { readers: BTreeMap::new(), playing, others: Others::default(), held: BTreeSet::new(), decided_at: None }
+        Self {
+            readers: BTreeMap::new(),
+            ended: BTreeMap::new(),
+            playing,
+            others: Others::default(),
+            held: BTreeSet::new(),
+            decided_at: None,
+        }
     }
 }
 
@@ -178,10 +226,11 @@ impl Owner {
         let first = !self.streamed_now(id);
         let reading = Arc::default();
         self.streams.readers.entry(id).or_default().push(Arc::downgrade(&reading));
+        let ended = self.streams.ended.entry(id).or_default().clone();
         if first {
             self.first_stream(id);
         }
-        Ok(Lease { reading, _playing: playing })
+        Ok(Lease { reading, ended, _playing: playing })
     }
 
     /// Whether someone holds a lease on `id`.
@@ -210,14 +259,16 @@ impl Owner {
             return;
         }
         streams.decided_at = Some(now);
-        let readings = |id: &TorrentId| -> Vec<Reading> {
+        let lead = |id: &TorrentId| -> Option<Duration> {
             let readers = streams.readers.get(id).into_iter().flatten().filter_map(Weak::upgrade);
-            readers.map(|reading| *reading.lock().expect("no holder panics")).collect()
+            let readings: Vec<Reading> = readers.map(|reading| *reading.lock().expect("no holder panics")).collect();
+            let ended = streams.ended.get(id).and_then(|ended| *ended.lock().expect("no holder panics"));
+            watched(&readings, ended, now)
         };
-        let downloading: Vec<(TorrentId, Vec<Reading>)> =
-            self.jobs.values().filter(|job| downloading(job)).map(|job| (job.id(), readings(&job.id()))).collect();
+        let downloading: Vec<(TorrentId, Option<Duration>)> =
+            self.jobs.values().filter(|job| downloading(job)).map(|job| (job.id(), lead(&job.id()))).collect();
         let before = streams.others;
-        streams.others = decide(before, downloading.iter().flat_map(|(_, r)| r.iter().copied()), now);
+        streams.others = decide(before, downloading.iter().filter_map(|(_, lead)| *lead));
         match (before, streams.others) {
             (Others::Free, Others::Held) => super::super::log(&format!(
                 "a film is less than {}s ahead of its player, so the other downloads trickle",
@@ -231,9 +282,7 @@ impl Owner {
         }
         let held: BTreeSet<TorrentId> = match streams.others {
             Others::Free => BTreeSet::new(),
-            Others::Held => {
-                downloading.iter().filter(|(_, readings)| !watched(readings, now)).map(|(id, _)| *id).collect()
-            }
+            Others::Held => downloading.iter().filter(|(_, lead)| lead.is_none()).map(|(id, _)| *id).collect(),
         };
         // Sent every time, for a download the engine adds again starts with no limit.
         for &id in &held {
@@ -245,6 +294,10 @@ impl Owner {
             }
         }
         streams.held = held;
+        streams.ended.retain(|_, ended| {
+            Arc::strong_count(ended) > 1
+                || ended.lock().expect("no holder panics").is_some_and(|at| now.duration_since(at) < IDLE)
+        });
     }
 }
 
@@ -252,54 +305,69 @@ impl Owner {
 mod tests {
     use super::*;
 
+    fn secs(seconds: u64) -> Duration {
+        Duration::from_secs(seconds)
+    }
+
     fn ahead(seconds: u64) -> Reading {
-        Reading { at: 0, writing_since: None, lead: Some(Duration::from_secs(seconds)) }
+        Reading { at: 0, taking: Taking::Waiting, lead: Some(secs(seconds)) }
     }
 
     #[test]
     fn a_film_less_than_60_s_ahead_of_its_player_holds_the_other_downloads_back() {
-        let now = Instant::now();
-        assert_eq!(decide(Others::Free, [ahead(59)], now), Others::Held);
-        assert_eq!(decide(Others::Free, [ahead(60)], now), Others::Free);
+        assert_eq!(decide(Others::Free, [secs(59)]), Others::Held);
+        assert_eq!(decide(Others::Free, [secs(60)]), Others::Free);
     }
 
     #[test]
     fn the_other_downloads_go_once_every_film_is_120_s_ahead_of_its_player() {
+        assert_eq!(decide(Others::Held, [secs(119)]), Others::Held);
+        assert_eq!(decide(Others::Held, [secs(120)]), Others::Free);
+        assert_eq!(decide(Others::Held, [secs(120), secs(90)]), Others::Held);
+        assert_eq!(decide(Others::Held, []), Others::Free);
+    }
+
+    #[test]
+    fn a_second_film_opening_behind_holds_the_others_back_though_the_first_is_ahead() {
+        assert_eq!(decide(Others::Free, [secs(120), secs(10)]), Others::Held);
+    }
+
+    #[test]
+    fn a_film_runs_as_far_ahead_as_its_least_ahead_player() {
         let now = Instant::now();
-        assert_eq!(decide(Others::Held, [ahead(119)], now), Others::Held);
-        assert_eq!(decide(Others::Held, [ahead(120)], now), Others::Free);
-        assert_eq!(decide(Others::Held, [ahead(120), ahead(90)], now), Others::Held);
-        assert_eq!(decide(Others::Held, [], now), Others::Free);
+        assert_eq!(watched(&[ahead(200), ahead(10)], None, now), Some(secs(10)));
     }
 
     #[test]
     fn a_download_only_a_cast_holds_is_not_watched_and_is_held_back_with_the_others() {
         let now = Instant::now();
-        let cast = Reading { at: 0, writing_since: None, lead: None };
-        assert!(!watched(&[cast], now));
-        assert!(watched(&[cast, ahead(10)], now));
+        let cast = Reading::default();
+        assert_eq!(watched(&[cast], None, now), None);
+        assert_eq!(watched(&[cast, ahead(10)], None, now), Some(secs(10)));
     }
 
     #[test]
     fn a_film_whose_player_has_taken_nothing_for_a_minute_holds_nothing_back() {
         let wrote = Instant::now();
-        let paused = Reading { writing_since: Some(wrote), ..ahead(0) };
-        assert_eq!(decide(Others::Held, [paused], wrote + Duration::from_secs(59)), Others::Held);
-        assert_eq!(decide(Others::Held, [paused], wrote + IDLE), Others::Free);
+        let paused = Reading { taking: Taking::Since(wrote), ..ahead(0) };
+        assert_eq!(watched(&[paused], None, wrote + secs(59)), Some(Duration::ZERO));
+        assert_eq!(watched(&[paused], None, wrote + IDLE), None);
     }
 
     #[test]
-    fn a_second_film_opening_behind_holds_the_others_back_though_the_first_is_ahead() {
+    fn a_film_counts_as_behind_from_its_first_read_until_an_answer_measures_it() {
         let now = Instant::now();
-        assert_eq!(decide(Others::Free, [ahead(120), ahead(10)], now), Others::Held);
+        let asked = Reading { at: 0, taking: Taking::Waiting, lead: None };
+        assert_eq!(watched(&[asked], None, now), Some(Duration::ZERO));
     }
 
     #[test]
-    fn a_lease_no_answer_has_measured_holds_nothing_back() {
-        let now = Instant::now();
-        let holding = Reading { lead: None, ..ahead(0) };
-        assert_eq!(decide(Others::Held, [holding], now), Others::Free);
-        assert_eq!(decide(Others::Free, [ahead(120), holding], now), Others::Free);
+    fn a_film_counts_as_behind_between_one_answer_and_the_next_until_a_minute_after_its_last_read() {
+        let read = Instant::now();
+        assert_eq!(watched(&[], Some(read), read + secs(2)), Some(Duration::ZERO));
+        assert_eq!(watched(&[], Some(read), read + secs(59)), Some(Duration::ZERO));
+        assert_eq!(watched(&[], Some(read), read + IDLE), None);
+        assert_eq!(watched(&[ahead(200)], Some(read), read + secs(2)), Some(secs(200)));
     }
 
     #[test]

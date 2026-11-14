@@ -371,7 +371,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         plays: owner::plays::Plays { root: paths.plays(), max: settings.plays_max.0, idle_after: plays_idle(env) },
         trash: trash(env, paths),
         deletion_pause: deletion_pause(env),
-        trash_pause: trash_pause(env),
+        trash_pause: owner::deleter::TrashPause::sleep(trash_pause(env)),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

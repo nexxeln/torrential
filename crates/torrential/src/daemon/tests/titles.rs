@@ -342,6 +342,12 @@ async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
     let stopped = torrent(76, "stopped", &[("stopped.mp4", GIB)]);
     let finished = torrent(77, "finished", &[("finished.mp4", 1_000)]);
     let watched = torrent(78, "watched", &[("watched.mp4", GIB)]);
+    // The small one finishes before anything else is on the list, so no other download gets a
+    // byte however long a slow disk takes to note it done.
+    let (_, finished_hold) = h.play_for(&finished, &[0], Some("tt0063350")).await.unwrap();
+    h.swarm.set_rate(MIB);
+    h.until("the small one is done", |jobs| jobs[0].status.name() == "done").await;
+    h.swarm.set_rate(0);
     h.swarm.withhold(stopped.info_hash.id(), u32::MAX);
     for t in [&mine, &paused, &stopped] {
         h.get(h.torrent_file(t), &[]).await.unwrap();
@@ -354,13 +360,10 @@ async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
     let before = h.until("one stops with no source", |jobs| names(jobs, "error") == ["stopped"]).await;
     let no_source = before.iter().find(|j| j.name.as_deref() == Some("stopped")).unwrap().status.clone();
 
-    let mut holds = Vec::new();
-    for t in [&empty, &made, &mine, &paused, &stopped, &finished, &watched] {
+    let mut holds = vec![finished_hold];
+    for t in [&empty, &made, &mine, &paused, &stopped, &watched] {
         holds.push(h.play_for(t, &[0], Some("tt0063350")).await.unwrap().1);
     }
-    h.swarm.set_rate(MIB);
-    h.until("the small one is done", |jobs| names(jobs, "done") == ["finished"]).await;
-    h.swarm.set_rate(0);
     h.played(&watched).await;
     let files = ["finished/finished.mp4", "made/made.mp4", "mine/mine.mp4", "paused/paused.mp4", "watched/watched.mp4"];
     for file in files {

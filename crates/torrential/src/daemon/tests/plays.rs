@@ -11,7 +11,7 @@ use torrential_core::{ErrorCode, JobStatus, Place, Selection, Target, TorrentId}
 use super::super::admission::{GIB, reserve};
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
 use super::super::owner::Command;
-use super::super::owner::deleter::{Identity, PlayName};
+use super::super::owner::deleter::{Identity, PlayName, TrashPause};
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
@@ -665,9 +665,15 @@ async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_ca
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to_the_trash() {
+    // An editor saves by writing a new file and renaming it over the old one.
+    let save = TrashPause::run(|file| {
+        let draft = file.with_file_name(".notes.txt.swp");
+        std::fs::write(&draft, "the person's own notes").unwrap();
+        std::fs::rename(&draft, file).unwrap();
+    });
     let h = Harness::with_outside(
         super::search_port::Fake::new(vec![]),
-        Outside { trash_pause: Duration::from_secs(1), ..Outside::default() },
+        Outside { trash_pause: save, ..Outside::default() },
     );
     h.swarm.set_rate(100 * GIB);
     let set = torrent(0xc7, "set", &[("notes.txt", MIB)]);
@@ -675,17 +681,8 @@ async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to
     let notes = h.downloads().join("set/notes.txt");
     written(&notes, MIB);
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
-    let saved = notes.clone();
-    // An editor saves by writing a new file and renaming it over the old one.
-    let save = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        let draft = saved.with_file_name(".notes.txt.swp");
-        std::fs::write(&draft, "the person's own notes").unwrap();
-        std::fs::rename(&draft, &saved).unwrap();
-    });
 
     let removed = h.rm(vec![prefix(&set)], true).await;
-    save.join().unwrap();
     let kept = Kept { path: notes.clone(), reason: "it was replaced after you asked to delete it".into() };
     assert_eq!((removed[0].trashed.clone(), removed[0].kept.clone()), (vec![], vec![kept]));
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "the person's own notes");
