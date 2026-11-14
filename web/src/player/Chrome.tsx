@@ -1,12 +1,14 @@
 import { ArrowDownIcon, ArrowLeftIcon, CheckIcon } from "@heroicons/react/16/solid";
 import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
 import type { ApiError, Job, PlayInfo } from "../api";
-import { count, percent, rate, sentence } from "../lib/format";
+import { bytes, count, percent, rate, sentence } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { readable } from "../lib/release";
+import { isTv } from "../lib/tv";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { usePlayer } from "./context";
+import type { Fetching } from "./ffmpeg";
 import type { Heading } from "./Playback";
 import { useVideo } from "./video";
 
@@ -30,8 +32,6 @@ export function Readout({ job }: { job: Job }) {
       return <div>Checking files on disk</div>;
     case "paused":
       return <div>Download paused</div>;
-    case "interrupted":
-      return <div>Download interrupted</div>;
     case "error":
       return <div className="text-error">{sentence(job.error?.message ?? "The download failed")}</div>;
     case "done":
@@ -71,13 +71,13 @@ export function TopBar({ name, heading, file, readout, onBack }: TopBarProps) {
   const title = heading?.title ?? release?.title;
   const under = heading ? heading.detail : episode || release?.tags;
   return (
-    <header className="flex items-start gap-2 bg-linear-to-b from-black/80 via-black/40 to-transparent px-[max(--spacing(3),2vw)] pt-[max(--spacing(3),1.5vh)] pb-16">
+    <header className="flex items-start gap-2 bg-linear-to-b from-black/80 via-black/40 to-transparent pt-(--edge-top) pr-(--edge-right) pb-16 pl-(--edge-left)">
       <button
         type="button"
         aria-label="Back (Esc)"
         title="Back (Esc)"
         onClick={onBack}
-        className="relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15"
+        className="relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15 pointer-coarse:size-11"
       >
         <ArrowLeftIcon className="size-4 fill-ink" />
       </button>
@@ -108,7 +108,7 @@ interface StartingProps {
 export function Starting({ step, name, readout }: StartingProps) {
   const release = name ? readable(name) : null;
   return (
-    <div className="absolute inset-0 flex items-end bg-radial-[at_15%_95%] from-raised to-black to-70% px-[max(--spacing(6),7vw)] pb-[max(--spacing(8),11vh)]">
+    <div className="absolute inset-0 flex items-end bg-radial-[at_15%_95%] from-raised to-black to-70% pr-[max(--spacing(6),7vw,env(safe-area-inset-right))] pb-[max(--spacing(8),11vh)] pl-[max(--spacing(6),7vw,env(safe-area-inset-left))]">
       <div className="flex max-w-xl animate-appear flex-col gap-8 motion-reduce:animate-none">
         {release && (
           <div className="flex flex-col gap-2">
@@ -138,6 +138,16 @@ export function Starting({ step, name, readout }: StartingProps) {
         </ol>
         <div className="min-h-5 text-sm text-soft">{readout}</div>
       </div>
+    </div>
+  );
+}
+
+/** How far the engine's ffmpeg download is, while it fetches the ffmpeg this file needs. */
+export function FfmpegReadout({ fetching: { done, size } }: { fetching: Fetching }) {
+  if (done >= size) return <div>Unpacking ffmpeg</div>;
+  return (
+    <div className="tabular-nums">
+      Fetching ffmpeg, which converts this file for the browser · {bytes(done)} of {bytes(size)}
     </div>
   );
 }
@@ -236,12 +246,12 @@ export function Ended({ next, onNext, onReplay, onBack, back = "Back to search" 
       )}
       <div className="flex flex-wrap justify-center gap-2">
         {next && (
-          <Button variant="primary" onClick={onNext}>
+          <Button variant="primary" autoFocus={isTv()} onClick={onNext}>
             Play now
           </Button>
         )}
         {left !== null && <Button onClick={() => setLeft(null)}>Cancel</Button>}
-        <Button variant={next ? "secondary" : "primary"} onClick={onReplay}>
+        <Button variant={next ? "secondary" : "primary"} autoFocus={isTv() && !next} onClick={onReplay}>
           Watch again
         </Button>
         {left === null && <Button onClick={onBack}>{back}</Button>}
@@ -281,7 +291,7 @@ export function Problem({ title, error, children, fix, note, onRetry, onBack, ba
       )}
       {note && <p className="max-w-[52ch] text-sm text-pretty text-pencil">{note}</p>}
       <div className="flex gap-2">
-        <Button variant="primary" onClick={onRetry}>
+        <Button variant="primary" autoFocus={isTv()} onClick={onRetry}>
           Try again
         </Button>
         <Button onClick={onBack}>{back}</Button>

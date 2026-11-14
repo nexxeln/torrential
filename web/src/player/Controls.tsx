@@ -11,8 +11,9 @@ import {
   TvIcon,
 } from "@heroicons/react/20/solid";
 import { PauseIcon, PlayIcon } from "@heroicons/react/24/solid";
-import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
+import { type ButtonHTMLAttributes, type CSSProperties, type ReactNode, useState } from "react";
 import type { Chapter } from "../api";
+import { preferences, savePreferences } from "../lib/storage";
 import type { PlayerActions } from "./actions";
 import { usePlayer } from "./context";
 import { TimeLabel, useChapter } from "./TimeLabel";
@@ -24,7 +25,7 @@ export function ControlButton({ label, className = "", ...rest }: ButtonHTMLAttr
       type="button"
       aria-label={label}
       title={label}
-      className={`relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15 aria-expanded:bg-white/15 *:[svg]:size-5 *:[svg]:fill-ink ${className}`}
+      className={`relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15 aria-expanded:bg-white/15 pointer-coarse:size-11 *:[svg]:size-5 *:[svg]:fill-ink ${className}`}
       {...rest}
     />
   );
@@ -34,7 +35,7 @@ function Volume({ actions }: { actions: PlayerActions }) {
   const { video } = usePlayer();
   const volume = useVideo(video, (state) => (state.muted ? 0 : state.volume));
   return (
-    <div className="group/volume flex items-center">
+    <div className="group/volume flex items-center pointer-coarse:max-sm:hidden tv:hidden">
       <ControlButton label={volume === 0 ? "Unmute (M)" : "Mute (M)"} onClick={actions.toggleMute}>
         {volume === 0 ? <SpeakerXMarkIcon /> : <SpeakerWaveIcon />}
       </ControlButton>
@@ -71,6 +72,8 @@ interface Props {
   subtitled: boolean;
   /** The open popover's first page, to mark its button. */
   menu: "subtitles" | "main" | null;
+  /** Null where the browser has no way to fill the screen. */
+  onFullscreen: (() => void) | null;
   filesOpen: boolean;
   /** More than one video in the torrent. */
   hasFiles: boolean;
@@ -78,6 +81,8 @@ interface Props {
   nextLabel: string;
   /** Safari can send this video to an AirPlay screen. */
   airPlay: (() => void) | null;
+  /** Play on TV. */
+  cast: ReactNode;
   /** The timeline, above the buttons. */
   seekBar: ReactNode;
   /** The settings popover, when open. */
@@ -85,18 +90,33 @@ interface Props {
   onNext: () => void;
   onMenu: (page: "subtitles" | "main") => void;
   onFiles: () => void;
-  onFullscreen: () => void;
 }
 
 /** The bar of controls along the bottom of the picture. */
 export function Controls(props: Props) {
   const { actions, menu } = props;
   const paused = useVideo(usePlayer().video, (state) => state.paused || state.ended);
+  const [remaining, setRemaining] = useState(() => preferences().showRemaining);
+  const clock = (className: string) => (
+    <TimeLabel
+      duration={props.duration}
+      remaining={remaining}
+      onFlip={() => {
+        savePreferences({ showRemaining: !remaining });
+        setRemaining(!remaining);
+      }}
+      className={className}
+    />
+  );
 
   return (
-    <div className="flex flex-col px-[max(--spacing(3),2vw)] pb-[max(--spacing(3),1.5vh)]">
-      {props.seekBar}
+    <div className="relative flex flex-col pr-(--edge-right) pb-(--edge-bottom) pl-(--edge-left)">
+      {/* A phone has no room for the clock among the buttons, so it sits beside the timeline. */}
       <div className="flex items-center gap-1">
+        <div className="min-w-0 flex-1">{props.seekBar}</div>
+        {clock("sm:hidden")}
+      </div>
+      <div className="flex items-center gap-1 max-sm:gap-0">
         <ControlButton label={paused ? "Play (Space)" : "Pause (Space)"} onClick={() => actions.toggle()} className="*:[svg]:size-6">
           {paused ? <PlayIcon /> : <PauseIcon />}
         </ControlButton>
@@ -106,7 +126,7 @@ export function Controls(props: Props) {
           </ControlButton>
         )}
         <Volume actions={actions} />
-        <TimeLabel duration={props.duration} />
+        {clock("max-sm:hidden")}
         <ChapterName chapters={props.chapters} />
         <div className="min-w-0 flex-1" />
 
@@ -115,7 +135,8 @@ export function Controls(props: Props) {
             <QueueListIcon />
           </ControlButton>
         )}
-        <div className="relative flex items-center gap-1" data-menu-root>
+        {/* On a phone the menu hangs from the whole bar, as the buttons are too near the left edge for its width. */}
+        <div className="flex items-center gap-1 max-sm:gap-0 sm:relative" data-menu-root>
           <ControlButton
             label="Subtitles (C turns them on or off)"
             aria-haspopup="menu"
@@ -130,6 +151,7 @@ export function Controls(props: Props) {
           </ControlButton>
           {props.settings}
         </div>
+        {props.cast}
         {props.airPlay && (
           <ControlButton label="AirPlay" onClick={props.airPlay}>
             <TvIcon />
@@ -140,9 +162,11 @@ export function Controls(props: Props) {
             <ArrowTopRightOnSquareIcon />
           </ControlButton>
         )}
-        <ControlButton label={props.fullscreen ? "Leave fullscreen (F)" : "Fullscreen (F)"} onClick={props.onFullscreen}>
-          {props.fullscreen ? <ArrowsPointingInIcon /> : <ArrowsPointingOutIcon />}
-        </ControlButton>
+        {props.onFullscreen && (
+          <ControlButton label={props.fullscreen ? "Leave fullscreen (F)" : "Fullscreen (F)"} onClick={props.onFullscreen}>
+            {props.fullscreen ? <ArrowsPointingInIcon /> : <ArrowsPointingOutIcon />}
+          </ControlButton>
+        )}
       </div>
     </div>
   );

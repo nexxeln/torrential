@@ -1,9 +1,10 @@
-// The engine's HTTP API, served on the same origin as this app (http://127.0.0.1:47919 by default).
+// The engine's HTTP API, served on the same origin as this app (http://127.0.0.1:47919 by default,
+// or the Mac's address on the home network for a paired phone or TV).
 //
 // Every JSON type here mirrors a Rust type in crates/core or crates/torrential/src/daemon/web.
 // A failed request answers with a 4xx or 5xx status and `{ "error": ApiError }`.
 //
-//   GET  /api/search?q=&category=&limit=&fresh=1        NDJSON stream of SearchMessage
+//   POST /api/search      { q, category?, limit?, fresh? }   NDJSON stream of SearchMessage
 //   POST /api/play        { ref, file? }                PlayInfo
 //   GET  /api/media?id=&file=                           MediaInfo
 //   GET  /api/stream?id=&file=&t=&audio=&video=         fragmented MP4, see streamUrl
@@ -11,11 +12,13 @@
 //   GET  /api/subtitles/online?id=&file=                 OnlineSubtitles
 //   GET  /api/subtitles/online/fetch?id=&file=&subtitle= WebVTT, see onlineSubtitleUrl
 //   GET  /api/thumbnail?id=&file=&t=                    JPEG, see thumbnailUrl
+//   POST /api/ffmpeg      {}                            NDJSON stream of FfmpegMessage
 //   GET  /api/pieces?id=&file=                          FilePieces
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
-//   GET  /api/files?ref=                                FileListing
-//   POST /api/pause | /api/resume | /api/remove  { refs }   { changes: Change[] }
+//   POST /api/files       { ref }                       FileListing
+//   POST /api/pause | /api/resume  { refs }               { changes: Change[] }
+//   POST /api/remove      { refs, delete? }              { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
 //
 // Films and series, by IMDb ID:
@@ -23,11 +26,30 @@
 //   GET  /api/titles?q=                                    TitleSearch
 //   GET  /api/title?id=                                    TitlePage
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
-//   GET  /api/title/sources?video=[&playback=]             NDJSON stream of SearchMessage
+//   GET  /api/title/sources?video=[&width=&height=&scale=&playback=]   NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
-//   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
+//   POST /api/watched        { video, position, duration, release? }   { watched: Watched, kept: boolean }
 //   POST /api/library        { title, saved }              { saved: boolean }
 //   GET  /api/home                                         Home
+//
+// Phones and TVs. A browser on the home network that is not paired gets 401 from every route, and
+// /pair for every page. Only the Mac itself may add and remove devices:
+//
+//   GET  /api/me                                           Me
+//   GET  /api/devices                                      DeviceList
+//   POST /api/devices/add                                  DeviceList, with a new offer
+//   POST /api/devices/remove   { id }                      DeviceList
+//
+// The engine:
+//
+//   GET  /api/version                                      Version
+//
+// Play on TV. A paired phone may cast and work the remote too:
+//
+//   GET  /api/tvs                                          TvList, as known now
+//   POST /api/tvs              { fresh? }                  TvList, after a search of the home network
+//   POST /api/cast             CastStart                   { cast: Cast }, at once
+//   POST /api/cast/control     { tv?, ...CastAction }       { cast: Cast }
 
 export type Category = "video" | "audio" | "software" | "book" | "game" | "dataset" | "other";
 export type Flag = "official" | "trusted" | "public_domain" | "creative_commons" | "cam" | "adult";
@@ -103,7 +125,6 @@ export type JobState =
   | "downloading"
   | "paused"
   | "done"
-  | "interrupted"
   | "error";
 
 export interface Progress {
@@ -140,6 +161,11 @@ export interface Job {
   added_at: number;
   /** The title this download was made for, when it was made by playing a title. */
   title?: { title: string; span: Span; release: string | null };
+  /**
+   * `plays`: a play in torrential's own folder, whose files go when it is removed.
+   * `folder`: a download in a folder the person chose, whose files stay unless they delete them.
+   */
+  place: "plays" | "folder";
 }
 
 export type JobEvent =
@@ -169,6 +195,12 @@ export interface Change {
   id: string;
   name: string | null;
   result: string;
+  /** What a remove deleted from disk: a play's folder. */
+  deleted?: string[];
+  /** What a remove with `delete` moved to the Trash: the files of a download in a folder the person chose. */
+  trashed?: string[];
+  /** What a remove was to delete or move to the Trash and left, and why. */
+  kept?: { path: string; reason: string }[];
 }
 
 /** A file the engine serves while it downloads. */
@@ -249,8 +281,12 @@ export interface MediaInfo {
    * one browsers read. If `canPlayType` accepts it, play the file's own URL.
    */
   direct: string | null;
-  /** ffmpeg is installed, so /api/stream, embedded subtitles, and thumbnails work. */
-  remux: boolean;
+  /**
+   * Whether /api/stream, embedded subtitles, and thumbnails work: `ready` now, `fetch` once
+   * POST /api/ffmpeg has fetched ffmpeg, or `missing` when ffmpeg is not installed and the engine
+   * does not fetch it.
+   */
+  ffmpeg: "ready" | "fetch" | "missing";
   /** The file's own chapters, in order. Empty for most files. */
   chapters: Chapter[];
 }
@@ -307,6 +343,15 @@ export type Kind = "film" | "series";
 export type Span = string;
 /** What the browser decodes, from MediaSource.isTypeSupported. */
 export type Playback = "h264" | "hevc" | "hevc-hdr";
+/** The screen a title plays on and what its browser decodes. The engine ranks the title's sources for it. */
+export interface Viewer {
+  /** The screen in device pixels. */
+  width: number;
+  height: number;
+  /** Device pixels to a CSS pixel. */
+  scale: number;
+  playback: Playback;
+}
 /**
  * How likely a release's swarm is to send data now: `strong` is 20 or more seeders or a lawful catalog that does not
  * count them, `fair` 5 to 19, `weak` 1 to 4, and `unknown` uncounted, or 0 in a lawful catalog.
@@ -390,7 +435,8 @@ export interface TitlePage extends TitleCard {
 export interface PlayTitle {
   /** `tt0063350`, `tt0903747:3:5`, or a series ID for its next episode. */
   video: string;
-  playback?: Playback;
+  /** The engine ranks for what this browser decodes, on this screen from another device and on the Mac's display from the Mac. */
+  viewer?: Viewer;
   /** Play only this release, with no fallback. */
   source?: string;
   /** The download that stalled. The engine plays another source, then pauses this one. */
@@ -402,7 +448,7 @@ export type Check = "file_list" | "start" | "first_bytes";
 export type Skip =
   | { reason: "no_file_list" | "no_data"; waited_s: number }
   | { reason: "no_video" | "stalled" }
-  | { reason: "unplayable"; container: string }
+  | { reason: "unplayable" | "not_on_tv"; container: string }
   | { reason: "too_large" | "failed"; error: ApiError };
 
 /** One line of the /api/title/play stream. The last is `playing` or `failed`. */
@@ -452,14 +498,15 @@ export function asApiError(thrown: unknown): ApiError {
   return thrown instanceof EngineError ? thrown.error : UNREACHABLE;
 }
 
+/** A body that stops arriving, as when its request is aborted, rejects instead of answering null. */
 async function json<T>(response: Response): Promise<T> {
+  if (response.ok) return response.json() as Promise<T>;
+  // A phone or TV that was removed on the Mac goes to the page that pairs it again.
+  if (response.status === 401) location.assign("/pair");
   const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    // The engine names every failure. A server error without a name is a proxy in front of an engine that is not running.
-    const unnamed = response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
-    throw new EngineError(body?.error ?? unnamed, response.status);
-  }
-  return body as T;
+  // The engine names every failure. A server error without a name is a proxy in front of an engine that is not running.
+  const unnamed = response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
+  throw new EngineError(body?.error ?? unnamed, response.status);
 }
 
 /** The JSON values of an NDJSON body, one per line, as they arrive. */
@@ -484,8 +531,8 @@ async function* lines<T>(response: Response): AsyncGenerator<T> {
 }
 
 /** A search stream. A failed request becomes its `error` message. */
-async function* searchMessages(path: string, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
-  const response = await fetch(path, { signal });
+async function* searchMessages(path: string, init: RequestInit): AsyncGenerator<SearchMessage> {
+  const response = await fetch(path, init);
   if (!response.ok || !response.body) {
     yield { type: "error", error: await json<never>(response).catch((e: EngineError) => e.error) };
     return;
@@ -503,11 +550,9 @@ export async function* search(
   query: string,
   options: { category?: Category; limit?: number; fresh?: boolean; signal?: AbortSignal } = {},
 ): AsyncGenerator<SearchMessage> {
-  const params = new URLSearchParams({ q: query });
-  if (options.category) params.set("category", options.category);
-  if (options.limit) params.set("limit", String(options.limit));
-  if (options.fresh) params.set("fresh", "1");
-  yield* searchMessages(`/api/search?${params}`, options.signal);
+  const { signal, ...rest } = options;
+  const body = JSON.stringify({ q: query, ...rest });
+  yield* searchMessages("/api/search", { method: "POST", headers: { "content-type": "application/json" }, body, signal });
 }
 
 /**
@@ -521,6 +566,17 @@ export function play(ref: string, file?: number, signal?: AbortSignal): Promise<
 
 export function media(id: string, file: number, signal?: AbortSignal): Promise<MediaInfo> {
   return fetch(`/api/media?id=${id}&file=${file}`, { signal }).then(json<MediaInfo>);
+}
+
+/** A line of POST /api/ffmpeg: bytes of the download so far, then `ready` or `error`. */
+export type FfmpegMessage = { type: "progress"; done: number; size: number } | { type: "ready" } | { type: "error"; error: ApiError };
+
+/** Has the engine fetch ffmpeg, saying how far the download is. The fetch carries on when this stops. */
+export async function* fetchFfmpeg(signal?: AbortSignal): AsyncGenerator<FfmpegMessage> {
+  const init = { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal };
+  const response = await fetch("/api/ffmpeg", init);
+  if (!response.ok || !response.body) await json<never>(response);
+  yield* lines<FfmpegMessage>(response);
 }
 
 /**
@@ -581,11 +637,68 @@ export function jobs(signal?: AbortSignal): Promise<Job[]> {
 }
 
 export function files(ref: string, signal?: AbortSignal): Promise<FileListing> {
-  return fetch(`/api/files?ref=${encodeURIComponent(ref)}`, { signal }).then(json<FileListing>);
+  return post("/api/files", { ref }, signal);
 }
 
-export function change(action: "pause" | "resume" | "remove", refs: string[]): Promise<Change[]> {
-  return post<{ changes: Change[] }>(`/api/${action}`, { refs }).then((body) => body.changes);
+/** A phone or TV this Mac let in. */
+export interface Device {
+  /** Eight hex digits. */
+  id: string;
+  /** What its browser runs on, such as `iPhone` or `LG TV`. */
+  name: string;
+  /** Unix seconds. */
+  added_at: number;
+  /** Unix seconds of its last request, to within a minute. */
+  seen_at: number;
+}
+
+/** A six-digit code that lets one more device in, for a few minutes. */
+export interface PairingOffer {
+  code: string;
+  /** The page that pairs a phone, with the code in it. */
+  url: string;
+  /** What to type into a TV's browser: the Mac's .local name and the port. */
+  address: string;
+  /** The Mac's address on the home network, for a browser that cannot open .local names. */
+  lan_address: string | null;
+  /** Unix seconds. */
+  expires_at: number;
+  /** The QR code of `url`: rows of `1` and `0`, without the quiet zone. */
+  qr: string[];
+}
+
+export interface DeviceList {
+  /** The most recently added last. */
+  devices: Device[];
+  offer: PairingOffer | null;
+  /** Why no phone or TV can reach the Mac while one should, in one sentence. */
+  unreachable: string | null;
+}
+
+/** Whether the browser asking is the Mac itself or a paired device. */
+export type Me = { asker: "mac" } | { asker: "device"; device: Device | null };
+
+export function me(): Promise<Me> {
+  return fetch("/api/me").then(json<Me>);
+}
+
+export function devices(): Promise<DeviceList> {
+  return fetch("/api/devices").then(json<DeviceList>);
+}
+
+/** Opens a new code in place of any open one. */
+export function addDevice(): Promise<DeviceList> {
+  return post("/api/devices/add", {});
+}
+
+/** Locks a device out at once. */
+export function removeDevice(id: string): Promise<DeviceList> {
+  return post("/api/devices/remove", { id });
+}
+
+/** With `remove`, `deleteFiles` moves the files of a download in a folder the person chose to the Trash too. */
+export function change(action: "pause" | "resume" | "remove", refs: string[], deleteFiles = false): Promise<Change[]> {
+  return post<{ changes: Change[] }>(`/api/${action}`, { refs, delete: deleteFiles }).then((body) => body.changes);
 }
 
 /**
@@ -596,7 +709,11 @@ export function watchJobs(onEvent: (event: JobEvent) => void, onConnection?: (co
   const source = new EventSource("/api/events");
   source.onmessage = (message) => onEvent(JSON.parse(message.data) as JobEvent);
   source.onopen = () => onConnection?.(true);
-  source.onerror = () => onConnection?.(false);
+  source.onerror = () => {
+    onConnection?.(false);
+    // The browser gives up on a stream the engine refused, which it does once a device is removed.
+    if (source.readyState === EventSource.CLOSED) void me().catch(() => {});
+  };
   return () => source.close();
 }
 
@@ -617,11 +734,11 @@ export function artUrl(id: string, kind: "poster" | "background" | "logo" | { se
   return `/api/title/art?${params}`;
 }
 
-/** The releases of one film or episode, ranked for playing here, as each source answers. The last message is `done` or `error`. */
-export async function* sources(video: string, playback?: Playback, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
+/** The releases of one film or episode, ranked for playing in this browser, as each source answers. The last message is `done` or `error`. */
+export async function* sources(video: string, viewer?: Viewer, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
   const params = new URLSearchParams({ video });
-  if (playback) params.set("playback", playback);
-  yield* searchMessages(`/api/title/sources?${params}`, signal);
+  if (viewer) for (const [name, value] of Object.entries(viewer)) params.set(name, String(value));
+  yield* searchMessages(`/api/title/sources?${params}`, { signal });
 }
 
 /**
@@ -649,4 +766,92 @@ export function setSaved(title: string, saved: boolean): Promise<boolean> {
 
 export function home(signal?: AbortSignal): Promise<Home> {
   return fetch("/api/home", { signal }).then(json<Home>);
+}
+
+/** The engine's version, and the line to show about a newer one, such as "Updated torrential to 0.5.1.". */
+export interface Version {
+  version: string;
+  notice: string | null;
+}
+
+export function version(signal?: AbortSignal): Promise<Version> {
+  return fetch("/api/version", { signal }).then(json<Version>);
+}
+
+/** A container a TV plays as it is. */
+export type Container = "mkv" | "mp4" | "webm" | "avi" | "ts" | "mov" | "mpeg" | "wmv";
+
+/** A TV, or another media renderer, on the home network. */
+export interface Tv {
+  /** The renderer's UDN and its address. A device that copies a TV's UDN from another address is another TV. */
+  id: string;
+  name: string;
+  address: string;
+  plays: Container[];
+  /** The newest codec it says it decodes. */
+  decodes: Playback;
+  /** Whether torrential can set its volume. */
+  volume: boolean;
+}
+
+export type CastState =
+  | { state: "finding" | "loading" | "playing" | "paused" }
+  /** `error` says why when it did not end as asked or at the end of the video. */
+  | { state: "ended"; error: ApiError | null };
+
+/** One cast on one TV, listed until a minute after it ends. */
+export type Cast = CastState & {
+  tv: string;
+  tv_name: string;
+  name: string;
+  video: string | null;
+  download: string | null;
+  file: number | null;
+  subtitle: string | null;
+  /** Seconds, as the TV last said. */
+  position: number | null;
+  duration: number | null;
+  /** From 0 to 100. */
+  volume: number | null;
+  started_at: number;
+};
+
+export interface TvList {
+  tvs: Tv[];
+  casts: Cast[];
+}
+
+/** What to cast: a film or an episode by `video`, or a file of a torrent by `ref`, with the film it holds as `video`. */
+export interface CastStart {
+  tv: string;
+  video?: string;
+  source?: string;
+  ref?: string;
+  file?: number;
+  /** A subtitle file of the same torrent. */
+  subtitle?: number;
+  /** Seconds, in place of where the person stopped. */
+  start_at?: number;
+}
+
+export type CastAction =
+  | { action: "pause" | "resume" | "stop" }
+  | { action: "seek"; position: number }
+  | { action: "volume"; level: number };
+
+export function tvs(signal?: AbortSignal): Promise<TvList> {
+  return fetch("/api/tvs", { signal }).then(json<TvList>);
+}
+
+/** Searches the home network for TVs, unless a search ran in the last 30 seconds and `fresh` is not set. */
+export function findTvs(fresh = false): Promise<TvList> {
+  return post("/api/tvs", { fresh });
+}
+
+export function startCast(start: CastStart): Promise<Cast> {
+  return post<{ cast: Cast }>("/api/cast", start).then((body) => body.cast);
+}
+
+export function controlCast(tv: string, action: CastAction): Promise<Cast> {
+  return post<{ cast: Cast }>("/api/cast/control", { tv, ...action }).then((body) => body.cast);
 }

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use torrential_core::watching::next;
 use torrential_core::{
-    Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Preferences, Profile, Release, ReleaseId, SearchQuery, Skip,
-    TitleDetails, TorrentId, VideoRef,
+    Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Player, Preferences, Profile, Quality, Release, ReleaseId,
+    SearchQuery, Skip, TitleDetails, TorrentId, VideoRef,
 };
 
 use catalog_port::{CatalogPort, label, season_episodes, wanted};
@@ -33,7 +33,7 @@ pub struct Titles {
     failed: Mutex<HashMap<ReleaseId, (Instant, Skip)>>,
 }
 
-/// Every deadline of a title play. Tests shrink them.
+/// Every deadline of a title play, and of the home lists. Tests shrink them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Timing {
     /// For a source's file list.
@@ -42,6 +42,9 @@ pub struct Timing {
     pub first_bytes: Duration,
     /// For the whole play.
     pub budget: Duration,
+    /// For the catalog lookups of the home lists, all together. Past it, the copies kept on this
+    /// machine answer.
+    pub home: Duration,
 }
 
 impl Default for Timing {
@@ -50,6 +53,7 @@ impl Default for Timing {
             file_list: Duration::from_secs(20),
             first_bytes: Duration::from_secs(30),
             budget: Duration::from_secs(180),
+            home: Duration::from_secs(3),
         }
     }
 }
@@ -63,23 +67,38 @@ impl Titles {
         self.failed.lock().unwrap_or_else(PoisonError::into_inner).insert(release, (Instant::now(), why));
     }
 
-    /// `video`'s sources in the order a play tries them and a list of sources shows them: the
-    /// downloads in `jobs` that hold it, then the top of `ranked`. A download on this machine goes
-    /// ahead of a release that is not, and a release that failed lately goes last, with why.
-    /// Releases ranked below the top rarely play better, so neither shows them.
-    pub fn line(&self, jobs: &[Job], video: &VideoRef, ranked: Vec<Release>) -> Vec<Release> {
+    /// `video`'s sources in the order a play in `player` tries them and a list of sources shows
+    /// them: the downloads in `jobs` that hold it, then the top of `ranked`. A download on this
+    /// machine goes ahead of a release that is not, when `player` reuses it with `ffmpeg` there or
+    /// not. Any other download that holds it comes after the top of `ranked`. A release that failed
+    /// lately goes last, with why. Releases ranked below the top rarely play better, so neither
+    /// shows them.
+    pub fn line(
+        &self,
+        jobs: &[Job],
+        video: &VideoRef,
+        ranked: Vec<Release>,
+        player: Player,
+        ffmpeg: bool,
+    ) -> Vec<Release> {
         let here: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
         let failed = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
         let failed_lately = |id: &ReleaseId| failed.get(id).filter(|(at, _)| at.elapsed() < FAILED_FOR);
+        let reused = |release: &Release| {
+            matches!(release.id, ReleaseId::Torrent(id) if here.contains(&id))
+                && player.reuses(Quality::parse(&release.name), ffmpeg)
+        };
+        let (first, other): (Vec<Release>, Vec<Release>) =
+            jobs.iter().filter_map(|job| holding(job, video)).partition(|release| reused(release));
         let mut seen = HashSet::new();
-        let linked = jobs.iter().filter_map(|job| holding(job, video));
-        let mut line: Vec<Release> = linked
+        let mut line: Vec<Release> = first
+            .into_iter()
             .chain(ranked.into_iter().take(MOST_CONSIDERED))
+            .chain(other)
             .filter(|release| seen.insert(release.id))
             .map(|release| Release { failed: failed_lately(&release.id).map(|(_, why)| why.clone()), ..release })
             .collect();
-        let is_here = |release: &Release| matches!(release.id, ReleaseId::Torrent(id) if here.contains(&id));
-        line.sort_by_key(|release| (release.failed.is_some(), !is_here(release)));
+        line.sort_by_key(|release| (release.failed.is_some(), !reused(release)));
         line
     }
 
@@ -100,16 +119,22 @@ impl Titles {
         Ok(Resolved { video, details, episode })
     }
 
-    /// The search for `title`'s releases, ranked for playing now with `preferences`. It asks the
-    /// catalog which titles share the name, which takes the catalog's search. So a play asks for
-    /// this only when it is about to search, and a title whose download is here plays without it.
-    pub async fn query(&self, title: &Resolved, preferences: Preferences) -> Result<SearchQuery, Error> {
+    /// The search for `title`'s releases, ranked for playing now in `player` with `preferences`.
+    /// It asks the catalog which titles share the name, which takes the catalog's search. So a
+    /// play asks for this only when it is about to search, and a title whose download is here
+    /// plays without it.
+    pub async fn query(
+        &self,
+        title: &Resolved,
+        preferences: Preferences,
+        player: Player,
+    ) -> Result<SearchQuery, Error> {
         let namesakes = self.catalog.namesakes(&title.details.card).await?;
         let wanted = wanted(&title.details, &namesakes, title.video.episode)?;
         let text = wanted.queries().into_iter().next().unwrap_or_else(|| wanted.name.clone());
         Ok(SearchQuery {
             category: Some(Category::Video),
-            profile: Profile { preferences, ..Profile::default() },
+            profile: Profile { preferences, player, ..Profile::default() },
             wanted: Some(wanted),
             ..SearchQuery::new(text)
         })
@@ -236,13 +261,14 @@ mod tests {
             selection: Selection::All,
             added_at: 0,
             title,
+            place: torrential_core::Place::Folder,
         };
         titles.failed(release(2).id, Skip::NoVideo);
         titles.failed(release(40).id, Skip::NoData { waited_s: 30 });
         let jobs = [job(3, None), job(40, Some(film))];
         let line = |jobs: &[Job], video: &str, ranked: &[u8]| -> Vec<(u8, Option<Skip>)> {
             let ranked = ranked.iter().map(|n| release(*n)).collect();
-            let line = titles.line(jobs, &video.parse().unwrap(), ranked).into_iter();
+            let line = titles.line(jobs, &video.parse().unwrap(), ranked, Player::External, false).into_iter();
             line.map(|r| (r.name.trim_start_matches("release ").parse().unwrap(), r.failed)).collect()
         };
         let fine = |n: u8| (n, None);

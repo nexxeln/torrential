@@ -262,6 +262,186 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "devices",
+      "about": "List, add, or remove the phones and TVs that watch from this Mac",
+      "arguments": [],
+      "flags": [],
+      "subcommands": [
+        {
+          "name": "list",
+          "about": "List the paired devices and the open code, the default",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "add",
+          "about": "Show a code and a QR code that let one more phone or TV in for 5 minutes",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "remove",
+          "about": "Lock a device out at once",
+          "arguments": [
+            {
+              "name": "ID",
+              "help": "A device ID from torrential devices",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": []
+        }
+      ]
+    },
+    {
+      "name": "tv",
+      "about": "List the TVs on the home network, play on one, and control what plays",
+      "arguments": [],
+      "flags": [],
+      "subcommands": [
+        {
+          "name": "list",
+          "about": "List the TVs on the home network and what plays on them, the default",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "play",
+          "about": "Play a film, an episode, or a torrent's video on a TV",
+          "arguments": [
+            {
+              "name": "WORDS",
+              "help": "A title ID such as tt0063350, tt0903747:3:5, or tt0903747 s03e05, or a download or search result ID, magnet link, infohash, or .torrent file or URL",
+              "required": true,
+              "repeatable": true
+            }
+          ],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one answers",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            },
+            {
+              "name": "--source",
+              "help": "With a title ID, play only this one of its torrents, by an ID from torrential sources",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "ID"
+            },
+            {
+              "name": "--file",
+              "help": "With a torrent, the index of the file to play, from torrential files",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "INDEX"
+            },
+            {
+              "name": "--subtitle",
+              "help": "The index of a subtitle file of the same torrent to show, from torrential files",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "INDEX"
+            },
+            {
+              "name": "--at",
+              "help": "Start at this time, such as 1:02:30 or 90s, instead of where you stopped",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "TIME"
+            }
+          ]
+        },
+        {
+          "name": "pause",
+          "about": "Pause what plays on the TV",
+          "arguments": [],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "resume",
+          "about": "Resume what plays on the TV",
+          "arguments": [],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "seek",
+          "about": "Go to a time in the video",
+          "arguments": [
+            {
+              "name": "TIME",
+              "help": "Such as 1:02:30, 90s, or 5m",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "volume",
+          "about": "Set the TV's volume",
+          "arguments": [
+            {
+              "name": "LEVEL",
+              "help": "From 0 to 100",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        },
+        {
+          "name": "stop",
+          "about": "Stop what plays on the TV",
+          "arguments": [],
+          "flags": [
+            {
+              "name": "--tv",
+              "help": "The TV, by a part of its name, its address, or its ID from torrential tv, when more than one plays",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "status",
       "about": "List downloads, or show one in detail",
       "arguments": [
@@ -334,7 +514,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "flags": [
         {
           "name": "--all",
-          "help": "Resume every paused, interrupted, or failed download",
+          "help": "Resume every paused or failed download",
           "takes_value": false,
           "repeatable": false
         }
@@ -342,7 +522,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "rm",
-      "about": "Remove downloads from the list without deleting their files",
+      "about": "Remove downloads from the list. A play's files go with it, and other files stay unless --delete moves them to the Trash",
       "arguments": [
         {
           "name": "ID",
@@ -351,7 +531,14 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
           "repeatable": true
         }
       ],
-      "flags": []
+      "flags": [
+        {
+          "name": "--delete",
+          "help": "Move the files of a download in your own folder to the Trash too",
+          "takes_value": false,
+          "repeatable": false
+        }
+      ]
     },
     {
       "name": "verify",
@@ -796,6 +983,16 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       "code": "interrupted",
       "exit": 130,
       "retryable": true
+    },
+    {
+      "code": "not_paired",
+      "exit": 6,
+      "retryable": false
+    },
+    {
+      "code": "local_only",
+      "exit": 6,
+      "retryable": false
     },
     {
       "code": "internal",

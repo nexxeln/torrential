@@ -10,11 +10,12 @@ use torrential_core::error::Details;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
 use torrential_core::{
-    AttemptEvent, Category, Check, Error, ErrorCode, Job, LocatorId, Release, ReleaseId, TitleLink, TorrentId,
+    AttemptEvent, Category, Check, Error, ErrorCode, Job, LocatorId, Player, Release, ReleaseId, TitleLink, TorrentId,
 };
 
 use super::super::admission::GIB;
-use super::super::engine_port::{Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
+use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
+use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{self, FakeSource};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
@@ -47,11 +48,11 @@ pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) ->
 /// first never sends its file list, the second holds no video, no peer has any piece of the
 /// third, and the fourth plays. The search also finds the 1990 remake, which is not this film.
 pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
-    night_within(TIMING)
+    night_with(Outside::default())
 }
 
-/// `night`, with `timing` for its plays.
-fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
+/// `night`, with what `outside` sets.
+pub(super) fn night_with(outside: Outside) -> (Harness, [FakeTorrentFile; 4]) {
     let night = [
         torrent(0xa1, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", &[("Night.1968.720p.mp4", 2 * GIB)]),
         torrent(0xa2, "Night.of.the.Living.Dead.1968.DVD9", &[("VIDEO_TS/NIGHT.iso", 4 * GIB)]),
@@ -72,7 +73,7 @@ fn night_within(timing: Timing) -> (Harness, [FakeTorrentFile; 4]) {
     catalog.push(listed(&remake, "knaben", Some(90)));
     let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
     let search = search_port::Fake::scripted(catalog, script, BTreeMap::new());
-    let h = Harness::with_outside(search, Outside { timing, ..Outside::default() });
+    let h = Harness::with_outside(search, outside);
     for t in &night[1..] {
         h.swarm.publish(t.clone());
     }
@@ -119,7 +120,7 @@ impl Harness {
         let link = |title: &str| TitleLink { title: title.parse().unwrap(), span: Span::Film, release: None };
         let play = PlayCommand {
             source: Source::Torrent { metainfo: t.metainfo().unwrap(), origin: Origin::File },
-            dir: Some(self.downloads()),
+            to: Destination::Folder(Some(self.downloads())),
             files: files.to_vec(),
             setup_max_size: None,
             title: title.map(|title| TitlePlay { link: link(title), hold }),
@@ -128,7 +129,12 @@ impl Harness {
         (play, hold)
     }
 
-    async fn play_for(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> Result<(Job, Hold), Error> {
+    pub(super) async fn play_for(
+        &self,
+        t: &FakeTorrentFile,
+        files: &[u32],
+        title: Option<&str>,
+    ) -> Result<(Job, Hold), Error> {
         let (play, hold) = self.play_command(t, files, title);
         let (job, _) = self.running.ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
         Ok((job, hold))
@@ -152,7 +158,7 @@ impl Harness {
     }
 
     /// Stops the engine where it is, lets `change` at the disk, and starts it again.
-    async fn restart_after(self, change: impl FnOnce()) -> Self {
+    pub(super) async fn restart_after(self, change: impl FnOnce()) -> Self {
         let Self { dir, running, swarm, disk, search, outside } = self;
         running.owner.abort();
         let _ = running.owner.await;
@@ -174,7 +180,7 @@ impl Harness {
             video: video.parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace,
-            playback: None,
+            player: Player::External,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };
@@ -183,16 +189,16 @@ impl Harness {
         steps
     }
 
-    /// Plays the film from the search, or from `pin` alone, and answers each step as the web app
-    /// reads it.
-    async fn play_film(&self, pin: Option<&FakeTorrentFile>) -> Vec<Value> {
+    /// Gets the film to keep from the search, or from `pin` alone, as `torrential get tt0063350`
+    /// does into the downloads folder, and answers each step as the web app reads it.
+    async fn get_film(&self, pin: Option<&FakeTorrentFile>) -> Vec<Value> {
         let ask = PlayTitle {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace: None,
-            playback: None,
+            player: Player::External,
             containers: Containers::Browser,
-            finish: Finish::Stream,
+            finish: Finish::Keep,
         };
         let mut steps = Vec::new();
         attempt::run(&self.running.ctx, ask, |event| steps.push(serde_json::to_value(event).unwrap())).await;
@@ -326,68 +332,6 @@ async fn a_trial_given_up_after_the_engine_verified_bytes_of_it_stays_on_the_lis
     assert_eq!(h.states().await, ["paused"]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn giving_up_a_source_puts_its_download_back_as_the_play_found_it() {
-    let h = Harness::new();
-    let empty = torrent(72, "empty", &[("empty.mp4", GIB)]);
-    let made = torrent(73, "made", &[("made.mp4", GIB)]);
-    let mine = torrent(74, "mine", &[("mine.mp4", GIB)]);
-    let paused = torrent(75, "paused", &[("paused.mp4", GIB)]);
-    let stopped = torrent(76, "stopped", &[("stopped.mp4", GIB)]);
-    let finished = torrent(77, "finished", &[("finished.mp4", 1_000)]);
-    let watched = torrent(78, "watched", &[("watched.mp4", GIB)]);
-    h.swarm.withhold(stopped.info_hash.id(), u32::MAX);
-    for t in [&mine, &paused, &stopped] {
-        h.get(h.torrent_file(t), &[]).await.unwrap();
-    }
-    let pause = Request::Pause { refs: vec![prefix(&paused)] };
-    assert_eq!(h.changes(pause).await.unwrap(), [(prefix(&paused), "paused".into())]);
-    let names = |jobs: &[Job], state: &str| -> Vec<String> {
-        jobs.iter().filter(|j| j.status.name() == state).filter_map(|j| j.name.clone()).collect()
-    };
-    let before = h.until("one stops with no source", |jobs| names(jobs, "error") == ["stopped"]).await;
-    let no_source = before.iter().find(|j| j.name.as_deref() == Some("stopped")).unwrap().status.clone();
-
-    let mut holds = Vec::new();
-    for t in [&empty, &made, &mine, &paused, &stopped, &finished, &watched] {
-        holds.push(h.play_for(t, &[0], Some("tt0063350")).await.unwrap().1);
-    }
-    h.swarm.set_rate(MIB);
-    h.until("the small one is done", |jobs| names(jobs, "done") == ["finished"]).await;
-    h.swarm.set_rate(0);
-    h.played(&watched).await;
-    let files = ["finished/finished.mp4", "made/made.mp4", "mine/mine.mp4", "paused/paused.mp4", "watched/watched.mp4"];
-    for file in files {
-        write(&h.downloads().join(file));
-    }
-    for hold in holds {
-        h.give_up(hold).await;
-    }
-    h.until("the trial with nothing on disk leaves the list", |jobs| names(jobs, "paused").len() == 2).await;
-    h.settled().await;
-
-    let mut jobs = h.status().await;
-    jobs.sort_by_key(|j| j.name.clone());
-    let states: Vec<(&str, &str)> = jobs.iter().map(|j| (j.name.as_deref().unwrap(), j.status.name())).collect();
-    assert_eq!(
-        states,
-        [
-            ("finished", "done"),
-            ("made", "paused"),
-            ("mine", "downloading"),
-            ("paused", "paused"),
-            ("stopped", "error"),
-            ("watched", "downloading")
-        ],
-        "of the two downloads the play made and never played, the one with a file stays and the other is gone"
-    );
-    assert_eq!(jobs[4].status, no_source, "it stopped again on the error it had");
-    let mut left = vec!["finished", "made", "mine", "paused", "watched"];
-    left.extend(files);
-    left.sort();
-    assert_eq!(tree(&h.downloads()), left, "no file is deleted");
-}
-
 /// Something a person has in the download folder.
 enum Theirs {
     File(&'static str, &'static str),
@@ -465,12 +409,12 @@ async fn a_play_or_get_by_hand_still_starts_over_a_file_that_is_there() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_title_play_skips_a_source_whose_folder_already_exists_and_plays_the_next() {
+async fn getting_a_title_skips_a_source_whose_folder_already_exists_and_gets_the_next() {
     let (h, night) = night();
     let theirs = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
     std::fs::create_dir_all(&theirs).unwrap();
     std::fs::write(theirs.join("Night.1968.1080p.mp4"), "the person's own film").unwrap();
-    let steps = h.play_film(None).await;
+    let steps = h.get_film(None).await;
     let third = night[2].info_hash.id().to_hex();
     let skipped = steps.iter().find(|s| s["type"] == "skipped" && s["release"] == third.as_str());
     assert_eq!(
@@ -495,7 +439,7 @@ async fn a_title_play_skips_a_source_whose_folder_already_exists_and_plays_the_n
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_title_play_skips_a_source_when_the_disk_cannot_say_that_its_path_is_free() {
+async fn getting_a_title_skips_a_source_when_the_disk_cannot_say_that_its_path_is_free() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } == 0 {
         return;
@@ -507,7 +451,7 @@ async fn a_title_play_skips_a_source_when_the_disk_cannot_say_that_its_path_is_f
     std::fs::write(theirs.join("Night.1968.1080p.mp4"), "the person's own film").unwrap();
     let shut = |mode| std::fs::set_permissions(&downloads, std::fs::Permissions::from_mode(mode)).unwrap();
     shut(0o000);
-    let steps = h.play_film(Some(&night[2])).await;
+    let steps = h.get_film(Some(&night[2])).await;
     shut(0o755);
     let reason = &steps[steps.len() - 2]["reason"];
     let message = format!(
@@ -764,7 +708,7 @@ async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHand
         video: "tt0063350".parse().unwrap(),
         pin: Some(ReleaseId::Torrent(source.info_hash.id())),
         replace: None,
-        playback: None,
+        player: Player::External,
         containers: Containers::Browser,
         finish: Finish::Stream,
     };
@@ -784,11 +728,12 @@ async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHand
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last_to_go_stops_it() {
     let patient = Timing { first_bytes: std::time::Duration::from_secs(10), ..TIMING };
-    let (h, night) = night_within(patient);
+    let (h, night) = night_with(Outside { timing: patient, ..Outside::default() });
     h.swarm.set_rate(0);
     let first = testing(&h, &night[3]).await;
     let second = testing(&h, &night[3]).await;
-    write(&h.downloads().join("night_of_the_living_dead/night_of_the_living_dead.mp4"));
+    let folder = h.play_folder(&night[3]);
+    write(&folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4"));
     let on_disk = ["night_of_the_living_dead", "night_of_the_living_dead/night_of_the_living_dead.mp4"];
 
     first.abort();
@@ -796,13 +741,13 @@ async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last
     h.settled().await;
     // The file written above is checked before the download goes on, and a slow machine is still checking here.
     h.until("its check ends", |jobs| jobs[0].status.name() == "downloading").await;
-    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["downloading"], on_disk.map(String::from).to_vec()));
+    assert_eq!((h.states().await, tree(&folder)), (vec!["downloading"], on_disk.map(String::from).to_vec()));
 
     second.abort();
     let _ = second.await;
     h.until("the last play to go pauses it", |jobs| jobs[0].status.name() == "paused").await;
     h.settled().await;
-    assert_eq!((h.states().await, tree(&h.downloads())), (vec!["paused"], on_disk.map(String::from).to_vec()));
+    assert_eq!((h.states().await, tree(&folder)), (vec!["paused"], on_disk.map(String::from).to_vec()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -955,41 +900,6 @@ async fn an_episode_in_a_season_pack_plays_the_file_whose_name_reads_as_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_download_made_by_hand_is_tried_first_and_kept_when_it_does_not_start() {
-    let (h, night) = night();
-    h.get(h.torrent_file(&night[2]), &[]).await.unwrap();
-    let mine = h.downloads().join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");
-    write(&mine.join("Night.1968.1080p.mp4"));
-    write(&mine.join("Night.1968.1080p.srt"));
-    let steps = h.play_title("tt0063350", None, None).await;
-    assert_eq!(
-        steps,
-        [
-            "resolved tt0063350 Night of the Living Dead",
-            "searched 4",
-            "trying 1 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
-            "trying 2 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
-            "check file_list",
-            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
-            "trying 3 of 4 Night.of.the.Living.Dead.1968.DVD9",
-            "check file_list",
-            r#"skipped a2a2a2 {"reason":"no_video"}"#,
-            "trying 4 of 4 night_of_the_living_dead",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            "playing tt0063350 a4a4a4 file 0 at null",
-        ]
-    );
-    assert_eq!(titles(&[h.job(&night[2]).await.unwrap()]), [Some("tt0063350".to_string())]);
-    assert_eq!(tree(&mine), ["Night.1968.1080p.mp4", "Night.1968.1080p.srt"], "its files stay");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_download_here_that_holds_the_film_plays_before_any_search() {
     let (h, night) = night();
     h.play_for(&night[3], &[0], Some("tt0063350")).await.unwrap();
@@ -1038,35 +948,6 @@ async fn a_title_whose_download_is_here_plays_while_the_catalog_search_is_unreac
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_download_here_that_does_not_start_is_followed_by_the_search_and_never_tried_again() {
-    let (h, night) = night();
-    h.play_for(&night[2], &[0], Some("tt0063350")).await.unwrap();
-    assert_eq!(
-        h.play_title("tt0063350", None, None).await,
-        [
-            "resolved tt0063350 Night of the Living Dead",
-            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
-            "searched 4",
-            "trying 2 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
-            "check file_list",
-            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
-            "trying 3 of 4 Night.of.the.Living.Dead.1968.DVD9",
-            "check file_list",
-            r#"skipped a2a2a2 {"reason":"no_video"}"#,
-            "trying 4 of 4 night_of_the_living_dead",
-            "check file_list",
-            "check start",
-            "check first_bytes",
-            "playing tt0063350 a4a4a4 file 0 at null",
-        ]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
     let (h, night) = night();
     h.play_for(&night[2], &[0], Some("tt0063350")).await.unwrap();
@@ -1077,6 +958,40 @@ async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
             "resolved tt0063350 Night of the Living Dead",
             "searched 4",
             "trying 1 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_whose_file_list_arrives_in_time_plays_while_a_slow_disk_holds_up_the_engine() {
+    let film = torrent(0xb7, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
+    let catalog = vec![listed(&film, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let h = Harness::with_outside(search, Outside { gate: Some(gate.clone()), ..Outside::default() });
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    gate.close();
+    let slow_disk = async {
+        gate.until_held(1).await;
+        let locked = h.lock_state();
+        gate.open();
+        tokio::time::sleep(TIMING.file_list + std::time::Duration::from_millis(200)).await;
+        drop(locked);
+    };
+
+    let (steps, ()) = tokio::join!(h.play_title("tt0063350", None, None), slow_disk);
+
+    assert_eq!(
+        steps,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 1",
+            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 b7b7b7 file 0 at null",
         ]
     );
 }
@@ -1243,8 +1158,10 @@ async fn replace_with_no_other_source_fails_and_leaves_the_stalled_download_alon
     h.swarm.set_rate(100 * MIB);
     let first = h.play_title("tt0063350", None, None).await;
     assert_eq!(first.last().unwrap(), "playing tt0063350 a4a4a4 file 0 at null");
+    let id = night[3].info_hash.id();
+    h.until("it is past its check", |jobs| jobs.iter().any(|j| j.id == id && j.status.name() == "downloading")).await;
     let before = h.job(&night[3]).await.unwrap();
-    let steps = h.play_title("tt0063350", None, Some(night[3].info_hash.id())).await;
+    let steps = h.play_title("tt0063350", None, Some(id)).await;
     assert_eq!(
         steps.last().unwrap(),
         concat!(

@@ -7,30 +7,48 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::protocol::{Change, GetOutcome, GetReply};
 use torrential_core::{
-    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleLink, TorrentId,
+    Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleCard, TitleId, TitleLink,
+    TorrentId,
 };
 
 use super::admission::{self, Cap, Disk};
-use super::book::{self, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
+use super::book::{self, Home, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
 use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
 };
 use super::files;
 use super::magnet::{self, Magnet};
+use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use deleter::Deleter;
+use plays::{Destination, Plays, Tending};
+pub use streams::Lease;
+use streams::Streams;
+
+pub mod deleter;
+pub mod plays;
+mod streams;
+pub mod trash;
 
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
     pub default_dir: PathBuf,
     pub probe_dir: PathBuf,
     pub max_active: usize,
+    /// Only tests set one. Every other engine runs until it is stopped.
     pub idle_timeout: Option<Duration>,
-    pub resume_on_start: bool,
     pub save_resume_every: Duration,
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
+    pub plays: Plays,
+    /// Where the files of a download in a folder the person chose go when they delete them.
+    pub trash: trash::Trash,
+    /// How long a play leaving the plays folder waits before it goes: no time, except in a test
+    /// that does something in between.
+    pub deletion_pause: Duration,
+    pub trash_pause: deleter::TrashPause,
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T, Error>>;
@@ -104,7 +122,8 @@ pub struct GetCommand {
 
 pub struct PlayCommand {
     pub source: Source,
-    pub dir: Option<PathBuf>,
+    /// Where the download goes, if the play starts one.
+    pub to: Destination,
     /// Indexes into the torrent's file list.
     pub files: Vec<u32>,
     pub setup_max_size: Option<u64>,
@@ -155,6 +174,12 @@ pub struct StreamFile {
     pub complete: bool,
 }
 
+/// A change to the library.
+pub enum Shelving {
+    Save(TitleCard),
+    Unsave(TitleId),
+}
+
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
@@ -166,14 +191,25 @@ pub enum Command {
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
     Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
-    Remove { refs: Vec<String>, reply: Reply<Vec<Change>> },
+    Remove { refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>> },
     Verify { reference: String, repair: bool, reply: Reply<Vec<Change>> },
     Watch { refs: Vec<String>, reply: Reply<(Vec<Job>, broadcast::Receiver<Update>)> },
     StreamFile { id: TorrentId, index: u32, reply: Reply<StreamFile> },
+    Stream { id: TorrentId, index: u32, reply: Reply<(StreamFile, Lease)> },
+    Library { shelving: Shelving, reply: Reply<()> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
     Connected,
     Disconnected { keep_until: Option<Instant> },
     Shutdown { reply: oneshot::Sender<()> },
+    Restart { reply: Reply<()> },
+}
+
+/// How the owner's run ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ended {
+    Stopped,
+    /// Stopped with every download saved, to start again from an installed update.
+    Restart,
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +300,11 @@ struct Stopping {
     waiting: BTreeSet<TorrentId>,
     deadline: Instant,
     replies: Vec<oneshot::Sender<()>>,
+    /// An update's restart, which happens only if the stop saves everything and no one else
+    /// asked the engine to stop meanwhile.
+    restart: Option<Reply<()>>,
+    /// A download's progress failed to save during the stop.
+    unsaved: bool,
 }
 
 pub struct Owner {
@@ -274,13 +315,16 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
+    /// Who streams which download now, and how far ahead of each player its film is.
+    streams: Streams,
     /// The downloads title plays are testing or have yet to put back. Only in memory: after a
     /// restart no play is running, so nothing is under test and every download stays as it is.
     under_test: BTreeMap<TorrentId, UnderTest>,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
+    tending: Tending,
     stopping: Option<Stopping>,
-    stopped: bool,
+    ended: Option<Ended>,
     engine: EngineHandle,
     parse: ParseTorrent,
     disk: Box<dyn Disk>,
@@ -298,12 +342,15 @@ pub fn now() -> i64 {
 
 impl Owner {
     pub fn new(
-        store: Store,
+        mut store: Store,
         engine: EngineHandle,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
+        playing: Playing,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
+        // Opened first, for a plays folder other than the one used before changes what the plays are.
+        let deleter = Deleter::open(&config.plays.root, config.trash.clone(), config.trash_pause.clone(), &mut store)?;
         let mut jobs = BTreeMap::new();
         for stored in store.jobs()? {
             let metainfo = match &stored.metainfo {
@@ -315,26 +362,24 @@ impl Owner {
                 })?)),
                 None => None,
             };
-            let observed = match stored.record.intent {
-                Intent::Running if !config.resume_on_start => Observed::Parked,
-                _ => Observed::Absent,
-            };
-            jobs.insert(stored.record.id, JobEntry::new(stored.record, metainfo, observed));
+            jobs.insert(stored.record.id, JobEntry::new(stored.record, metainfo, Observed::Absent));
         }
         let now = now();
         let (updates, _) = broadcast::channel(256);
         let mut owner = Self {
             tombstones: store.tombstones(now)?,
+            tending: Tending::new(deleter),
             store,
             jobs,
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
+            streams: Streams::new(playing),
             under_test: BTreeMap::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
-            stopped: false,
+            ended: None,
             engine,
             parse,
             disk,
@@ -345,6 +390,8 @@ impl Owner {
             keep_until: None,
             resume_saved_at: Instant::now(),
         };
+        // Nothing is in the engine yet, so what a removal cut short by a crash left goes now.
+        owner.finish_deletions();
         owner.schedule();
         Ok(owner)
     }
@@ -353,23 +400,42 @@ impl Owner {
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         mut events: mpsc::UnboundedReceiver<EngineEvent>,
-    ) {
+    ) -> Ended {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
-        while !self.stopped {
+        loop {
+            if let Some(ended) = self.ended {
+                return ended;
+            }
+            let due = self.metadata_waiters.iter().map(|w| w.deadline).min();
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => self.command(command),
-                    None => self.begin_stop(None),
+                    None => self.begin_stop(Stopper::Exit(None)),
                 },
                 event = events.recv() => match event {
                     Some(event) => self.engine_event(event),
                     None => {
                         super::log("the engine thread stopped, so the engine process is exiting");
-                        self.stopped = true;
+                        self.ended = Some(Ended::Stopped);
                     }
                 },
-                _ = tick.tick() => self.tick(),
+                _ = tick.tick() => {
+                    self.catch_up(&mut events);
+                    self.tick();
+                }
+                _ = tokio::time::sleep_until(due.unwrap_or_else(Instant::now).into()), if due.is_some() => {
+                    self.catch_up(&mut events);
+                    self.expire_metadata(Instant::now());
+                }
             }
+        }
+    }
+
+    /// Applies what the engine sent while the owner was busy, so it counts before a deadline is judged.
+    fn catch_up(&mut self, events: &mut mpsc::UnboundedReceiver<EngineEvent>) {
+        for _ in 0..events.len() {
+            let Ok(event) = events.try_recv() else { break };
+            self.engine_event(event);
         }
     }
 
@@ -410,11 +476,13 @@ impl Owner {
             }
             Command::Resume { refs, all, reply } => {
                 self.adopt(&refs, "resume");
-                let _ = reply.send(self.resume(&refs, all));
+                let resumed = self.resume(&refs, all);
+                if let Ok(changes) = &resumed {
+                    self.touch_plays(changes);
+                }
+                let _ = reply.send(resumed);
             }
-            Command::Remove { refs, reply } => {
-                let _ = reply.send(self.remove(&refs));
-            }
+            Command::Remove { refs, delete, reply } => self.rm(refs, delete, reply),
             Command::Verify { reference, repair, reply } => {
                 self.adopt(std::slice::from_ref(&reference), "verify");
                 let _ = reply.send(self.verify(&reference, repair));
@@ -426,13 +494,21 @@ impl Owner {
             Command::StreamFile { id, index, reply } => {
                 let _ = reply.send(self.stream_file(id, index));
             }
+            Command::Stream { id, index, reply } => {
+                let streaming = self.stream_file(id, index).and_then(|file| Ok((file, self.lease(id)?)));
+                let _ = reply.send(streaming);
+            }
+            Command::Library { shelving, reply } => {
+                let _ = reply.send(self.library(shelving));
+            }
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Connected => self.connections += 1,
             Command::Disconnected { keep_until } => {
                 self.connections = self.connections.saturating_sub(1);
                 self.keep_until = self.keep_until.max(keep_until);
             }
-            Command::Shutdown { reply } => self.begin_stop(Some(reply)),
+            Command::Shutdown { reply } => self.begin_stop(Stopper::Exit(Some(reply))),
+            Command::Restart { reply } => self.begin_stop(Stopper::Update(reply)),
         }
     }
 
@@ -538,7 +614,7 @@ impl Owner {
         let Ok(space) = self.disk.space(dir) else { return 0 };
         self.jobs
             .values()
-            .filter(|j| j.id() != except && j.record.intent == Intent::Running)
+            .filter(|j| j.id() != except && j.record.intent == Intent::Running && !self.leaving(j.id()))
             .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
             .map(|job| self.space_needed(job))
             .sum()
@@ -557,9 +633,10 @@ impl Owner {
     /// `get` as a person runs it, which makes a download under test theirs.
     fn get_by_hand(&mut self, get: GetCommand) -> Result<GetReply, Error> {
         let dry_run = get.dry_run;
-        let reply = self.get(get, None)?;
+        let reply = self.get(get, None, Home::Folder)?;
         if !dry_run {
             self.adopt(&[reply.job.id.to_hex()], "get");
+            self.keep_play(reply.job.id)?;
         }
         Ok(reply)
     }
@@ -577,8 +654,8 @@ impl Owner {
         }
     }
 
-    /// `title` links a download this creates to the title it is for.
-    fn get(&mut self, get: GetCommand, title: Option<Linked>) -> Result<GetReply, Error> {
+    /// `title` links a download this creates to the title it is for, and `home` says where its files live.
+    fn get(&mut self, get: GetCommand, title: Option<Linked>, home: Home) -> Result<GetReply, Error> {
         let GetCommand { source, dir, files, max_size, setup_max_size, dry_run } = get;
         if !files.is_empty() {
             super::files::compile(&files)?;
@@ -603,6 +680,9 @@ impl Owner {
         };
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
+        if home == Home::Folder {
+            self.tending.deleter.outside_plays(&dir)?;
+        }
         let cap = Cap::new(max_size, setup_max_size);
         let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
         if let (Some(plan), Some(metainfo)) = (&plan, metainfo.as_deref()) {
@@ -611,7 +691,16 @@ impl Owner {
                 admission::check_conflicts(plan)?;
                 self.check_claims(id, metainfo, &dir, &plan.wanted, None)?;
             }
-            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
+            // A new play makes room in the plays folder only once nothing but the disk refuses it.
+            // The plays the engine did not hold are gone by then, so the disk is measured again.
+            let space = match home {
+                Home::Plays(_) if !dry_run => {
+                    self.make_room_for(id, plan.selected_size);
+                    self.disk.space(&dir).unwrap_or(plan.space)
+                }
+                _ => plan.space,
+            };
+            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(&dir, id))?;
         }
         let record = JobRecord {
             id,
@@ -627,6 +716,7 @@ impl Owner {
             piece_map: None,
             files_verified: None,
             title,
+            home,
         };
         if dry_run {
             let job = JobEntry::new(record, metainfo, Observed::Absent).view();
@@ -669,11 +759,6 @@ impl Owner {
         {
             self.job_metadata(id, metainfo);
         }
-        if !dry_run && self.jobs[&id].observed == Observed::Parked {
-            self.jobs.get_mut(&id).expect("found above").observed = Observed::Absent;
-            self.schedule();
-            self.publish(id);
-        }
         let job = &self.jobs[&id];
         let too_large = matches!(&job.record.intent, Intent::Failed { error } if error.code == ErrorCode::TooLarge);
         let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none() && self.lost_files(job);
@@ -706,6 +791,7 @@ impl Owner {
             self.check_claims(id, &metainfo, &job.record.dir, &plan.wanted, None)?;
         }
         let needed = plan.needed(if recheck { 0 } else { job.verified() });
+        // A running download gets the files at once, so only room the disk has now counts.
         admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
         if dry_run {
             let mut preview = job.clone();
@@ -773,7 +859,7 @@ impl Owner {
     }
 
     fn play(&mut self, play: PlayCommand) -> Result<(Job, Arc<Metainfo>), Error> {
-        let PlayCommand { source, dir, files, setup_max_size, title, finish } = play;
+        let PlayCommand { source, to, files, setup_max_size, title, finish } = play;
         let id = match &source {
             Source::Download(id) if self.jobs.contains_key(id) => *id,
             Source::Download(id) => return Err(no_download(&id.to_hex())),
@@ -822,13 +908,26 @@ impl Owner {
                 patterns.push(pattern);
             }
         }
-        if title.is_some() && matches!(before, Before::Absent) {
-            let into = dir.as_deref().unwrap_or(&self.config.default_dir);
-            admission::check_free(&files::footprint(&metainfo, into), id)?;
-        }
-        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false });
-        let get = GetCommand { source, dir, files: patterns, max_size: None, setup_max_size, dry_run: false };
-        let id = self.get(get, made.filter(|_| matches!(before, Before::Absent)))?.job.id;
+        let absent = matches!(before, Before::Absent);
+        let (dir, home) = if absent { self.destination(id, to)? } else { (None, Home::Folder) };
+        let free = match &title {
+            Some(_) if absent => {
+                let into = dir.as_deref().unwrap_or(&self.config.default_dir);
+                admission::check_free(&files::footprint(&metainfo, into), id)
+            }
+            _ => Ok(()),
+        };
+        let made = title.as_ref().map(|play| Linked { link: play.link.clone(), played: false }).filter(|_| absent);
+        let get =
+            GetCommand { source, dir: dir.clone(), files: patterns, max_size: None, setup_max_size, dry_run: false };
+        let id = match free.and_then(|()| self.get(get, made, home)) {
+            Ok(reply) => reply.job.id,
+            Err(error) => {
+                self.unmade(dir.as_deref(), home);
+                return Err(error);
+            }
+        };
+        self.pressed_play(id, finish)?;
         match (&title, &self.jobs[&id].record.title) {
             // A download played by hand is being watched, so no title play puts it back.
             (None, _) => self.played(id)?,
@@ -840,7 +939,7 @@ impl Owner {
             (Some(_), Some(_)) => {}
         }
         let job = &self.jobs[&id];
-        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) || job.observed == Observed::Parked {
+        if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) {
             self.resume(&[id.to_hex()], false)?;
         }
         if let Some(play) = title {
@@ -903,7 +1002,7 @@ impl Owner {
             Some(PutBack::Pause) => self.pause(vec![id.to_hex()], oneshot::channel().0),
             Some(PutBack::Fail(error)) => self.fail(id, error),
             Some(PutBack::Remove) => {
-                if let Err(error) = self.remove(&[id.to_hex()]) {
+                if let Err(error) = self.remove(&[id.to_hex()], false) {
                     super::log(&format!("{id} stays, for it could not be removed: {}", error.message));
                 }
             }
@@ -922,7 +1021,7 @@ impl Owner {
         }
         let settled = match job.observed {
             Observed::InEngine(phase) => phase == Phase::Paused,
-            Observed::Absent | Observed::Parked => !self.draining.contains(&job.id()),
+            Observed::Absent => !self.draining.contains(&job.id()),
         };
         if !settled {
             return OnDisk::Unsettled;
@@ -1031,7 +1130,7 @@ impl Owner {
                             job.observed = Observed::InEngine(Phase::Pausing);
                             self.engine.send(EngineCommand::Pause(id));
                         }
-                        Observed::Absent | Observed::Parked => job.observed = Observed::Absent,
+                        Observed::Absent => {}
                     }
                     self.publish(id);
                     "paused"
@@ -1053,14 +1152,11 @@ impl Owner {
 
     fn change(&self, id: TorrentId, result: &str) -> Change {
         let job = &self.jobs[&id];
-        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), path: None }
+        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), ..Change::default() }
     }
 
     fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
-        let resumable = |j: &JobEntry| {
-            matches!(j.record.intent, Intent::Paused | Intent::Failed { .. })
-                || (j.record.intent == Intent::Running && j.observed == Observed::Parked)
-        };
+        let resumable = |j: &JobEntry| matches!(j.record.intent, Intent::Paused | Intent::Failed { .. });
         let fits = |j: &JobEntry| {
             j.selected_size().map_or(Ok(()), |size| admission::check_size(size, j.record.cap, Some(j.id())))
         };
@@ -1078,18 +1174,10 @@ impl Owner {
             let job = &self.jobs[&id];
             let result = match (&job.record.intent, job.observed) {
                 (Intent::Done { .. }, _) => "already_done",
-                (Intent::Running, Observed::Parked) => {
-                    self.jobs.get_mut(&id).expect("resolved above").observed = Observed::Absent;
-                    "resumed"
-                }
                 (Intent::Running, _) => "already_running",
-                (Intent::Paused | Intent::Failed { .. }, observed) => {
+                (Intent::Paused | Intent::Failed { .. }, _) => {
                     self.store.set_intent(id, &Intent::Running)?;
-                    let job = self.jobs.get_mut(&id).expect("resolved above");
-                    job.record.intent = Intent::Running;
-                    if observed == Observed::Parked {
-                        job.observed = Observed::Absent;
-                    }
+                    self.jobs.get_mut(&id).expect("resolved above").record.intent = Intent::Running;
                     "resumed"
                 }
             };
@@ -1104,7 +1192,10 @@ impl Owner {
         Ok(changes)
     }
 
-    fn remove(&mut self, refs: &[String]) -> Result<Vec<Change>, Error> {
+    /// Takes downloads off the list. What of them to delete is put on record with each removal,
+    /// and deleted once the engine lets go of it: a play's folder always, and the files of a
+    /// download in a folder the person chose only with `delete`.
+    fn remove(&mut self, refs: &[String], delete: bool) -> Result<Vec<Change>, Error> {
         let mut targets = Vec::new();
         for reference in refs {
             match self.resolve_job(reference, "rm") {
@@ -1125,6 +1216,7 @@ impl Owner {
                     name: tomb.name,
                     result: "already_removed".into(),
                     path: tomb.path,
+                    ..Change::default()
                 }),
                 Ok(id) if !self.jobs.contains_key(&id) => {}
                 Ok(id) => {
@@ -1132,13 +1224,17 @@ impl Owner {
                     let view = job.view();
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
-                    self.store.remove(&tomb)?;
+                    let doom = self.doom(job, delete);
+                    self.tending.deleter.remove(&mut self.store, &tomb, doom)?;
                     let job = self.jobs.remove(&id).expect("resolved above");
                     self.streamed.remove(&id);
                     self.under_test.remove(&id);
                     if job.observed.in_engine() {
                         self.engine.send(EngineCommand::Remove(id));
                         self.draining.insert(id);
+                    }
+                    if self.draining.contains(&id) {
+                        self.tending.letting_go.insert(id, Self::writes(&job));
                     }
                     self.pauses.iter_mut().for_each(|p| {
                         p.waiting.remove(&id);
@@ -1154,6 +1250,7 @@ impl Owner {
                         name: job.record.name,
                         result: "removed".into(),
                         path: view.path,
+                        ..Change::default()
                     });
                 }
             }
@@ -1291,7 +1388,10 @@ impl Owner {
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
+                self.tending.letting_go.remove(&id);
+                self.leave();
                 self.put_back(id);
+                self.finish_deletions();
             }
         }
         self.finish_stop_if_done();
@@ -1323,6 +1423,7 @@ impl Owner {
             admission::check_size(plan.selected_size, cap, Some(id))?;
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
+            // The engine gets the files at once, so only room the disk has now counts.
             admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
             Ok(plan)
         });
@@ -1366,6 +1467,11 @@ impl Owner {
     }
 
     fn fail(&mut self, id: TorrentId, error: Error) {
+        if let Some(stopping) = &mut self.stopping
+            && stopping.waiting.contains(&id)
+        {
+            stopping.unsaved = true;
+        }
         let Some(job) = self.jobs.get_mut(&id) else { return };
         job.verify = None;
         job.forget_sources();
@@ -1402,7 +1508,7 @@ impl Owner {
                 }
                 Observed::Absent
             }
-            outside @ (Observed::Absent | Observed::Parked) => outside,
+            Observed::Absent => Observed::Absent,
         };
         self.publish(id);
     }
@@ -1440,7 +1546,7 @@ impl Owner {
             Observed::InEngine(Phase::Finishing { writes_stopped: true }) => return,
             Observed::InEngine(Phase::Checking) if job.verify.is_some() => return,
             Observed::InEngine(_) => job.observed = Observed::InEngine(Phase::Paused),
-            Observed::Absent | Observed::Parked => return,
+            Observed::Absent => return,
         }
         self.engine.send(EngineCommand::SaveResume(id));
         for pause in &mut self.pauses {
@@ -1494,6 +1600,9 @@ impl Owner {
         if finishing && job.selected_size() == Some(verified) {
             let finished_at = now();
             if let Err(error) = self.store.finish(id, finished_at, &data, verified) {
+                if let Some(stopping) = &mut self.stopping {
+                    stopping.unsaved = true;
+                }
                 self.fail(id, error);
                 return;
             }
@@ -1507,6 +1616,9 @@ impl Owner {
             return;
         }
         let saved = self.store.save_resume(id, &data, verified, piece_map, files.as_deref(), now()).is_ok();
+        if !saved && let Some(stopping) = &mut self.stopping {
+            stopping.unsaved = true;
+        }
         let job = self.jobs.get_mut(&id).expect("checked above");
         if saved {
             job.record.verified = verified;
@@ -1596,7 +1708,7 @@ impl Owner {
         if self.stopping.is_some() {
             return;
         }
-        let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()));
+        let ready = self.jobs.values().filter(|j| !self.draining.contains(&j.id()) && !self.leaving(j.id()));
         for id in book::to_start(ready, self.config.max_active, &self.streamed) {
             self.start(id);
         }
@@ -1620,7 +1732,10 @@ impl Owner {
             && let Err(error) =
                 admission::check_disk(space, self.space_needed(job), self.others_remaining(&job.record.dir, id))
         {
-            self.fail(id, error);
+            // Plays leaving the plays folder make room: it is checked again once they are gone.
+            if !self.reclaiming(space) {
+                self.fail(id, error);
+            }
             return;
         }
         let resume_data = self.store.resume(id).ok().flatten();
@@ -1680,6 +1795,20 @@ impl Owner {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.expire_metadata(now);
+        self.finish_pauses();
+        self.finish_stop_if_done();
+        self.check_idle(now);
+        self.save_progress(now);
+        self.finish_deletions();
+        self.leave();
+        self.tend_plays(now);
+        self.prioritize(now);
+    }
+
+    /// Answers each wait for a file list whose deadline has passed, and gives up the probes no one
+    /// waits for any longer.
+    fn expire_metadata(&mut self, now: Instant) {
         let (expired, waiting): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.metadata_waiters).into_iter().partition(|w| w.deadline <= now);
         self.metadata_waiters = waiting;
@@ -1698,10 +1827,6 @@ impl Owner {
             self.engine.send(EngineCommand::Remove(id));
             self.draining.insert(id);
         }
-        self.finish_pauses();
-        self.finish_stop_if_done();
-        self.check_idle(now);
-        self.save_progress(now);
     }
 
     fn save_progress(&mut self, now: Instant) {
@@ -1729,13 +1854,18 @@ impl Owner {
         if self.connections > 0 || self.busy() || self.stopping.is_some() {
             self.idle_since = now;
         } else if now.duration_since(self.idle_since) >= timeout && self.keep_until.is_none_or(|until| now >= until) {
-            self.begin_stop(None);
+            self.begin_stop(Stopper::Exit(None));
         }
     }
 
-    fn begin_stop(&mut self, reply: Option<oneshot::Sender<()>>) {
+    fn begin_stop(&mut self, by: Stopper) {
         if let Some(stopping) = &mut self.stopping {
-            stopping.replies.extend(reply);
+            match by {
+                Stopper::Exit(reply) => stopping.replies.extend(reply),
+                Stopper::Update(reply) => {
+                    let _ = reply.send(Err(Error::new(ErrorCode::DaemonUnavailable, "the engine is already stopping")));
+                }
+            }
             return;
         }
         self.put_back_all();
@@ -1755,13 +1885,19 @@ impl Owner {
                     self.engine.send(EngineCommand::Pause(id));
                     waiting.insert(id);
                 }
-                Observed::Absent | Observed::Parked => {}
+                Observed::Absent => {}
             }
         }
+        let (replies, restart) = match by {
+            Stopper::Exit(reply) => (reply.into_iter().collect(), None),
+            Stopper::Update(reply) => (Vec::new(), Some(reply)),
+        };
         self.stopping = Some(Stopping {
             waiting,
             deadline: Instant::now() + self.config.writes_stop_within,
-            replies: reply.into_iter().collect(),
+            replies,
+            restart,
+            unsaved: false,
         });
         self.finish_stop_if_done();
     }
@@ -1772,11 +1908,39 @@ impl Owner {
             return;
         }
         let stopping = self.stopping.take().expect("checked above");
+        let saved = stopping.waiting.is_empty() && !stopping.unsaved;
+        let ended = match stopping.restart {
+            Some(restart) if stopping.replies.is_empty() && !saved => {
+                let error =
+                    Error::new(ErrorCode::StorageError, "the engine could not save the progress of every download");
+                let _ = restart.send(Err(error));
+                self.schedule();
+                return;
+            }
+            Some(restart) if stopping.replies.is_empty() => {
+                let _ = restart.send(Ok(()));
+                Ended::Restart
+            }
+            Some(restart) => {
+                let _ = restart.send(Err(Error::new(ErrorCode::DaemonUnavailable, "the engine is stopping")));
+                Ended::Stopped
+            }
+            None => Ended::Stopped,
+        };
         for reply in stopping.replies {
             let _ = reply.send(());
         }
-        self.stopped = true;
+        self.ended = Some(ended);
     }
+}
+
+/// Who asked the engine to stop.
+enum Stopper {
+    /// A person, a signal, or the idle timeout. The engine stops whatever the last saves did.
+    Exit(Option<oneshot::Sender<()>>),
+    /// An update, which restarts the engine only once every download's progress is saved.
+    /// Otherwise the engine carries on and the update tries again later.
+    Update(Reply<()>),
 }
 
 // Default macOS filesystems ignore case.

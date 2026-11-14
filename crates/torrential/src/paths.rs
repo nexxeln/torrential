@@ -1,3 +1,4 @@
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use torrential_core::{Error, ErrorCode};
@@ -9,6 +10,8 @@ pub struct Paths {
     pub config: PathBuf,
     pub state: PathBuf,
     pub cache: PathBuf,
+    /// What torrential keeps for the person, such as the plays it is downloading.
+    pub data: PathBuf,
     pub runtime: PathBuf,
     pub downloads: PathBuf,
 }
@@ -37,6 +40,7 @@ impl Paths {
                 config: root.join("config"),
                 state: root.join("state"),
                 cache: root.join("cache"),
+                data: root.join("data"),
                 runtime: root.join("run"),
                 downloads,
             }
@@ -49,6 +53,7 @@ impl Paths {
                 config: xdg("XDG_CONFIG_HOME", ".config"),
                 state: xdg("XDG_STATE_HOME", ".local/state"),
                 cache: xdg("XDG_CACHE_HOME", ".cache"),
+                data: xdg("XDG_DATA_HOME", ".local/share"),
                 runtime: env.var("XDG_RUNTIME_DIR").map_or_else(
                     || PathBuf::from(format!("/tmp/torrential-{uid}")),
                     |d| PathBuf::from(d).join("torrential"),
@@ -87,8 +92,29 @@ impl Paths {
         self.state.join("state.db")
     }
 
+    /// torrential's own folder for plays. Each play downloads into a folder of its own inside it,
+    /// and nothing else writes there.
+    pub fn plays(&self) -> PathBuf {
+        self.data.join("plays")
+    }
+
     pub fn startup_error(&self) -> PathBuf {
         self.state.join("engine.error")
+    }
+
+    /// Holds the port the engine last served the web app on.
+    pub fn http_port(&self) -> PathBuf {
+        self.state.join("http-port")
+    }
+
+    /// Left by an engine that exits for the login service to start the next one.
+    pub fn switching(&self) -> PathBuf {
+        self.state.join("engine.switching")
+    }
+
+    /// Makes the state folder, if it is not there, so that only this user can change it.
+    pub fn make_state(&self) -> std::io::Result<()> {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.state)
     }
 }
 
@@ -162,6 +188,7 @@ mod tests {
         assert_eq!(p.state, Path::new("/tmp/th/state"));
         assert_eq!(p.socket(), Path::new("/tmp/th/run/engine.sock"));
         assert_eq!(p.downloads, Path::new("/Users/ada/Downloads/torrential"));
+        assert_eq!(p.plays(), Path::new("/tmp/th/data/plays"));
     }
 
     #[test]
@@ -169,6 +196,7 @@ mod tests {
         let p = resolve(&[("HOME", "/Users/ada"), ("XDG_STATE_HOME", "/var/st")]).unwrap();
         assert_eq!(p.state, Path::new("/var/st/torrential"));
         assert_eq!(p.config, Path::new("/Users/ada/.config/torrential"));
+        assert_eq!(p.plays(), Path::new("/Users/ada/.local/share/torrential/plays"));
         assert_eq!(p.socket(), Path::new("/tmp/torrential-501/engine.sock"));
         let p = resolve(&[("HOME", "/home/ada"), ("XDG_RUNTIME_DIR", "/run/user/501")]).unwrap();
         assert_eq!(p.socket(), Path::new("/run/user/501/torrential/engine.sock"));

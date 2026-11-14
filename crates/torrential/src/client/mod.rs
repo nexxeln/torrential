@@ -1,4 +1,5 @@
 pub mod connect;
+mod devices;
 pub mod launch;
 pub mod play;
 pub mod player;
@@ -7,6 +8,7 @@ pub mod service;
 mod setup;
 mod titles;
 pub mod tui;
+mod tv;
 mod update;
 pub mod wait;
 mod web;
@@ -89,6 +91,8 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         },
         Command::Play(args) => play::run(args, mode, env, &cwd),
         Command::Web(args) => web::run(&engine()?, args, mode, env),
+        Command::Devices { command } => devices::run(engine()?, command, mode),
+        Command::Tv { command } => tv::run(engine()?, command, mode, &cwd),
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;
@@ -107,10 +111,10 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
                 (None, Mode::Human) => None,
                 (None, _) => Some(wait::DEFAULT_TIMEOUT),
             };
-            let conn = engine()?;
+            let following = (engine()?, wait::Engine { paths: paths()?, env: env.clone() });
             match mode {
-                Mode::Human => wait::attach(conn, refs, args.until, timeout),
-                _ => wait::run(conn, refs, args.until, timeout, &wait::Printer { mode }),
+                Mode::Human => wait::attach(following, refs, args.until, timeout),
+                _ => wait::run(following, refs, args.until, timeout, &wait::Printer { mode }),
             }
         }
         Command::Pause(args) => {
@@ -121,7 +125,8 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             changes(engine()?, request, ChangeCommand::Resume, mode)
         }
         Command::Rm(args) => {
-            changes(engine()?, Request::Remove { refs: job_refs(&args.references, &cwd)? }, ChangeCommand::Remove, mode)
+            let request = Request::Remove { refs: job_refs(&args.references, &cwd)?, delete: args.delete };
+            changes(engine()?, request, ChangeCommand::Remove, mode)
         }
         Command::Verify(args) => {
             let reference = job_refs(std::slice::from_ref(&args.reference), &cwd)?.remove(0);
@@ -242,7 +247,9 @@ fn follow(exit: u8, job: &Job, mode: Mode, env: &Env) -> Result<u8, Error> {
         return Ok(exit);
     }
     eprintln!("Press Ctrl-C to stop watching. The download continues in the background.");
-    wait::attach(connect::ensure(&Paths::from_process(env)?, env)?, vec![job.id.to_hex()], Until::Done, None)
+    let paths = Paths::from_process(env)?;
+    let following = (connect::ensure(&paths, env)?, wait::Engine { paths, env: env.clone() });
+    wait::attach(following, vec![job.id.to_hex()], Until::Done, None)
 }
 
 /// A torrent's files, fetching its metadata if needed, as `torrential files` lists them.
@@ -300,7 +307,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
     match command {
         DaemonCommand::Status => {
-            let report = match connect::existing(&paths, env)? {
+            let report = match connect::running(&paths, env)? {
                 Some(mut conn) => {
                     let downloads = match conn.call(&Request::Status { refs: Vec::new() }) {
                         Ok(Response::Jobs { jobs }) => Some(jobs.len()),
@@ -327,10 +334,8 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             Ok(emit(mode, &views::daemon_status(&report), &Typed { kind: "daemon", body: &report }))
         }
         DaemonCommand::Stop => {
-            let (result, pid) = match connect::existing(&paths, env)? {
-                Some(conn) => ("stopped", Some(connect::stop(conn)?)),
-                None => ("already_stopped", None),
-            };
+            let pid = connect::stop_asked(&paths, env)?;
+            let result = if pid.is_some() { "stopped" } else { "already_stopped" };
             #[derive(Serialize)]
             struct Stopped {
                 result: &'static str,
@@ -348,12 +353,12 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             Ok(emit(mode, &doc, &Typed { kind: "daemon_stop", body: Stopped { result, pid } }))
         }
         DaemonCommand::Install => {
-            if let Some(conn) = connect::existing(&paths, env)? {
-                connect::stop(conn)?;
+            if let Some(conn) = connect::running(&paths, env)? {
+                connect::stop(conn, connect::Stop::Asked)?;
             }
-            service_report(service::install(env, &paths.log())?, mode)
+            service_report(service::install(env, &paths)?, mode)
         }
-        DaemonCommand::Uninstall => service_report(service::uninstall(env)?, mode),
+        DaemonCommand::Uninstall => service_report(service::uninstall(env, &paths)?, mode),
         DaemonCommand::Run { service } => Ok(crate::daemon::run(env, service)),
         DaemonCommand::Launch => Ok(launch::launch_stage(env)),
     }
@@ -482,7 +487,7 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         Ok(()) => checks.push(check("state", CheckStatus::Ok, paths.state.display().to_string())),
         Err(error) => checks.push(check("state", CheckStatus::Fail, error.message)),
     }
-    match connect::existing(&paths, env) {
+    match connect::running(&paths, env) {
         Ok(Some(conn)) => {
             checks.push(check("engine", CheckStatus::Ok, format!("running {} (pid {})", conn.engine_version, conn.pid)))
         }
@@ -500,15 +505,18 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         Err(error) => checks.push(check("skill", CheckStatus::Fail, error.message)),
     }
     let profile = match (&settings, crate::machine::detect(env)) {
-        (Ok(settings), Ok(machine)) => {
-            views::profile_check(&Profile { detected: Some(machine), preferences: settings.preferences, room: None })
-        }
+        (Ok(settings), Ok(machine)) => views::profile_check(&Profile {
+            detected: Some(machine),
+            preferences: settings.preferences,
+            ..Profile::default()
+        }),
         (Err(_), _) => check("profile", CheckStatus::Skipped, "the config has an error".into()),
         (_, Err(error)) => check("profile", CheckStatus::Fail, error.message),
     };
+    let fetch_ffmpeg = settings.as_ref().map_or(true, |settings| settings.ffmpeg.fetch);
     checks.extend(probe::checks(&paths, settings, network));
     checks.push(profile);
-    checks.push(web::check(env));
+    checks.push(web::check(env, &paths, fetch_ffmpeg));
     emit(mode, &views::doctor(&checks, fix), &Typed { kind: "doctor", body: Checks { checks: &checks } })
 }
 

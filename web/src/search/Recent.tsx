@@ -29,10 +29,9 @@ function Unfinished({ entry, onForget }: { entry: Position; onForget: () => void
         aria-label={`Forget where ${name.title} stopped`}
         title="Forget this position"
         onClick={onForget}
-        className="absolute top-1/2 right-0 flex size-7 -translate-y-1/2 items-center justify-center rounded-md hover:bg-white/10"
+        className="absolute top-1/2 right-0 hit-area flex size-7 -translate-y-1/2 items-center justify-center rounded-md hover:bg-white/10"
       >
         <XMarkIcon className="size-4 fill-pencil" />
-        <span className="absolute top-1/2 left-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden" aria-hidden="true" />
       </button>
     </li>
   );
@@ -56,8 +55,6 @@ function summary(job: Job): string {
       return "Queued";
     case "checking":
       return "Checking";
-    case "interrupted":
-      return "Interrupted";
   }
 }
 

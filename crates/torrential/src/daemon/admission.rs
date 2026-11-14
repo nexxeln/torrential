@@ -315,6 +315,8 @@ pub struct FakeDisk(std::sync::Arc<std::sync::Mutex<FakeFiles>>);
 #[cfg(test)]
 struct FakeFiles {
     space: Space,
+    /// Folders whose bytes become free once they are gone.
+    freeing: Vec<(PathBuf, u64)>,
     paths: BTreeSet<PathBuf>,
     links: BTreeSet<PathBuf>,
     allocated: std::collections::BTreeMap<PathBuf, u64>,
@@ -325,6 +327,7 @@ impl FakeDisk {
     pub fn new(space: Space) -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(FakeFiles {
             space,
+            freeing: Vec::new(),
             paths: BTreeSet::new(),
             links: BTreeSet::new(),
             allocated: std::collections::BTreeMap::new(),
@@ -355,12 +358,19 @@ impl FakeDisk {
     pub fn set_free(&self, free: u64) {
         self.0.lock().unwrap().space.free = free;
     }
+
+    /// Adds `bytes` to what is free once the real folder `path` is gone, as deleting it would.
+    pub fn frees(&self, path: impl Into<PathBuf>, bytes: u64) {
+        self.0.lock().unwrap().freeing.push((path.into(), bytes));
+    }
 }
 
 #[cfg(test)]
 impl Disk for FakeDisk {
     fn space(&self, _: &Path) -> std::io::Result<Space> {
-        Ok(self.0.lock().unwrap().space)
+        let files = self.0.lock().unwrap();
+        let freed: u64 = files.freeing.iter().filter(|(path, _)| !path.exists()).map(|(_, bytes)| bytes).sum();
+        Ok(Space { free: files.space.free + freed, ..files.space })
     }
 
     fn exists(&self, path: &Path) -> bool {

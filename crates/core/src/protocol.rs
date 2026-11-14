@@ -9,14 +9,16 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cast::{Cast, CastAction, CastRequest, TvList};
 use crate::catalog::{EpisodeInfo, TitleCard, TitleDetails, TitleId, VideoRef};
+use crate::device::DeviceList;
 use crate::error::Error;
 use crate::id::Target;
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
-pub const WIRE_VERSION: u32 = 5;
+pub const WIRE_VERSION: u32 = 8;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -54,8 +56,12 @@ pub enum Request {
         refs: Vec<String>,
         all: bool,
     },
+    /// Takes downloads off the list. A play's files go with it. Files in a folder the person chose
+    /// go only with `delete`.
     Remove {
         refs: Vec<String>,
+        #[serde(default)]
+        delete: bool,
     },
     Verify {
         reference: String,
@@ -65,8 +71,14 @@ pub enum Request {
     Watch {
         refs: Vec<String>,
     },
-    /// Asks the engine to save resume data and exit, for example before an upgrade.
-    Shutdown,
+    /// Asks the engine to save resume data and exit. `asked` says the person asked for it. Without
+    /// it, a newer client asks the engine to make way for its version, which the engine does only
+    /// when nothing plays. Clients before 0.5 leave it out, and also send it to an engine of any
+    /// other version, so an engine newer than the client stays up.
+    Shutdown {
+        #[serde(default)]
+        asked: bool,
+    },
     /// Films and series named like `words`.
     Titles {
         words: String,
@@ -85,6 +97,30 @@ pub enum Request {
     /// The same play, answered as `get` answers, for a download kept without a player. Once a
     /// source starts, it downloads as `get` downloads, not in playing order.
     GetTitle(TitleRequest),
+    /// The phones and TVs this machine let in, and the pairing offer open now.
+    Devices,
+    /// Opens a pairing offer for one more device, in place of any open one.
+    AddDevice,
+    /// Locks a device out at once.
+    RemoveDevice {
+        id: String,
+    },
+    /// The TVs on the home network and the casts playing. `fresh` searches the network again even
+    /// when the last search was moments ago.
+    Tvs {
+        fresh: bool,
+    },
+    /// Plays a film, an episode, or a torrent's video on a TV. A title sends a `TitleFrame::Step`
+    /// for each step of finding its source. The reply comes once the TV plays, or the cast fails.
+    Cast(CastRequest),
+    /// Pauses, resumes, seeks, stops, or sets the volume of the cast on a TV: its ID or a part of
+    /// its name, or `None` for the only cast playing.
+    CastControl {
+        tv: Option<String>,
+        action: CastAction,
+    },
+    /// The films and episodes to go on with, and the saved titles.
+    Home,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -169,6 +205,20 @@ pub enum Response {
         reply: Box<GetReply>,
         title: Box<TitlePlayed>,
     },
+    Devices {
+        #[serde(flatten)]
+        list: DeviceList,
+    },
+    Tvs {
+        #[serde(flatten)]
+        list: TvList,
+    },
+    Cast {
+        cast: Box<Cast>,
+    },
+    Home {
+        home: Box<Home>,
+    },
     Ok,
     Error {
         error: Error,
@@ -187,6 +237,27 @@ pub struct TitlePage {
     pub next: Option<Next>,
     /// The downloads made by playing this title.
     pub downloads: Vec<Job>,
+}
+
+/// What the home screens list: for each title watched lately, its video to go on with, and the
+/// saved titles. The socket's `home` and `GET /api/home` both answer with it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Home {
+    /// The most recently watched first.
+    #[serde(rename = "continue")]
+    pub going_on: Vec<Continue>,
+    pub saved: Vec<TitleCard>,
+}
+
+/// A film or episode to go on with.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Continue {
+    pub title: TitleCard,
+    pub video: VideoRef,
+    pub episode: Option<EpisodeInfo>,
+    /// `None` when the video has not been started, as the episode after a finished one.
+    pub resume_at: Option<f64>,
+    pub duration: Option<f64>,
 }
 
 /// A film's or an episode's releases, in the order a play tries them.
@@ -288,7 +359,7 @@ pub struct DownloadPlan {
 }
 
 /// The result of a pause, resume, remove, or verify for one download.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Change {
     pub id: String,
     pub name: Option<String>,
@@ -296,6 +367,22 @@ pub struct Change {
     pub result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// What `rm` deleted from disk: a play's folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<PathBuf>,
+    /// What `rm --delete` moved to the Trash: the files of a download in a folder the person chose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trashed: Vec<PathBuf>,
+    /// What `rm` was to delete and left.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<Kept>,
+}
+
+/// A file or folder `rm` was to delete or move to the Trash and left, and why.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Kept {
+    pub path: PathBuf,
+    pub reason: String,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -357,6 +444,72 @@ mod tests {
         assert_eq!(serde_json::from_str::<TitleFrame>(&text).unwrap(), step);
         let reply: TitleFrame = serde_json::from_str(r#"{"type":"ok"}"#).unwrap();
         assert_eq!(reply, TitleFrame::Reply(Box::new(Response::Ok)));
+    }
+
+    /// The requests each wire version added, the first entry holding every request of version 5.
+    /// An engine cannot read a request newer than its version, and a client reuses an engine only
+    /// of its own version.
+    const ADDED: &[(u32, &[&str])] = &[
+        (
+            5,
+            &[
+                "hello",
+                "search",
+                "files",
+                "get",
+                "play",
+                "status",
+                "pause",
+                "resume",
+                "remove",
+                "verify",
+                "watch",
+                "shutdown",
+                "titles",
+                "title",
+                "sources",
+                "play_title",
+                "get_title",
+            ],
+        ),
+        (6, &["devices", "add_device", "remove_device"]),
+        (7, &["home"]),
+        (8, &["tvs", "cast", "cast_control"]),
+    ];
+
+    #[test]
+    fn a_new_request_comes_with_a_new_wire_version() {
+        let unknown = serde_json::from_str::<Request>(r#"{"op": "?"}"#).unwrap_err().to_string();
+        let listed = unknown.split_once("expected one of ").map(|(_, ops)| ops).unwrap_or_default();
+        let listed = listed.split(" at line").next().unwrap_or_default();
+        let ops: std::collections::BTreeSet<&str> = listed.split(", ").map(|op| op.trim_matches('`')).collect();
+        let added: std::collections::BTreeSet<&str> = ADDED.iter().flat_map(|(_, ops)| ops.iter().copied()).collect();
+        assert_eq!(ops, added, "a new request goes in ADDED under a new wire version");
+        assert_eq!(ADDED.last().map(|(version, _)| *version), Some(WIRE_VERSION));
+    }
+
+    #[test]
+    fn a_device_list_reads_as_one_flat_document() {
+        let list = Response::Devices { list: crate::DeviceList::default() };
+        let text = serde_json::to_string(&list).unwrap();
+        assert_eq!(text, r#"{"type":"devices","devices":[],"offer":null,"unreachable":null}"#);
+        assert_eq!(serde_json::from_str::<Response>(&text).unwrap(), list);
+        let remove = serde_json::to_value(Request::RemoveDevice { id: "3f9a0c2e".into() }).unwrap();
+        assert_eq!(remove, serde_json::json!({"op": "remove_device", "id": "3f9a0c2e"}));
+    }
+
+    #[test]
+    fn a_stop_from_torrential_0_4_and_one_for_it_read_both_ways() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "op")]
+        enum Before05 {
+            Shutdown,
+        }
+        let asked = serde_json::to_string(&Request::Shutdown { asked: true }).unwrap();
+        assert_eq!(asked, r#"{"op":"shutdown","asked":true}"#);
+        assert_eq!(serde_json::from_str::<Before05>(&asked).unwrap(), Before05::Shutdown);
+        let old: Request = serde_json::from_str(r#"{"op":"shutdown"}"#).unwrap();
+        assert_eq!(old, Request::Shutdown { asked: false });
     }
 
     #[test]

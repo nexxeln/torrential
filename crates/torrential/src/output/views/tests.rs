@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use torrential_core::error::{Details, EXIT_PENDING};
 use torrential_core::protocol::{
-    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, PlayReply, Response, Stream, TitlePlayed,
+    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, Kept, PlayReply, Response, Stream, TitlePlayed,
 };
 use torrential_core::{
     Error, ErrorCode, FileRisk, Flag, InfoHash, Job, JobStatus, LocatorId, Progress, Release, ReleaseId, SearchQuery,
@@ -306,6 +306,7 @@ fn job(hex: &str, name: Option<&str>, status: JobStatus, progress: Progress) -> 
         selection: Selection::All,
         added_at: NOW - 3600,
         title: None,
+        place: torrential_core::Place::Folder,
     }
 }
 
@@ -433,7 +434,7 @@ fn fleet() -> Vec<Job> {
         job(
             "c32cdd",
             Some("stackexchange"),
-            JobStatus::Interrupted,
+            JobStatus::Checking,
             Progress { size: Some(99_535_000_000), verified: 79_130_000_000, ..Progress::default() },
         ),
         job(
@@ -478,18 +479,18 @@ fn status_lists_every_state() {
 }
 
 #[test]
-fn status_offers_resume_for_interrupted_and_failed_downloads() {
+fn status_offers_resume_for_failed_downloads() {
     let next = |jobs: &[Job]| {
         let doc = super::jobs(jobs);
         (doc.summary[1..].to_vec(), doc.next)
     };
     let fleet = fleet();
     let (summary, wait) = next(&fleet);
-    assert_eq!(wait.as_deref(), Some("torrential wait 9b5212 d40a19 51e0c7"));
-    assert_eq!(summary.last().unwrap(), "to retry interrupted and failed downloads: torrential resume c32cdd e3a1f0");
+    assert_eq!(wait.as_deref(), Some("torrential wait 9b5212 c32cdd d40a19 51e0c7"));
+    assert_eq!(summary.last().unwrap(), "to retry failed downloads: torrential resume e3a1f0");
 
     let stopped: Vec<Job> = fleet.iter().filter(|j| j.status.is_stopped()).cloned().collect();
-    assert_eq!(next(&stopped).1.as_deref(), Some("torrential resume c32cdd e3a1f0"));
+    assert_eq!(next(&stopped).1.as_deref(), Some("torrential resume e3a1f0"));
 
     let paused: Vec<Job> = fleet.iter().filter(|j| j.status == JobStatus::Paused).cloned().collect();
     assert_eq!(next(&paused), (Vec::new(), Some("torrential resume a282c6".to_string())));
@@ -511,7 +512,13 @@ fn status_of_one_download() {
 }
 
 fn change(hex: &str, name: &str, result: &str, path: Option<&str>) -> Change {
-    Change { id: tid(hex).to_hex(), name: Some(name.into()), result: result.into(), path: path.map(PathBuf::from) }
+    Change {
+        id: tid(hex).to_hex(),
+        name: Some(name.into()),
+        result: result.into(),
+        path: path.map(PathBuf::from),
+        ..Change::default()
+    }
 }
 
 #[test]
@@ -534,13 +541,32 @@ fn pause_resume_rm_and_verify() {
         (
             ChangeCommand::Remove,
             vec![
-                change(
-                    ARCH,
-                    "archlinux-2026.10.01-x86_64.iso",
-                    "removed",
-                    Some("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"),
-                ),
+                Change {
+                    trashed: vec![PathBuf::from("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso")],
+                    kept: vec![Kept {
+                        path: "/Users/ada/isos/archlinux-2026.10.01-x86_64.iso.sig".into(),
+                        reason: "another download uses it".into(),
+                    }],
+                    ..change(
+                        ARCH,
+                        "archlinux-2026.10.01-x86_64.iso",
+                        "removed",
+                        Some("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"),
+                    )
+                },
                 change("c32cdd", "stackexchange", "already_removed", Some("/Users/ada/datasets/stackexchange")),
+                Change {
+                    deleted: vec![PathBuf::from("/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0")],
+                    ..change(
+                        "6bc1af",
+                        "night_of_the_living_dead_dvd",
+                        "removed",
+                        Some(
+                            "/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0/night_of_the_living_dead_dvd",
+                        ),
+                    )
+                },
+                change("d4d4d4", "pioneer_one", "removed", Some("/Users/ada/Downloads/torrential/pioneer_one")),
             ],
         ),
         (ChangeCommand::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", "checking", None)]),
@@ -611,7 +637,7 @@ fn wait_until_done_timeout_error_and_stop() {
             vec![(0, arch(JobStatus::Metadata, Progress::default())), (3, arch(failed, Progress::default()))],
             3,
         ),
-        ("stopped", WaitEnd::Stopped { id: "9b5212".into() }, vec![(0, arch(JobStatus::Interrupted, later))], 0),
+        ("stopped", WaitEnd::Stopped { id: "9b5212".into() }, vec![(0, arch(JobStatus::Paused, later))], 0),
         (
             "metadata",
             WaitEnd::Metadata,
@@ -847,6 +873,12 @@ fn sample(code: ErrorCode) -> Error {
         )
         .with_next("torrential resume 770e77"),
         ErrorCode::Interrupted => given(code, "interrupted", "run the command again"),
+        ErrorCode::NotPaired => crate::daemon::devices::Refused::WrongCode.error(),
+        ErrorCode::LocalOnly => given(
+            code,
+            "only the Mac running torrential can add or remove devices",
+            "open torrential on the Mac to do it",
+        ),
         ErrorCode::Internal => Error::internal("the engine thread stopped"),
     }
 }

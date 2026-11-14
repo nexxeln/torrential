@@ -1,0 +1,23 @@
+---
+source: crates/tui/src/tests/render.rs
+expression: shot(&scenario(size))
+---
+"  torrential                      ↓ 10.0 MiB/s "
+"                                               "
+"│ press / to search                            "
+"│                                              "
+"│ series                                       "
+"│ Harbor Lights                                "
+"│ 2019 · 2 seasons · 44 min · Horror, Thriller "
+"│ A keeper and her daughter tend the last      "
+"│ manned lighthouse on the coast.              "
+"│                                              "
+"● Resume S01E03  Third Light          22m left "
+"│                                              "
+"│ season 1                                     "
+"│  1  First Light                      watched "
+"│  2  Low Tide                         watched "
+"│  3  Third Light           22m left · up next "
+"↓  4  Fog Bank                                 "
+"                                               "
+"  enter play   esc back   d downloads   ? keys "

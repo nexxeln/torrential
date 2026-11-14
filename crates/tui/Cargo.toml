@@ -1,6 +1,6 @@
 [package]
 name = "torrential-tui"
-description = "The torrential terminal UI: one list of downloads and search results"
+description = "The torrential terminal UI: films and shows, and the downloads with their torrent search"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

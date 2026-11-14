@@ -1,6 +1,7 @@
 mod keys;
 mod ranking;
 mod render;
+mod titles;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use torrential_core::{
     TorrentId,
 };
 
-use crate::state::{Item, State};
+use crate::state::{Item, Page, State};
 use crate::update::{Effect, Msg};
 
 pub const CLOCK: i64 = 1_790_000_000;
@@ -51,6 +52,7 @@ fn job(short: &str, name: &str, status: JobStatus, size: u64, done: u64, rate: u
         selection: Selection::All,
         added_at: CLOCK - days_ago * 86_400,
         title: None,
+        place: torrential_core::Place::Folder,
     }
 }
 
@@ -290,9 +292,14 @@ pub fn stackexchange_files() -> FilesReply {
     }
 }
 
+/// The screen as the downloads page shows it, before the engine answers.
 pub fn app(size: (u16, u16)) -> State {
-    let now = Instant::now();
-    State::new(now, CLOCK, size, Some(PathBuf::from("/Users/ada")))
+    State { page: Page::Downloads, ..titles_app(size) }
+}
+
+/// The screen as bare `torrential` opens, before the engine answers.
+pub fn titles_app(size: (u16, u16)) -> State {
+    State::new(Instant::now(), CLOCK, size, Some(PathBuf::from("/Users/ada")))
 }
 
 pub fn with_downloads(size: (u16, u16)) -> State {

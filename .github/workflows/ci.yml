@@ -21,6 +21,22 @@ jobs:
       - run: rustup component add rustfmt
       - run: cargo fmt --all --check
 
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # The bun the flake's nixpkgs gives `nix develop`.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run build
+      - run: bun test
+
   test:
     strategy:
       fail-fast: false

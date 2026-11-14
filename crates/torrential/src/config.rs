@@ -26,6 +26,30 @@ pub struct Config {
     pub player: Option<Choice>,
     pub subtitles: SubtitleConfig,
     pub catalog: CatalogConfig,
+    pub ffmpeg: FfmpegConfig,
+    pub plays_max: PlaysMax,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FfmpegConfig {
+    /// The engine fetches a pinned ffmpeg when none is installed and a file needs converting.
+    pub fetch: bool,
+}
+
+impl Default for FfmpegConfig {
+    fn default() -> Self {
+        Self { fetch: true }
+    }
+}
+
+/// The most torrential's plays folder holds before the plays watched longest ago leave it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlaysMax(pub u64);
+
+impl Default for PlaysMax {
+    fn default() -> Self {
+        Self(20 << 30)
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -38,6 +62,15 @@ struct File {
     player: Option<Spanned<String>>,
     subtitles: Subtitles,
     catalog: Catalog,
+    ffmpeg: Ffmpeg,
+    plays: Plays,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct Plays {
+    /// A size, or none to keep every play.
+    max: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -74,6 +107,13 @@ struct Catalog {
     online: Option<bool>,
     /// A Cinemeta mirror.
     endpoint: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct Ffmpeg {
+    /// False stops the engine from fetching ffmpeg when none is installed.
+    fetch: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -346,8 +386,16 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         imdb_endpoint: None,
         cache_dir: None,
     };
+    let ffmpeg = FfmpegConfig { fetch: file.ffmpeg.fetch.unwrap_or(true) };
     let updates = file.updates.unwrap_or_default();
-    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog })
+    let plays_max = match file.plays.max {
+        None => PlaysMax::default(),
+        Some(Spanned { value, .. }) if value.trim() == "none" => PlaysMax(u64::MAX),
+        Some(Spanned { value, referenced, .. }) => PlaysMax(parse_size(&value).ok_or_else(|| {
+            (Some(referenced.line()), format!("plays.max {value:?} is not a size; use a form like 20GiB, or none"))
+        })?),
+    };
+    Ok(Config { downloads, search, file: None, preferences, updates, player, subtitles, catalog, ffmpeg, plays_max })
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -494,6 +542,19 @@ sources:
         for none in ["preferences: {}\n", "preferences:\n", "preferences:\n  max_size: none\n", "sources: {}\n"] {
             assert_eq!(read(none), Preferences::default(), "{none}");
         }
+    }
+
+    #[test]
+    fn the_plays_folder_holds_20_gib_unless_config_yaml_says_otherwise() {
+        let max = |text: &str| parse(text, &env()).map(|c| c.plays_max.0);
+        assert_eq!(max(""), Ok(20 << 30));
+        assert_eq!(max("plays:\n  max: 8GiB\n"), Ok(8 << 30));
+        assert_eq!(max("plays: { max: 700MB }\n"), Ok(700_000_000));
+        assert_eq!(max("plays:\n  max: none\n"), Ok(u64::MAX));
+        assert_eq!(
+            max("updates: auto\nplays:\n  max: lots\n"),
+            Err((Some(3), "plays.max \"lots\" is not a size; use a form like 20GiB, or none".to_string()))
+        );
     }
 
     #[test]
@@ -663,6 +724,18 @@ sources:
     }
 
     #[test]
+    fn fetching_ffmpeg_is_on_unless_the_file_turns_it_off() {
+        let fetch = |text: &str| parse(text, &env()).unwrap().ffmpeg.fetch;
+        assert_eq!(
+            [fetch(""), fetch("ffmpeg:\n  fetch: true\n"), fetch("ffmpeg:\n  fetch: false\n")],
+            [true, true, false]
+        );
+        assert!(Config::default().ffmpeg.fetch);
+        let error = load("ffmpeg:\n  fetch: never\n").unwrap_err();
+        assert!(error.message.starts_with("$TORRENTIAL_HOME/config/config.yaml line 2: "), "{}", error.message);
+    }
+
+    #[test]
     fn title_lookups_are_on_unless_the_file_turns_them_off_and_may_use_a_mirror() {
         let catalog = |text: &str| {
             let config = parse(text, &env()).unwrap().catalog;
@@ -686,11 +759,11 @@ sources:
     }
 
     #[test]
-    fn updates_default_to_notify_and_a_bad_value_names_the_line() {
+    fn updates_install_by_themselves_unless_the_file_says_notify_or_off() {
         let read = |text: &str| parse(text, &env()).unwrap().updates;
         assert_eq!(
-            [read(""), read("updates: auto\n"), read("updates: off\n")],
-            [Policy::Notify, Policy::Auto, Policy::Off]
+            [read(""), read("sources: {}\n"), read("updates: notify\n"), read("updates: off\n")],
+            [Policy::Auto, Policy::Auto, Policy::Notify, Policy::Off]
         );
         let error = load("sources: {}\nupdates: always\n").unwrap_err();
         assert_eq!(

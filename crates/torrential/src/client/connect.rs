@@ -9,9 +9,12 @@ use torrential_core::{Error, ErrorCode};
 use super::launch::{self, Blocked};
 use crate::env::Env;
 use crate::paths::Paths;
+use crate::update::Version;
 use crate::wire;
 
 pub const DEFAULT_REPLY_WITHIN: Duration = Duration::from_secs(30);
+/// How long an engine that refuses connections, as one does while it restarts, has to answer again.
+pub const BACK_WITHIN: Duration = Duration::from_secs(30);
 
 pub struct Conn {
     stream: UnixStream,
@@ -56,7 +59,8 @@ impl Conn {
     }
 }
 
-pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
+/// The engine that runs now, whatever its version, for reports and for stops the person asks for.
+pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     let socket = paths.socket();
     let stream = match UnixStream::connect(&socket) {
         Ok(stream) => stream,
@@ -94,19 +98,54 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     }
 }
 
-pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
-    if let Some(conn) = existing(paths, env)? {
-        if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
-            return Ok(conn);
-        }
-        stop(conn)?;
+/// The engine, for a command to use. A client never uses or stops a newer engine: it runs a release
+/// installed after this torrential started, which the person restarts this torrential to run too.
+/// Every connection a command uses comes from here.
+pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
+    match running(paths, env)? {
+        Some(conn) if newer(&conn, env) => Err(Error::new(
+            ErrorCode::DaemonVersion,
+            format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
+        )),
+        found => Ok(found),
     }
-    launch::start(paths, env)
 }
 
-pub fn stop(mut conn: Conn) -> Result<u32, Error> {
+pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
+    let Some(conn) = existing(paths, env)? else { return launch::start(paths, env) };
+    if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
+        return Ok(conn);
+    }
+    let speaks = conn.wire == WIRE_VERSION;
+    match stop(conn, Stop::Switch) {
+        Ok(_) => launch::start(paths, env),
+        // The engine keeps its version while a film plays. A client that speaks its protocol uses it.
+        Err(staying) if speaks => existing(paths, env)?.ok_or(staying),
+        Err(staying) => Err(staying),
+    }
+}
+
+fn newer(conn: &Conn, env: &Env) -> bool {
+    Version::parse(&conn.engine_version).is_some_and(|engine| engine.newer_than(&env.version()))
+}
+
+/// Why a client stops the engine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stop {
+    /// The person asked.
+    Asked,
+    /// The engine is older than this client, which starts its own version once the engine stops.
+    /// The engine stays while a film plays.
+    Switch,
+}
+
+/// Asks the engine to stop and waits until it exits, or returns why the engine stays.
+pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
     let pid = conn.pid;
-    let _ = conn.call_within(&Request::Shutdown, Duration::from_secs(20));
+    let request = Request::Shutdown { asked: why == Stop::Asked };
+    if let Ok(Response::Error { error }) = conn.call_within(&request, Duration::from_secs(20)) {
+        return Err(error);
+    }
     let deadline = Instant::now() + Duration::from_secs(20);
     while alive(pid) {
         if Instant::now() > deadline {
@@ -116,6 +155,34 @@ pub fn stop(mut conn: Conn) -> Result<u32, Error> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(pid)
+}
+
+/// Stops the engine as the person asks, and returns the process ID of the last engine it stopped.
+/// An engine that exits for the login service to start an update says so in its state folder, so
+/// this waits across the gap until the new engine starts and stops that one too.
+pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
+    let deadline = Instant::now() + BACK_WITHIN;
+    let mut stopped = None;
+    loop {
+        let failed = match running(paths, env) {
+            Ok(found) => {
+                if let Some(conn) = found {
+                    stopped = Some(stop(conn, Stop::Asked)?);
+                }
+                if !crate::daemon::switching(paths, crate::daemon::owner::now()) {
+                    return Ok(stopped);
+                }
+                None
+            }
+            // An engine that switches can take the connection and exit before it answers.
+            Err(e) if e.code == ErrorCode::DaemonUnavailable => Some(e),
+            Err(e) => return Err(e),
+        };
+        if Instant::now() > deadline {
+            return failed.map_or(Ok(stopped), Err);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn alive(pid: u32) -> bool {

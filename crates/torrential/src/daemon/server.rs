@@ -7,20 +7,21 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::error::Details;
 use torrential_core::protocol::{
-    Event, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream, TitleFrame,
-    TitlePage, TitlePlayed, TitleRequest, TitleSources, WIRE_VERSION,
+    Continue, Event, FilesReply, GetOutcome, GetReply, GetRequest, Home, PlayReply, PlayRequest, Request, Response,
+    Stream, TitleFrame, TitlePage, TitlePlayed, TitleRequest, TitleSources, WIRE_VERSION,
 };
 use torrential_core::text::sanitize;
 use torrential_core::watching::next;
 use torrential_core::{
-    AttemptEvent, Error, ErrorCode, HexPrefix, Release, ReleaseId, SearchQuery, SearchResult, Target, TitleCard,
-    TitleId, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, CastRequest, Error, ErrorCode, HexPrefix, Next, Player, Profile, Release, ReleaseId, SearchQuery,
+    SearchResult, Target, TitleCard, TitleId, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::engine_port::{EngineHandle, Metainfo, ParseTorrent};
 use super::files;
 use super::http;
 use super::magnet::{self, Magnet};
+use super::owner::plays::Destination;
 use super::owner::{
     Command, FileBytes, FilesInfo, Finish, GetCommand, MetaTarget, Origin, PlayCommand, Reply, Resolved, Source, Update,
 };
@@ -28,9 +29,12 @@ use super::search_port::{Progress, SearchPort};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use crate::machine::Detector;
 use crate::output::views::title_name;
+use crate::update::Version;
 use crate::wire;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Titles listed under Continue on the home screens.
+const CONTINUE_MOST: usize = 20;
 pub const METADATA_WAIT: Duration = Duration::from_secs(60);
 pub(super) const HEARTBEAT: Duration = Duration::from_secs(15);
 
@@ -65,6 +69,12 @@ pub struct Ctx {
     pub http_port: u16,
     pub web: super::web::State,
     pub titles: super::titles::Titles,
+    pub playing: super::playing::Playing,
+    pub news: crate::update::Board,
+    /// The phones and TVs this Mac let in, and the grants casts play from.
+    pub devices: Arc<super::devices::Devices>,
+    /// The TVs on the home network, and the casts playing on them.
+    pub casts: super::cast::Casts,
 }
 
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
@@ -88,14 +98,15 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         Request::Resume { refs, all } => {
             owner.ask(|reply| Command::Resume { refs, all, reply }).await.map(|changes| Response::Changed { changes })
         }
-        Request::Remove { refs } => {
-            owner.ask(|reply| Command::Remove { refs, reply }).await.map(|changes| Response::Changed { changes })
-        }
+        Request::Remove { refs, delete } => owner
+            .ask(|reply| Command::Remove { refs, delete, reply })
+            .await
+            .map(|changes| Response::Changed { changes }),
         Request::Verify { reference, repair } => owner
             .ask(|reply| Command::Verify { reference, repair, reply })
             .await
             .map(|changes| Response::Changed { changes }),
-        Request::Shutdown => {
+        Request::Shutdown { .. } => {
             let (reply, done) = oneshot::channel();
             owner.tell(Command::Shutdown { reply });
             let _ = done.await;
@@ -110,13 +121,29 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         }
         Request::PlayTitle(request) => play_title(ctx, request, Finish::Stream, mpsc::unbounded_channel().0).await,
         Request::GetTitle(request) => play_title(ctx, request, Finish::Keep, mpsc::unbounded_channel().0).await,
+        Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port) }),
+        Request::AddDevice => {
+            ctx.devices.add(ctx.http_port, super::owner::now()).map(|list| Response::Devices { list })
+        }
+        Request::RemoveDevice { id } => ctx.devices.remove(&id, ctx.http_port).map(|list| Response::Devices { list }),
+        Request::Tvs { fresh } => Ok(Response::Tvs { list: ctx.casts.search(fresh).await }),
+        Request::Cast(request) => match ctx.casts.start(request).await {
+            Ok((mut view, _)) => {
+                super::cast::playing(&mut view).await.map(|cast| Response::Cast { cast: Box::new(cast) })
+            }
+            Err(error) => Err(error),
+        },
+        Request::CastControl { tv, action } => {
+            ctx.casts.control(tv.as_deref(), action).await.map(|cast| Response::Cast { cast: Box::new(cast) })
+        }
+        Request::Home => home(ctx).await.map(|home| Response::Home { home: Box::new(home) }),
     };
     result.unwrap_or_else(|error| Response::Error { error })
 }
 
 async fn search(ctx: &Ctx, query: SearchQuery) -> Result<SearchResult, Error> {
-    let preferences = query.profile.preferences;
-    let mut result = ctx.search.search(query, &|| ctx.machine.profile(preferences)).await?;
+    let Profile { preferences, player, .. } = query.profile;
+    let mut result = ctx.search.search(query, &|| ctx.machine.profile(preferences, player)).await?;
     record(ctx, &mut result);
     Ok(result)
 }
@@ -131,8 +158,8 @@ pub(super) fn record(ctx: &Ctx, result: &mut SearchResult) {
 
 async fn stream_search(ctx: &Ctx, query: SearchQuery, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
     let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let preferences = query.profile.preferences;
-    let rank_for = || ctx.machine.profile(preferences);
+    let Profile { preferences, player, .. } = query.profile;
+    let rank_for = || ctx.machine.profile(preferences, player);
     let search = ctx.search.search_stream(query, &rank_for, progress_tx);
     tokio::pin!(search);
     let result = loop {
@@ -269,7 +296,8 @@ async fn get(ctx: &Ctx, request: GetRequest) -> Result<torrential_core::protocol
 async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
     let PlayRequest { target, dir, files, setup_max_size } = request;
     let source = resolve(ctx, target, "play").await?;
-    let play = PlayCommand { source, dir, files: files.clone(), setup_max_size, title: None, finish: Finish::Stream };
+    let to = Destination::Folder(dir);
+    let play = PlayCommand { source, to, files: files.clone(), setup_max_size, title: None, finish: Finish::Stream };
     let (job, metainfo) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let streams = streams(ctx, job.id, &metainfo, files);
     Ok(PlayReply { job, streams })
@@ -303,23 +331,51 @@ pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Erro
     })
 }
 
+/// For each title watched lately, its video to go on with, and the saved titles. A finished film,
+/// and a series the person has caught up with, are left out. The catalog lookups share one
+/// deadline, so an unreachable catalog cannot hold the lists up. Past it, each title's details
+/// come from the copy kept on this machine, and a title with none is left out.
+pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
+    let now = super::owner::now();
+    let deadline = tokio::time::Instant::now() + ctx.titles.timing.home;
+    let catalog = &ctx.titles.catalog;
+    let mut going_on = Vec::new();
+    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
+        let id = &recent.video.title;
+        let details = match tokio::time::timeout_at(deadline, catalog.title(id)).await {
+            Ok(looked_up) => looked_up.ok(),
+            Err(_) => catalog.kept(id).await,
+        };
+        let Some(details) = details else { continue };
+        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
+        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
+        let episode = video
+            .episode
+            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
+        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
+        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
+    }
+    Ok(Home { going_on, saved: ctx.titles.shelf.saved()? })
+}
+
 /// The releases of the film or episode `video` names, in the order a play tries them.
 async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
     let title = ctx.titles.resolve(&video, super::owner::now()).await?;
-    let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)()).await?).await?;
+    let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)(), Player::External).await?).await?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-    result.releases = ctx.titles.line(&jobs, &title.video, result.releases);
+    let ffmpeg = ctx.web.ffmpeg.converts();
+    result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);
     Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
 }
 
 /// The release among `video`'s sources whose ID starts with `prefix`.
-async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<ReleaseId, Error> {
+pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<Release, Error> {
     let parsed: HexPrefix = prefix.parse()?;
     let sources = sources(ctx, video.clone()).await?;
     let name = title_name(&sources.title, sources.video.episode);
     let matching: Vec<&Release> = sources.result.releases.iter().filter(|r| parsed.matches(&r.id)).collect();
     match matching.as_slice() {
-        [one] => Ok(one.id),
+        [one] => Ok((*one).clone()),
         [] => Err(Error::new(ErrorCode::NotFound, format!("no source of {name} has an ID that starts with {prefix}"))
             .with_hint(format!("run torrential sources {video} to list them"))
             .with_next(format!("torrential sources {video}"))),
@@ -363,13 +419,13 @@ async fn play_title(
 ) -> Result<Response, Error> {
     let TitleRequest { video, source } = request;
     let pin = match source {
-        Some(prefix) => Some(pinned(ctx, &video, &prefix).await?),
+        Some(prefix) => Some(pinned(ctx, &video, &prefix).await?.id),
         None => None,
     };
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let before: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
     let mut seen = Seen::default();
-    let ask = PlayTitle { video, pin, replace: None, playback: None, containers: Containers::Any, finish };
+    let ask = PlayTitle { video, pin, replace: None, player: Player::External, containers: Containers::Any, finish };
     attempt::run(ctx, ask, |step| {
         seen.note(&step);
         let _ = steps.send(step);
@@ -433,6 +489,30 @@ async fn title_frames(
     wire::write_async(wr, &reply.unwrap_or_else(|error| Response::Error { error })).await
 }
 
+/// A cast over the socket: a frame for each step of finding a title's source, then the cast once
+/// the TV plays it. The cast goes on after the client leaves.
+async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
+    let (mut view, mut steps) = match ctx.casts.start(request).await {
+        Ok(started) => started,
+        Err(error) => return wire::write_async(wr, &Response::Error { error }).await,
+    };
+    let playing = super::cast::playing(&mut view);
+    tokio::pin!(playing);
+    let reply = loop {
+        tokio::select! {
+            biased;
+            step = steps.recv() => match step {
+                Ok(step) => wire::write_async(wr, &TitleFrame::Step { step: Box::new(step) }).await?,
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break (&mut playing).await,
+            },
+            cast = &mut playing => break cast,
+        }
+    };
+    let reply = reply.map_or_else(|error| Response::Error { error }, |cast| Response::Cast { cast: Box::new(cast) });
+    wire::write_async(wr, &reply).await
+}
+
 pub(super) async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesReply, Error> {
     let started = Instant::now();
     let deadline = started + timeout;
@@ -488,7 +568,7 @@ pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
 
 async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     let (mut rd, mut wr) = stream.into_split();
-    let Some(Request::Hello { wire: client_wire, .. }) = wire::read_async::<Request>(&mut rd).await? else {
+    let Some(Request::Hello { client_version, wire: client_wire }) = wire::read_async::<Request>(&mut rd).await? else {
         return Ok(());
     };
     let hello = Response::Hello {
@@ -499,7 +579,11 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
     };
     wire::write_async(&mut wr, &hello).await?;
     while let Some(request) = wire::read_async::<Request>(&mut rd).await? {
-        if client_wire != WIRE_VERSION && request != Request::Shutdown {
+        if request == (Request::Shutdown { asked: false }) {
+            wire::write_async(&mut wr, &switch(ctx, &client_version).await).await?;
+            continue;
+        }
+        if client_wire != WIRE_VERSION && !matches!(request, Request::Shutdown { .. }) {
             let error = Error::new(
                 ErrorCode::DaemonVersion,
                 format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {client_wire}"),
@@ -509,11 +593,22 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
             wire::write_async(&mut wr, &Response::Error { error }).await?;
             continue;
         }
+        let _playing = match request {
+            Request::Play(_) | Request::PlayTitle(_) => match ctx.playing.open() {
+                Ok(open) => Some(open),
+                Err(error) => {
+                    wire::write_async(&mut wr, &Response::Error { error }).await?;
+                    continue;
+                }
+            },
+            _ => None,
+        };
         match request {
             Request::Watch { refs } => return watch(ctx, refs, rd, wr).await,
             Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,
             Request::PlayTitle(request) => title_frames(ctx, request, Finish::Stream, &mut rd, &mut wr).await?,
             Request::GetTitle(request) => title_frames(ctx, request, Finish::Keep, &mut rd, &mut wr).await?,
+            Request::Cast(request) => cast_frames(ctx, request, &mut wr).await?,
             request => {
                 let response = handle(ctx, request).await;
                 wire::write_async(&mut wr, &response).await?;
@@ -521,6 +616,36 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Answers a stop that a client sends without the person asking, to run its own version instead. An
+/// engine newer than the client keeps running, since torrential 0.4 sends this stop to an engine of
+/// any other version. Any other engine stops only when nothing plays and every download is saved.
+async fn switch(ctx: &Ctx, client: &str) -> Response {
+    if older(client, &ctx.version) {
+        super::log(&format!("torrential {client} asked the engine to stop for its own version"));
+        let error = Error::new(
+            ErrorCode::DaemonVersion,
+            format!("the engine runs the newer torrential {}, so it keeps running", ctx.version),
+        )
+        .with_hint("restart this torrential");
+        return Response::Error { error };
+    }
+    let Some(closed) = ctx.playing.try_close() else {
+        let error = Error::new(ErrorCode::DaemonVersion, format!("torrential switches to {client} when the film ends"));
+        return Response::Error { error };
+    };
+    match ctx.owner.ask(|reply| Command::Restart { reply }).await {
+        Ok(()) => {
+            closed.keep();
+            Response::Ok
+        }
+        Err(error) => Response::Error { error },
+    }
+}
+
+fn older(client: &str, engine: &str) -> bool {
+    Version::parse(engine).is_some_and(|engine| engine.newer_than(client))
 }
 
 async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {

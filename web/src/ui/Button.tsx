@@ -8,11 +8,11 @@ const STYLES = {
 };
 
 const SIZES = {
-  /** Inside a line of text, such as a notice over the picture. */
-  small: "px-2 py-1 text-sm",
-  medium: "px-3 py-1.5 text-sm",
-  /** A page's main actions, sized for a finger on a phone. */
-  large: "px-4 py-2.5 text-base sm:py-2 sm:text-sm",
+  /** Inside a line of text, such as a notice over the picture. Its hit area is larger than it on a touchscreen. */
+  small: "relative hit-area px-2 py-1 text-sm",
+  medium: "px-3 py-1.5 text-sm pointer-coarse:min-h-11",
+  /** A page's main actions. */
+  large: "px-4 py-2.5 text-base sm:py-2 sm:text-sm pointer-coarse:min-h-11",
 };
 
 export type ButtonStyle = { variant?: keyof typeof STYLES; size?: keyof typeof SIZES };

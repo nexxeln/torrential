@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Progress, Selection, TitleLink, TorrentId};
+use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Place, Progress, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
 use super::engine_port::{Metainfo, Stats};
 use super::files;
+use super::owner::deleter::Identity;
 
 const ETA_AFTER: Duration = Duration::from_secs(10);
 
@@ -22,7 +23,6 @@ pub enum Intent {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Observed {
     Absent,
-    Parked,
     InEngine(Phase),
 }
 
@@ -49,7 +49,6 @@ pub fn status(intent: &Intent, observed: Observed) -> JobStatus {
         (Intent::Failed { error }, _) => JobStatus::Error { error: error.clone() },
         (Intent::Paused, _) => JobStatus::Paused,
         (Intent::Running, Observed::Absent | Observed::InEngine(Phase::Paused)) => JobStatus::Queued,
-        (Intent::Running, Observed::Parked) => JobStatus::Interrupted,
         (Intent::Running, Observed::InEngine(Phase::Metadata)) => JobStatus::Metadata,
         (Intent::Running, Observed::InEngine(Phase::Downloading | Phase::Pausing | Phase::Finishing { .. })) => {
             JobStatus::Downloading
@@ -85,6 +84,28 @@ pub struct JobRecord {
     pub piece_map: Option<PieceMap>,
     pub files_verified: Option<Vec<u64>>,
     pub title: Option<Linked>,
+    pub home: Home,
+}
+
+/// Where a download's files live, which decides who may delete them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Home {
+    /// The downloads folder or a folder the person chose. Its files go only when the person asks.
+    Folder,
+    /// A folder of its own inside torrential's plays folder.
+    Plays(Play),
+}
+
+/// A download in torrential's plays folder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Play {
+    /// When someone last pressed play on it or streamed it, in Unix seconds.
+    pub watched_at: i64,
+    /// The person asked for it by hand with `get`, so it never leaves the plays folder or stops
+    /// by itself.
+    pub by_hand: bool,
+    /// The folder torrential made for it, which is the only one deleted for it.
+    pub folder: Identity,
 }
 
 /// The title a download was made for, and whether it ever reached playing.
@@ -229,6 +250,10 @@ impl JobEntry {
             selection: self.record.selection.clone(),
             added_at: self.record.added_at,
             title: self.record.title.as_ref().map(|linked| linked.link.clone()),
+            place: match self.record.home {
+                Home::Folder => Place::Folder,
+                Home::Plays(_) => Place::Plays,
+            },
         }
     }
 }
@@ -271,9 +296,8 @@ mod tests {
         let failed = Intent::Failed { error: Error::new(ErrorCode::DiskFull, "disk full") };
         let done = Intent::Done { finished_at: 7 };
         let engine = Observed::InEngine;
-        let table: [(&Intent, Observed, &str); 20] = [
+        let table: [(&Intent, Observed, &str); 17] = [
             (&Intent::Running, Observed::Absent, "queued"),
-            (&Intent::Running, Observed::Parked, "interrupted"),
             (&Intent::Running, engine(Phase::Metadata), "metadata"),
             (&Intent::Running, engine(Phase::Checking), "checking"),
             (&Intent::Running, engine(Phase::Downloading), "downloading"),
@@ -281,12 +305,10 @@ mod tests {
             (&Intent::Running, engine(Phase::Paused), "queued"),
             (&Intent::Running, engine(Phase::Finishing { writes_stopped: false }), "downloading"),
             (&Intent::Paused, Observed::Absent, "paused"),
-            (&Intent::Paused, Observed::Parked, "paused"),
             (&Intent::Paused, engine(Phase::Pausing), "paused"),
             (&Intent::Paused, engine(Phase::Paused), "paused"),
             (&Intent::Paused, engine(Phase::Checking), "checking"),
             (&done, Observed::Absent, "done"),
-            (&done, Observed::Parked, "done"),
             (&done, engine(Phase::Checking), "checking"),
             (&done, engine(Phase::Paused), "done"),
             (&failed, Observed::Absent, "error"),
@@ -315,6 +337,7 @@ mod tests {
             piece_map: None,
             files_verified: None,
             title: None,
+            home: Home::Folder,
         };
         JobEntry::new(record, None, observed)
     }
@@ -380,7 +403,6 @@ mod tests {
             entry(2, 30, Intent::Running, Observed::Absent),
             entry(3, 20, Intent::Running, Observed::Absent),
             entry(4, 5, Intent::Paused, Observed::Absent),
-            entry(5, 1, Intent::Running, Observed::Parked),
             entry(6, 40, Intent::Running, Observed::InEngine(Phase::Paused)),
         ];
         let none = BTreeSet::new();

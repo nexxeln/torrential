@@ -14,16 +14,18 @@ use crate::format::{
 };
 use crate::layout::{self, Block, Indent, MASTHEAD, SEARCH, Screen};
 use crate::state::{
-    Engine, Files, Focus, Item, ROWS, RankedFor, Ranking, Row, SearchPhase, Sort, State, Tone, Upgrade, label,
+    Engine, Files, Focus, Input, Item, Page, ROWS, RankedFor, Ranking, Row, SearchPhase, Sort, State, Tone, Upgrade,
+    label,
 };
 use crate::theme::*;
+use crate::titles;
 use crate::tree::{Check, NodeKind, Tree};
 
-fn fg(c: Color) -> Style {
+pub(crate) fn fg(c: Color) -> Style {
     Style::new().fg(c)
 }
 
-fn bold(c: Color) -> Style {
+pub(crate) fn bold(c: Color) -> Style {
     fg(c).add_modifier(Modifier::BOLD)
 }
 
@@ -44,7 +46,7 @@ fn put_right(buf: &mut Buffer, right: u16, y: u16, text: &str, style: Style) -> 
     x
 }
 
-fn spans(buf: &mut Buffer, x: u16, y: u16, max: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
+pub(crate) fn spans(buf: &mut Buffer, x: u16, y: u16, max: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
     let mut used = 0;
     for (text, style) in parts {
         used += put(buf, x + used, y, max.saturating_sub(used), text.as_ref(), *style);
@@ -56,7 +58,7 @@ fn spans_width(parts: &[(impl AsRef<str>, Style)]) -> u16 {
     parts.iter().map(|(t, _)| width(t.as_ref()) as u16).sum()
 }
 
-fn spans_right(buf: &mut Buffer, right: u16, y: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
+pub(crate) fn spans_right(buf: &mut Buffer, right: u16, y: u16, parts: &[(impl AsRef<str>, Style)]) -> u16 {
     let w = spans_width(parts);
     spans(buf, right.saturating_sub(w), y, w, parts);
     right.saturating_sub(w)
@@ -68,23 +70,23 @@ fn paint(buf: &mut Buffer) {
     }
 }
 
-fn margin(buf: &mut Buffer, at: Indent, y: u16, text: &str, style: Style) {
+pub(crate) fn margin(buf: &mut Buffer, at: Indent, y: u16, text: &str, style: Style) {
     if let Some(edge) = at.margin {
         put_right(buf, edge + 1, y, text, style);
     }
 }
 
-fn mark(buf: &mut Buffer, at: Indent, y: u16) {
+pub(crate) fn mark(buf: &mut Buffer, at: Indent, y: u16) {
     put(buf, at.mark, y, 1, "●", fg(ACTION));
 }
 
-fn arrow(buf: &mut Buffer, at: Indent, y: u16, glyph: &str) {
+pub(crate) fn arrow(buf: &mut Buffer, at: Indent, y: u16, glyph: &str) {
     if buf[(at.mark, y)].symbol() == "│" {
         put(buf, at.mark, y, 1, glyph, fg(PENCIL));
     }
 }
 
-fn rule(buf: &mut Buffer, at: Indent, top: u16, bottom: u16) {
+pub(crate) fn rule(buf: &mut Buffer, at: Indent, top: u16, bottom: u16) {
     for y in top..bottom {
         put(buf, at.mark, y, 1, "│", fg(RULE));
     }
@@ -196,12 +198,16 @@ pub fn render(buf: &mut Buffer, state: &State, mode: ColorMode) -> Option<Positi
         return None;
     };
     masthead(buf, state, &screen);
-    let caret = search(buf, state, &screen);
+    let caret = match state.page {
+        Page::Titles => titles::view::search(buf, state, &screen),
+        Page::Downloads => search(buf, state, &screen),
+    };
     rule(buf, screen.at, SEARCH + 1, screen.list.y);
-    if state.help {
-        help(buf, &screen);
-    } else {
-        list(buf, state, &screen);
+    match (state.help, state.page) {
+        (true, Page::Titles) => help(buf, &screen, &titles::view::HELP, &titles::view::NOTES),
+        (true, Page::Downloads) => help(buf, &screen, &HELP, &NOTES),
+        (false, Page::Titles) => titles::view::list(buf, state, &screen),
+        (false, Page::Downloads) => list(buf, state, &screen),
     }
     footer(buf, state, &screen);
     degrade(buf, mode);
@@ -258,19 +264,32 @@ fn short_of_space(state: &State) -> bool {
 }
 
 fn search(buf: &mut Buffer, state: &State, screen: &Screen) -> Option<Position> {
-    let at = screen.at;
     let focused = state.focus == Focus::Query;
+    let hint = if focused { "type a name, then press enter" } else { "press / to search" };
+    let status = [false, true].map(|short| search_status(state, short));
+    search_box(buf, screen, &state.query, focused, hint, status)
+}
+
+/// The search line: the words typed or a hint, and on the right a status, `long` where it fits
+/// beside the words and `short` where it does not. Returns where the caret goes while typing.
+pub(crate) fn search_box(
+    buf: &mut Buffer,
+    screen: &Screen,
+    input: &Input,
+    focused: bool,
+    hint: &str,
+    [long, short]: [Vec<(String, Style)>; 2],
+) -> Option<Position> {
+    let at = screen.at;
     margin(buf, at, SEARCH, "search", fg(PENCIL));
     if focused {
         mark(buf, at, SEARCH);
     } else {
         rule(buf, at, SEARCH, SEARCH + 1);
     }
-    let text = &state.query.text;
-    let hint = if focused { "type a name, then press enter" } else { "press / to search" };
+    let text = &input.text;
     let left = width(if text.is_empty() { hint } else { text }) as u16;
     let room = screen.right - at.content;
-    let [long, short] = [false, true].map(|short| search_status(state, short));
     let status = if left + 3 + spans_width(&long) <= room { long } else { short };
     let used = spans_width(&status);
     spans_right(buf, screen.right, SEARCH, &status);
@@ -283,7 +302,7 @@ fn search(buf: &mut Buffer, state: &State, screen: &Screen) -> Option<Position> 
         put(buf, x, SEARCH, room, text, fg(INK));
         return None;
     }
-    let before: String = text.chars().take(state.query.caret).collect();
+    let before: String = text.chars().take(input.caret).collect();
     let skip = (width(&before) as u16).saturating_sub(room.saturating_sub(1));
     let shown: String = {
         let mut cells = 0;
@@ -521,7 +540,7 @@ fn ranking_rows(buf: &mut Buffer, state: &State, ranking: &Ranking, screen: &Scr
     margin(buf, at, y, "ranking", fg(PENCIL));
     let room = right - at.content;
     let lead = if at.narrow() { "ranking for " } else { "for " };
-    let profile = Profile { detected: state.machine.clone(), preferences: ranking.picks, room: None };
+    let profile = Profile { detected: state.machine.clone(), preferences: ranking.picks, ..Profile::default() };
     let heads = first_fit(shortenings(&profile.describe()), usize::from(room) - lead.len());
     put(buf, at.content, y, room, &heads.map(|heads| format!("{lead}{heads}")).unwrap_or_default(), fg(PENCIL));
     for (row, y) in ROWS.into_iter().zip(y + 1..) {
@@ -557,7 +576,7 @@ fn auto_note(row: Row, ranking: &Ranking, machine: Option<&Machine>) -> Option<S
         }),
         (Row::Playback, Some(machine)) => {
             let preferences = Preferences { playback: None, ..ranking.picks };
-            let auto = Profile { detected: Some(machine.clone()), preferences, room: None };
+            let auto = Profile { detected: Some(machine.clone()), preferences, ..Profile::default() };
             Some(auto.playback().map_or_else(|| "any codec".into(), |p| format!("detected {}", p.value.as_str())))
         }
     }
@@ -1015,7 +1034,17 @@ const HELP: [(&str, &[(&str, &str)]); 6] = [
             ("y", "copy path"),
         ],
     ),
-    ("always", &[("? f1", "keys"), ("esc", "back"), ("S", "ranking"), ("q", "quit"), ("ctrl+c", "quit")]),
+    (
+        "always",
+        &[
+            ("? f1", "keys"),
+            ("esc", "back"),
+            ("t", "films and shows"),
+            ("S", "ranking"),
+            ("q", "quit"),
+            ("ctrl+c", "quit"),
+        ],
+    ),
 ];
 
 const NOTES: [&str; 4] = [
@@ -1025,14 +1054,14 @@ const NOTES: [&str; 4] = [
     "Removing a download keeps its files.",
 ];
 
-fn help(buf: &mut Buffer, screen: &Screen) {
+fn help(buf: &mut Buffer, screen: &Screen, sections: &[(&str, &[(&str, &str)])], notes: &[&str]) {
     let at = screen.at;
     let area = screen.list;
     rule(buf, at, area.y, area.bottom());
     let room = screen.right - at.content;
     let start = if at.narrow() { at.detail } else { at.content };
     let mut y = area.y;
-    for (word, pairs) in HELP {
+    for &(word, pairs) in sections {
         if at.narrow() {
             if y >= area.bottom() {
                 return;
@@ -1056,25 +1085,80 @@ fn help(buf: &mut Buffer, screen: &Screen) {
         }
         y += 1;
     }
-    for (k, note) in NOTES.iter().enumerate() {
-        put(buf, at.content, y + 1 + k as u16, room, note, fg(PENCIL));
+    for (note, y) in notes.iter().zip(y + 1..area.bottom()) {
+        put(buf, at.content, y, room, note, fg(PENCIL));
     }
 }
 
 fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
     let y = screen.footer;
+    let pairs = match state.page {
+        Page::Titles => titles::view::hints(state, screen),
+        Page::Downloads => download_hints(state, screen),
+    };
+    let mut room = screen.right - screen.at.content;
+    let essential = |(key, _): &(&str, &str)| state.toast.is_none() && matches!(*key, "esc" | "?" | "f1");
+    let kept: Vec<(&str, &str)> =
+        pairs.iter().enumerate().filter(|(i, pair)| *i == 0 || essential(pair)).map(|(_, pair)| *pair).collect();
+    let reserve = |pairs: &[(&str, &str)]| if pairs.is_empty() { 0 } else { hints_width(pairs) + 4 };
+    let first = reserve(&kept);
+    let must = reserve(&pairs.iter().copied().filter(essential).collect::<Vec<_>>());
+    let starting = match &state.titles.play {
+        Some(titles::Play::Starting { step, .. }) => Some(step),
+        _ => None,
+    };
+    let note = match (&state.toast, starting, &state.upgrade) {
+        (Some(toast), _, _) => {
+            let color = match toast.tone {
+                Tone::Info => TEXT,
+                Tone::Success => ACTION,
+                Tone::Warning | Tone::Error => ERROR,
+            };
+            Some((toast.text.clone(), color, first))
+        }
+        (None, Some(step), _) => Some((format!("{step}{}", state.spinner()), PENCIL, first)),
+        (None, None, Some(Upgrade::Available(latest))) => {
+            let typing = match state.page {
+                Page::Titles => state.titles.typing,
+                Page::Downloads => state.focus == Focus::Query,
+            };
+            let texts = match typing {
+                true => vec![format!("torrential {latest} available"), format!("{latest} available")],
+                false => vec![
+                    format!("torrential {latest} available · U update"),
+                    format!("{latest} available · U update"),
+                    format!("U update to {latest}"),
+                ],
+            };
+            let shortest = texts.last().filter(|text| width(text) as u16 + must <= room).cloned();
+            first_fit(texts, room.saturating_sub(first).into()).or(shortest).map(|text| (text, PENCIL, must))
+        }
+        (None, None, Some(Upgrade::Installing(latest))) => {
+            Some((format!("Updating to {latest}{}", state.spinner()), PENCIL, first))
+        }
+        (None, None, Some(Upgrade::Installed) | None) => None,
+    };
+    if let Some((text, color, reserved)) = note {
+        let used = put(buf, screen.at.content, y, room.saturating_sub(reserved), &text, fg(color));
+        room = room.saturating_sub(used + 4);
+    }
+    if !pairs.is_empty() {
+        hints(buf, screen.right, y, room, &pairs, &kept);
+    }
+}
+
+/// The keys the footer offers on the downloads page, most useful first.
+fn download_hints(state: &State, screen: &Screen) -> Vec<(&'static str, &'static str)> {
     let pause = match state.cursor.and_then(|item| match item {
         Item::Download(id) => state.job(id),
         Item::Result(_) => None,
     }) {
-        Some(job) if matches!(job.status, JobStatus::Paused | JobStatus::Interrupted | JobStatus::Error { .. }) => {
-            "resume"
-        }
+        Some(job) if matches!(job.status, JobStatus::Paused | JobStatus::Error { .. }) => "resume",
         _ => "pause",
     };
     let downloaded = matches!(state.cursor, Some(Item::Result(ReleaseId::Torrent(t))) if state.job(t).is_some());
     let (sideways, down) = if screen.narrow() { ("h l", "tab") } else { ("← →", "↓") };
-    let pairs: Vec<(&str, &str)> = match (state.focus, state.cursor) {
+    match (state.focus, state.cursor) {
         _ if state.confirm.is_some() => Vec::new(),
         _ if state.ranking.is_some() => vec![("enter", "save"), ("esc", "close"), (sideways, "choose")],
         _ if state.help => vec![("esc", "close")],
@@ -1094,45 +1178,5 @@ fn footer(buf: &mut Buffer, state: &State, screen: &Screen) {
             vec![("enter", "files"), ("D", "download"), ("P", "play"), ("s", "sort"), ("?", "keys")]
         }
         (Focus::List, None) => vec![("/", "search"), ("?", "keys")],
-    };
-    let mut room = screen.right - screen.at.content;
-    let essential = |(key, _): &(&str, &str)| state.toast.is_none() && matches!(*key, "esc" | "?" | "f1");
-    let kept: Vec<(&str, &str)> =
-        pairs.iter().enumerate().filter(|(i, pair)| *i == 0 || essential(pair)).map(|(_, pair)| *pair).collect();
-    let reserve = |pairs: &[(&str, &str)]| if pairs.is_empty() { 0 } else { hints_width(pairs) + 4 };
-    let first = reserve(&kept);
-    let must = reserve(&pairs.iter().copied().filter(essential).collect::<Vec<_>>());
-    let note = match (&state.toast, &state.upgrade) {
-        (Some(toast), _) => {
-            let color = match toast.tone {
-                Tone::Info => TEXT,
-                Tone::Success => ACTION,
-                Tone::Warning | Tone::Error => ERROR,
-            };
-            Some((toast.text.clone(), color, first))
-        }
-        (None, Some(Upgrade::Available(latest))) => {
-            let texts = match state.focus {
-                Focus::Query => vec![format!("torrential {latest} available"), format!("{latest} available")],
-                _ => vec![
-                    format!("torrential {latest} available · U update"),
-                    format!("{latest} available · U update"),
-                    format!("U update to {latest}"),
-                ],
-            };
-            let shortest = texts.last().filter(|text| width(text) as u16 + must <= room).cloned();
-            first_fit(texts, room.saturating_sub(first).into()).or(shortest).map(|text| (text, PENCIL, must))
-        }
-        (None, Some(Upgrade::Installing(latest))) => {
-            Some((format!("Updating to {latest}{}", state.spinner()), PENCIL, first))
-        }
-        (None, Some(Upgrade::Installed) | None) => None,
-    };
-    if let Some((text, color, reserved)) = note {
-        let used = put(buf, screen.at.content, y, room.saturating_sub(reserved), &text, fg(color));
-        room = room.saturating_sub(used + 4);
-    }
-    if !pairs.is_empty() {
-        hints(buf, screen.right, y, room, &pairs, &kept);
     }
 }

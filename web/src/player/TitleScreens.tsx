@@ -7,7 +7,8 @@ import { Link } from "../router";
 import { CODECS, RESOLUTIONS } from "../search/ResultRow";
 import { Picture } from "../titles/Picture";
 import { CHECKS, skipReason } from "../titles/words";
-import { Button } from "../ui/Button";
+import { isTv } from "../lib/tv";
+import { Button, buttonClass } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import type { Attempt, Passed } from "./titleSession";
 
@@ -125,7 +126,7 @@ export function TitleStarting({ attempt, naming, backdrop, step, readout }: Star
   return (
     <div className="absolute inset-0">
       <Backdrop src={backdrop} />
-      <div className="absolute inset-0 flex items-end overflow-y-auto px-[max(--spacing(6),7vw)] pt-20 pb-[max(--spacing(8),11vh)]">
+      <div className="absolute inset-0 flex items-end overflow-y-auto pt-20 pr-[max(--spacing(6),7vw,env(safe-area-inset-right))] pb-[max(--spacing(8),11vh)] pl-[max(--spacing(6),7vw,env(safe-area-inset-left))]">
         <div className="flex w-full max-w-xl animate-appear flex-col gap-8 motion-reduce:animate-none">
           <Name naming={naming} />
           <ol role="list" aria-label="Starting" className="flex flex-col gap-3">
@@ -175,7 +176,7 @@ export function TitleFailed({ naming, backdrop, kind, error, tried, sources, unp
   return (
     <div role="alert" className="absolute inset-0">
       <Backdrop src={backdrop} />
-      <div className="absolute inset-0 flex items-end overflow-y-auto px-[max(--spacing(6),7vw)] pt-20 pb-[max(--spacing(8),11vh)]">
+      <div className="absolute inset-0 flex items-end overflow-y-auto pt-20 pr-[max(--spacing(6),7vw,env(safe-area-inset-right))] pb-[max(--spacing(8),11vh)] pl-[max(--spacing(6),7vw,env(safe-area-inset-left))]">
         <div className="flex w-full max-w-xl animate-appear flex-col gap-8 motion-reduce:animate-none">
           <Name naming={naming} />
           <div className="flex flex-col gap-2">
@@ -185,15 +186,15 @@ export function TitleFailed({ naming, backdrop, kind, error, tried, sources, unp
           </div>
           <PassedList title="Tried" passed={tried} kind={kind === "film" ? "film" : "series"} />
           <div className="flex flex-wrap gap-2">
-            <Button variant="primary" onClick={onRetry}>
+            <Button variant="primary" autoFocus={isTv()} onClick={onRetry}>
               Try again
             </Button>
             {unpinned ? (
-              <Link href={unpinned} replace className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink inset-ring inset-ring-white/15 hover:bg-white/10">
+              <Link href={unpinned} replace className={buttonClass({})}>
                 Let torrential choose
               </Link>
             ) : (
-              <Link href={sources} className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink inset-ring inset-ring-white/15 hover:bg-white/10">
+              <Link href={sources} className={buttonClass({})}>
                 Choose a source
               </Link>
             )}

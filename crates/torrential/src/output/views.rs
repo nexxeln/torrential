@@ -387,7 +387,7 @@ pub fn state_cell(status: &JobStatus) -> Cell {
     let token = match status {
         JobStatus::Downloading | JobStatus::Metadata | JobStatus::Checking => Token::Mint,
         JobStatus::Done { .. } => Token::Mint,
-        JobStatus::Queued | JobStatus::Paused | JobStatus::Interrupted => Token::Accent,
+        JobStatus::Queued | JobStatus::Paused => Token::Accent,
         JobStatus::Error { .. } => Token::Error,
     };
     Cell::styled(status.name(), token)
@@ -397,17 +397,13 @@ fn next_for_stopped(status: &JobStatus, id: &str) -> Option<String> {
     match status {
         JobStatus::Error { error } if error.next.is_some() => error.next.as_deref().cloned(),
         JobStatus::Error { error } if error.code == ErrorCode::TooLarge => None,
-        JobStatus::Paused | JobStatus::Interrupted | JobStatus::Error { .. } => Some(format!("torrential resume {id}")),
+        JobStatus::Paused | JobStatus::Error { .. } => Some(format!("torrential resume {id}")),
         _ => None,
     }
 }
 
 fn restartable(status: &JobStatus) -> bool {
-    match status {
-        JobStatus::Interrupted => true,
-        JobStatus::Error { error } => error.code != ErrorCode::TooLarge,
-        _ => false,
-    }
+    matches!(status, JobStatus::Error { error } if error.code != ErrorCode::TooLarge)
 }
 
 fn is_active(status: &JobStatus) -> bool {
@@ -461,7 +457,7 @@ pub fn jobs(jobs: &[Job]) -> Doc {
         Some("torrential search <words>".to_string())
     } else if !active.is_empty() {
         if !restart.is_empty() {
-            summary.push(format!("to retry interrupted and failed downloads: torrential resume {}", restart.join(" ")));
+            summary.push(format!("to retry failed downloads: torrential resume {}", restart.join(" ")));
         }
         Some(format!("torrential wait {}", active.join(" ")))
     } else if !restart.is_empty() {
@@ -567,10 +563,37 @@ pub fn changes(command: ChangeCommand, changes: &[Change]) -> Doc {
         .collect();
     let next = (!next_ids.is_empty()).then(|| format!("torrential {verb} {}", next_ids.join(" ")));
     let summary = match command {
-        ChangeCommand::Remove => vec!["files were kept".to_string()],
+        ChangeCommand::Remove => removed_files(changes, &ids),
         _ => Vec::new(),
     };
     Doc { body: Body::Table { header, rows }, summary, next }
+}
+
+/// What `rm` did with the files of the downloads it removed, and what it left and why.
+fn removed_files(changes: &[Change], ids: &[String]) -> Vec<String> {
+    // Each fate, and the downloads it was, in the order they come.
+    let mut fates: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (change, id) in changes.iter().zip(ids).filter(|(c, _)| c.result == "removed") {
+        let fate = match (change.deleted.is_empty(), change.trashed.is_empty()) {
+            (false, _) => "deleted",
+            (true, false) => "moved to the Trash",
+            (true, true) => "kept",
+        };
+        match fates.iter_mut().find(|(f, _)| *f == fate) {
+            Some((_, of)) => of.push(id),
+            None => fates.push((fate, vec![id])),
+        }
+    }
+    let done = match &fates[..] {
+        [] => "files were kept".to_string(),
+        [(fate, _)] => format!("files were {fate}"),
+        [rest @ .., last] => {
+            let said = |(fate, of): &(&str, Vec<&str>)| format!("files of {} were {fate}", of.join(", "));
+            format!("{}, and {}", rest.iter().map(said).collect::<Vec<_>>().join(", "), said(last))
+        }
+    };
+    let left = changes.iter().flat_map(|c| &c.kept).map(|k| format!("kept {}: {}", k.path.display(), k.reason));
+    std::iter::once(done).chain(left).collect()
 }
 
 #[derive(Clone, PartialEq, Debug)]

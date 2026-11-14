@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -146,6 +147,8 @@ pub trait EnginePort: Send {
     fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error>;
     /// Downloads pieces in file order, for a download someone watches as it arrives.
     fn stream(&mut self, id: TorrentId) -> Result<(), Error>;
+    /// Caps how fast a download goes, in bytes a second. `None` lifts the cap.
+    fn limit(&mut self, id: TorrentId, rate: Option<NonZeroU32>) -> Result<(), Error>;
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent>;
 }
 
@@ -162,6 +165,7 @@ pub enum EngineCommand {
     WantRange(TorrentId, u32, u64, u64, oneshot::Sender<Result<bool, Error>>),
     Written(TorrentId, u32, u64, u64, u32, oneshot::Sender<Result<Vec<Slice>, Error>>),
     Stream(TorrentId),
+    Limit(TorrentId, Option<NonZeroU32>),
 }
 
 #[derive(Clone)]
@@ -244,6 +248,13 @@ fn apply(port: &mut dyn EnginePort, command: EngineCommand) -> Option<EngineEven
         EngineCommand::SaveResumeIfProgressed(id) => (id, port.save_resume_data_if_progressed(id)),
         EngineCommand::Remove(id) => (id, port.remove(id)),
         EngineCommand::Stream(id) => (id, port.stream(id)),
+        EngineCommand::Limit(id, rate) => {
+            // A limit the engine cannot set leaves the download running as it was, not failed.
+            if let Err(error) = port.limit(id, rate) {
+                super::log(&format!("cannot change how fast {id} downloads: {}", error.message));
+            }
+            return None;
+        }
         EngineCommand::FileProgress(id, reply) => {
             let _ = reply.send(port.file_progress(id));
             return None;
@@ -373,6 +384,7 @@ struct FakeTorrent {
     paused: bool,
     finished: bool,
     downloading: bool,
+    limit: Option<NonZeroU32>,
 }
 
 impl FakeTorrent {
@@ -478,6 +490,7 @@ impl EnginePort for Fake {
             paused: torrent.paused,
             finished: false,
             downloading: false,
+            limit: None,
         };
         self.torrents.insert(torrent.id, t);
         Ok(())
@@ -567,6 +580,11 @@ impl EnginePort for Fake {
         Ok(())
     }
 
+    fn limit(&mut self, id: TorrentId, rate: Option<NonZeroU32>) -> Result<(), Error> {
+        self.torrent(id)?.limit = rate;
+        Ok(())
+    }
+
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         if self.events.is_empty() {
             std::thread::sleep(max_wait.min(Duration::from_millis(20)));
@@ -577,7 +595,7 @@ impl EnginePort for Fake {
         if stats_due {
             self.last_stats = Instant::now();
         }
-        let rate = self.swarm.0.lock().unwrap().rate;
+        let swarm_rate = self.swarm.0.lock().unwrap().rate;
         for (id, t) in &mut self.torrents {
             let id = *id;
             if t.metainfo.is_none() {
@@ -595,6 +613,7 @@ impl EnginePort for Fake {
                 t.downloading = true;
                 self.events.push_back(EngineEvent::Activity { id, activity: Activity::Downloading });
             }
+            let rate = t.limit.map_or(swarm_rate, |limit| swarm_rate.min(u64::from(limit.get())));
             t.arrived = (t.arrived + rate as f64 * dt).min(size as f64);
             let landing = t.landing().expect("the file list and the selection are known");
             let done = landing.verified >= size;

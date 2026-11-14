@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -537,6 +538,10 @@ impl EnginePort for Libtorrent {
 
     fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
         self.session.download_in_order(engine_id(id)).map_err(engine_error)
+    }
+
+    fn limit(&mut self, id: TorrentId, rate: Option<NonZeroU32>) -> Result<(), Error> {
+        self.session.set_download_limit(engine_id(id), rate).map_err(engine_error)
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {

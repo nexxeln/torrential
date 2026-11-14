@@ -118,8 +118,19 @@ pub fn sources(mut conn: Conn, video: VideoRef, mode: Mode) -> Result<u8, Error>
 
 /// Plays a film or an episode from the first of its sources that starts.
 pub fn play(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(PlayReply, TitlePlayed), Error> {
+    let shown = Shown::new(mode);
+    play_each(conn, request, |step| shown.step(step, "Playing"))
+}
+
+/// Plays a film or an episode from the first of its sources that starts, handing each step to
+/// `each` as it happens.
+pub fn play_each(
+    conn: &mut Conn,
+    request: TitleRequest,
+    each: impl FnMut(&AttemptEvent),
+) -> Result<(PlayReply, TitlePlayed), Error> {
     let video = request.video.clone();
-    match steps(conn, &Request::PlayTitle(request), &video, mode, "Playing")? {
+    match steps(conn, &Request::PlayTitle(request), &video, each)? {
         Response::PlayTitle { reply, title } => Ok((*reply, *title)),
         other => Err(connect::unexpected(&other)),
     }
@@ -129,7 +140,10 @@ pub fn play(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(PlayR
 /// code and the download.
 pub fn get(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(u8, Job), Error> {
     let video = request.video.clone();
-    let (reply, title) = match steps(conn, &Request::GetTitle(request), &video, mode, "Downloading")? {
+    let shown = Shown::new(mode);
+    let answered = steps(conn, &Request::GetTitle(request), &video, |step| shown.step(step, "Downloading"));
+    drop(shown);
+    let (reply, title) = match answered? {
         Response::GetTitle { reply, title } => (*reply, *title),
         other => return Err(connect::unexpected(&other)),
     };
@@ -143,11 +157,15 @@ pub fn get(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(u8, Jo
     Ok((exit, reply.job))
 }
 
-/// Sends a title play and shows each of its steps until the reply. When no source of the title
-/// is found, a search for its name comes next.
-fn steps(conn: &mut Conn, request: &Request, video: &VideoRef, mode: Mode, started: &str) -> Result<Response, Error> {
+/// Sends a title play and hands each of its steps to `each` until the reply. When no source of
+/// the title is found, a search for its name comes next.
+pub(super) fn steps(
+    conn: &mut Conn,
+    request: &Request,
+    video: &VideoRef,
+    mut each: impl FnMut(&AttemptEvent),
+) -> Result<Response, Error> {
     conn.send(request)?;
-    let shown = Shown::new(mode);
     let mut search = None;
     loop {
         match conn.read_within::<TitleFrame>(STEP_WITHIN)? {
@@ -155,7 +173,7 @@ fn steps(conn: &mut Conn, request: &Request, video: &VideoRef, mode: Mode, start
                 if let AttemptEvent::Resolved { video, title, .. } = &*step {
                     search = Some(views::search_for(&views::title_name(title, video.episode)));
                 }
-                shown.step(&step, started);
+                each(&step);
             }
             TitleFrame::Reply(reply) => {
                 return answer(*reply).map_err(|e| match search {
@@ -169,13 +187,13 @@ fn steps(conn: &mut Conn, request: &Request, video: &VideoRef, mode: Mode, start
 
 /// A title play's steps as they happen: a line each on stderr in text modes, and in a terminal a
 /// spinner that says what the play waits for.
-struct Shown {
+pub(super) struct Shown {
     mode: Mode,
     bar: Option<ProgressBar>,
 }
 
 impl Shown {
-    fn new(mode: Mode) -> Self {
+    pub(super) fn new(mode: Mode) -> Self {
         let bar = (mode == Mode::Human).then(|| {
             let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr())
                 .with_style(ProgressStyle::with_template("{spinner} {msg}").expect("the template is valid"));
@@ -186,7 +204,7 @@ impl Shown {
         Self { mode, bar: bar.filter(|bar| !bar.is_hidden()) }
     }
 
-    fn step(&self, step: &AttemptEvent, started: &str) {
+    pub(super) fn step(&self, step: &AttemptEvent, started: &str) {
         if self.mode == Mode::Json {
             return;
         }

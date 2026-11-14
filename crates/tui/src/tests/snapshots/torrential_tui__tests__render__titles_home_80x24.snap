@@ -1,0 +1,28 @@
+---
+source: crates/tui/src/tests/render.rs
+expression: shot(&scenario(size))
+---
+" torrential                                                       ↓ 10.0 MiB/s  "
+"                                                                                "
+"     search │ press / to search                                                 "
+"            │                                                                   "
+"   continue ● Harbor Lights  S01E03 · Third Light                     22m left  "
+"            │ Night of the Living Dead (1968)                       1h01m left  "
+"            │                                                                   "
+"      saved │ Night of the Living Dead                                    1968  "
+"            │ Sintel                                                      2010  "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"            │                                                                   "
+"                                                                                "
+"                         enter play   l open   / search   d downloads   ? keys  "

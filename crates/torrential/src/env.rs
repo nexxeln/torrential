@@ -34,6 +34,12 @@ impl Env {
         Self { vars: pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() }
     }
 
+    /// This environment with `key` set to `value`.
+    pub fn with(mut self, key: &str, value: &str) -> Self {
+        self.vars.insert(key.to_string(), value.to_string());
+        self
+    }
+
     pub fn var(&self, key: &str) -> Option<&str> {
         self.vars.get(key).map(String::as_str).filter(|v| !v.is_empty())
     }

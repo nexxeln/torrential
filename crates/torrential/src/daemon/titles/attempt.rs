@@ -10,12 +10,13 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Playback, Release, ReleaseId, SearchResult, Skip,
-    SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId,
+    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
+use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{BoxFuture, Progress};
 use super::super::server::{self, Ctx, OwnerHandle};
@@ -25,8 +26,8 @@ const MOST_TRIED: usize = 6;
 /// Sources after the one under test whose file lists are asked for early, so dead swarms in a row
 /// cost one wait.
 const LOOK_AHEAD: usize = 2;
-/// How long the owner may take to answer with a file list it already has. A source whose file
-/// list was asked for early waits at least this long, however long ago that was.
+/// How long a source whose file list was asked for early still waits for it, however long ago
+/// that was.
 const ANSWER_WITHIN: Duration = Duration::from_millis(100);
 /// How often a trial looks for the first bytes of its video.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
@@ -43,8 +44,8 @@ pub struct PlayTitle {
     pub pin: Option<ReleaseId>,
     /// The download that stalled. It is never tried, and once another source plays it is paused.
     pub replace: Option<TorrentId>,
-    /// What the caller's player decodes, in place of the preference in config.yaml.
-    pub playback: Option<Playback>,
+    /// What the title plays in, which its sources are ranked for.
+    pub player: Player,
     pub containers: Containers,
     pub finish: Finish,
 }
@@ -56,6 +57,8 @@ pub enum Containers {
     Browser,
     /// Any, as mpv, IINA, and VLC open. A download kept with `get` takes any too.
     Any,
+    /// A TV's, which plays these as they are and no other.
+    Tv(Plays),
 }
 
 impl Containers {
@@ -65,6 +68,7 @@ impl Containers {
         match self {
             Containers::Any => true,
             Containers::Browser => remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str())),
+            Containers::Tv(plays) => plays.takes(path),
         }
     }
 }
@@ -95,17 +99,19 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    let held = ctx.titles.line(&healthy, &title.video, Vec::new());
-    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r))
+    // ffmpeg converts nothing for a TV, which fetches the file as it is.
+    let ffmpeg = !matches!(ask.containers, Containers::Tv(_)) && ctx.web.ffmpeg.converts();
+    let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
+    let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
+    if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
         && walk.try_source(release, 1, &mut report).await
     {
         return;
     }
 
     let preferences = (ctx.web.preferences)();
-    let preferences = torrential_core::Preferences { playback: ask.playback.or(preferences.playback), ..preferences };
-    let rank_for = || ctx.machine.profile(preferences);
-    let query = match ctx.titles.query(&title, preferences).await {
+    let rank_for = || ctx.machine.profile(preferences, ask.player);
+    let query = match ctx.titles.query(&title, preferences, ask.player).await {
         Ok(query) => query,
         Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
     };
@@ -119,7 +125,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         error: None,
     };
     let line_up = |search: &Searching, tried: &[Tried]| {
-        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone()), tried)
+        next_up(&ask, ctx.titles.line(&jobs, &title.video, search.releases.clone(), ask.player, ffmpeg), tried)
     };
     loop {
         let ran = search.started.elapsed();
@@ -305,11 +311,15 @@ impl Walk<'_> {
 }
 
 impl PlayTitle {
-    /// Whether this play may try `release`: never the download it replaces, and only the pinned
-    /// release when one is. A trial checks again once it knows the release's torrent.
+    /// Whether this play may try `release`: never the download it replaces, only the pinned
+    /// release when one is, and on a TV, which gets the file as it is, never one whose name says a
+    /// codec the TV does not decode, held here or not. A trial checks again once it knows the
+    /// release's torrent.
     fn may_try(&self, release: &Release) -> bool {
+        let tv = matches!(self.containers, Containers::Tv(_));
         self.replace.is_none_or(|old| release.id != ReleaseId::Torrent(old))
             && self.pin.is_none_or(|pin| release.id == pin)
+            && (!tv || self.player.plays(Quality::parse(&release.name)))
     }
 }
 
@@ -342,10 +352,10 @@ impl Trial<'_> {
         let timing = ctx.titles.timing;
         report(AttemptEvent::Check { check: Check::FileList });
         let deadline = end.min(asked + timing.file_list).max(Instant::now() + ANSWER_WITHIN);
-        let (source, metainfo) = match tokio::time::timeout_at(deadline.into(), files(ctx, release, deadline)).await {
-            Ok(Ok(found)) => found,
-            Ok(Err(error)) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),
-            _ => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
+        let (source, metainfo) = match files(ctx, release, deadline).await {
+            Ok(found) => found,
+            Err(error) if error.code != ErrorCode::MetadataTimeout => return Err(Skip::Failed { error }.into()),
+            Err(_) => return Err(Skip::NoFileList { waited_s: seconds(asked.elapsed()) }.into()),
         };
         // A release found by its .torrent link names no torrent until the file is read.
         if let Some(stalled) = ask.replace
@@ -353,8 +363,12 @@ impl Trial<'_> {
         {
             return Err(Skip::Stalled.into());
         }
-        let remux = (ctx.web.tools)().ffmpeg.is_some();
+        let remux = ctx.web.ffmpeg.converts();
         let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
+        // ffmpeg comes while the download starts, when the browser cannot read this file itself.
+        if !ask.containers.open(&metainfo.files[playable.video as usize].path, false) {
+            let _ = ctx.web.ffmpeg.fetch();
+        }
 
         report(AttemptEvent::Check { check: Check::Start });
         let span = release.span.unwrap_or_else(|| title.video.episode.map_or(Span::Film, Span::Episode));
@@ -362,9 +376,11 @@ impl Trial<'_> {
         let hold = Hold::fresh();
         // Held before the owner is asked, so a play that goes away at any point after gives it up.
         self.hold = Some(hold);
+        // A film played to keep goes where `get` puts it. One played to watch goes to the plays folder.
+        let to = if ask.finish == Finish::Keep { Destination::Folder(None) } else { Destination::Plays };
         let play = PlayCommand {
             source,
-            dir: None,
+            to,
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
             setup_max_size: (ctx.web.preferences)().max_size,
             title: Some(TitlePlay { link, hold }),
@@ -417,7 +433,9 @@ impl Drop for Trial<'_> {
 }
 
 /// The source of `release` and its file list, from a download on this machine, from the
-/// release's .torrent file, or from peers.
+/// release's .torrent file, or from peers, by `deadline`. The owner judges the deadline for a file
+/// list from peers, so one that arrived in time counts however long a slow disk keeps the owner
+/// from answering.
 async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Source, Arc<Metainfo>), Error> {
     if let ReleaseId::Torrent(id) = release.id
         && ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await.is_ok()
@@ -425,7 +443,10 @@ async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Sourc
         let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
         return Ok((Source::Download(id), info.metainfo));
     }
-    match server::release_source(ctx, release.clone(), None).await? {
+    let source = tokio::time::timeout_at(deadline.into(), server::release_source(ctx, release.clone(), None))
+        .await
+        .map_err(|_| Error::new(ErrorCode::MetadataTimeout, "the .torrent file did not arrive in time"))??;
+    match source {
         Source::Magnet(magnet) => {
             let info = server::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
             let source = match info.download {
@@ -489,7 +510,11 @@ fn video_of(
         Ok(playable)
     } else {
         let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
-        Err(Skip::Unplayable { container }.into())
+        let skip = match containers {
+            Containers::Tv(_) => Skip::NotOnTv { container },
+            Containers::Browser | Containers::Any => Skip::Unplayable { container },
+        };
+        Err(skip.into())
     }
 }
 
@@ -515,6 +540,10 @@ fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error 
     if every(|s| matches!(s, Skip::Unplayable { .. })) {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} plays in the browser without ffmpeg"))
             .with_hint("install ffmpeg, then play it again");
+    }
+    if every(|s| matches!(s, Skip::NotOnTv { .. })) {
+        return Error::new(ErrorCode::NoSource, format!("no source of {name} comes in a container the TV plays"))
+            .with_hint("play it on this Mac, or choose a source in MKV or MP4");
     }
     if every(|s| matches!(s, Skip::TooLarge { .. }))
         && let Some(Skip::TooLarge { error }) = tried.first().map(|t| &t.reason)
@@ -567,7 +596,7 @@ mod tests {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|n| release(n).id),
             replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
-            playback: None,
+            player: Player::External,
             containers: Containers::Browser,
             finish: Finish::Stream,
         };

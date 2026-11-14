@@ -2,8 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use torrential_core::{Error, ErrorCode};
-
 use super::media::Media;
 
 /// Where ffmpeg lives when the engine's own `PATH` is the bare one launchd and systemd give a service.
@@ -24,6 +22,13 @@ pub struct Tools {
     pub ffprobe: Option<PathBuf>,
 }
 
+/// ffmpeg and ffprobe, both found, which converting a file needs.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Programs {
+    pub ffmpeg: PathBuf,
+    pub ffprobe: PathBuf,
+}
+
 impl Tools {
     /// Looks in `path`, the value of `PATH`, then in the usual folders.
     pub fn find(path: Option<&str>) -> Tools {
@@ -36,19 +41,14 @@ impl Tools {
         Tools { ffmpeg: find("ffmpeg"), ffprobe: find("ffprobe") }
     }
 
-    /// Both programs, which converting a file needs.
-    pub fn both(&self) -> Option<(&Path, &Path)> {
-        Some((self.ffmpeg.as_deref()?, self.ffprobe.as_deref()?))
+    pub fn both(&self) -> Option<Programs> {
+        Some(Programs { ffmpeg: self.ffmpeg.clone()?, ffprobe: self.ffprobe.clone()? })
     }
 }
 
-/// What a request for a file's tracks gets when ffmpeg is not installed.
-pub fn missing() -> Error {
-    let install =
-        if cfg!(target_os = "macos") { "brew install ffmpeg" } else { "install ffmpeg with your package manager" };
-    Error::new(ErrorCode::NotFound, "ffmpeg is not installed, and this needs it")
-        .with_hint(format!("{install}, then try again; torrential doctor shows what it found"))
-}
+/// How a person installs ffmpeg here, as the end of a sentence.
+pub const INSTALL: &str =
+    if cfg!(target_os = "macos") { "run brew install ffmpeg" } else { "install ffmpeg with your package manager" };
 
 /// The video the stream carries.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -198,6 +198,7 @@ fn strings(args: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fetch::Readiness;
     use super::super::media::{Audio, Video};
     use super::*;
 
@@ -232,7 +233,7 @@ mod tests {
             audio,
             subtitles: Vec::new(),
             direct: None,
-            remux: true,
+            ffmpeg: Readiness::Ready,
             chapters: Vec::new(),
         }
     }

@@ -1,5 +1,7 @@
 pub mod admission;
 pub mod book;
+pub mod cast;
+pub mod devices;
 pub mod engine_port;
 pub mod files;
 mod fixture;
@@ -7,6 +9,7 @@ pub mod http;
 pub mod libtorrent;
 pub mod magnet;
 pub mod owner;
+pub mod playing;
 pub mod resolve;
 pub mod search_port;
 pub mod server;
@@ -21,7 +24,7 @@ mod tests;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,15 +36,15 @@ use crate::config::Config;
 use crate::env::Env;
 use crate::machine::Detector;
 use crate::paths::{self, Paths};
+use crate::update;
 use admission::Disk;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
-use owner::{Owner, OwnerConfig};
+use owner::{Ended, Owner, OwnerConfig};
 use search_port::SearchPort;
 use server::{Ctx, OwnerHandle};
 use store::Store;
 
-const DEFAULT_IDLE: Duration = Duration::from_secs(120);
 const SAVE_RESUME_EVERY: Duration = Duration::from_secs(5 * 60);
 /// Longer than libtorrent's 15-minute DHT announce, so a new source gets a round of discovery.
 const STALL_AFTER: Duration = Duration::from_secs(20 * 60);
@@ -56,10 +59,12 @@ pub struct Ports {
     pub machine: Arc<Detector>,
     /// The preferences in config.yaml now.
     pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
-    /// Where ffmpeg and ffprobe are now.
-    pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
+    /// ffmpeg and ffprobe, installed or fetched.
+    pub ffmpeg: web::fetch::Ffmpeg,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
+    /// Where searches for TVs go.
+    pub tvs: cast::Find,
 }
 
 impl Ports {
@@ -67,8 +72,9 @@ impl Ports {
         let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
             Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
-        let tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync> =
-            Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        let installed = Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        let fetch = web::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
+        let ffmpeg = web::fetch::Ffmpeg::new(installed, web::fetch::root(&paths.state), fetch);
         // The fake engine's subtitles are made up too, unless a test asks for the real sources.
         let subtitles: Arc<dyn subtitle_port::SubtitlePort> =
             if fake(env) && env.var("TORRENTIAL_TEST_SUBTITLES") != Some("live") {
@@ -86,6 +92,11 @@ impl Ports {
                 };
                 Arc::new(titles::catalog_port::Live::new(&config)?)
             };
+        let tvs = match env.var("TORRENTIAL_TEST_SSDP").map(str::parse) {
+            Some(Ok(address)) => cast::Find::At(address),
+            Some(Err(_)) => return Err(Error::new(ErrorCode::Usage, "TORRENTIAL_TEST_SSDP is not an address")),
+            None => cast::Find::Multicast,
+        };
         if fake(env) {
             let rate =
                 env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
@@ -101,9 +112,10 @@ impl Ports {
                 disk: Box::new(admission::RoomyDisk),
                 machine: Detector::start(env, settings.downloads_dir(paths), Box::new(admission::RoomyDisk)),
                 preferences,
-                tools,
+                ffmpeg,
                 subtitles,
                 catalog,
+                tvs,
             });
         }
         let network = match env.var("TORRENTIAL_TEST_NETWORK") {
@@ -124,9 +136,10 @@ impl Ports {
             disk: disk(),
             machine: Detector::start(env, settings.downloads_dir(paths), disk()),
             preferences,
-            tools,
+            ffmpeg,
             subtitles,
             catalog,
+            tvs,
         })
     }
 }
@@ -146,9 +159,53 @@ fn fake(env: &Env) -> bool {
     env.var("TORRENTIAL_TEST_ENGINE") == Some("fake")
 }
 
+/// The settings of an engine a test started, the one with the fake engine or on the loopback
+/// network, and `None` for any other. Every setting that lets a test reach into what the engine
+/// does is read through it.
+fn test_engine(env: &Env) -> Option<&Env> {
+    (fake(env) || env.var("TORRENTIAL_TEST_NETWORK") == Some("loopback")).then_some(env)
+}
+
+/// How long a play leaving the plays folder waits before it goes: no time, unless a test engine
+/// asks for up to a minute, to do something in between.
+fn deletion_pause(env: &Env) -> Duration {
+    test_pause(env, "TORRENTIAL_TEST_DELETION_PAUSE")
+}
+
+/// How long a file waits between the check that it is still the file to move to the Trash and
+/// the move: no time, unless a test engine asks for up to a minute, to change it in between.
+fn trash_pause(env: &Env) -> Duration {
+    test_pause(env, "TORRENTIAL_TEST_TRASH_PAUSE")
+}
+
+fn test_pause(env: &Env, name: &str) -> Duration {
+    let asked = test_engine(env).and_then(|test| test.var(name));
+    asked.and_then(torrential_core::units::parse_duration).map_or(Duration::ZERO, |pause| pause.min(MAX_TEST_PAUSE))
+}
+
+const MAX_TEST_PAUSE: Duration = Duration::from_secs(60);
+
+/// How long a play no one streams keeps downloading. A test engine may ask for less.
+fn plays_idle(env: &Env) -> Duration {
+    let asked = test_engine(env).and_then(|test| test.var("TORRENTIAL_TEST_PLAYS_IDLE"));
+    asked.and_then(torrential_core::units::parse_duration).unwrap_or(owner::plays::IDLE_AFTER)
+}
+
+/// Where the files of a download in a folder the person chose go when they delete them. A test
+/// engine never uses the person's Trash: `TORRENTIAL_TEST_TRASH` names its own, or it keeps one
+/// beside its state.
+fn trash(env: &Env, paths: &Paths) -> owner::trash::Trash {
+    if let Some(test) = test_engine(env) {
+        let dir = test.var("TORRENTIAL_TEST_TRASH").map_or_else(|| paths.state.join("trash"), PathBuf::from);
+        return owner::trash::Trash::At(dir);
+    }
+    let home = || Path::new(env.var("HOME").unwrap_or("/")).join(".local/share");
+    owner::trash::Trash::system(&env.var("XDG_DATA_HOME").map_or_else(home, PathBuf::from))
+}
+
 pub struct Running {
     pub ctx: Arc<Ctx>,
-    pub owner: tokio::task::JoinHandle<()>,
+    pub owner: tokio::task::JoinHandle<Ended>,
     pub engine: std::thread::JoinHandle<()>,
     pub http: tokio::task::JoinHandle<()>,
 }
@@ -160,25 +217,29 @@ pub fn start(
     config: OwnerConfig,
     timing: titles::Timing,
     version: String,
-    http_port: u16,
+    http_ports: &[u16],
 ) -> Result<Running, Error> {
     ports.search.restore(store.results(owner::now())?);
-    let players = http::bind(http_port)
+    let devices = Arc::new(devices::Devices::open(store.path())?);
+    // Taken before the bind, so a change while the engine starts reaches the accept loop.
+    let mut reach = devices.reach();
+    let players = http::bind(http_ports, *reach.borrow_and_update())
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
             tokio::net::TcpListener::from_std(listener)
         })
-        .map_err(|e| Error::internal(format!("cannot listen for players on 127.0.0.1: {e}")))?;
+        .map_err(|e| Error::internal(format!("cannot listen for players and the web app: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
     let shelf = titles::shelf::Shelf::open(store.path())?;
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
-    let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, config)?;
+    let playing = playing::Playing::new();
+    let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, playing.clone(), config)?;
     let (commands_tx, commands) = mpsc::unbounded_channel();
     let task = runtime.spawn(owner.run(commands, events));
-    let ctx = Arc::new(Ctx {
+    let ctx = Arc::new_cyclic(|ctx| Ctx {
         owner: OwnerHandle(commands_tx),
         search: ports.search,
         machine: ports.machine,
@@ -186,10 +247,14 @@ pub fn start(
         parse: ports.parse,
         version,
         http_port,
-        web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
+        web: web::State::new(ports.preferences, ports.ffmpeg, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
+        playing,
+        news: update::Board::default(),
+        devices,
+        casts: cast::Casts::new(ctx.clone(), ports.tvs),
     });
-    let http = runtime.spawn(http::accept(ctx.clone(), players));
+    let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
@@ -197,16 +262,48 @@ pub fn log(message: &str) {
     eprintln!("{} {message}", crate::output::format::timestamp(owner::now()));
 }
 
+/// The exit status after which launchd (`KeepAlive` without `SuccessfulExit`) and systemd
+/// (`Restart=on-failure`) start the engine again, from the binary an update installed. Any other
+/// clean stop exits 0, which neither restarts.
+const RESTART: u8 = 75;
+
+/// What an engine that exits for the login service leaves, so `engine stop` waits for the next
+/// engine to stop it too. The next engine removes it once it is up.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Switching {
+    pid: u32,
+    at: i64,
+}
+
+/// How long a stop waits for the login service to start the next engine.
+const SWITCH_WITHIN: i64 = 60;
+
+fn leave_switching(paths: &Paths, at: i64) {
+    let switching = Switching { pid: std::process::id(), at };
+    let _ = crate::skill::write_atomic(&paths.switching(), &serde_json::to_vec(&switching).expect("records serialize"));
+}
+
+/// Whether an engine exited for the login service under a minute before `now`, and no engine has
+/// started since.
+pub fn switching(paths: &Paths, now: i64) -> bool {
+    let Ok(bytes) = std::fs::read(paths.switching()) else { return false };
+    serde_json::from_slice::<Switching>(&bytes).is_ok_and(|switching| now - switching.at < SWITCH_WITHIN)
+}
+
+/// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
+/// systemd started it, a switch to an installed update.
 pub fn run(env: &Env, service: bool) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
     match serve(env, &paths, service) {
-        Ok(()) => 0,
+        Ok(Ended::Restart) if service => RESTART,
+        Ok(_) => 0,
+        // The other engine serves this home, so launchd and systemd have nothing to start again.
         Err(Startup::AlreadyRunning(message)) => {
             log(&message);
-            ErrorCode::DaemonUnavailable.exit_code()
+            0
         }
         Err(Startup::Failed(e)) => fail_start(Some(&paths), &e),
     }
@@ -231,10 +328,10 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     error.code.exit_code()
 }
 
-fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
+fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
-    std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
+    paths.make_state().map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
     paths::check_state_filesystem(&paths.state)?;
     let _lock = match OwnerLock::acquire(&paths.lock())? {
         Some(lock) => lock,
@@ -242,16 +339,17 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
     };
     let _ = std::fs::remove_file(paths.startup_error());
     prepare_runtime_dir(&paths.runtime)?;
+    match crate::client::service::add_at_start(env, paths) {
+        Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
+        Ok(None) => {}
+        Err(e) => log(&format!("cannot add a login service: {}", e.message)),
+    }
     let seed = fake(env) && !paths.database().exists();
     let mut store = Store::open(&paths.database())?;
     let default_dir = settings.downloads_dir(paths);
     if seed {
         fixture::seed(&mut store, &default_dir, owner::now())?;
     }
-    let idle_timeout = env
-        .var("TORRENTIAL_TEST_IDLE_TIMEOUT")
-        .and_then(torrential_core::units::parse_duration)
-        .unwrap_or(DEFAULT_IDLE);
     let save_resume_every = env
         .var("TORRENTIAL_TEST_SAVE_RESUME_EVERY")
         .and_then(torrential_core::units::parse_duration)
@@ -266,11 +364,14 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         default_dir,
         probe_dir: paths.cache.join("probes"),
         max_active: MAX_ACTIVE,
-        idle_timeout: (!service).then_some(idle_timeout),
-        resume_on_start: service || seed,
+        idle_timeout: env.var("TORRENTIAL_TEST_IDLE_TIMEOUT").and_then(torrential_core::units::parse_duration),
         save_resume_every,
         stall_after,
         writes_stop_within: WRITES_STOP_WITHIN,
+        plays: owner::plays::Plays { root: paths.plays(), max: settings.plays_max.0, idle_after: plays_idle(env) },
+        trash: trash(env, paths),
+        deletion_pause: deletion_pause(env),
+        trash_pause: owner::deleter::TrashPause::sleep(trash_pause(env)),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -278,7 +379,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         .map_err(|e| Error::internal(format!("cannot start the async runtime: {e}")))?;
     let version = env.version();
     let ports = Ports::from_env(env, paths, &settings, runtime.handle())?;
-    let engine = runtime.block_on(async {
+    let (engine, ended) = runtime.block_on(async {
         let socket = paths.socket();
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).map_err(|e| {
@@ -286,14 +387,23 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
         })?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
-        let http_port = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        let wanted = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        // Open pages reconnect to the address they loaded from, so the engine serves where it last did.
+        let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
+        let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let running =
-            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), http_port)?;
+            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), &http_ports)?;
+        // Before the socket answers, so a page that reconnects the moment this engine is up says what was updated.
+        running.ctx.news.post(update::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
+        if last != Some(players) {
+            let _ = crate::skill::write_atomic(&paths.http_port(), players.to_string().as_bytes());
+        }
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
             socket.display()
         ));
+        let _ = std::fs::remove_file(paths.switching());
         let ctx = running.ctx.clone();
         let accept = tokio::spawn(async move {
             let uid = paths::uid();
@@ -304,19 +414,27 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
             }
         });
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let updates = tokio::spawn(crate::update::watch(env.clone(), paths.clone()));
-        let _ = running.owner.await;
+        let updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), service));
+        let ended = running.owner.await.unwrap_or(Ended::Stopped);
+        // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
+        if ended == Ended::Restart && service {
+            leave_switching(paths, owner::now());
+        }
         accept.abort();
         running.http.abort();
         signals.abort();
         updates.abort();
-        let _ = std::fs::remove_file(&socket);
-        Ok::<_, Error>(running.engine)
+        // An engine that stops for a newer version leaves its socket, so a client following it
+        // finds one that refuses for a moment instead of none, and waits for the next engine.
+        if ended == Ended::Stopped {
+            let _ = std::fs::remove_file(&socket);
+        }
+        Ok::<_, Error>((running.engine, ended))
     })?;
     drop(runtime);
     let _ = engine.join();
     log("engine stopped");
-    Ok(())
+    Ok(ended)
 }
 
 async fn stop_on_signal(owner: OwnerHandle) {
