@@ -136,6 +136,13 @@ fn decide(before: Others, readings: impl IntoIterator<Item = Reading>, now: Inst
     after
 }
 
+/// Whether someone is watching a download now: a reader an answer has measured, that has taken
+/// something lately. A cast's lease, which nothing reads through, does not count, so a paused
+/// cast's download is held back like any other.
+fn watched(readings: &[Reading], now: Instant) -> bool {
+    readings.iter().any(|reading| reading.lead.is_some() && !reading.idle(now))
+}
+
 #[derive(Default)]
 pub struct Streams {
     /// The answers streaming each download. A lease holds each reading for as long as it lasts,
@@ -213,8 +220,7 @@ impl Owner {
         let held: BTreeSet<TorrentId> = match streams.others {
             Others::Free => BTreeSet::new(),
             Others::Held => {
-                let unwatched = |readings: &[Reading]| readings.iter().all(|reading| reading.idle(now));
-                downloading.iter().filter(|(_, readings)| unwatched(readings)).map(|(id, _)| *id).collect()
+                downloading.iter().filter(|(_, readings)| !watched(readings, now)).map(|(id, _)| *id).collect()
             }
         };
         // Sent every time, for a download the engine adds again starts with no limit.
@@ -252,6 +258,14 @@ mod tests {
         assert_eq!(decide(Others::Held, [ahead(120)], now), Others::Free);
         assert_eq!(decide(Others::Held, [ahead(120), ahead(90)], now), Others::Held);
         assert_eq!(decide(Others::Held, [], now), Others::Free);
+    }
+
+    #[test]
+    fn a_download_only_a_cast_holds_is_not_watched_and_is_held_back_with_the_others() {
+        let now = Instant::now();
+        let cast = Reading { at: 0, writing_since: None, lead: None };
+        assert!(!watched(&[cast], now));
+        assert!(watched(&[cast, ahead(10)], now));
     }
 
     #[test]
