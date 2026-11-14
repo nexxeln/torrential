@@ -19,6 +19,7 @@ use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
+use super::web::fetch::{Fetch, Ffmpeg};
 use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
 
@@ -48,9 +49,13 @@ struct Harness {
 struct Outside {
     /// Where the engine finds ffmpeg and ffprobe. Nowhere, until a test says.
     tools: Arc<Mutex<Tools>>,
+    /// What the engine does with none. It fetches nothing, unless a test says where from.
+    fetch: Fetch,
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     timing: Timing,
+    /// Where searches for TVs go: nowhere that answers, unless a test runs a fake TV.
+    tvs: super::cast::Find,
     /// What the plays folder holds, and how long a play no one streams keeps downloading.
     plays_max: u64,
     idle_after: Duration,
@@ -70,9 +75,11 @@ impl Default for Outside {
     fn default() -> Self {
         Self {
             tools: Arc::default(),
+            fetch: Fetch::Unavailable,
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
+            tvs: super::cast::Find::At(std::net::SocketAddr::from(([127, 0, 0, 1], 9))),
             plays_max: 20 * GIB,
             idle_after: IDLE_AFTER,
             gate: None,
@@ -179,12 +186,17 @@ impl Harness {
                 let preferences = outside.preferences;
                 move || preferences
             }),
-            tools: Arc::new({
-                let tools = outside.tools.clone();
-                move || tools.lock().unwrap().clone()
-            }),
+            ffmpeg: Ffmpeg::new(
+                Arc::new({
+                    let tools = outside.tools.clone();
+                    move || tools.lock().unwrap().clone()
+                }),
+                dir.path().join("ffmpeg"),
+                outside.fetch.clone(),
+            ),
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
+            tvs: outside.tvs,
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
@@ -1693,6 +1705,7 @@ async fn while_a_film_is_behind_its_player_the_other_downloads_trickle() {
     h.until("the iso back at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
 }
 
+mod cast;
 mod devices;
 mod plays;
 mod titles;

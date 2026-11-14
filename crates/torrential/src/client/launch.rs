@@ -78,7 +78,8 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
     }
     let unavailable =
         |why: String| Error::new(ErrorCode::DaemonUnavailable, why).with_hint(format!("see {}", paths.log().display()));
-    std::fs::create_dir_all(&paths.state)
+    paths
+        .make_state()
         .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot create {}: {e}", paths.state.display())))?;
     let _ = std::fs::remove_file(paths.startup_error());
     let exe = std::env::current_exe().map_err(|e| unavailable(format!("cannot find the torrential binary: {e}")))?;

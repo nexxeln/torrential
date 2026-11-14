@@ -13,6 +13,8 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { MediaInfo, PlayInfo } from "../api";
+import { CastButton } from "../cast/CastButton";
+import { useCasting } from "../cast/casts";
 import { clock } from "../lib/format";
 import { fileName, isVideoFile, readable } from "../lib/release";
 import {
@@ -42,6 +44,7 @@ import { SeekBar } from "./SeekBar";
 import { audioLabel, offsetText, Settings, type SettingsPage } from "./Settings";
 import { Shortcuts } from "./Shortcuts";
 import { DirectSource, RemuxSource, type Source, type SourceState } from "./source";
+import { Unsaved } from "./saving";
 import { Stats } from "./Stats";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { useAirPlay, useMediaSession, useWakeLock } from "./system";
@@ -91,6 +94,8 @@ export interface Neighbor {
 /** A film or an episode played by title, instead of a file of a torrent. */
 export interface Titled {
   kind: "film" | "episode";
+  /** The film or episode, such as `tt0903747:3:5`. */
+  video: string;
   heading: Heading;
   /** The episodes N and P move to, and the one the end of the video counts down to. */
   previous: Neighbor | null;
@@ -272,30 +277,43 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
 
   // A file the browser said it could read, but could not: let the engine repackage it.
   const failure = sourceState.kind === "failed" ? sourceState.error : null;
+  const converts = media.ffmpeg === "ready";
   useEffect(() => {
-    if (failure && howKind === "direct" && media.remux && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
-  }, [failure, howKind, media.remux]);
+    if (failure && howKind === "direct" && converts && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
+  }, [failure, howKind, converts]);
 
-  // Where playback is, remembered for the next visit.
-  const remember = useCallback(() => {
-    if (!duration || lastTime.current <= WORTH_RESUMING / 2) return;
-    memory.save(lastTime.current, duration);
-  }, [memory, duration]);
+  // Where playback is, remembered for the next visit while it plays here.
+  const [unsaved] = useState(() => new Unsaved());
+  const casting = useRef(false);
+  casting.current = useCasting(titled?.video);
+  const remember = useCallback(
+    (seen: boolean) => {
+      if (!unsaved.take({ seen, cast: casting.current }) || !duration || lastTime.current <= WORTH_RESUMING / 2) return;
+      memory.save(lastTime.current, duration);
+    },
+    [unsaved, memory, duration],
+  );
   useEffect(() => {
     const follow = () => {
-      if (video.snapshot().started) lastTime.current = element.ended && duration ? duration : element.currentTime;
+      if (!video.snapshot().started) return;
+      lastTime.current = element.ended && duration ? duration : element.currentTime;
+      unsaved.moved(!element.paused || element.ended);
     };
+    const now = () => remember(!document.hidden);
+    // The page was in view until it hid, so where it got to is still worth saving.
+    const hide = () => remember(true);
     const stop = new AbortController();
     for (const name of ["timeupdate", "ended"]) element.addEventListener(name, follow, { signal: stop.signal });
-    for (const name of ["pause", "ended"]) element.addEventListener(name, remember, { signal: stop.signal });
-    addEventListener("pagehide", remember, { signal: stop.signal });
-    const timer = setInterval(remember, SAVE_EVERY_MS);
+    for (const name of ["pause", "ended"]) element.addEventListener(name, now, { signal: stop.signal });
+    document.addEventListener("visibilitychange", () => document.hidden && hide(), { signal: stop.signal });
+    addEventListener("pagehide", hide, { signal: stop.signal });
+    const timer = setInterval(now, SAVE_EVERY_MS);
     return () => {
       stop.abort();
       clearInterval(timer);
-      remember();
+      now();
     };
-  }, [element, video, duration, remember]);
+  }, [element, video, duration, unsaved, remember]);
   useEffect(() => {
     if (!resumeNotice) return;
     const timer = setTimeout(() => setResumeNotice(false), 8000);
@@ -362,10 +380,11 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const [filesOpen, setFilesOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [stats, setStats] = useState(false);
+  const [castOpen, setCastOpen] = useState(false);
   /** The pointer rests on the controls, which keeps them shown. */
   const [onControls, setOnControls] = useState(false);
   const covered = useRef(false);
-  covered.current = menu.length > 0 || filesOpen;
+  covered.current = menu.length > 0 || filesOpen || castOpen;
   const closeMenu = useCallback(() => {
     const root = frame.current?.querySelector("[data-menu-root]");
     const within = root?.contains(document.activeElement);
@@ -519,7 +538,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const blocked = how.kind === "blocked" ? how.reason : null;
   const stuck = failure !== null || blocked !== null;
   const starting = !stuck && !started && waiting;
-  const showControls = !stuck && !starting && (awake || onControls || paused || menu.length > 0 || scrubbing);
+  const showControls = !stuck && !starting && (awake || onControls || paused || menu.length > 0 || castOpen || scrubbing);
   const hidden = showControls || stuck || starting ? undefined : "";
   /** The shortcuts dialog, or on a TV the files panel, covers the bars, so a remote cannot reach them. */
   const overlaid = sheet || (filesOpen && isTv());
@@ -677,6 +696,18 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
             hasNext={next !== null}
             nextLabel={titled ? "Next episode (N)" : "Next video (N)"}
             airPlay={airPlay}
+            cast={
+              <CastButton
+                look="player"
+                start={{ ref: id, file: file.index, video: titled?.video, subtitle: chosen?.source?.kind === "file" ? chosen.source.index : undefined }}
+                at={() => element.currentTime}
+                onOpen={setCastOpen}
+                onCast={() => {
+                  element.pause();
+                  onBack();
+                }}
+              />
+            }
             onNext={goNext ?? onBack}
             onMenu={openMenu}
             onFiles={() => setFilesOpen((open) => !open)}
@@ -686,7 +717,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
                 play={play}
                 duration={duration}
                 chapters={media.chapters}
-                frames={media.remux}
+                frames={converts}
                 aspect={media.video && media.video.height > 0 ? media.video.width / media.video.height : 16 / 9}
                 onSeek={actions.seekTo}
               />

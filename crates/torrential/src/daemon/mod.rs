@@ -1,5 +1,6 @@
 pub mod admission;
 pub mod book;
+pub mod cast;
 pub mod devices;
 pub mod engine_port;
 pub mod files;
@@ -57,10 +58,12 @@ pub struct Ports {
     pub machine: Arc<Detector>,
     /// The preferences in config.yaml now.
     pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
-    /// Where ffmpeg and ffprobe are now.
-    pub tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync>,
+    /// ffmpeg and ffprobe, installed or fetched.
+    pub ffmpeg: web::fetch::Ffmpeg,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
+    /// Where searches for TVs go.
+    pub tvs: cast::Find,
 }
 
 impl Ports {
@@ -68,8 +71,9 @@ impl Ports {
         let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
             Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
-        let tools: Arc<dyn Fn() -> web::ffmpeg::Tools + Send + Sync> =
-            Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        let installed = Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
+        let fetch = web::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
+        let ffmpeg = web::fetch::Ffmpeg::new(installed, web::fetch::root(&paths.state), fetch);
         // The fake engine's subtitles are made up too, unless a test asks for the real sources.
         let subtitles: Arc<dyn subtitle_port::SubtitlePort> =
             if fake(env) && env.var("TORRENTIAL_TEST_SUBTITLES") != Some("live") {
@@ -87,6 +91,11 @@ impl Ports {
                 };
                 Arc::new(titles::catalog_port::Live::new(&config)?)
             };
+        let tvs = match env.var("TORRENTIAL_TEST_SSDP").map(str::parse) {
+            Some(Ok(address)) => cast::Find::At(address),
+            Some(Err(_)) => return Err(Error::new(ErrorCode::Usage, "TORRENTIAL_TEST_SSDP is not an address")),
+            None => cast::Find::Multicast,
+        };
         if fake(env) {
             let rate =
                 env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
@@ -102,9 +111,10 @@ impl Ports {
                 disk: Box::new(admission::RoomyDisk),
                 machine: Detector::start(env, settings.downloads_dir(paths), Box::new(admission::RoomyDisk)),
                 preferences,
-                tools,
+                ffmpeg,
                 subtitles,
                 catalog,
+                tvs,
             });
         }
         let network = match env.var("TORRENTIAL_TEST_NETWORK") {
@@ -125,9 +135,10 @@ impl Ports {
             disk: disk(),
             machine: Detector::start(env, settings.downloads_dir(paths), disk()),
             preferences,
-            tools,
+            ffmpeg,
             subtitles,
             catalog,
+            tvs,
         })
     }
 }
@@ -226,7 +237,7 @@ pub fn start(
     let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, config)?;
     let (commands_tx, commands) = mpsc::unbounded_channel();
     let task = runtime.spawn(owner.run(commands, events));
-    let ctx = Arc::new(Ctx {
+    let ctx = Arc::new_cyclic(|ctx| Ctx {
         owner: OwnerHandle(commands_tx),
         search: ports.search,
         machine: ports.machine,
@@ -234,9 +245,10 @@ pub fn start(
         parse: ports.parse,
         version,
         http_port,
-        web: web::State::new(ports.preferences, ports.tools, ports.subtitles),
+        web: web::State::new(ports.preferences, ports.ffmpeg, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         devices,
+        casts: cast::Casts::new(ctx.clone(), ports.tvs),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
@@ -283,7 +295,7 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
 fn serve(env: &Env, paths: &Paths, service: bool) -> Result<(), Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
-    std::fs::create_dir_all(&paths.state).map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
+    paths.make_state().map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
     paths::check_state_filesystem(&paths.state)?;
     let _lock = match OwnerLock::acquire(&paths.lock())? {
         Some(lock) => lock,

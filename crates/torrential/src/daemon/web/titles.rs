@@ -99,7 +99,7 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request, asker: &Asker
     };
     match asked {
         Ok((query, video, jobs)) => {
-            let (player, ffmpeg) = (query.profile.player, (ctx.web.tools)().both().is_some());
+            let (player, ffmpeg) = (query.profile.player, ctx.web.ffmpeg.converts());
             let line = |releases| ctx.titles.line(&jobs, &video, releases, player, ffmpeg);
             super::results(conn, request, query, line).await
         }
@@ -234,14 +234,18 @@ pub struct Position {
 }
 
 /// `POST /api/watched`: where a film or episode stopped. The player sends it every few seconds.
+/// `kept` is false while a TV plays the video, whose own place stands until the cast ends.
 pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
     let Position { video, position, duration, release } = request;
     check_times(position, duration)?;
     let now = now();
     watchable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
+    let kept = !ctx.casts.plays(&video);
     let watched = Watched { video, position, duration, release, at: now };
-    ctx.titles.shelf.watch(&watched)?;
-    Ok(json!({ "watched": watched }))
+    if kept {
+        ctx.titles.shelf.watch(&watched)?;
+    }
+    Ok(json!({ "watched": watched, "kept": kept }))
 }
 
 /// No video runs longer, in seconds.

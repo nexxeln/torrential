@@ -8,6 +8,7 @@ pub mod service;
 mod setup;
 mod titles;
 pub mod tui;
+mod tv;
 mod update;
 pub mod wait;
 mod web;
@@ -91,6 +92,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         Command::Play(args) => play::run(args, mode, env, &cwd),
         Command::Web(args) => web::run(&engine()?, args, mode, env),
         Command::Devices { command } => devices::run(engine()?, command, mode),
+        Command::Tv { command } => tv::run(engine()?, command, mode, &cwd),
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;
@@ -511,9 +513,10 @@ fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
         (Err(_), _) => check("profile", CheckStatus::Skipped, "the config has an error".into()),
         (_, Err(error)) => check("profile", CheckStatus::Fail, error.message),
     };
+    let fetch_ffmpeg = settings.as_ref().map_or(true, |settings| settings.ffmpeg.fetch);
     checks.extend(probe::checks(&paths, settings, network));
     checks.push(profile);
-    checks.push(web::check(env));
+    checks.push(web::check(env, &paths, fetch_ffmpeg));
     emit(mode, &views::doctor(&checks, fix), &Typed { kind: "doctor", body: Checks { checks: &checks } })
 }
 

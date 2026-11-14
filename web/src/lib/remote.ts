@@ -135,6 +135,8 @@ function pressed(event: KeyboardEvent, onBack: (() => void) | null): void {
     event.stopPropagation();
     active.click();
   } else if (onBack && isBack(event)) {
+    // An open list, such as Play on TV, closes itself on Back.
+    if (document.querySelector("[data-overlay]")) return;
     // Escape in a search field with text clears it, and the field does that itself.
     if (event.key === "Escape" && active instanceof HTMLInputElement && active.value) return;
     event.preventDefault();

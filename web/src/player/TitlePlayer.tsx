@@ -1,13 +1,14 @@
 import { type Dispatch, type RefObject, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { artUrl, asApiError, type MediaInfo, media, type PlayInfo, saveWatched, type TitlePage } from "../api";
+import { artUrl, asApiError, type MediaInfo, type PlayInfo, saveWatched, type TitlePage } from "../api";
 import { useJob } from "../lib/jobs";
 import { goBack, navigate, playPath, titlePath } from "../router";
 import { useTitle } from "../titles/useTitle";
 import { episodeCode, episodeName, findEpisode, playingOrder, titleOf, videoOf } from "../titles/words";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
-import { PlayingReadout, Readout, TopBar } from "./Chrome";
+import { FfmpegReadout, PlayingReadout, Readout, TopBar } from "./Chrome";
 import { usePlayer } from "./context";
+import { readMedia } from "./ffmpeg";
 import { leaveOnBack } from "./keys";
 import { type Heading, type Memory, type Neighbor, Playback, type Titled } from "./Playback";
 import { type Recovery, type RecoveryEvent, recover, WATCHING } from "./recovery";
@@ -180,7 +181,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     (async () => {
       const ended = await attempt({ video: from.started.video, replace: from.started.play.id }, stop.signal, () => {});
       if ("error" in ended) return dispatch({ type: "failed", error: ended.error });
-      const details = await media(ended.started.play.id, ended.started.play.video.index, stop.signal);
+      const details = await readMedia(ended.started.play.id, ended.started.play.video.index, stop.signal, () => {});
       const at = element.current?.currentTime ?? from.start;
       setSwapped({ started: ended.started, media: details, start: at, resumed: false, poster: still(element.current) });
       setSwitched(true);
@@ -209,6 +210,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     };
     return {
       kind,
+      video: started.video,
       heading,
       ...neighbors(page, started.video),
       memory,
@@ -259,7 +261,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
               naming={naming}
               backdrop={backdrop}
               step={session.stage === "reading" ? 2 : heard.found === null ? 0 : 1}
-              readout={readingJob && <Readout job={readingJob} />}
+              readout={session.stage === "reading" && session.ffmpeg ? <FfmpegReadout fetching={session.ffmpeg} /> : readingJob && <Readout job={readingJob} />}
             />
           )}
           <div className="absolute inset-x-0 top-0 z-10">
