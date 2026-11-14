@@ -402,6 +402,7 @@ impl Owner {
             if let Some(ended) = self.ended {
                 return ended;
             }
+            let due = self.metadata_waiters.iter().map(|w| w.deadline).min();
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => self.command(command),
@@ -414,8 +415,23 @@ impl Owner {
                         self.ended = Some(Ended::Stopped);
                     }
                 },
-                _ = tick.tick() => self.tick(),
+                _ = tick.tick() => {
+                    self.catch_up(&mut events);
+                    self.tick();
+                }
+                _ = tokio::time::sleep_until(due.unwrap_or_else(Instant::now).into()), if due.is_some() => {
+                    self.catch_up(&mut events);
+                    self.expire_metadata(Instant::now());
+                }
             }
+        }
+    }
+
+    /// Applies what the engine sent while the owner was busy, so it counts before a deadline is judged.
+    fn catch_up(&mut self, events: &mut mpsc::UnboundedReceiver<EngineEvent>) {
+        for _ in 0..events.len() {
+            let Ok(event) = events.try_recv() else { break };
+            self.engine_event(event);
         }
     }
 
@@ -1775,6 +1791,19 @@ impl Owner {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.expire_metadata(now);
+        self.finish_pauses();
+        self.finish_stop_if_done();
+        self.check_idle(now);
+        self.save_progress(now);
+        self.finish_deletions();
+        self.leave();
+        self.tend_plays(now);
+    }
+
+    /// Answers each wait for a file list whose deadline has passed, and gives up the probes no one
+    /// waits for any longer.
+    fn expire_metadata(&mut self, now: Instant) {
         let (expired, waiting): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.metadata_waiters).into_iter().partition(|w| w.deadline <= now);
         self.metadata_waiters = waiting;
@@ -1793,13 +1822,6 @@ impl Owner {
             self.engine.send(EngineCommand::Remove(id));
             self.draining.insert(id);
         }
-        self.finish_pauses();
-        self.finish_stop_if_done();
-        self.check_idle(now);
-        self.save_progress(now);
-        self.finish_deletions();
-        self.leave();
-        self.tend_plays(now);
     }
 
     fn save_progress(&mut self, now: Instant) {

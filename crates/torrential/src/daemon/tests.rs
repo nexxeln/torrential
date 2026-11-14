@@ -14,7 +14,7 @@ use super::engine_port::{
 };
 use super::owner::plays::{IDLE_AFTER, Plays};
 use super::owner::trash::Trash;
-use super::owner::{Command, Ended, OwnerConfig};
+use super::owner::{Command, Ended, MetaTarget, OwnerConfig};
 use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
@@ -1157,6 +1157,36 @@ async fn a_repair_after_no_source_gives_its_sources_a_full_window_again() {
     let JobStatus::Error { error } = &jobs[0].status else { unreachable!() };
     assert_eq!(error.code, ErrorCode::NoSource);
     assert!(repaired.elapsed() >= STALL, "stopped again after {:?}", repaired.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_lists_peers_send_while_the_engine_saves_to_a_slow_disk_count_once_it_catches_up() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let outside = Outside { gate: Some(gate.clone()), ..Outside::default() };
+    let h = Harness::with_outside(search_port::Fake::new(fake_catalog()), outside);
+    let films = [0x91, 0x92, 0x93, 0x94].map(|n| torrent(n, &format!("film{n}"), &[("film.mkv", GIB)]));
+    for film in &films {
+        h.swarm.publish(film.clone());
+    }
+    gate.close();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let asked = films.clone().map(|film| {
+        let ctx = h.running.ctx.clone();
+        let target = MetaTarget::Magnet(super::magnet::from_hash(film.info_hash));
+        tokio::spawn(async move { ctx.owner.ask(|reply| Command::Metadata { target, deadline, reply }).await })
+    });
+    gate.until_held(4).await;
+    let disk = rusqlite::Connection::open(h.dir.path().join("state.db")).unwrap();
+    disk.execute_batch("BEGIN IMMEDIATE").unwrap();
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(disk);
+
+    let mut found = Vec::new();
+    for ask in asked {
+        found.push(ask.await.unwrap().map(|info| info.metainfo.name.clone()).map_err(|e| e.code));
+    }
+    assert_eq!(found, ["film145", "film146", "film147", "film148"].map(|name| Ok(name.to_string())));
 }
 
 #[tokio::test(flavor = "multi_thread")]

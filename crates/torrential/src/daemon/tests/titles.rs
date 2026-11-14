@@ -14,7 +14,7 @@ use torrential_core::{
 };
 
 use super::super::admission::GIB;
-use super::super::engine_port::{Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
+use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{self, FakeSource};
@@ -1084,6 +1084,40 @@ async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
             "resolved tt0063350 Night of the Living Dead",
             "searched 4",
             "trying 1 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_whose_file_list_arrives_in_time_plays_while_a_slow_disk_holds_up_the_engine() {
+    let film = torrent(0xb7, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
+    let catalog = vec![listed(&film, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let h = Harness::with_outside(search, Outside { gate: Some(gate.clone()), ..Outside::default() });
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    gate.close();
+    let slow_disk = async {
+        gate.until_held(1).await;
+        let locked = h.lock_state();
+        gate.open();
+        tokio::time::sleep(TIMING.file_list + std::time::Duration::from_millis(200)).await;
+        drop(locked);
+    };
+
+    let (steps, ()) = tokio::join!(h.play_title("tt0063350", None, None), slow_disk);
+
+    assert_eq!(
+        steps,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "searched 1",
+            "trying 1 of 1 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 b7b7b7 file 0 at null",
         ]
     );
 }
