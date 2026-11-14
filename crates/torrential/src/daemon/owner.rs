@@ -23,10 +23,13 @@ use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
 use deleter::Deleter;
-use plays::{Destination, Lease, Plays, Tending};
+use plays::{Destination, Plays, Tending};
+pub use streams::Lease;
+use streams::Streams;
 
 pub mod deleter;
 pub mod plays;
+mod streams;
 pub mod trash;
 
 #[derive(Clone, Debug)]
@@ -314,6 +317,8 @@ pub struct Owner {
     draining: BTreeSet<TorrentId>,
     /// Played downloads, which run in order and take no download slot until the engine exits.
     streamed: BTreeSet<TorrentId>,
+    /// Who streams which download now, and how far ahead of each player its film is.
+    streams: Streams,
     /// The downloads title plays are testing or have yet to put back. Only in memory: after a
     /// restart no play is running, so nothing is under test and every download stays as it is.
     under_test: BTreeMap<TorrentId, UnderTest>,
@@ -365,12 +370,13 @@ impl Owner {
         let (updates, _) = broadcast::channel(256);
         let mut owner = Self {
             tombstones: store.tombstones(now)?,
-            tending: Tending::new(deleter, playing),
+            tending: Tending::new(deleter),
             store,
             jobs,
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
+            streams: Streams::new(playing),
             under_test: BTreeMap::new(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
@@ -1799,6 +1805,7 @@ impl Owner {
         self.finish_deletions();
         self.leave();
         self.tend_plays(now);
+        self.prioritize(now);
     }
 
     /// Answers each wait for a file list whose deadline has passed, and gives up the probes no one

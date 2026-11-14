@@ -28,7 +28,7 @@
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
 //   GET  /api/title/sources?video=[&width=&height=&scale=&playback=]   NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
-//   POST /api/watched        { video, position, duration, release? }   { watched: Watched }
+//   POST /api/watched        { video, position, duration, release? }   { watched: Watched, kept: boolean }
 //   POST /api/library        { title, saved }              { saved: boolean }
 //   GET  /api/home                                         Home
 //
@@ -43,6 +43,13 @@
 // The engine:
 //
 //   GET  /api/version                                      Version
+//
+// Play on TV. A paired phone may cast and work the remote too:
+//
+//   GET  /api/tvs                                          TvList, as known now
+//   POST /api/tvs              { fresh? }                  TvList, after a search of the home network
+//   POST /api/cast             CastStart                   { cast: Cast }, at once
+//   POST /api/cast/control     { tv?, ...CastAction }       { cast: Cast }
 
 export type Category = "video" | "audio" | "software" | "book" | "game" | "dataset" | "other";
 export type Flag = "official" | "trusted" | "public_domain" | "creative_commons" | "cam" | "adult";
@@ -441,7 +448,7 @@ export type Check = "file_list" | "start" | "first_bytes";
 export type Skip =
   | { reason: "no_file_list" | "no_data"; waited_s: number }
   | { reason: "no_video" | "stalled" }
-  | { reason: "unplayable"; container: string }
+  | { reason: "unplayable" | "not_on_tv"; container: string }
   | { reason: "too_large" | "failed"; error: ApiError };
 
 /** One line of the /api/title/play stream. The last is `playing` or `failed`. */
@@ -769,4 +776,82 @@ export interface Version {
 
 export function version(signal?: AbortSignal): Promise<Version> {
   return fetch("/api/version", { signal }).then(json<Version>);
+}
+
+/** A container a TV plays as it is. */
+export type Container = "mkv" | "mp4" | "webm" | "avi" | "ts" | "mov" | "mpeg" | "wmv";
+
+/** A TV, or another media renderer, on the home network. */
+export interface Tv {
+  /** The renderer's UDN and its address. A device that copies a TV's UDN from another address is another TV. */
+  id: string;
+  name: string;
+  address: string;
+  plays: Container[];
+  /** The newest codec it says it decodes. */
+  decodes: Playback;
+  /** Whether torrential can set its volume. */
+  volume: boolean;
+}
+
+export type CastState =
+  | { state: "finding" | "loading" | "playing" | "paused" }
+  /** `error` says why when it did not end as asked or at the end of the video. */
+  | { state: "ended"; error: ApiError | null };
+
+/** One cast on one TV, listed until a minute after it ends. */
+export type Cast = CastState & {
+  tv: string;
+  tv_name: string;
+  name: string;
+  video: string | null;
+  download: string | null;
+  file: number | null;
+  subtitle: string | null;
+  /** Seconds, as the TV last said. */
+  position: number | null;
+  duration: number | null;
+  /** From 0 to 100. */
+  volume: number | null;
+  started_at: number;
+};
+
+export interface TvList {
+  tvs: Tv[];
+  casts: Cast[];
+}
+
+/** What to cast: a film or an episode by `video`, or a file of a torrent by `ref`, with the film it holds as `video`. */
+export interface CastStart {
+  tv: string;
+  video?: string;
+  source?: string;
+  ref?: string;
+  file?: number;
+  /** A subtitle file of the same torrent. */
+  subtitle?: number;
+  /** Seconds, in place of where the person stopped. */
+  start_at?: number;
+}
+
+export type CastAction =
+  | { action: "pause" | "resume" | "stop" }
+  | { action: "seek"; position: number }
+  | { action: "volume"; level: number };
+
+export function tvs(signal?: AbortSignal): Promise<TvList> {
+  return fetch("/api/tvs", { signal }).then(json<TvList>);
+}
+
+/** Searches the home network for TVs, unless a search ran in the last 30 seconds and `fresh` is not set. */
+export function findTvs(fresh = false): Promise<TvList> {
+  return post("/api/tvs", { fresh });
+}
+
+export function startCast(start: CastStart): Promise<Cast> {
+  return post<{ cast: Cast }>("/api/cast", start).then((body) => body.cast);
+}
+
+export function controlCast(tv: string, action: CastAction): Promise<Cast> {
+  return post<{ cast: Cast }>("/api/cast/control", { tv, ...action }).then((body) => body.cast);
 }

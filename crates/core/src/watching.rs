@@ -184,6 +184,10 @@ pub enum Skip {
     Unplayable {
         container: String,
     },
+    /// The video plays on a TV, which does not take its container.
+    NotOnTv {
+        container: String,
+    },
     TooLarge {
         error: Error,
     },
@@ -203,6 +207,7 @@ impl fmt::Display for Skip {
             Skip::NoFileList { waited_s } => write!(f, "no peer sent its file list in {waited_s}s"),
             Skip::NoVideo => f.write_str("none of its files is the video"),
             Skip::Unplayable { container } => write!(f, "its .{container} file needs ffmpeg, which is not installed"),
+            Skip::NotOnTv { container } => write!(f, "the TV does not play its .{container} file"),
             Skip::TooLarge { error } | Skip::Failed { error } => f.write_str(&crate::text::sanitize(&error.message)),
             Skip::NoData { waited_s } => write!(f, "no data arrived in {waited_s}s"),
             Skip::Stalled => f.write_str("it stalled"),

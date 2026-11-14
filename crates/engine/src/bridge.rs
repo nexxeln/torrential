@@ -236,6 +236,8 @@ pub(crate) mod ffi {
             runs: u32,
         ) -> Result<Vec<PieceCounts>>;
         fn download_in_order(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
+        fn set_download_limit(self: Pin<&mut Session>, id: &[u8], bytes_per_second: u32) -> Result<()>;
+        fn download_limit(self: &Session, id: &[u8]) -> Result<u32>;
         fn post_session_stats(self: Pin<&mut Session>) -> Result<()>;
         fn save_state(self: &Session) -> Result<Vec<u8>>;
         fn listen_port(self: &Session) -> Result<u16>;

@@ -16,8 +16,9 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{oneshot, watch};
 use torrential_core::{ErrorCode, TorrentId};
 
+use super::cast::Dlna;
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
-use super::owner::{Command, StreamFile};
+use super::owner::{Command, Lease, StreamFile};
 use super::server::Ctx;
 use super::web;
 
@@ -449,7 +450,10 @@ impl Connection<'_> {
             Asker::Cast(_) if request.method == Method::Post => {
                 return self.empty("405 Method Not Allowed", "", request.keep_alive).await;
             }
-            Asker::Cast(granted) => return self.file(request, granted.id, granted.index).await,
+            Asker::Cast(granted) => {
+                let dlna = self.ctx.casts.served(&request.path);
+                return self.file(request, granted.id, granted.index, dlna.as_ref()).await;
+            }
             Asker::Local | Asker::Device(_) => {}
         }
         if let Some(route) = request.path.strip_prefix("/api/") {
@@ -462,7 +466,7 @@ impl Connection<'_> {
             return self.empty("303 See Other", "Location: /\r\n", request.keep_alive).await;
         }
         match route(&request.path) {
-            Some((id, index)) => self.file(request, id, index).await,
+            Some((id, index)) => self.file(request, id, index, None).await,
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
                     let mut headers = format!("Cache-Control: {}\r\n", asset.cache);
@@ -578,11 +582,12 @@ impl Connection<'_> {
         }
     }
 
-    /// Sends file `index` of download `id` to a player on this Mac, a paired device, or a cast. Its
-    /// lease holds off an update's switch, and none is handed out once the switch waits for none.
-    async fn file(&mut self, request: Request, id: TorrentId, index: u32) -> io::Result<bool> {
+    /// Sends file `index` of download `id` to a player on this Mac, a paired device, or a cast, with
+    /// the type and headers a TV playing a cast reads when `dlna` says them. Its lease holds off an
+    /// update's switch, and none is handed out once the switch waits for none.
+    async fn file(&mut self, request: Request, id: TorrentId, index: u32, dlna: Option<&Dlna>) -> io::Result<bool> {
         let keep = request.keep_alive;
-        let (file, _lease) = match self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await {
+        let (file, lease) = match self.ctx.owner.ask(|reply| Command::Stream { id, index, reply }).await {
             Ok(streaming) => streaming,
             Err(updating) if updating.code == ErrorCode::DaemonUnavailable => {
                 let (message, text) = (updating.message.as_bytes(), "text/plain; charset=utf-8");
@@ -602,15 +607,23 @@ impl Connection<'_> {
             ),
             None => ("200 OK", (0, file.size), String::new()),
         };
+        let content_type = dlna.map_or(content_type(&file.path), |dlna| dlna.mime.as_str());
+        let dlna = dlna.map(Dlna::headers).unwrap_or_default();
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}{}\r\n",
-            content_type(&file.path),
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}{dlna}{}\r\n",
             end - start,
             if keep { "" } else { "Connection: close\r\n" },
         );
         self.wr.write_all(head.as_bytes()).await?;
         if !request.head_only() {
-            self.body(&file, id, index, start, end).await?;
+            let ctx = self.ctx;
+            lease.waiting(start);
+            let runtime =
+                || web::watch::probed(ctx, id, index)?.duration.and_then(|s| Duration::try_from_secs_f64(s).ok());
+            tokio::select! {
+                sent = self.body(&file, id, index, start, end, &lease) => sent?,
+                never = lease.follow(&ctx.engine, id, index, file.size, runtime) => match never {},
+            }
         }
         Ok(keep)
     }
@@ -622,13 +635,22 @@ impl Connection<'_> {
         Ok(keep)
     }
 
-    async fn body(&mut self, file: &StreamFile, id: TorrentId, index: u32, start: u64, end: u64) -> io::Result<()> {
+    async fn body(
+        &mut self,
+        file: &StreamFile,
+        id: TorrentId,
+        index: u32,
+        start: u64,
+        end: u64,
+        lease: &Lease,
+    ) -> io::Result<()> {
         let mut complete = file.complete;
         let mut disk = None;
         let mut buf = vec![0; CHUNK as usize];
         let mut offset = start;
         while offset < end {
             let length = CHUNK.min(end - offset);
+            lease.waiting(offset);
             if !complete {
                 complete = self.arrived(id, index, offset, length).await?;
             }
@@ -639,6 +661,7 @@ impl Connection<'_> {
             let chunk = &mut buf[..length as usize];
             disk.seek(SeekFrom::Start(offset)).await?;
             disk.read_exact(chunk).await?;
+            lease.writing(offset);
             self.wr.write_all(chunk).await?;
             offset += length;
         }

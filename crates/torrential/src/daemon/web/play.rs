@@ -6,7 +6,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
-use torrential_core::{Error, ErrorCode, Job, TorrentFile, TorrentId};
+use torrential_core::{Error, ErrorCode, Job, Target, TorrentFile, TorrentId};
 
 use super::super::engine_port::Metainfo;
 use super::super::http;
@@ -48,7 +48,20 @@ struct Streamed {
 
 pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
     let deadline = Instant::now() + METADATA_WAIT;
-    let (source, metainfo) = match server::resolve(ctx, super::target(&request.reference)?, "play").await? {
+    let (source, _, playable) = prepare(ctx, super::target(&request.reference)?, request.file, deadline).await?;
+    let (job, info) = begin(ctx, source, &playable, deadline).await?;
+    Ok(playing(ctx, job, &info, &playable).await)
+}
+
+/// The torrent `target` names, its files, and the video to watch in it with its subtitles: file
+/// `file`, or the main video.
+pub async fn prepare(
+    ctx: &Ctx,
+    target: Target,
+    file: Option<u32>,
+    deadline: Instant,
+) -> Result<(Source, Arc<Metainfo>, Playable), Error> {
+    let (source, metainfo) = match server::resolve(ctx, target, "play").await? {
         Source::Download(id) => {
             let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
             (Source::Download(id), info.metainfo)
@@ -66,14 +79,25 @@ pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
             (Source::Torrent { metainfo, origin }, shared)
         }
     };
-    let playable = choose(&metainfo, request.file)?;
+    let playable = choose(&metainfo, file)?;
+    Ok((source, metainfo, playable))
+}
+
+/// Starts or joins the download of `playable`'s video and subtitles, which come first and in
+/// playing order.
+pub async fn begin(
+    ctx: &Ctx,
+    source: Source,
+    playable: &Playable,
+    deadline: Instant,
+) -> Result<(Job, FilesInfo), Error> {
     let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
     let setup_max_size = (ctx.web.preferences)().max_size;
     let to = Destination::Plays;
     let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
     let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let info = server::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
-    Ok(playing(ctx, job, &info, &playable).await)
+    Ok((job, info))
 }
 
 /// How the web player plays `file` of a download that is already playing, as a title play
@@ -113,7 +137,7 @@ async fn playing(ctx: &Ctx, job: Job, info: &FilesInfo, playable: &Playable) -> 
 }
 
 /// The file to watch and its subtitles: the one the page chose, or the torrent's main video.
-fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable, Error> {
+pub fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable, Error> {
     let listing: Vec<TorrentFile> = (0..)
         .zip(&metainfo.files)
         .map(|(index, f)| TorrentFile {

@@ -54,6 +54,8 @@ struct Outside {
     subtitles: super::subtitle_port::Fake,
     catalog: Arc<dyn CatalogPort>,
     timing: Timing,
+    /// Where searches for TVs go: nowhere that answers, unless a test runs a fake TV.
+    tvs: super::cast::Find,
     /// What the plays folder holds, and how long a play no one streams keeps downloading.
     plays_max: u64,
     idle_after: Duration,
@@ -77,6 +79,7 @@ impl Default for Outside {
             subtitles: super::subtitle_port::Fake::default(),
             catalog: Arc::new(catalog_port::Fake::default()),
             timing: TIMING,
+            tvs: super::cast::Find::At(std::net::SocketAddr::from(([127, 0, 0, 1], 9))),
             plays_max: 20 * GIB,
             idle_after: IDLE_AFTER,
             gate: None,
@@ -192,6 +195,7 @@ impl Harness {
             ),
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
+            tvs: outside.tvs,
         };
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
@@ -404,6 +408,10 @@ impl<P: EnginePort> EnginePort for Gated<P> {
 
     fn stream(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
         self.port.stream(id)
+    }
+
+    fn limit(&mut self, id: torrential_core::TorrentId, rate: Option<std::num::NonZeroU32>) -> Result<(), Error> {
+        self.port.limit(id, rate)
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
@@ -1813,6 +1821,27 @@ fn an_engine_that_exits_for_the_login_service_counts_as_switching_for_a_minute()
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn while_a_film_is_behind_its_player_the_other_downloads_trickle() {
+    let h = Harness::new();
+    h.swarm.set_rate(8 * MIB);
+    let iso = torrent(99, "iso", &[("disc.iso", 40 * GIB)]);
+    let film = torrent(100, "film", &[("film.mkv", 40 * GIB)]);
+    h.get(h.torrent_file(&iso), &[]).await.unwrap();
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    let rates = |jobs: &[Job]| jobs.iter().map(|j| j.progress.down_rate).collect::<Vec<_>>();
+    h.until("both at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
+
+    let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
+    let mut player = Player::connect(&h).await;
+    let watching = tokio::spawn(async move { player.get(&path, "bytes=40000000000-40000000099").await });
+    h.until("the iso down to 64 KiB/s", |jobs| rates(jobs) == [64 * 1024, 8 * MIB]).await;
+
+    watching.abort();
+    h.until("the iso back at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
+}
+
+mod cast;
 mod devices;
 mod plays;
 mod titles;

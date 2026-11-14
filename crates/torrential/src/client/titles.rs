@@ -159,7 +159,7 @@ pub fn get(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(u8, Jo
 
 /// Sends a title play and hands each of its steps to `each` until the reply. When no source of
 /// the title is found, a search for its name comes next.
-fn steps(
+pub(super) fn steps(
     conn: &mut Conn,
     request: &Request,
     video: &VideoRef,
@@ -187,13 +187,13 @@ fn steps(
 
 /// A title play's steps as they happen: a line each on stderr in text modes, and in a terminal a
 /// spinner that says what the play waits for.
-struct Shown {
+pub(super) struct Shown {
     mode: Mode,
     bar: Option<ProgressBar>,
 }
 
 impl Shown {
-    fn new(mode: Mode) -> Self {
+    pub(super) fn new(mode: Mode) -> Self {
         let bar = (mode == Mode::Human).then(|| {
             let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr())
                 .with_style(ProgressStyle::with_template("{spinner} {msg}").expect("the template is valid"));
@@ -204,7 +204,7 @@ impl Shown {
         Self { mode, bar: bar.filter(|bar| !bar.is_hidden()) }
     }
 
-    fn step(&self, step: &AttemptEvent, started: &str) {
+    pub(super) fn step(&self, step: &AttemptEvent, started: &str) {
         if self.mode == Mode::Json {
             return;
         }

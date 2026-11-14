@@ -10,8 +10,8 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Quality, Release, ReleaseId, SearchResult,
-    Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId,
+    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
 use super::super::engine_port::Metainfo;
@@ -57,6 +57,8 @@ pub enum Containers {
     Browser,
     /// Any, as mpv, IINA, and VLC open. A download kept with `get` takes any too.
     Any,
+    /// A TV's, which plays these as they are and no other.
+    Tv(Plays),
 }
 
 impl Containers {
@@ -66,6 +68,7 @@ impl Containers {
         match self {
             Containers::Any => true,
             Containers::Browser => remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str())),
+            Containers::Tv(plays) => plays.takes(path),
         }
     }
 }
@@ -96,7 +99,8 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    let ffmpeg = ctx.web.ffmpeg.converts();
+    // ffmpeg converts nothing for a TV, which fetches the file as it is.
+    let ffmpeg = !matches!(ask.containers, Containers::Tv(_)) && ctx.web.ffmpeg.converts();
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
     if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
@@ -307,11 +311,15 @@ impl Walk<'_> {
 }
 
 impl PlayTitle {
-    /// Whether this play may try `release`: never the download it replaces, and only the pinned
-    /// release when one is. A trial checks again once it knows the release's torrent.
+    /// Whether this play may try `release`: never the download it replaces, only the pinned
+    /// release when one is, and on a TV, which gets the file as it is, never one whose name says a
+    /// codec the TV does not decode, held here or not. A trial checks again once it knows the
+    /// release's torrent.
     fn may_try(&self, release: &Release) -> bool {
+        let tv = matches!(self.containers, Containers::Tv(_));
         self.replace.is_none_or(|old| release.id != ReleaseId::Torrent(old))
             && self.pin.is_none_or(|pin| release.id == pin)
+            && (!tv || self.player.plays(Quality::parse(&release.name)))
     }
 }
 
@@ -502,7 +510,11 @@ fn video_of(
         Ok(playable)
     } else {
         let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
-        Err(Skip::Unplayable { container }.into())
+        let skip = match containers {
+            Containers::Tv(_) => Skip::NotOnTv { container },
+            Containers::Browser | Containers::Any => Skip::Unplayable { container },
+        };
+        Err(skip.into())
     }
 }
 
@@ -528,6 +540,10 @@ fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error 
     if every(|s| matches!(s, Skip::Unplayable { .. })) {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} plays in the browser without ffmpeg"))
             .with_hint("install ffmpeg, then play it again");
+    }
+    if every(|s| matches!(s, Skip::NotOnTv { .. })) {
+        return Error::new(ErrorCode::NoSource, format!("no source of {name} comes in a container the TV plays"))
+            .with_hint("play it on this Mac, or choose a source in MKV or MP4");
     }
     if every(|s| matches!(s, Skip::TooLarge { .. }))
         && let Some(Skip::TooLarge { error }) = tried.first().map(|t| &t.reason)
