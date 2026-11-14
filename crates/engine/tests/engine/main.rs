@@ -1,3 +1,4 @@
+mod download_limit;
 mod hybrid;
 mod missing_pieces;
 mod parse;

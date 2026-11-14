@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -75,16 +74,8 @@ pub fn leaving(mut shares: Vec<Share>, max: u64) -> Vec<TorrentId> {
     leaving
 }
 
-/// Someone streaming a download, from their request for its bytes until the answer ends. The
-/// owner hands it out with the file, in one step, and counts the leases still held.
-pub struct Lease {
-    _held: Arc<()>,
-}
-
 /// What the owner keeps track of for plays and deletions.
 pub struct Tending {
-    /// The streams of each download: a play is streamed while a lease other than this one is held.
-    viewers: BTreeMap<TorrentId, Arc<()>>,
     pub(super) deleter: Deleter,
     /// The folder and the files of each download taken off the list that the engine has yet to
     /// let go of.
@@ -102,7 +93,6 @@ pub struct Tending {
 impl Tending {
     pub fn new(deleter: Deleter) -> Self {
         Self {
-            viewers: BTreeMap::new(),
             deleter,
             letting_go: BTreeMap::new(),
             leaving: BTreeMap::new(),
@@ -205,14 +195,9 @@ impl Owner {
         }
     }
 
-    /// Someone starts streaming `id`, until they drop the lease. The first stream to open marks
-    /// when the play was watched, and resumes it if it stopped.
-    pub(super) fn lease(&mut self, id: TorrentId) -> Lease {
-        let first = !self.streamed_now(id);
-        let lease = Lease { _held: Arc::clone(self.tending.viewers.entry(id).or_default()) };
-        if !first {
-            return lease;
-        }
+    /// The first stream of `id` opened: marks when the play was watched, and resumes it if it
+    /// stopped.
+    pub(super) fn first_stream(&mut self, id: TorrentId) {
         self.watched_now(id);
         if let Some(job) = self.jobs.get(&id)
             && (job.record.intent == Intent::Paused || job.observed == Observed::Parked)
@@ -221,20 +206,11 @@ impl Owner {
         {
             log(&format!("{id} is streaming but cannot resume: {}", error.message));
         }
-        lease
-    }
-
-    /// Whether someone holds a lease on `id`.
-    fn streamed_now(&self, id: TorrentId) -> bool {
-        self.tending.viewers.get(&id).is_some_and(|held| Arc::strong_count(held) > 1)
     }
 
     /// Marks when each play whose last stream closed was watched.
     fn closed_streams(&mut self) {
-        let closed: Vec<TorrentId> =
-            self.tending.viewers.keys().copied().filter(|id| !self.streamed_now(*id)).collect();
-        for id in closed {
-            self.tending.viewers.remove(&id);
+        for id in self.forget_closed_streams() {
             self.watched_now(id);
         }
     }

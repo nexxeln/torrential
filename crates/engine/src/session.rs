@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use crate::alert::Alert;
@@ -212,6 +213,19 @@ impl Session {
     /// Picks pieces in file order instead of rarest first, for a torrent read while it downloads.
     pub fn download_in_order(&mut self, id: TorrentId) -> Result<(), EngineError> {
         let r = self.native.pin_mut().download_in_order(id.as_bytes());
+        r.map_err(|e| with_id(e, id))
+    }
+
+    /// Caps how fast this torrent downloads, in bytes per second. `None` lifts the cap. Resume
+    /// data does not keep it, so a torrent added again downloads as fast as it can.
+    pub fn set_download_limit(&mut self, id: TorrentId, limit: Option<NonZeroU32>) -> Result<(), EngineError> {
+        let r = self.native.pin_mut().set_download_limit(id.as_bytes(), limit.map_or(0, NonZeroU32::get));
+        r.map_err(|e| with_id(e, id))
+    }
+
+    /// How fast this torrent may download, in bytes per second. `None` when it has no cap.
+    pub fn download_limit(&self, id: TorrentId) -> Result<Option<NonZeroU32>, EngineError> {
+        let r = self.native.download_limit(id.as_bytes()).map(NonZeroU32::new);
         r.map_err(|e| with_id(e, id))
     }
 

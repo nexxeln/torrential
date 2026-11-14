@@ -411,6 +411,10 @@ impl<P: EnginePort> EnginePort for Gated<P> {
         self.port.stream(id)
     }
 
+    fn limit(&mut self, id: torrential_core::TorrentId, rate: Option<std::num::NonZeroU32>) -> Result<(), Error> {
+        self.port.limit(id, rate)
+    }
+
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         let events = self.port.poll(max_wait);
         let (closed, held) = &mut *self.gate.state.lock().unwrap();
@@ -1679,6 +1683,26 @@ async fn a_played_download_runs_while_every_slot_is_taken() {
     let film = torrent(98, "film", &[("film.mkv", GIB)]);
     h.play(h.torrent_file(&film), &[0]).await.unwrap();
     h.until("all five downloading", |jobs| jobs.iter().all(|j| j.status.name() == "downloading")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn while_a_film_is_behind_its_player_the_other_downloads_trickle() {
+    let h = Harness::new();
+    h.swarm.set_rate(8 * MIB);
+    let iso = torrent(99, "iso", &[("disc.iso", 40 * GIB)]);
+    let film = torrent(100, "film", &[("film.mkv", 40 * GIB)]);
+    h.get(h.torrent_file(&iso), &[]).await.unwrap();
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    let rates = |jobs: &[Job]| jobs.iter().map(|j| j.progress.down_rate).collect::<Vec<_>>();
+    h.until("both at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
+
+    let path = format!("/{}/0/film.mkv", film.info_hash.id().to_hex());
+    let mut player = Player::connect(&h).await;
+    let watching = tokio::spawn(async move { player.get(&path, "bytes=40000000000-40000000099").await });
+    h.until("the iso down to 64 KiB/s", |jobs| rates(jobs) == [64 * 1024, 8 * MIB]).await;
+
+    watching.abort();
+    h.until("the iso back at full speed", |jobs| rates(jobs) == [8 * MIB, 8 * MIB]).await;
 }
 
 mod cast;
