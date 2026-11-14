@@ -607,6 +607,7 @@ impl Connection<'_> {
         self.wr.write_all(head.as_bytes()).await?;
         if !request.head_only() {
             let ctx = self.ctx;
+            lease.waiting(start);
             let runtime =
                 || web::watch::probed(ctx, id, index)?.duration.and_then(|s| Duration::try_from_secs_f64(s).ok());
             tokio::select! {

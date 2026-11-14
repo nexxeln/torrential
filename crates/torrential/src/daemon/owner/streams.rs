@@ -65,9 +65,9 @@ impl Lease {
         (reading.at, reading.writing_since) = (at, Some(Instant::now()));
     }
 
-    /// Measures how far the film on disk runs ahead of the answer, each second for as long as it
-    /// runs. An answer over within a second, like a player reading a file's index, is never
-    /// measured. `runtime` is how long file `file` of `id` plays, once something has read it.
+    /// Measures how far the film on disk runs ahead of the answer, at once and then each second
+    /// for as long as it runs. `runtime` is how long file `file` of `id` plays, once something has
+    /// read it.
     pub async fn follow(
         &self,
         engine: &EngineHandle,
@@ -77,7 +77,6 @@ impl Lease {
         runtime: impl Fn() -> Option<Duration>,
     ) -> Infallible {
         loop {
-            tokio::time::sleep(DECIDE_EVERY).await;
             let at = self.reading.lock().expect("no holder panics").at;
             let rate = bitrate(size, runtime());
             let window = rate.saturating_mul(AHEAD.as_secs()).min(size.saturating_sub(at));
@@ -87,6 +86,7 @@ impl Lease {
                 Err(_) => Duration::MAX,
             };
             self.reading.lock().expect("no holder panics").lead = Some(measured);
+            tokio::time::sleep(DECIDE_EVERY).await;
         }
     }
 }
@@ -120,14 +120,16 @@ enum Others {
 }
 
 /// How the other downloads stand, from how they stood and the readings of the films still
-/// downloading. A lead between the two marks, or not yet measured, leaves them as they were.
+/// downloading. A lead between the two marks leaves them as they were. A lease no answer has
+/// measured, like the one a cast holds on its download, counts for nothing.
 fn decide(before: Others, readings: impl IntoIterator<Item = Reading>, now: Instant) -> Others {
     let mut after = Others::Free;
-    for reading in readings.into_iter().filter(|reading| !reading.idle(now)) {
-        match reading.lead {
-            Some(lead) if lead < BEHIND => return Others::Held,
-            Some(lead) if lead >= AHEAD => {}
-            _ => after = before,
+    for lead in readings.into_iter().filter(|reading| !reading.idle(now)).filter_map(|reading| reading.lead) {
+        if lead < BEHIND {
+            return Others::Held;
+        }
+        if lead < AHEAD {
+            after = before;
         }
     }
     after
@@ -262,9 +264,15 @@ mod tests {
     #[test]
     fn a_second_film_opening_behind_holds_the_others_back_though_the_first_is_ahead() {
         let now = Instant::now();
-        let opening = Reading { lead: None, ..ahead(0) };
-        assert_eq!(decide(Others::Free, [ahead(120), opening], now), Others::Free);
         assert_eq!(decide(Others::Free, [ahead(120), ahead(10)], now), Others::Held);
+    }
+
+    #[test]
+    fn a_lease_no_answer_has_measured_holds_nothing_back() {
+        let now = Instant::now();
+        let holding = Reading { lead: None, ..ahead(0) };
+        assert_eq!(decide(Others::Held, [holding], now), Others::Free);
+        assert_eq!(decide(Others::Free, [ahead(120), holding], now), Others::Free);
     }
 
     #[test]
