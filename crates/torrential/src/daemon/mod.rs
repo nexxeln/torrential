@@ -393,6 +393,8 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let running =
             start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), &http_ports)?;
+        // Before the socket answers, so a page that reconnects the moment this engine is up says what was updated.
+        running.ctx.news.post(update::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
             let _ = crate::skill::write_atomic(&paths.http_port(), players.to_string().as_bytes());

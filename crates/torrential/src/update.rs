@@ -662,6 +662,17 @@ impl Board {
     }
 }
 
+/// What the web app says the moment an engine starts, before the update watcher has looked at
+/// the network: that this engine is the release just installed, unless updates are off.
+pub fn opening(env: &Env, paths: &Paths) -> Option<News> {
+    if matches!(crate::config::updates(paths), Ok(Policy::Off) | Err(_)) {
+        return None;
+    }
+    let current = env.version();
+    let updated = read_json::<Updated>(&paths.state.join(UPDATED)).filter(|u| u.to == current)?;
+    Some(News::Updated { from: updated.from, to: current })
+}
+
 /// Looks for newer releases, and under `updates: auto` installs one. An engine that the login
 /// service started, as `service` says, then stops once nothing is playing and every download is
 /// saved, for the service to start the installed release. Returns once the owner has stopped.
