@@ -12,6 +12,7 @@ use super::engine_port::{
     AddTorrent, EngineEvent, EnginePort, Fake, FakeTorrentFile, MetaFile, Metainfo, ParseTorrent, Swarm, disagreement,
     parse_fake,
 };
+use super::owner::deleter::TrashPause;
 use super::owner::plays::{IDLE_AFTER, Plays};
 use super::owner::trash::Trash;
 use super::owner::{Command, Ended, MetaTarget, OwnerConfig};
@@ -61,8 +62,8 @@ struct Outside {
     idle_after: Duration,
     /// Holds back some of the engine's events while it is closed.
     gate: Option<Gate>,
-    /// How long a file waits between its check and its move to the Trash.
-    trash_pause: Duration,
+    /// What happens to a file between its check and its move to the Trash.
+    trash_pause: TrashPause,
     /// The preferences in config.yaml.
     preferences: Preferences,
     /// The display the engine detected. None, as on a server.
@@ -83,7 +84,7 @@ impl Default for Outside {
             plays_max: 20 * GIB,
             idle_after: IDLE_AFTER,
             gate: None,
-            trash_pause: Duration::ZERO,
+            trash_pause: TrashPause::default(),
             preferences: Preferences::default(),
             display: None,
             search: None,
@@ -103,7 +104,7 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
         plays: Plays { root: dir.join("plays"), max: outside.plays_max, idle_after: outside.idle_after },
         trash: Trash::At(dir.join("trash")),
         deletion_pause: Duration::ZERO,
-        trash_pause: outside.trash_pause,
+        trash_pause: outside.trash_pause.clone(),
     }
 }
 
