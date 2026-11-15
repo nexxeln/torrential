@@ -268,11 +268,8 @@ async fn switch(ctx: &Ctx, client: &str) -> Response {
         let error = Error::new(ErrorCode::DaemonVersion, format!("torrential switches to {client} when the film ends"));
         return Response::Error { error };
     };
-    match ctx.owner.ask(|reply| Command::Restart { reply }).await {
-        Ok(()) => {
-            closed.keep();
-            Response::Ok
-        }
+    match super::switch::stop_for_next(ctx, closed).await {
+        Ok(()) => Response::Ok,
         Err(error) => Response::Error { error },
     }
 }
