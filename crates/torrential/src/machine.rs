@@ -1,49 +1,15 @@
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use torrential_core::{Arch, Display, Error, ErrorCode, Language, Machine, Os, Player, Preferences, Profile};
+use torrential_core::{Arch, Display, Error, ErrorCode, Language, Machine, Os};
 
-use crate::daemon::admission::{Disk, reserve};
 use crate::env::Env;
-use crate::log::log;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-
-pub struct Detector {
-    machine: OnceLock<Machine>,
-    downloads: PathBuf,
-    disk: Box<dyn Disk + Sync>,
-}
-
-impl Detector {
-    pub fn start(env: &Env, downloads: PathBuf, disk: Box<dyn Disk + Sync>) -> Arc<Detector> {
-        let detector = Arc::new(Detector { machine: OnceLock::new(), downloads, disk });
-        let (env, filling) = (env.clone(), detector.clone());
-        std::thread::spawn(move || match detect(&env) {
-            Ok(machine) => {
-                let profile = Profile { detected: Some(machine.clone()), ..Profile::default() };
-                log(&format!("ranking for {}", profile.describe()));
-                let _ = filling.machine.set(machine);
-            }
-            Err(error) => log(&format!("cannot detect this machine: {}", error.message)),
-        });
-        detector
-    }
-
-    #[cfg(test)]
-    pub fn detected(machine: Machine, downloads: PathBuf, disk: Box<dyn Disk + Sync>) -> Arc<Detector> {
-        Arc::new(Detector { machine: OnceLock::from(machine), downloads, disk })
-    }
-
-    pub fn profile(&self, preferences: Preferences, player: Player) -> Profile {
-        let room = self.disk.space(&self.downloads).ok().map(|space| space.free.saturating_sub(reserve(space.total)));
-        Profile { detected: self.machine.get().cloned(), preferences, room, player }
-    }
-}
 
 pub fn detect(env: &Env) -> Result<Machine, Error> {
     if let Some(json) = env.var("TORRENTIAL_TEST_MACHINE") {

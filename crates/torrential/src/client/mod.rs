@@ -2,7 +2,6 @@ pub mod connect;
 mod devices;
 pub mod launch;
 pub mod play;
-pub mod player;
 mod probe;
 mod setup;
 mod titles;
@@ -21,8 +20,6 @@ use torrential_core::protocol::{FilesReply, GetRequest, Request, Response, Title
 use torrential_core::{Error, ErrorCode, Job, Preferences, Profile, SearchQuery, Target};
 
 use crate::cli::{Command, DaemonCommand, GetArgs, SearchArgs, Until};
-use crate::daemon::files;
-use crate::daemon::server::METADATA_WAIT;
 use crate::env::Env;
 use crate::fsutil::Writes;
 use crate::output::views::{self, ChangeCommand, Check, CheckStatus, DaemonReport, FileMatch};
@@ -31,6 +28,7 @@ use crate::paths::Paths;
 use crate::service;
 use crate::skill::{self, SkillCommand};
 use connect::Conn;
+use torrential_core::protocol::METADATA_WAIT;
 
 pub fn run(command: Command, mode: Mode, env: &Env) -> u8 {
     match dispatch(command, mode, env) {
@@ -200,7 +198,7 @@ fn get(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path, en
         return Err(titles::for_a_title("--source"));
     }
     if !args.files.is_empty() {
-        crate::daemon::files::compile(&args.files)?;
+        crate::selection::compile(&args.files)?;
     }
     let dir = args.dir.map(|d| absolute(&d, cwd, env));
     let dry_run = args.dry_run;
@@ -360,7 +358,7 @@ fn daemon(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             service_report(service::install(env, &paths)?, mode)
         }
         DaemonCommand::Uninstall => service_report(service::uninstall(env, &paths)?, mode),
-        DaemonCommand::Run { service } => Ok(crate::daemon::run(env, service)),
+        DaemonCommand::Run { .. } => unreachable!("main runs the engine itself"),
         DaemonCommand::Launch => Ok(launch::launch_stage(env)),
     }
 }
@@ -449,7 +447,7 @@ fn service_report(report: service::Report, mode: Mode) -> Result<u8, Error> {
 }
 
 fn doctor(env: &Env, mode: Mode, network: bool) -> u8 {
-    use crate::daemon::admission::{Disk, RealDisk, reserve};
+    use crate::disk::{Disk, RealDisk, reserve};
     use torrential_core::units::format_size;
     let check = |check: &str, status, detail: String| Check { check: check.into(), status, detail };
     let mut checks = Vec::new();
@@ -534,9 +532,9 @@ pub struct Files {
 }
 
 pub fn keep_matching(reply: &mut FilesReply, patterns: &[String]) -> Result<FileMatch, Error> {
-    let set = files::compile(patterns)?;
+    let set = crate::selection::compile(patterns)?;
     let wanted = reply.files.iter().map(|f| set.is_match(&f.path)).collect();
-    let wanted = files::some_match(wanted, patterns, reply.name.as_deref().unwrap_or(&reply.id), &reply.id)?;
+    let wanted = crate::selection::some_match(wanted, patterns, reply.name.as_deref().unwrap_or(&reply.id), &reply.id)?;
     let total_files = reply.files.len();
     let mut wanted = wanted.into_iter();
     reply.files.retain(|_| wanted.next().unwrap_or(false));

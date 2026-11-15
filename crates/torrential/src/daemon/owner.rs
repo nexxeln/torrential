@@ -12,7 +12,7 @@ use torrential_core::{
     TorrentId,
 };
 
-use super::admission::{self, Cap, Disk};
+use super::admission::{self, Cap};
 use super::book::{self, Home, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
 use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
@@ -23,6 +23,7 @@ use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use crate::disk::Disk;
 use crate::log::log;
 use deleter::Deleter;
 use plays::{Destination, Plays, Tending};
@@ -656,7 +657,7 @@ impl Owner {
     fn get(&mut self, get: GetCommand, title: Option<Linked>, home: Home) -> Result<GetReply, Error> {
         let GetCommand { source, dir, files, max_size, setup_max_size, dry_run } = get;
         if !files.is_empty() {
-            super::files::compile(&files)?;
+            crate::selection::compile(&files)?;
         }
         let selection = if files.is_empty() { Selection::All } else { Selection::Patterns(files) };
         let info_hash = match &source {

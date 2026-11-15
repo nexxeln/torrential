@@ -15,10 +15,10 @@ use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
 use super::super::http::{self, Connection, Request};
 use super::super::owner::{Command, StreamFile, Update};
 use super::super::server::{Ctx, HEARTBEAT};
-use super::fetch::Found;
 use super::ffmpeg::{self, Encoder, Picture};
 use super::media::Media;
 use super::{fail, file_of, number};
+use crate::ffmpeg::fetch::Found;
 use crate::log::log;
 
 /// Bytes read from each end of a video for its runtime when ffprobe is not installed, as `play` reads.
@@ -100,7 +100,7 @@ pub async fn media(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Media>, E
         .await
         .map_err(|e| Error::internal(format!("cannot run {}: {e}", ffprobe.display())))?;
     if !output.status.success() {
-        let complaint = ffmpeg::complaint(&String::from_utf8_lossy(&output.stderr));
+        let complaint = crate::ffmpeg::complaint(&String::from_utf8_lossy(&output.stderr));
         return Err(Error::internal(format!("ffprobe cannot read {name}: {complaint}"))
             .with_hint("the file may not be a video, or its download may be damaged"));
     }
@@ -278,7 +278,7 @@ async fn pipe(
         conn.chunk(&buf[..read]).await?;
     }
     let succeeded = child.wait().await?.success();
-    let complaint = ffmpeg::complaint(&complaints.await.unwrap_or_default());
+    let complaint = crate::ffmpeg::complaint(&complaints.await.unwrap_or_default());
     match (begun, succeeded) {
         (true, true) => conn.end().await,
         (false, true) => {

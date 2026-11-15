@@ -18,6 +18,9 @@ use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
+/// How long the engine waits for a torrent's file list before it gives up.
+pub const METADATA_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub const WIRE_VERSION: u32 = 8;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
