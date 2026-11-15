@@ -60,6 +60,9 @@ const ENDED_KEPT: Duration = Duration::from_secs(60);
 const REACHABLE_WITHIN: Duration = Duration::from_secs(5);
 /// Tries at the seek that resumes a video, since some TVs refuse one while they start.
 const RESUME_TRIES: u32 = 3;
+/// How long a TV that took the seek that resumes a video may take to get there. Until then the
+/// cast shows where it resumes.
+const RESUME_WITHIN: Duration = Duration::from_secs(30);
 
 /// The TVs on the home network, and a cast for each TV that plays one.
 pub struct Casts {
@@ -584,7 +587,7 @@ impl Run {
         let tv = &self.tv.tv;
         let mut contact = Contact::new(Instant::now());
         let mut saved = Instant::now();
-        let mut resume = found.start_at.filter(|at| *at > WORTH_SAVING).map(|at| (at, RESUME_TRIES));
+        let mut resume = found.start_at.filter(|at| *at > WORTH_SAVING).map(Resume::new);
         let mut polls = 0u32;
         let mut tick = tokio::time::interval(POLL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -597,6 +600,9 @@ impl Run {
                         return Ok(());
                     };
                     let done = self.act(action).await;
+                    if matches!(action, CastAction::Seek { .. }) && done.is_ok() {
+                        resume = None;
+                    }
                     let stop = action == CastAction::Stop;
                     if stop {
                         self.save(found);
@@ -624,18 +630,20 @@ impl Run {
                         contact.played = true;
                         let paused = transport == Transport::Paused;
                         let duration = polled.duration.or(known);
+                        resume = resume.filter(|resume| !resume.over(polled.position, now));
+                        let position = resume.map(|resume| resume.at).or(polled.position);
                         self.view.send_modify(|cast| {
                             cast.state = if paused { CastState::Paused } else { CastState::Playing };
-                            cast.position = polled.position.or(cast.position);
+                            cast.position = position.or(cast.position);
                             cast.duration = duration;
                             cast.volume = polled.volume.or(cast.volume);
                         });
-                        if !paused
-                            && let Some((at, tries)) = resume.take()
-                            && self.seek(at).await.is_err()
-                            && tries > 1
-                        {
-                            resume = Some((at, tries - 1));
+                        if !paused && let Some(Resume { at, seek: Seek::Due(tries) }) = resume {
+                            resume = match self.seek(at).await {
+                                Ok(()) => Some(Resume { at, seek: Seek::Taken(Instant::now()) }),
+                                Err(_) if tries > 1 => Some(Resume { at, seek: Seek::Due(tries - 1) }),
+                                Err(_) => None,
+                            };
                         }
                     }
                     _ if contact.played && elsewhere => {
@@ -756,6 +764,36 @@ impl Run {
         if let Err(error) = self.ctx.titles.shelf.watch(&watched) {
             super::log(&format!("cannot keep where {} stopped: {error}", found.name));
         }
+    }
+}
+
+/// Where a cast resumes the video, which it shows until the TV gets there, so the bar does not
+/// show the top of the video while the TV starts there and seeks.
+#[derive(Clone, Copy, Debug)]
+struct Resume {
+    /// Seconds.
+    at: f64,
+    seek: Seek,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Seek {
+    /// To send, with this many tries left.
+    Due(u32),
+    /// The TV took it at this time.
+    Taken(Instant),
+}
+
+impl Resume {
+    fn new(at: f64) -> Self {
+        Self { at, seek: Seek::Due(RESUME_TRIES) }
+    }
+
+    /// Whether the TV, at `position` at `now`, is done resuming: it got there, or it took the seek
+    /// `RESUME_WITHIN` ago and is still not there.
+    fn over(&self, position: Option<f64>, now: Instant) -> bool {
+        position.is_some_and(|position| position >= self.at)
+            || matches!(self.seek, Seek::Taken(at) if now.saturating_duration_since(at) >= RESUME_WITHIN)
     }
 }
 

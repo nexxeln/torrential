@@ -156,3 +156,17 @@ fn a_cast_gives_up_on_a_tv_that_stops_answering_fails_every_poll_or_never_plays(
     loading.played = true;
     assert_eq!(why(&loading, 90), None);
 }
+
+#[test]
+fn a_cast_shows_where_it_resumes_until_the_tv_gets_there_or_has_had_half_a_minute_to() {
+    let start = Instant::now();
+    let after = |seconds| start + Duration::from_secs(seconds);
+    let due = Resume::new(2_473.0);
+    assert!(!due.over(None, after(0)));
+    assert!(!due.over(Some(1.0), after(120)), "the TV has not taken the seek yet");
+    let taken = Resume { seek: Seek::Taken(after(10)), ..due };
+    assert!(!taken.over(Some(1.0), after(39)));
+    assert!(!taken.over(Some(2_472.0), after(39)));
+    assert!(taken.over(Some(2_473.0), after(11)));
+    assert!(taken.over(Some(1.0), after(40)), "a TV that took the seek and stayed at the top");
+}
