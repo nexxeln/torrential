@@ -50,8 +50,8 @@ expression: value
       },
       {
         "check": "ffmpeg",
-        "status": "[redacted]",
-        "detail": "[redacted]"
+        "status": "ok",
+        "detail": "[home]/bin/ffmpeg; the web player converts what the browser cannot read"
       }
     ],
     "next": "torrential skill install"

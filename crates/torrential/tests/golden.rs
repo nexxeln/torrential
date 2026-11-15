@@ -56,15 +56,18 @@ struct Home {
 
 impl Home {
     /// A fake engine whose downloads do not move, so a title play gives up on each release after a
-    /// second. Its only player is a stub `mpv` that starts nothing, ffmpeg is not on the path, and
-    /// its TV search asks an address no TV answers.
+    /// second. Its only player is a stub `mpv` that starts nothing. `ffmpeg` and `ffprobe` are stubs
+    /// that fail, found before any the machine has, so what plays does not depend on the machine.
+    /// Its TV search asks an address no TV answers.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let mpv = bin.join("mpv");
-        std::fs::write(&mpv, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&mpv, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        for (program, script) in [("mpv", "exit 0"), ("ffmpeg", "exit 1"), ("ffprobe", "exit 1")] {
+            let path = bin.join(program);
+            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
         std::fs::create_dir_all(dir.path().join("th/config")).unwrap();
         std::fs::write(dir.path().join("th/config/config.yaml"), "player: mpv\n").unwrap();
         let vars = vec![
@@ -109,6 +112,21 @@ impl Home {
         self.redact(Value::Object(doc))
     }
 
+    /// Starts the engine and waits for the fake engine's first stats of the running download, which
+    /// come a second after it starts.
+    fn settle(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let out = self.command(&["status", RUNNING, "--json"]).output().unwrap();
+            let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+            if doc["jobs"][0]["progress"]["peers"] == 3 {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "no stats for {RUNNING}: {doc}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// The engine's web port, from `torrential web --json`.
     fn port(&self) -> u16 {
         let out = self.command(&["web", "--json"]).output().unwrap();
@@ -143,21 +161,17 @@ fn parse(text: String) -> Value {
 fn redact(value: Value, home: &[String]) -> Value {
     match value {
         Value::Object(map) => {
-            // What the disk has free, whether this machine has ffmpeg, how far a check has got, and
-            // the pairing link with its code and this machine's name.
-            let check = map.get("check").and_then(Value::as_str).map(str::to_string);
-            let machine = |key: &str| match check.as_deref() {
-                Some("disk") => key == "detail",
-                Some("ffmpeg") => key == "detail" || key == "status",
-                _ => false,
-            };
+            // What the disk has free, how far a check has got, and the pairing link with its code
+            // and this machine's name.
+            let disk = map.get("check").is_some_and(|check| check == "disk");
             let checking = map.get("state").is_some_and(|state| state == "checking");
             Value::Object(
                 map.into_iter()
                     .map(|(key, value)| {
                         let value = match (key.as_str(), value) {
                             (_, Value::Null) => Value::Null,
-                            (key, _) if VOLATILE.contains(&key) || machine(key) => json!("[redacted]"),
+                            (key, _) if VOLATILE.contains(&key) => json!("[redacted]"),
+                            ("detail", _) if disk => json!("[redacted]"),
                             ("progress", Value::Object(mut progress)) if checking => {
                                 for key in ["verified", "piece_map"] {
                                     progress.entry(key).and_modify(|value| *value = json!("[redacted]"));
@@ -258,13 +272,23 @@ fn full_id(home: &Home, short: &str) -> String {
     doc["jobs"][0]["id"].as_str().map(str::to_string).unwrap_or_else(|| panic!("no job {short}: {doc}"))
 }
 
-fn snapshot(name: &str, value: &Value) {
-    insta::assert_json_snapshot!(name, value);
+/// Checks every snapshot, then fails with the names of those that changed, so one run shows each
+/// change.
+fn snapshots(answers: impl IntoIterator<Item = (String, Value)>) {
+    let changed: Vec<String> = answers
+        .into_iter()
+        .filter(|(name, value)| {
+            std::panic::catch_unwind(|| insta::assert_json_snapshot!(name.as_str(), value)).is_err()
+        })
+        .map(|(name, _)| name)
+        .collect();
+    assert!(changed.is_empty(), "changed: {}", changed.join(", "));
 }
 
 #[test]
 fn every_command_answers_in_json_as_it_did() {
     let home = Home::new();
+    home.settle();
     let steps: &[(&str, &[&str])] = &[
         ("search", &["search", "night", "of", "the", "living", "dead", "--json"]),
         ("search_limit", &["search", "ubuntu", "--limit", "3", "--json"]),
@@ -299,16 +323,13 @@ fn every_command_answers_in_json_as_it_did() {
         ("doctor", &["doctor", "--json"]),
         ("schema", &["schema"]),
     ];
-    for (name, args) in steps {
-        snapshot(&format!("cli_{name}"), &home.run(args));
-    }
+    snapshots(steps.iter().map(|(name, args)| (format!("cli_{name}"), home.run(args))));
 }
 
-/// Every JSON route but `/api/media` and `/api/ffmpeg`, whose answers depend on whether this
-/// machine has ffmpeg.
 #[test]
 fn every_api_route_answers_as_it_did() {
     let home = Home::new();
+    home.settle();
     let port = home.port();
     let running = full_id(&home, RUNNING);
     let done = full_id(&home, DONE);
@@ -341,6 +362,7 @@ fn every_api_route_answers_as_it_did() {
         ("jobs", "GET", "/api/jobs".into(), None),
         ("events", "GET", "/api/events".into(), None),
         ("files", "POST", "/api/files".into(), Some(json!({ "ref": ARCHIVE }))),
+        ("media", "GET", film("/api/media"), None),
         ("pieces", "GET", film("/api/pieces"), None),
         ("subtitles_online", "GET", film("/api/subtitles/online"), None),
         ("play", "POST", "/api/play".into(), Some(json!({ "ref": done }))),
@@ -348,9 +370,12 @@ fn every_api_route_answers_as_it_did() {
         ("pause", "POST", "/api/pause".into(), Some(json!({ "refs": [running] }))),
         ("resume", "POST", "/api/resume".into(), Some(json!({ "refs": [running] }))),
         ("remove", "POST", "/api/remove".into(), Some(json!({ "refs": [PAUSED] }))),
+        ("ffmpeg", "POST", "/api/ffmpeg".into(), Some(json!({}))),
         ("unknown", "GET", "/api/nothing".into(), None),
     ];
-    for (name, method, path, body) in steps {
-        snapshot(&format!("api_{name}"), &http(&home, port, method, &path, body));
-    }
+    snapshots(
+        steps
+            .into_iter()
+            .map(|(name, method, path, body)| (format!("api_{name}"), http(&home, port, method, &path, body))),
+    );
 }

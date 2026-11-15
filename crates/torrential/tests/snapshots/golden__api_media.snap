@@ -1,0 +1,15 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "500 Internal Server Error",
+  "type": "application/json",
+  "body": {
+    "error": {
+      "code": "internal",
+      "message": "ffprobe cannot read big_buck_bunny_1080p_h264.mov: it printed no reason",
+      "hint": "the file may not be a video, or its download may be damaged"
+    }
+  }
+}
