@@ -2,11 +2,12 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use torrential_core::TorrentId;
+
 use crate::alert::Alert;
 use crate::bridge::{self, ffi};
 use crate::config::{Config, Dht, DhtState};
 use crate::error::{EngineError, ErrorKind};
-use crate::identity::TorrentId;
 use crate::torrent::{
     AddTorrent, Added, FileEntry, FileIndex, FilePriority, Metainfo, MissingPieces, SelectedPieces, TorrentStatus,
     WrittenPieces,
@@ -130,7 +131,7 @@ impl Session {
     /// a `.torrent` file. Trackers and web seeds are not included.
     pub fn metainfo(&self, id: TorrentId) -> Result<Metainfo, EngineError> {
         let bytes = self.native.metainfo(id.as_bytes()).map_err(|e| with_id(e, id))?;
-        Metainfo::from_bytes(bytes)
+        Metainfo::from_bytes(bytes).map_err(|e| e.about(id))
     }
 
     /// The info dictionary alone, as a `.torrent` file. Unlike `metainfo` it
@@ -139,7 +140,7 @@ impl Session {
     /// `.torrent` without them.
     pub fn info_dictionary(&self, id: TorrentId) -> Result<Metainfo, EngineError> {
         let bytes = self.native.info_dictionary(id.as_bytes()).map_err(|e| with_id(e, id))?;
-        Metainfo::from_bytes(bytes)
+        Metainfo::from_bytes(bytes).map_err(|e| e.about(id))
     }
 
     /// Needs metadata.
@@ -150,14 +151,14 @@ impl Session {
 
     pub fn status(&self, id: TorrentId) -> Result<TorrentStatus, EngineError> {
         let record = self.native.status(id.as_bytes()).map_err(|e| with_id(e, id))?;
-        bridge::status(record)
+        bridge::status(record).map_err(|e| e.about(id))
     }
 
     /// Needs metadata. Unlike `status`, this counts whole pieces, so a damaged
     /// piece that spans two files counts once.
     pub fn selected_pieces(&self, id: TorrentId) -> Result<SelectedPieces, EngineError> {
         let mut whole = self.piece_slices(id, 1)?;
-        whole.pop().ok_or_else(|| EngineError::new(ErrorKind::Native, "the torrent has no pieces"))
+        whole.pop().ok_or_else(|| EngineError::new(ErrorKind::Native, "the torrent has no pieces").about(id))
     }
 
     /// Needs metadata. Cuts the pieces into `slices` runs of equal length, in
@@ -223,17 +224,6 @@ impl Session {
         r.map_err(|e| with_id(e, id))
     }
 
-    /// How fast this torrent may download, in bytes per second. `None` when it has no cap.
-    pub fn download_limit(&self, id: TorrentId) -> Result<Option<NonZeroU32>, EngineError> {
-        let r = self.native.download_limit(id.as_bytes()).map(NonZeroU32::new);
-        r.map_err(|e| with_id(e, id))
-    }
-
-    /// Asks for session counters. `Alert::SessionStats` delivers them.
-    pub fn post_session_stats(&mut self) -> Result<(), EngineError> {
-        self.native.pin_mut().post_session_stats().map_err(bridge::error)
-    }
-
     /// The DHT routing table and node ids, for `Config::dht_state`.
     pub fn save_state(&self) -> Result<DhtState, EngineError> {
         let bytes = self.native.save_state().map_err(bridge::error)?;
@@ -259,13 +249,7 @@ impl Session {
 }
 
 fn with_id(e: cxx::Exception, id: TorrentId) -> EngineError {
-    let e = bridge::error(e);
-    match e.kind() {
-        ErrorKind::UnknownTorrent | ErrorKind::NoMetadata if e.message().is_empty() => {
-            EngineError::new(e.kind(), id.to_string())
-        }
-        _ => e,
-    }
+    bridge::error(e).about(id)
 }
 
 #[cfg(test)]

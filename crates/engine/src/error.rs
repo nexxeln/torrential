@@ -1,8 +1,11 @@
 use std::fmt;
 
+use torrential_core::TorrentId;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineError {
     kind: ErrorKind,
+    torrent: Option<TorrentId>,
     message: String,
 }
 
@@ -21,11 +24,20 @@ pub enum ErrorKind {
 
 impl EngineError {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        EngineError { kind, message: message.into() }
+        EngineError { kind, torrent: None, message: message.into() }
+    }
+
+    pub(crate) fn about(self, torrent: TorrentId) -> Self {
+        EngineError { torrent: Some(torrent), ..self }
     }
 
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// The torrent the failed call named.
+    pub fn torrent(&self) -> Option<TorrentId> {
+        self.torrent
     }
 
     pub fn message(&self) -> &str {
@@ -41,7 +53,14 @@ impl fmt::Display for EngineError {
             ErrorKind::InvalidInput => "invalid input",
             ErrorKind::Native => "libtorrent error",
         };
-        if self.message.is_empty() { f.write_str(kind) } else { write!(f, "{kind}: {}", self.message) }
+        f.write_str(kind)?;
+        if let Some(torrent) = self.torrent {
+            write!(f, ": {torrent}")?;
+        }
+        if !self.message.is_empty() {
+            write!(f, ": {}", self.message)?;
+        }
+        Ok(())
     }
 }
 

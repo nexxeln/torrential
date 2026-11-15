@@ -6,7 +6,7 @@ use torrential_engine::{
     TorrentState, create_torrent,
 };
 
-use crate::support::{Fixture, Node, PIECE, loopback, rate};
+use crate::support::{Fixture, Node, PIECE};
 
 const KIB: usize = 1024;
 
@@ -15,15 +15,15 @@ fn slices_fill_as_pieces_arrive_and_skipped_files_stay_unwanted() {
     let files = [("a.bin", 256 * KIB), ("b.bin", 256 * KIB), ("c.bin", 512 * KIB)];
     let fixture = Fixture::new("slices", &files, 41);
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(Config { download_limit: rate(192 * 1024), ..loopback() });
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent.clone()), download.path());
     add.files = FileSelection::Only([FileIndex::new(0), FileIndex::new(2)].into());
     add.peers = vec![seeder.addr()];
-    let id = leecher.add(add);
+    let id = leecher.add_slowly(add, 192 * 1024);
     let slices = |leecher: &Node| leecher.session.piece_slices(id, 64).unwrap();
     let piece = |selected, verified| SelectedPieces { selected, verified };
 
@@ -59,7 +59,7 @@ fn piece_slices_cost_at_100k_pieces() {
     file.set_len(u64::from(PIECES) * u64::from(PIECE)).unwrap();
     let piece = PieceSize::new(PIECE).unwrap();
     let torrent = create_torrent(&data.path().join("big"), piece, TorrentFormat::V1).unwrap();
-    let mut node = Node::new(loopback());
+    let mut node = Node::new(Config::loopback());
     let empty = TempDir::new().unwrap();
     let id = node.add(AddTorrent::new(TorrentSource::Metainfo(torrent), empty.path()));
     node.wait_until("checked", |s| s.status(id).unwrap().state == TorrentState::Downloading);

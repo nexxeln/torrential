@@ -1437,7 +1437,7 @@ async fn every_pause_returns_once_writes_stop_or_fails_when_they_do_not() {
 
 struct Seeder {
     session: torrential_engine::Session,
-    id: torrential_engine::TorrentId,
+    id: torrential_core::TorrentId,
     addr: std::net::SocketAddr,
     torrent: Vec<u8>,
     _files: tempfile::TempDir,
@@ -1455,16 +1455,7 @@ impl Seeder {
         }
         let piece = lt::PieceSize::new(Self::PIECE).unwrap();
         let torrent = lt::create_torrent(&dir.path().join("set"), piece, lt::TorrentFormat::V1).unwrap();
-        let config = lt::Config {
-            listen: vec![std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 0)],
-            dht: lt::Dht::Off,
-            lsd: false,
-            upnp: false,
-            natpmp: false,
-            connections: lt::ConnectionLimits { multiple_per_ip: true, ..lt::ConnectionLimits::default() },
-            ..lt::Config::default()
-        };
-        let mut session = lt::Session::new(config).unwrap();
+        let mut session = lt::Session::new(lt::Config::loopback()).unwrap();
         let source = lt::TorrentSource::Metainfo(torrent.clone());
         let id = session.add(lt::AddTorrent::new(source, dir.path())).unwrap().id();
         let total = u64::from(Self::PIECE) * files.len() as u64;

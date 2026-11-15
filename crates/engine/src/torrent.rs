@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use torrential_core::{InfoHash, TorrentId};
+
 use crate::bridge::{self, ffi};
 use crate::error::EngineError;
-use crate::identity::{InfoHash, TorrentId};
 
 /// A file's position in the torrent's file list. Pad files keep their index
 /// in libtorrent but never appear in this crate's file lists.
@@ -68,7 +69,6 @@ pub struct Metainfo {
     bytes: Vec<u8>,
     info_hash: InfoHash,
     name: String,
-    piece_length: u32,
     files: Vec<FileEntry>,
     web_seeds: Vec<String>,
 }
@@ -79,7 +79,6 @@ impl Metainfo {
         Ok(Metainfo {
             info_hash: bridge::info_hash(&parsed.hashes)?,
             name: parsed.name,
-            piece_length: parsed.piece_length,
             files: bridge::file_entries(parsed.files),
             web_seeds: parsed.web_seeds,
             bytes,
@@ -92,10 +91,6 @@ impl Metainfo {
 
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    pub fn piece_length(&self) -> u32 {
-        self.piece_length
     }
 
     pub fn files(&self) -> &[FileEntry] {
@@ -198,9 +193,7 @@ impl FileSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FilePriority {
     Skip,
-    Low,
     Normal,
-    High,
 }
 
 /// One torrent to add. The options apply to every source, so they override

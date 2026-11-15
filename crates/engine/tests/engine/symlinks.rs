@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use sha1::Digest as _;
-use torrential_engine::{AddTorrent, Metainfo, TorrentSource};
+use torrential_engine::{AddTorrent, Config, Metainfo, TorrentSource};
 
-use crate::support::{Node, loopback};
+use crate::support::Node;
 
 fn string(s: &[u8]) -> Vec<u8> {
     [format!("{}:", s.len()).as_bytes(), s].concat()
@@ -64,7 +64,7 @@ fn a_torrents_symbolic_links_never_point_outside_its_folder() {
     .concat();
     let torrent = [b"d".as_slice(), &string(b"info"), &info, b"e"].concat();
     let dir = tempfile::tempdir().unwrap();
-    let mut node = Node::new(loopback());
+    let mut node = Node::new(Config::loopback());
     let source = TorrentSource::Metainfo(Metainfo::from_bytes(torrent).unwrap());
     node.add(AddTorrent::new(source, dir.path()));
     node.idle(Duration::from_secs(2));

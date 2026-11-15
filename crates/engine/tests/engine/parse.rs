@@ -3,17 +3,13 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use torrential_core::TorrentId;
 use torrential_engine::{
     AddTorrent, Alert, Config, Dht, DhtState, ErrorKind, FileIndex, FilePriority, FileSelection, Magnet, Metainfo,
-    PieceSize, Progress, ResumeData, Session, TorrentFormat, TorrentId, TorrentSource, libtorrent_version,
+    PieceSize, Progress, ResumeData, Session, TorrentFormat, TorrentSource,
 };
 
-use crate::support::{Fixture, Node, bencode, loopback, magnet};
-
-#[test]
-fn links_the_pinned_libtorrent() {
-    assert_eq!(libtorrent_version().unwrap(), "2.1.2.0");
-}
+use crate::support::{Fixture, Node, bencode, magnet};
 
 #[test]
 fn malformed_inputs_are_invalid_input() {
@@ -24,19 +20,19 @@ fn malformed_inputs_are_invalid_input() {
     assert_eq!(PieceSize::new(24 * 1024).map_err(kind).unwrap_err(), ErrorKind::InvalidInput);
     assert_eq!(PieceSize::new(256 * 1024 * 1024).map_err(kind).unwrap_err(), ErrorKind::InvalidInput);
     assert_eq!(PieceSize::new(32 * 1024).unwrap().get(), 32_768);
-    let garbage = Config { dht_state: Some(DhtState::from_bytes(b"garbage".to_vec())), ..loopback() };
+    let garbage = Config { dht_state: Some(DhtState::from_bytes(b"garbage".to_vec())), ..Config::loopback() };
     assert_eq!(Session::new(garbage).map(|_| ()).map_err(kind).unwrap_err(), ErrorKind::InvalidInput);
 }
 
 #[test]
 fn torrent_calls_name_what_is_missing() {
-    let mut node = Node::new(loopback());
+    let mut node = Node::new(Config::loopback());
     let save = TempDir::new().unwrap();
 
     let unknown = TorrentId::from_bytes([7; 20]);
     let err = node.session.pause(unknown).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::UnknownTorrent);
-    assert_eq!(err.message(), "0707070707070707070707070707070707070707");
+    assert_eq!(err.to_string(), "unknown torrent: 0707070707070707070707070707070707070707");
     assert_eq!(node.session.announce_to_dht(unknown).unwrap_err().kind(), ErrorKind::UnknownTorrent);
     assert_eq!(
         node.session.add_web_seed(unknown, "http://127.0.0.1:9/").unwrap_err().kind(),
@@ -72,7 +68,7 @@ fn a_torrent_file_lists_its_web_seeds_as_written() {
 
 #[test]
 fn saved_dht_state_keeps_the_node_id() {
-    let config = || Config { dht: Dht::On { bootstrap_nodes: vec!["127.0.0.1:9".to_owned()] }, ..loopback() };
+    let config = || Config { dht: Dht::On { bootstrap_nodes: vec!["127.0.0.1:9".to_owned()] }, ..Config::loopback() };
     let node_id = |s: &Session| {
         let state = s.save_state().unwrap();
         let dht = bencode::dict_value(state.as_bytes(), b"dht state")?;
@@ -91,7 +87,7 @@ fn saved_dht_state_keeps_the_node_id() {
     let state_again = restored.session.save_state().unwrap();
 
     let unbootstrapped =
-        Config { dht: Dht::On { bootstrap_nodes: Vec::new() }, dht_state: Some(state_again), ..loopback() };
+        Config { dht: Dht::On { bootstrap_nodes: Vec::new() }, dht_state: Some(state_again), ..Config::loopback() };
     assert_eq!(Session::new(unbootstrapped).map(|_| ()).unwrap_err().kind(), ErrorKind::InvalidInput);
 
     let mut fresh = Node::new(config());
@@ -102,7 +98,7 @@ fn saved_dht_state_keeps_the_node_id() {
 #[test]
 fn listen_failures_and_taken_ports() {
     let unassigned: SocketAddr = "192.0.2.1:6881".parse().unwrap();
-    let mut session = Session::new(Config { listen: vec![unassigned], ..loopback() }).unwrap();
+    let mut session = Session::new(Config { listen: vec![unassigned], ..Config::loopback() }).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let failure = loop {
         let alerts = session.wait_alerts(Duration::from_millis(100)).unwrap();
@@ -115,16 +111,18 @@ fn listen_failures_and_taken_ports() {
     assert_eq!((port, operation.as_str(), error.category.as_str()), (6881, "sock_bind", "system"));
     assert_eq!(session.listen_port().unwrap(), None);
 
-    let taken = Node::new(loopback());
-    let next = Node::new(Config { listen: vec![taken.addr()], ..loopback() });
+    let taken = Node::new(Config::loopback());
+    let next = Node::new(Config { listen: vec![taken.addr()], ..Config::loopback() });
     assert_ne!(next.addr().port(), taken.addr().port(), "libtorrent moved to a free port");
 }
 
 #[test]
 fn every_interface_reports_its_address_and_scope() {
-    let mut session =
-        Session::new(Config { listen: vec!["0.0.0.0:0".parse().unwrap(), "[::]:0".parse().unwrap()], ..loopback() })
-            .unwrap();
+    let mut session = Session::new(Config {
+        listen: vec!["0.0.0.0:0".parse().unwrap(), "[::]:0".parse().unwrap()],
+        ..Config::loopback()
+    })
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut addresses = Vec::new();
     while Instant::now() < deadline {

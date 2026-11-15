@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use serde_json::Value;
 use sha2::Digest;
-use torrential_core::Target;
 use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame};
+use torrential_core::{Target, TorrentId};
 use torrential_engine as lt;
 
 const PIECE: u32 = 16 * 1024;
@@ -173,7 +173,7 @@ impl Fixture {
     }
 
     fn id(&self) -> String {
-        hex(self.torrent.info_hash().v1().unwrap().as_bytes())
+        self.torrent.info_hash().id().to_hex()
     }
 
     fn short(&self) -> String {
@@ -205,7 +205,7 @@ impl Fixture {
 
 struct Seeder {
     session: lt::Session,
-    id: lt::TorrentId,
+    id: TorrentId,
     addr: SocketAddr,
 }
 
@@ -221,14 +221,8 @@ impl Seeder {
 
     fn serving(fixture: &Fixture, rate: Option<NonZeroU32>, has: u64) -> Self {
         let config = lt::Config {
-            listen: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)],
-            dht: lt::Dht::Off,
-            lsd: false,
-            upnp: false,
-            natpmp: false,
             upload: rate.map_or(lt::UploadPolicy::Normal, lt::UploadPolicy::Capped),
-            connections: lt::ConnectionLimits { multiple_per_ip: true, ..lt::ConnectionLimits::default() },
-            ..lt::Config::default()
+            ..lt::Config::loopback()
         };
         let mut session = lt::Session::new(config).unwrap();
         let source = lt::TorrentSource::Metainfo(fixture.torrent.clone());
@@ -549,7 +543,12 @@ fn a_killed_engine_trusts_its_last_periodic_save_instead_of_hashing_the_files() 
     let files = home.ok(&["files", &fixture.short()]);
     let in_engine: u64 =
         files["files"]["files"].as_array().unwrap().iter().map(|f| f["verified"].as_u64().unwrap()).sum();
-    assert_eq!(in_engine, saved, "the engine kept the saved pieces, which a hash of the zeroed files would reject");
+    // The verified count saved with the resume data is read when its alert arrives, and the
+    // resume data can trail it by the pieces still being written, so only "some, at most that" holds.
+    assert!(
+        (1..=saved).contains(&in_engine),
+        "the engine kept {in_engine} of {saved} saved bytes, where a hash of the zeroed files keeps none"
+    );
 }
 
 #[test]
