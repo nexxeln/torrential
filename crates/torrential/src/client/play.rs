@@ -216,7 +216,7 @@ pub fn open(conn: &mut Conn, player: &Player, playing: &Playing, env: &Env, path
 
 /// Picks the video and its subtitles from `listing` and asks the engine to stream them.
 pub fn start(conn: &mut Conn, target: Target, listing: &FilesReply, dir: Option<PathBuf>) -> Result<PlayReply, Error> {
-    let Some(playable) = stream::pick(&listing.files) else {
+    let Some(playable) = stream::pick(&listing.files, |_| true) else {
         let id = short_ref(&listing.id);
         let name = listing.name.clone().unwrap_or_else(|| id.clone());
         return Err(Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))

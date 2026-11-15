@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use torrential_core::time::now;
 use torrential_core::title::Episode;
 use torrential_core::{
-    ArtKind, AttemptEvent, Error, ErrorCode, Playback, Player, Plays, Release, ReleaseId, TitleCard, TitleId,
-    TorrentId, VideoRef, Viewer, Watched,
+    ArtKind, AttemptEvent, Decoders, Decoding, Error, ErrorCode, Playback, Player, Plays, Release, ReleaseId,
+    TitleCard, TitleId, TorrentId, VideoRef, Viewer, Watched,
 };
 
 use super::super::ctx::Ctx;
@@ -130,11 +130,15 @@ pub(super) struct Measured {
     /// Device pixels to a CSS pixel.
     scale: f64,
     playback: Playback,
+    /// How the browser decodes each codec, from its `mediaCapabilities`.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional))]
+    decoders: Option<Decoders>,
 }
 
 impl Measured {
     fn viewer(self) -> Result<Viewer, Error> {
-        let Measured { width, height, scale, playback } = self;
+        let Measured { width, height, scale, playback, decoders } = self;
         let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
         if width == 0 || height == 0 {
             return usage(format!("a {width}x{height} screen has no pixels"));
@@ -142,18 +146,25 @@ impl Measured {
         if !(scale.is_finite() && scale > 0.0) {
             return usage(format!("scale {scale} is not a number of device pixels to a CSS pixel"));
         }
-        Ok(Viewer::measured(width, height, scale, playback))
+        Ok(Viewer { decoders, ..Viewer::measured(width, height, scale, playback) })
     }
 }
 
 /// Who a source listing ranks for, from its `width`, `height`, `scale`, and `playback`
-/// parameters. The screen's three come with `playback` or not at all.
+/// parameters, and `h264`, `hevc` and `av1` for how the browser decodes each. The screen's three
+/// come with `playback` or not at all, and the codecs all three or none.
 fn listed_for(request: &Request, asker: &Asker) -> Result<Player, Error> {
     let size = (number(request, "width")?, number(request, "height")?, number(request, "scale")?);
     let playback = request.param("playback").map(|text| playback(&text)).transpose()?;
+    let decoding = |codec: &str| request.param(codec).map(|text| decoding(&text)).transpose();
+    let decoders = match (decoding("h264")?, decoding("hevc")?, decoding("av1")?) {
+        (Some(h264), Some(hevc), Some(av1)) => Some(Decoders { h264, hevc, av1 }),
+        (None, None, None) => None,
+        _ => return Err(Error::new(ErrorCode::Usage, "how a browser decodes needs all of h264, hevc, and av1")),
+    };
     let viewer = match (size, playback) {
         ((Some(width), Some(height), Some(scale)), Some(playback)) => {
-            Some(Measured { width, height, scale, playback }.viewer()?)
+            Some(Measured { width, height, scale, playback, decoders }.viewer()?)
         }
         ((None, None, None), _) => None,
         _ => return Err(Error::new(ErrorCode::Usage, "a viewer needs all of width, height, scale, and playback")),
@@ -162,15 +173,25 @@ fn listed_for(request: &Request, asker: &Asker) -> Result<Player, Error> {
 }
 
 /// Who a web play or source listing ranks for. Every browser decodes what it reports. A browser
-/// on this Mac shows this Mac's display, so only a paired device's screen counts. A tab opened
-/// before browsers reported their screen reports only what it decodes. A request that reports
-/// neither ranks as `torrential play` does.
+/// on this Mac shows this Mac's display, so a paired device's screen counts, and this one's only
+/// on a machine without a display. A tab opened before browsers reported their screen reports
+/// only what it decodes. A request that reports neither ranks as `torrential play` does.
 fn player(viewer: Option<Viewer>, playback: Option<Playback>, asker: &Asker) -> Player {
     match (viewer, playback) {
         (Some(viewer), _) if *asker != Asker::Local => Player::Device(viewer),
-        (Some(Viewer { playback, .. }), _) | (None, Some(playback)) => Player::Browser { playback },
+        (Some(Viewer { screen, playback, decoders }), _) => {
+            Player::Browser { playback, measured: Some(screen), decoders }
+        }
+        (None, Some(playback)) => Player::Browser { playback, measured: None, decoders: None },
         (None, None) => Player::External,
     }
+}
+
+fn decoding(text: &str) -> Result<Decoding, Error> {
+    serde_json::from_value(Value::String(text.to_string())).map_err(|_| {
+        let words: Vec<&str> = Decoding::ALL.iter().map(|decoding| decoding.as_str()).collect();
+        Error::new(ErrorCode::Usage, format!("{text} is not a decoding: use {}", words.join(", ")))
+    })
 }
 
 fn playback(text: &str) -> Result<Playback, Error> {

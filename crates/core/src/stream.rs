@@ -13,6 +13,10 @@ const MARGIN: f64 = 0.9;
 /// Video on disk before playback starts.
 const HEAD_BUFFER: Duration = Duration::from_secs(10);
 
+/// How much smaller than the largest video a file the player opens as it is may be and still play
+/// instead: a quarter. Archive.org's derivatives of one film come within it of each other.
+const AS_IS_WITHIN: (u64, u64) = (3, 4);
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Playable {
     pub video: u32,
@@ -29,13 +33,25 @@ pub enum Start {
     Stalled,
 }
 
-/// The largest video file, plus the subtitle files that belong with it.
-pub fn pick(files: &[TorrentFile]) -> Option<Playable> {
+/// The video a play opens, plus the subtitle files that belong with it: the largest video, unless
+/// one the player opens as it is, by `as_is` on its path, comes within a quarter of its size. So a
+/// browser plays an archive.org film's MP4 rather than its larger Ogg, which it cannot decode.
+pub fn pick(files: &[TorrentFile], as_is: impl Fn(&str) -> bool) -> Option<Playable> {
     let videos: Vec<&TorrentFile> = files.iter().filter(|f| kind(&f.path) == Some(Kind::Video)).collect();
     let features: Vec<&TorrentFile> = videos.iter().copied().filter(|f| !is_sample(&f.path)).collect();
-    let video = if features.is_empty() { &videos } else { &features }.iter().max_by_key(|f| f.size)?;
+    let candidates = if features.is_empty() { &videos } else { &features };
+    let video = preferred(candidates, |f| f.size, |f| as_is(&f.path))?;
     let subtitles = subtitles(files, video, features.len());
     Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
+}
+
+/// Of `videos`, the largest, unless one the player opens as it is comes within a quarter of its
+/// size; then the largest of those.
+pub fn preferred<T>(videos: &[T], size: impl Fn(&T) -> u64, as_is: impl Fn(&T) -> bool) -> Option<&T> {
+    let largest = videos.iter().max_by_key(|v| size(v))?;
+    let (keep, of) = AS_IS_WITHIN;
+    let near = |v: &&T| u128::from(size(v)) * u128::from(of) >= u128::from(size(largest)) * u128::from(keep);
+    Some(videos.iter().filter(near).filter(|v| as_is(v)).max_by_key(|v| size(v)).unwrap_or(largest))
 }
 
 /// The file a person chose to watch, plus the subtitle files that belong with it. When some of
@@ -123,7 +139,7 @@ mod tests {
                 risk: None,
             })
             .collect();
-        let playable = pick(&files)?;
+        let playable = pick(&files, |_| true)?;
         let path = |index: u32| listing[index as usize].0;
         Some((path(playable.video), playable.subtitles.into_iter().map(path).collect()))
     }
@@ -177,6 +193,32 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn a_player_takes_the_file_it_opens_as_it_is_when_it_is_nearly_as_large() {
+        let night = [
+            ("Night/Night.gif", 392_050),
+            ("Night/Night.mov", 286_303_405),
+            ("Night/Night.ogv", 469_976_138),
+            ("Night/Night_512kb.mp4", 416_743_288),
+        ];
+        let files: Vec<TorrentFile> = (0..)
+            .zip(night)
+            .map(|(index, (path, size))| TorrentFile {
+                index,
+                path: path.into(),
+                size,
+                selected: true,
+                verified: 0,
+                risk: None,
+            })
+            .collect();
+        let picked = |as_is: fn(&str) -> bool| pick(&files, as_is).map(|p| night[p.video as usize].0);
+        let browser = |path: &str| FileType::of(path).is_some_and(|t| t.browser.is_some());
+        assert_eq!(picked(|_| true), Some("Night/Night.ogv"), "a player that opens any file takes the largest");
+        assert_eq!(picked(browser), Some("Night/Night_512kb.mp4"), "a browser takes the MP4, 89% of the Ogg");
+        assert_eq!(picked(|path| path.ends_with(".mov")), Some("Night/Night.ogv"), "the MOV is 61% of the Ogg");
     }
 
     #[test]

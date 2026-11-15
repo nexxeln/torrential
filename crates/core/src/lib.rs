@@ -30,7 +30,7 @@ pub use device::{Device, DeviceList, PairingOffer};
 pub use error::{Error, ErrorCode};
 pub use id::{HexPrefix, InfoHash, LocatorId, ReleaseId, Target, TorrentId};
 pub use job::{Eighths, FileRisk, Job, JobStatus, PieceMap, Place, Progress, Selection, Slice, TorrentFile};
-pub use preferences::{Playback, Preferences, Screen};
+pub use preferences::{Decoders, Decoding, Playback, Preferences, Screen};
 pub use profile::{Arch, Display, Language, Machine, Os, Player, Profile, Setting, Source, Viewer};
 pub use quality::{Codec, Quality, Resolution};
 pub use release::{Category, Flag, Release, SearchQuery, SearchResult, Sort, SourceOutcome, SourceReport, Swarm};

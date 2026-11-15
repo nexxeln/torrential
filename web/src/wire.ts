@@ -250,6 +250,10 @@ export type AttemptEvent = { "type": "resolved", video: string, title: TitleCard
 
 export type Playback = "hevc-hdr" | "hevc" | "h264";
 
+export type Decoding = "hardware" | "software" | "no";
+
+export type Decoders = { h264: Decoding, hevc: Decoding, av1: Decoding, };
+
 export type Device = {
 /**
  * Eight hex digits, which `torrential devices remove` takes.
@@ -430,7 +434,11 @@ width: number, height: number,
 /**
  * Device pixels to a CSS pixel.
  */
-scale: number, playback: Playback, };
+scale: number, playback: Playback,
+/**
+ * How the browser decodes each codec, from its `mediaCapabilities`.
+ */
+decoders?: Decoders, };
 
 export type PlayTitle = {
 /**

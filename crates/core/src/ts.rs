@@ -99,6 +99,8 @@ pub fn declarations(cfg: &Config) -> Vec<String> {
         Tried::decl(cfg),
         AttemptEvent::decl(cfg),
         Playback::decl(cfg),
+        Decoding::decl(cfg),
+        Decoders::decl(cfg),
         Device::decl(cfg),
         words("Container", Container::ALL.map(Container::name)),
         Tv::decl(cfg),
