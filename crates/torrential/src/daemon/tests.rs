@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use torrential_core::protocol::{
-    Change, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream,
+    Change, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream, TitleFrame,
 };
 use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
@@ -215,6 +215,24 @@ impl Harness {
 
     async fn ask(&self, request: Request) -> Response {
         server::handle(&self.running.ctx, request).await
+    }
+
+    /// Asks over the socket, as the command line does, and answers the reply that follows any
+    /// steps.
+    async fn ask_socket(&self, request: Request) -> Response {
+        let (client, served) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(server::connection(self.running.ctx.clone(), served));
+        let (mut rd, mut wr) = client.into_split();
+        let hello = Request::Hello { client_version: "0.1.0".into(), wire: torrential_core::protocol::WIRE_VERSION };
+        crate::wire::write_async(&mut wr, &hello).await.unwrap();
+        crate::wire::read_async::<Response>(&mut rd).await.unwrap();
+        crate::wire::write_async(&mut wr, &request).await.unwrap();
+        loop {
+            match crate::wire::read_async(&mut rd).await.unwrap().expect("the engine answers") {
+                TitleFrame::Step { .. } => {}
+                TitleFrame::Reply(response) => return *response,
+            }
+        }
     }
 
     async fn get(&self, target: Target, files: &[&str]) -> Result<GetReply, Error> {

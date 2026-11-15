@@ -5,23 +5,23 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use torrential_core::filetype::{self, FileType};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId,
-    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId, Skip,
+    SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,
 };
 
 use super::super::ctx::{Ctx, OwnerHandle};
-use super::super::downloads;
+use super::super::downloads::{self, Answer};
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
-use super::super::search_port::{BoxFuture, Progress};
+use super::super::search_port::Progress;
 use super::Resolved;
 
 const MOST_TRIED: usize = 6;
@@ -153,16 +153,12 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         return outcome;
     }
 
-    let preferences = (ctx.web.preferences)();
-    let rank_for = || ctx.machine.profile(preferences, ask.player);
-    let query = match ctx.titles.query(&title, preferences, ask.player).await {
+    let query = match ctx.titles.query(&title, (ctx.preferences)(), ask.player).await {
         Ok(query) => query,
         Err(error) => return ended(&mut report, Outcome::Failed { error, tried: walk.tried }),
     };
-    let (progress, answers) = mpsc::unbounded_channel();
     let mut search = Searching {
-        running: Some(ctx.search.search_stream(query, &rank_for, progress)),
-        answers,
+        search: downloads::Searching::start(ctx, query),
         started: Instant::now(),
         releases: Vec::new(),
         sources: Vec::new(),
@@ -179,7 +175,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         }
         let strong_after = tokio::time::Instant::from_std(search.started + STRONG_AFTER);
         tokio::select! {
-            () = search.next(ctx) => {}
+            () = search.next() => {}
             () = tokio::time::sleep_until(strong_after), if ran < STRONG_AFTER => {}
         }
     }
@@ -195,7 +191,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
             if search.over() {
                 break;
             }
-            search.next(ctx).await;
+            search.next().await;
             continue;
         };
         let of = (walk.tried.len() + candidates.len()) as u32;
@@ -205,7 +201,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         let over = loop {
             tokio::select! {
                 over = &mut trial => break over,
-                () = search.next(ctx) => {}
+                () = search.next() => {}
             }
         };
         if let Some(outcome) = over {
@@ -228,9 +224,7 @@ fn may_start(first: Option<&Release>, ran: Duration, over: bool) -> bool {
 
 /// A title's search as it runs, and the best of what it has found so far.
 struct Searching<'a> {
-    /// `None` once every source has answered or the deadline has passed.
-    running: Option<BoxFuture<'a, Result<SearchResult, Error>>>,
-    answers: mpsc::UnboundedReceiver<Progress>,
+    search: downloads::Searching<'a>,
     started: Instant,
     /// Ranked for playing here.
     releases: Vec<Release>,
@@ -240,28 +234,18 @@ struct Searching<'a> {
 
 impl Searching<'_> {
     fn over(&self) -> bool {
-        self.running.is_none()
+        self.search.over()
     }
 
     /// Waits for the next source to answer, and keeps what the search has found by then. Once
     /// the search is over it never returns.
-    async fn next(&mut self, ctx: &Ctx) {
-        let Some(running) = &mut self.running else { return std::future::pending().await };
-        let found = tokio::select! {
-            biased;
-            Some(Progress { result, .. }) = self.answers.recv() => Ok(result),
-            result = running => {
-                self.running = None;
-                result
-            }
-        };
-        match found {
-            Ok(mut result) => {
-                downloads::record(ctx, &mut result);
+    async fn next(&mut self) {
+        match self.search.next().await {
+            Answer::SoFar(Progress { result, .. }) | Answer::Done(Ok(result)) => {
                 self.releases = result.releases;
                 self.sources = result.sources;
             }
-            Err(error) => self.error = Some(error),
+            Answer::Done(Err(error)) => self.error = Some(error),
         }
     }
 }
@@ -434,7 +418,7 @@ impl Trial<'_> {
             source,
             to: ask.to.clone(),
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
-            setup_max_size: (ctx.web.preferences)().max_size,
+            setup_max_size: (ctx.preferences)().max_size,
             title: Some(TitlePlay { link, hold }),
             finish,
         };

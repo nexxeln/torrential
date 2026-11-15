@@ -25,12 +25,11 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
-use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, Release, SearchQuery, Target, TorrentId};
+use torrential_core::{Category, Error, ErrorCode, Profile, Release, SearchQuery, Target, TorrentId};
 
 use super::ctx::Ctx;
 use super::devices::Asker;
-use super::downloads;
+use super::downloads::{self, Answer, Searching};
 use super::http::{Connection, Method, Request};
 use super::owner::Command;
 use super::search_port::Progress;
@@ -51,8 +50,6 @@ type Made = Arc<Vec<u8>>;
 
 /// What the API reads from outside the engine, and what it remembers between requests.
 pub struct State {
-    /// The preferences in config.yaml now, which rank searches and cap new downloads.
-    pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
     /// ffmpeg and ffprobe, installed or fetched.
     pub ffmpeg: Ffmpeg,
     probes: Mutex<HashMap<(TorrentId, u32), Arc<Media>>>,
@@ -67,13 +64,8 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(
-        preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
-        ffmpeg: Ffmpeg,
-        subtitles: Arc<dyn SubtitlePort>,
-    ) -> Self {
+    pub fn new(ffmpeg: Ffmpeg, subtitles: Arc<dyn SubtitlePort>) -> Self {
         Self {
-            preferences,
             ffmpeg,
             probes: Mutex::default(),
             subtitles,
@@ -118,22 +110,10 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, a
     match (request.method, route) {
         (Method::Post, "search") => return search(conn, request).await,
         (Method::Get, "events") => return watch::events(conn, request).await,
-        (Method::Get, "stream") => {
-            let _playing = match conn.ctx.playing.open() {
-                Ok(open) => open,
-                Err(updating) => return fail(conn, request, &updating).await,
-            };
-            return watch::stream(conn, request).await;
-        }
+        (Method::Get, "stream") => return watch::stream(conn, request).await,
         (Method::Get, "subtitles") => return watch::subtitles(conn, request).await,
         (Method::Get, "title/sources") => return titles::sources(conn, request, asker).await,
-        (Method::Post, "title/play") => {
-            let _playing = match conn.ctx.playing.open() {
-                Ok(open) => open,
-                Err(updating) => return fail(conn, request, &updating).await,
-            };
-            return titles::play(conn, request, asker).await;
-        }
+        (Method::Post, "title/play") => return titles::play(conn, request, asker).await,
         (Method::Get, "title/art") => return titles::art(conn, request).await,
         (Method::Post, "ffmpeg") => return ffmpeg(conn, request).await,
         _ => {}
@@ -199,9 +179,9 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
                 return Err(Error::new(ErrorCode::Usage, "refs names no download"));
             }
             let changes = match route {
-                "pause" => owner.ask(|reply| Command::Pause { refs, reply }).await?,
-                "resume" => owner.ask(|reply| Command::Resume { refs, all: false, reply }).await?,
-                _ => owner.ask(|reply| Command::Remove { refs, delete, reply }).await?,
+                "pause" => downloads::pause(ctx, refs).await?,
+                "resume" => downloads::resume(ctx, refs, false).await?,
+                _ => downloads::remove(ctx, refs, delete).await?,
             };
             Ok(json!({ "changes": changes }))
         }
@@ -333,32 +313,25 @@ async fn results(
     query: SearchQuery,
     order: impl Fn(Vec<Release>) -> Vec<Release>,
 ) -> io::Result<bool> {
-    let ctx = conn.ctx;
     conn.begin(NDJSON, request).await?;
-    let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let Profile { preferences, player, .. } = query.profile;
-    let rank_for = || ctx.machine.profile(preferences, player);
-    let search = ctx.search.search_stream(query, &rank_for, progress_tx);
-    tokio::pin!(search);
-    let result = loop {
-        tokio::select! {
+    let mut search = Searching::start(conn.ctx, query);
+    let last = loop {
+        let answer = tokio::select! {
             biased;
-            Some(Progress { mut result, pending }) = progress.recv() => {
-                downloads::record(ctx, &mut result);
+            answer = search.next() => answer,
+            gone = conn.gone() => return Err(gone),
+        };
+        match answer {
+            Answer::SoFar(Progress { mut result, pending }) => {
                 result.releases = order(result.releases);
                 line(conn, &json!({ "type": "update", "result": result, "pending": pending })).await?;
             }
-            result = &mut search => break result,
-            gone = conn.gone() => return Err(gone),
+            Answer::Done(Ok(mut result)) => {
+                result.releases = order(result.releases);
+                break json!({ "type": "done", "result": result });
+            }
+            Answer::Done(Err(error)) => break json!({ "type": "error", "error": error }),
         }
-    };
-    let last = match result {
-        Ok(mut result) => {
-            downloads::record(ctx, &mut result);
-            result.releases = order(result.releases);
-            json!({ "type": "done", "result": result })
-        }
-        Err(error) => json!({ "type": "error", "error": error }),
     };
     line(conn, &last).await?;
     conn.end().await
@@ -432,7 +405,7 @@ fn search_query(ctx: &Ctx, request: &Request) -> Result<SearchQuery, Error> {
         category,
         limit: limit.unwrap_or(SEARCH_LIMIT).clamp(1, MOST_RESULTS),
         fresh,
-        profile: Profile { preferences: (ctx.web.preferences)(), ..Profile::default() },
+        profile: Profile { preferences: (ctx.preferences)(), ..Profile::default() },
         ..SearchQuery::new(text.to_string())
     })
 }

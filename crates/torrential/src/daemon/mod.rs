@@ -205,8 +205,9 @@ pub fn start(
         engine,
         parse: ports.parse,
         version,
+        preferences: ports.preferences,
         http_port,
-        web: web::State::new(ports.preferences, ports.ffmpeg, ports.subtitles),
+        web: web::State::new(ports.ffmpeg, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         playing,
         news: update::Board::default(),
@@ -361,15 +362,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
             socket.display()
         ));
         let _ = std::fs::remove_file(paths.switching());
-        let ctx = running.ctx.clone();
-        let accept = tokio::spawn(async move {
-            let uid = paths::uid();
-            while let Ok((stream, _)) = listener.accept().await {
-                if stream.peer_cred().is_ok_and(|cred| cred.uid() == uid) {
-                    tokio::spawn(server::connection(ctx.clone(), stream));
-                }
-            }
-        });
+        let accept = tokio::spawn(server::accept(listener, running.ctx.clone()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);

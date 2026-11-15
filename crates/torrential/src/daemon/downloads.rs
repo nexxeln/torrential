@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use torrential_core::protocol::{FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
+use tokio::sync::{broadcast, mpsc};
+use torrential_core::protocol::{Change, Event, FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
 use torrential_core::text::sanitize;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile, TorrentId,
@@ -17,19 +18,137 @@ use super::http;
 use super::magnet::{self, Magnet};
 use super::owner::plays::Destination;
 use super::owner::{
-    Command, FileBytes, FilesInfo, Finish, GetCommand, MetaTarget, Origin, PlayCommand, Resolved, Source,
+    Command, FileBytes, FilesInfo, Finish, GetCommand, MetaTarget, Origin, PlayCommand, Resolved, Source, Update,
 };
+use super::search_port::{BoxFuture, Progress};
 use crate::log::log;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
 /// How often a stream of download events with nothing new says it is still there.
-pub(super) const HEARTBEAT: Duration = Duration::from_secs(15);
+const HEARTBEAT: Duration = Duration::from_secs(15);
 
 pub(super) async fn search(ctx: &Ctx, query: SearchQuery) -> Result<SearchResult, Error> {
     let Profile { preferences, player, .. } = query.profile;
     let mut result = ctx.search.search(query, &|| ctx.machine.profile(preferences, player)).await?;
     record(ctx, &mut result);
     Ok(result)
+}
+
+/// A search as it runs. Each answer is recorded, as `search` records its results.
+pub(super) struct Searching<'a> {
+    ctx: &'a Ctx,
+    /// `None` once every source has answered or the deadline has passed.
+    running: Option<BoxFuture<'a, Result<SearchResult, Error>>>,
+    answers: mpsc::UnboundedReceiver<Progress>,
+}
+
+/// What a running search has to say.
+pub(super) enum Answer {
+    /// What the sources that have answered found, and the sources still searching.
+    SoFar(Progress),
+    /// The final results, once every source has answered or the deadline has passed.
+    Done(Result<SearchResult, Error>),
+}
+
+impl<'a> Searching<'a> {
+    pub(super) fn start(ctx: &'a Ctx, query: SearchQuery) -> Self {
+        let (progress, answers) = mpsc::unbounded_channel();
+        let running = Box::pin(async move {
+            let Profile { preferences, player, .. } = query.profile;
+            let rank_for = || ctx.machine.profile(preferences, player);
+            ctx.search.search_stream(query, &rank_for, progress).await
+        });
+        Self { ctx, running: Some(running), answers }
+    }
+
+    pub(super) fn over(&self) -> bool {
+        self.running.is_none()
+    }
+
+    /// Waits for the next source to answer. Once the search is over it never returns.
+    pub(super) async fn next(&mut self) -> Answer {
+        let Some(running) = &mut self.running else { return std::future::pending().await };
+        let mut answer = tokio::select! {
+            biased;
+            Some(progress) = self.answers.recv() => Answer::SoFar(progress),
+            result = running => {
+                self.running = None;
+                Answer::Done(result)
+            }
+        };
+        if let Answer::SoFar(Progress { result, .. }) | Answer::Done(Ok(result)) = &mut answer {
+            record(self.ctx, result);
+        }
+        answer
+    }
+}
+
+/// The events of some downloads: a snapshot of them, then each change, with a heartbeat while
+/// nothing changes.
+pub(super) struct JobEvents<'a> {
+    ctx: &'a Ctx,
+    /// The downloads followed, or `None` for every download, those started later too.
+    followed: Option<Vec<TorrentId>>,
+    updates: broadcast::Receiver<Update>,
+    heartbeat: tokio::time::Interval,
+    /// Changes were missed, so the next event is a fresh snapshot.
+    lagged: bool,
+}
+
+impl<'a> JobEvents<'a> {
+    /// Follows the downloads `refs` names, or every download when it names none, and answers the
+    /// first event: a snapshot of them.
+    pub(super) async fn start(ctx: &'a Ctx, refs: Vec<String>) -> Result<(Self, Event), Error> {
+        let everything = refs.is_empty();
+        let (jobs, updates) = ctx.owner.ask(|reply| Command::Watch { refs, reply }).await?;
+        let followed = (!everything).then(|| jobs.iter().map(|job| job.id).collect());
+        let mut heartbeat = tokio::time::interval(HEARTBEAT);
+        heartbeat.tick().await;
+        Ok((Self { ctx, followed, updates, heartbeat, lagged: false }, Event::Snapshot { jobs }))
+    }
+
+    /// The next event, or `None` once the engine stops.
+    pub(super) async fn next(&mut self) -> Option<Event> {
+        let event = loop {
+            if self.lagged {
+                let refs = self.followed.iter().flatten().map(|id| id.to_hex()).collect();
+                let jobs = self.ctx.owner.ask(|reply| Command::Status { refs, reply }).await.ok()?;
+                self.lagged = false;
+                break Event::Snapshot { jobs };
+            }
+            tokio::select! {
+                update = self.updates.recv() => match update {
+                    Ok(Update::Job(job)) if self.follows(job.id) => break Event::Job { job },
+                    Ok(Update::Removed(id)) if self.follows(id) => break Event::Removed { id: id.to_hex() },
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                },
+                _ = self.heartbeat.tick() => break Event::Heartbeat { at: torrential_core::time::now() },
+            }
+        };
+        self.heartbeat.reset();
+        Some(event)
+    }
+
+    fn follows(&self, id: TorrentId) -> bool {
+        self.followed.as_ref().is_none_or(|followed| followed.contains(&id))
+    }
+}
+
+/// Pauses the downloads `refs` names.
+pub(super) async fn pause(ctx: &Ctx, refs: Vec<String>) -> Result<Vec<Change>, Error> {
+    ctx.owner.ask(|reply| Command::Pause { refs, reply }).await
+}
+
+/// Resumes the downloads `refs` names, or every paused one when `all` is set.
+pub(super) async fn resume(ctx: &Ctx, refs: Vec<String>, all: bool) -> Result<Vec<Change>, Error> {
+    ctx.owner.ask(|reply| Command::Resume { refs, all, reply }).await
+}
+
+/// Removes the downloads `refs` names, and with `delete` their files too.
+pub(super) async fn remove(ctx: &Ctx, refs: Vec<String>, delete: bool) -> Result<Vec<Change>, Error> {
+    ctx.owner.ask(|reply| Command::Remove { refs, delete, reply }).await
 }
 
 pub(super) fn record(ctx: &Ctx, result: &mut SearchResult) {
@@ -152,6 +271,7 @@ pub(super) async fn get(ctx: &Ctx, request: GetRequest) -> Result<torrential_cor
 }
 
 pub(super) async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
+    let _playing = ctx.playing.open()?;
     let PlayRequest { target, dir, files, setup_max_size } = request;
     let source = resolve(ctx, target, "play").await?;
     let to = Destination::Folder(dir);

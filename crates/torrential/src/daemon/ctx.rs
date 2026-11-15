@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
-use torrential_core::{Error, ErrorCode};
+use torrential_core::{Error, ErrorCode, Preferences};
 
 use super::detector::Detector;
 use super::engine_port::{EngineHandle, ParseTorrent};
@@ -37,6 +37,8 @@ pub struct Ctx {
     pub engine: EngineHandle,
     pub parse: ParseTorrent,
     pub version: String,
+    /// The preferences in config.yaml now, which rank searches and cap new downloads.
+    pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
     /// Where `http` serves downloads to players, and the web app.
     pub http_port: u16,
     pub web: super::web::State,

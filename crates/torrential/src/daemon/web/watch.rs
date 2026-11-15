@@ -8,14 +8,13 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::broadcast;
 use torrential_core::protocol::Event;
 use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
 
 use super::super::ctx::Ctx;
-use super::super::downloads::HEARTBEAT;
+use super::super::downloads::JobEvents;
 use super::super::http::{self, Connection, Request};
-use super::super::owner::{Command, StreamFile, Update};
+use super::super::owner::{Command, StreamFile};
 use super::ffmpeg::{self, Encoder, Picture};
 use super::media::Media;
 use super::{fail, file_of, number};
@@ -37,33 +36,20 @@ type Conversion = (PathBuf, Vec<String>, Option<Vec<u8>>);
 
 /// Follows every download as server-sent events. The first is a snapshot.
 pub async fn events(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
-    let ctx = conn.ctx;
-    let watch = ctx.owner.ask(|reply| Command::Watch { refs: Vec::new(), reply }).await;
-    let (jobs, mut updates) = match watch {
-        Ok(watch) => watch,
+    let (mut events, snapshot) = match JobEvents::start(conn.ctx, Vec::new()).await {
+        Ok(started) => started,
         Err(error) => return fail(conn, request, &error).await,
     };
     conn.begin("text/event-stream", request).await?;
-    send(conn, &Event::Snapshot { jobs }).await?;
-    let mut heartbeat = tokio::time::interval(HEARTBEAT);
-    heartbeat.tick().await;
+    send(conn, &snapshot).await?;
     loop {
         let event = tokio::select! {
-            update = updates.recv() => match update {
-                Ok(Update::Job(job)) => Event::Job { job },
-                Ok(Update::Removed(id)) => Event::Removed { id: id.to_hex() },
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    match ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await {
-                        Ok(jobs) => Event::Snapshot { jobs },
-                        Err(_) => return conn.end().await,
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => return conn.end().await,
+            event = events.next() => match event {
+                Some(event) => event,
+                None => return conn.end().await,
             },
-            _ = heartbeat.tick() => Event::Heartbeat { at: torrential_core::time::now() },
             gone = conn.gone() => return Err(gone),
         };
-        heartbeat.reset();
         send(conn, &event).await?;
     }
 }
@@ -147,6 +133,10 @@ pub async fn pieces(ctx: &Ctx, id: TorrentId, index: u32) -> Result<String, Erro
 /// The video as a fragmented MP4 from `t` seconds on, converted by ffmpeg as the browser reads it.
 pub async fn stream(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let ctx = conn.ctx;
+    let _playing = match ctx.playing.open() {
+        Ok(open) => open,
+        Err(updating) => return fail(conn, request, &updating).await,
+    };
     let conversion = tokio::select! {
         conversion = stream_conversion(ctx, request) => conversion,
         gone = conn.gone() => return Err(gone),
