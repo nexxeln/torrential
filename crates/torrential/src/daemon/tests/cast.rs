@@ -79,8 +79,7 @@ impl FakeTv {
     }
 
     async fn named(ip: Ipv4Addr, sink: &'static str, name: &'static str, udn: &'static str) -> Self {
-        let http = TcpListener::bind((ip, 0)).await.unwrap();
-        let at = http.local_addr().unwrap();
+        let (http, at) = device(ip).await;
         let screen = Arc::new(Mutex::new(Screen { name, udn, transport: "NO_MEDIA_PRESENT", ..Screen::default() }));
         let tv = Self { ssdp: answering(ip, vec![found(at, udn)]).await, http: at, screen };
         let screen = tv.screen.clone();
@@ -113,6 +112,15 @@ impl FakeTv {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+}
+
+/// The HTTP server of a fake device at `ip`, and its address. It listens on every address, so its
+/// port is never one that the engine of another test holds on 127.0.0.1 and moves to the home
+/// network when it casts.
+async fn device(ip: Ipv4Addr) -> (TcpListener, SocketAddr) {
+    let http = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+    let at = SocketAddr::new(ip.into(), http.local_addr().unwrap().port());
+    (http, at)
 }
 
 /// What a TV whose HTTP server is at `http` answers to a search for TVs.
@@ -389,9 +397,9 @@ impl Liar {
         elsewhere: SocketAddr,
         answers: impl FnOnce(SocketAddr) -> Vec<(String, String)>,
     ) -> Self {
-        let http = TcpListener::bind((ip, 0)).await.unwrap();
+        let (http, at) = device(ip).await;
         let udp = UdpSocket::bind((ip, 0)).await.unwrap();
-        let answers = answers(http.local_addr().unwrap());
+        let answers = answers(at);
         let liar = Self { ssdp: udp.local_addr().unwrap(), count: Arc::default() };
         tokio::spawn(async move {
             let mut buf = [0; 2048];
