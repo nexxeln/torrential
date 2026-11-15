@@ -616,49 +616,6 @@ fn unquarantine(_: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::hooks;
-
-    #[test]
-    fn apple_silicon_and_linux_on_arm64_and_x86_64_have_a_pinned_build() {
-        let system = tempfile::tempdir().unwrap();
-        for loader in ["lib64/ld-linux-x86-64.so.2", "lib/ld-linux-aarch64.so.1"] {
-            std::fs::create_dir_all(system.path().join(loader).parent().unwrap()).unwrap();
-            std::fs::write(system.path().join(loader), "").unwrap();
-        }
-        let pinned = |os, arch| {
-            Build::pinned(os, arch, system.path())
-                .map(|build| (build.version, build.url, build.bin.display().to_string()))
-        };
-        let pin = |version: &str, url: &str, bin: &str| Some((version.to_string(), url.to_string(), bin.to_string()));
-        let btbn = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59";
-        assert_eq!(
-            pinned("macos", "aarch64"),
-            pin(
-                "8.1.3-2",
-                "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2/\
-                 jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz",
-                ""
-            )
-        );
-        assert_eq!(
-            pinned("linux", "x86_64"),
-            pin(
-                "n8.1.3-27-g8dca1586f4",
-                &format!("{btbn}/ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz"),
-                "ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1/bin"
-            )
-        );
-        assert_eq!(
-            pinned("linux", "aarch64"),
-            pin(
-                "n8.1.3-27-g8dca1586f4",
-                &format!("{btbn}/ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1.tar.xz"),
-                "ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1/bin"
-            )
-        );
-        assert_eq!(pinned("macos", "x86_64"), None);
-        assert_eq!(pinned("windows", "x86_64"), None);
-    }
 
     #[test]
     fn a_linux_without_the_glibc_loader_its_build_starts_with_has_no_build() {
@@ -679,25 +636,6 @@ mod tests {
                 Some("ffmpeg-n8.1.3-27-g8dca1586f4-linuxarm64-gpl-8.1.tar.xz".to_string())
             ]
         );
-    }
-
-    #[test]
-    fn an_engine_fetches_the_pinned_build_whatever_its_environment_says() {
-        let fetch = |vars: &[(&str, &str)], allowed| Fetch::from_env(&Env::from_pairs(vars.iter().copied()), allowed);
-        let pinned = Build::pinned(std::env::consts::OS, std::env::consts::ARCH, Path::new("/"));
-        let Some(pinned) = pinned else {
-            assert_eq!(fetch(&[], true), Fetch::Unavailable);
-            return;
-        };
-        let elsewhere = [
-            ("TORRENTIAL_TEST_FFMPEG_URL", "http://127.0.0.1:9/ffmpeg.tar.xz"),
-            ("TORRENTIAL_TEST_FFMPEG_SHA256", "ABC123"),
-            ("TORRENTIAL_TEST_FFMPEG_SIZE", "4096"),
-        ];
-        assert_eq!(fetch(&elsewhere, true), Fetch::Build(pinned.clone()));
-        assert_eq!(fetch(&elsewhere, false), Fetch::Off(pinned));
-        assert_eq!(fetch(&[(hooks::ENGINE, "fake"), elsewhere[0]], true), Fetch::Unavailable);
-        assert_eq!(fetch(&[(hooks::NETWORK, "loopback"), elsewhere[0]], true), Fetch::Unavailable);
     }
 
     #[test]

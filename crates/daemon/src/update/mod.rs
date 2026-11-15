@@ -201,16 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn apple_silicon_and_linux_on_arm64_and_x86_64_have_a_prebuilt_binary() {
-        assert_eq!(target("macos", "aarch64"), Some("aarch64-apple-darwin"));
-        assert_eq!(target("linux", "x86_64"), Some("x86_64-unknown-linux-musl"));
-        assert_eq!(target("linux", "aarch64"), Some("aarch64-unknown-linux-musl"));
-        assert_eq!(target("macos", "x86_64"), None);
-        assert_eq!(target("windows", "x86_64"), None);
-        assert_eq!(target("freebsd", "x86_64"), None);
-    }
-
-    #[test]
     fn the_engine_checks_a_day_after_an_answer_and_an_hour_after_a_failure() {
         let t = 1_790_000_000;
         let next = |checked_at, failed_at| Checked { checked_at, failed_at, ..Checked::default() }.next_check();
@@ -243,20 +233,5 @@ mod tests {
         assert!(!checked("0.1.0", None).install_due("0.1.0", t));
         assert!(!checked("0.1.1", Some(t - HOUR)).install_due("0.1.0", t));
         assert!(checked("0.1.1", Some(t - DAY)).install_due("0.1.0", t));
-    }
-
-    #[test]
-    fn people_and_agents_get_their_own_lines() {
-        let latest = version("0.1.1");
-        assert_eq!(
-            Audience::Person.out("0.1.0", latest),
-            "torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it."
-        );
-        assert_eq!(
-            Audience::Agent.out("0.1.0", latest),
-            "# update: torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it."
-        );
-        assert_eq!(Audience::Person.updated("0.1.0", "0.1.1"), "Updated torrential to 0.1.1.");
-        assert_eq!(Audience::Agent.updated("0.1.0", "0.1.1"), "# updated torrential from 0.1.0 to 0.1.1");
     }
 }

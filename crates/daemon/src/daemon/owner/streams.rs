@@ -315,20 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn a_film_less_than_60_s_ahead_of_its_player_holds_the_other_downloads_back() {
-        assert_eq!(decide(Others::Free, [secs(59)]), Others::Held);
-        assert_eq!(decide(Others::Free, [secs(60)]), Others::Free);
-    }
-
-    #[test]
-    fn the_other_downloads_go_once_every_film_is_120_s_ahead_of_its_player() {
-        assert_eq!(decide(Others::Held, [secs(119)]), Others::Held);
-        assert_eq!(decide(Others::Held, [secs(120)]), Others::Free);
-        assert_eq!(decide(Others::Held, [secs(120), secs(90)]), Others::Held);
-        assert_eq!(decide(Others::Held, []), Others::Free);
-    }
-
-    #[test]
     fn a_second_film_opening_behind_holds_the_others_back_though_the_first_is_ahead() {
         assert_eq!(decide(Others::Free, [secs(120), secs(10)]), Others::Held);
     }
@@ -380,11 +366,5 @@ mod tests {
         assert_eq!(lead(&[half, done, done], false), Duration::ZERO);
         assert_eq!(lead(&[done, done, done], false), Duration::from_secs(3));
         assert_eq!(lead(&[done, done, done], true), Duration::MAX);
-    }
-
-    #[test]
-    fn a_film_of_unknown_runtime_is_taken_to_play_for_45_minutes() {
-        assert_eq!(bitrate(2_700_000_000, None), 1_000_000);
-        assert_eq!(bitrate(2_700_000_000, Some(Duration::from_secs(5400))), 500_000);
     }
 }

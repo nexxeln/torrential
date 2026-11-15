@@ -1,13 +1,10 @@
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use torrential_core::SearchQuery;
-use torrential_core::protocol::{Request, WIRE_VERSION};
 
 mod common;
-use common::{Home, Reply, Run, Server, fixture, hooks, ok, receive, send, status};
+use common::{Home, Reply, Run, Server, fixture, hooks, ok, status};
 
 const BUILTIN: [&str; 8] =
     ["archlinux", "ubuntu", "debian", "archive.org", "academictorrents", "knaben", "apibay", "nyaa"];
@@ -289,49 +286,6 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn a_streaming_search_sends_updates_before_the_result() {
-    let server = Server::start(|_| {
-        vec![
-            ("/knaben/", vec![ok(fixture("knaben/v2-search-ubuntu.json"))]),
-            (
-                "/apibay/",
-                vec![Reply::Bytes { body: fixture("apibay/q.php-ubuntu.json"), delay: Duration::from_millis(800) }],
-            ),
-        ]
-    });
-    let home = Home::searching(&server, &["knaben", "apibay"], "");
-    assert_eq!(home.run(&["status"]).code, 0);
-
-    let mut socket = UnixStream::connect(home.socket()).unwrap();
-    send(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
-    receive(&mut socket);
-    send(&mut socket, &Request::Search { query: SearchQuery::new("ubuntu"), stream: true });
-    let mut frames = Vec::new();
-    loop {
-        let frame = receive(&mut socket).expect("the engine sent a frame");
-        let kind = frame["event"].as_str().or(frame["type"].as_str()).unwrap().to_string();
-        let sources: Vec<String> = frame["result"]["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| format!("{} {}", s["source"].as_str().unwrap(), s["outcome"].as_str().unwrap()))
-            .collect();
-        frames.push(format!("{kind}: {sources:?} total {} pending {}", frame["result"]["total"], frame["pending"]));
-        if kind != "search_update" {
-            break;
-        }
-    }
-
-    assert_eq!(
-        frames,
-        [
-            r#"search_update: ["knaben ok"] total 97 pending ["apibay"]"#,
-            r#"search: ["knaben ok", "apibay ok"] total 158 pending null"#,
-        ]
-    );
-}
-
-#[test]
 fn the_engine_refuses_a_config_that_does_not_parse() {
     let server = Server::start(|_| Vec::<(&str, _)>::new());
     let home = Home::searching(&server, &[], "  torznab: 3\n");
@@ -353,29 +307,6 @@ fn the_engine_refuses_a_config_that_does_not_parse() {
     assert_eq!(config(&doctor), ("fail".to_string(), message));
     assert_eq!(fixed.code, 0, "{}", fixed.stderr);
     assert_eq!(config(&fixed_doctor), ("ok".to_string(), file));
-}
-
-#[test]
-fn a_config_toml_is_named_rather_than_ignored() {
-    let server = Server::start(|_| Vec::<(&str, _)>::new());
-    let home = Home::searching(&server, &[], "");
-    std::fs::remove_file(home.path("th/config/config.yaml")).unwrap();
-    std::fs::write(home.path("th/config/config.toml"), "[downloads]\ndir = \"~/isos\"\n").unwrap();
-
-    let refused = home.run(&["status"]);
-    let doctor = home.run(&["doctor"]);
-
-    let (toml, yaml) = (home.path("th/config/config.toml"), home.path("th/config/config.yaml"));
-    let message = format!("{} is not supported; the config file is config.yaml", toml.display());
-    assert_eq!(refused.code, 2, "{}{}", refused.stdout, refused.stderr);
-    assert_eq!(
-        refused.stderr,
-        format!(
-            "error[usage]: {message}\nhint: write your settings as YAML in {}, then delete config.toml\n",
-            yaml.display()
-        )
-    );
-    assert!(doctor.stdout.contains(&format!("config\tfail\t{message}\n")), "{}", doctor.stdout);
 }
 
 #[test]

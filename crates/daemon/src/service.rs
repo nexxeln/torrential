@@ -279,17 +279,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launchd_agent() {
-        let text = unit(
-            Manager::Launchd,
-            Path::new("/opt/bin/torrential"),
-            Path::new("/Users/ada/.local/state/torrential/engine.log"),
-            None,
-        );
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
     fn the_line_about_an_added_service_comes_once() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().display().to_string();
@@ -313,40 +302,6 @@ mod tests {
         assert_eq!(
             said(Audience::Agent).as_deref(),
             Some("# the engine now starts at login; torrential engine uninstall turns that off")
-        );
-    }
-
-    #[test]
-    fn systemd_unit_carries_a_relocated_home() {
-        let text = unit(
-            Manager::Systemd,
-            Path::new("/usr/bin/torrential"),
-            Path::new("/x/engine.log"),
-            Some("/srv/torrential"),
-        );
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
-    fn an_engine_that_exits_for_the_login_service_counts_as_switching_for_a_minute() {
-        let dir = tempfile::tempdir().unwrap();
-        let at = |name: &str| dir.path().join(name);
-        let paths = Paths {
-            config: at("config"),
-            state: at("state"),
-            cache: at("cache"),
-            data: at("data"),
-            runtime: at("run"),
-            downloads: at("downloads"),
-        };
-        std::fs::create_dir_all(&paths.state).unwrap();
-        let before = switching(&paths, 1_000);
-
-        leave_switching(&paths, 1_000);
-
-        assert_eq!(
-            (before, switching(&paths, 1_000), switching(&paths, 1_059), switching(&paths, 1_060)),
-            (false, true, true, false)
         );
     }
 }

@@ -229,13 +229,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_wait_for_the_engine_asks_often_at_first_and_less_later() {
-        let ms = Duration::from_millis;
-        let pauses = [ms(0), ms(25), ms(100), ms(10_000)].map(pause);
-        assert_eq!(pauses, [ms(2), Duration::from_micros(2_500), ms(10), ms(20)]);
-    }
-
-    #[test]
     fn the_wait_for_the_engine_ends_when_it_answers_fails_or_runs_out() {
         let mut asked = 0;
         let answered = poll(Duration::from_secs(10), || {

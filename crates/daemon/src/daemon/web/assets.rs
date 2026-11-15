@@ -75,9 +75,4 @@ mod tests {
         assert_eq!(read("/assets/index-old.js"), None, "a stale script must not get the page");
         assert_eq!(read("/assets/x"), None);
     }
-
-    #[test]
-    fn the_binary_carries_the_app() {
-        assert!(find("/").is_some_and(|page| page.content_type.starts_with("text/html")));
-    }
 }

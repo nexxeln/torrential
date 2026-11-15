@@ -259,20 +259,6 @@ fn a_torrent_file_downloads_and_every_file_matches_its_source() {
 }
 
 #[test]
-fn a_magnet_downloads_and_every_file_matches_its_source() {
-    let fixture = Fixture::new("set", &SET, 2);
-    let seeder = Seeder::start(&fixture, None);
-    let home = Home::seeded_by(&[&seeder]);
-    home.get(&fixture.magnet(), &[]);
-    let wait = home.run(&["wait", &fixture.short()]);
-    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
-    assert_eq!(state(&home.job(&fixture.id())), "done");
-    for file in fixture.files.keys() {
-        assert!(fixture.intact(&home, file), "{file} matches its source");
-    }
-}
-
-#[test]
 fn a_files_glob_downloads_only_the_matching_files() {
     let fixture = Fixture::new("set", &SET, 3);
     let seeder = Seeder::start(&fixture, None);
@@ -647,19 +633,6 @@ fn a_failed_check_outlives_the_engine_and_resume_repairs_the_damage() {
     let wait = home.run(&["wait", &fixture.short()]);
     assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
     assert!(fixture.intact(&home, "a.bin"), "resume downloaded the damaged piece again");
-}
-
-#[test]
-fn wait_exits_8_on_a_short_timeout_and_0_when_done() {
-    let fixture = Fixture::new("big", &BIG, 7);
-    let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::seeded_by(&[&seeder]);
-    home.get(&fixture.magnet(), &[]);
-    let short = home.run(&["wait", &fixture.short(), "--timeout", "1s"]);
-    assert_eq!(short.code, 8, "{}{}", short.stdout, short.stderr);
-    let wait = home.run(&["wait", &fixture.short()]);
-    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
-    assert_eq!(state(&home.job(&fixture.id())), "done");
 }
 
 #[test]

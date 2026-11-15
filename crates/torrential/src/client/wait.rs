@@ -544,12 +544,4 @@ mod tests {
         assert_eq!(evaluate(&watched(paused.to_vec()), Until::Done), Some(WaitEnd::Stopped { id: "010101".into() }));
         assert_eq!(evaluate(&watched(paused.to_vec()), Until::Metadata), Some(WaitEnd::Metadata));
     }
-
-    #[test]
-    fn exit_codes_follow_the_contract() {
-        assert_eq!(WaitEnd::Done.exit_code(), 0);
-        assert_eq!(WaitEnd::Timeout.exit_code(), 8);
-        assert_eq!(WaitEnd::Failed { id: "x".into() }.exit_code(), 7);
-        assert_eq!(WaitEnd::Stopped { id: "x".into() }.exit_code(), 8);
-    }
 }

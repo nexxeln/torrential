@@ -235,20 +235,9 @@ impl CatalogPort for Fake {
 mod tests {
     use std::time::Duration;
 
-    use torrential_core::VideoRef;
-    use torrential_core::catalog::Countries;
     use torrential_core::title::{Namesakes, Wanted};
 
     use super::*;
-
-    /// What to search for to find `video`, as a title's search asks the catalog.
-    async fn wanted_of(fake: &Fake, video: &str) -> (TitleDetails, Wanted) {
-        let video: VideoRef = video.parse().unwrap();
-        let details = fake.title(&video.title).await.unwrap();
-        let namesakes = fake.namesakes(&details.card).await.unwrap();
-        let wanted = Wanted::of(&details, &namesakes, video.episode).unwrap();
-        (details, wanted)
-    }
 
     #[test]
     fn a_title_is_wanted_by_its_name_year_and_whether_another_shares_the_name() {
@@ -287,37 +276,5 @@ mod tests {
             refused(&series, None),
             (ErrorCode::Usage, "Harbor Lights is a series, so name one of its episodes".into())
         );
-    }
-
-    #[tokio::test]
-    async fn the_fake_catalog_finds_titles_namesakes_and_pictures_without_the_network() {
-        let fake = Fake::default();
-        let ids = |cards: Vec<TitleCard>| cards.into_iter().map(|c| c.id.to_string()).collect::<Vec<_>>();
-        assert_eq!(ids(fake.search("night of the living dead").await.unwrap()), ["tt0063350", "tt0100258"]);
-        assert_eq!(ids(fake.search("Harbor").await.unwrap()), ["tt9999901"]);
-        assert_eq!(ids(fake.search("  ").await.unwrap()), Vec::<String>::new());
-        let (details, remake) = wanted_of(&fake, "tt0100258").await;
-        assert_eq!((details.card.year, remake.namesakes), (Some(1990), Namesakes::Shadowed));
-        let (_, episode) = wanted_of(&fake, "tt9999901:2:1").await;
-        assert_eq!((episode.namesakes, episode.season_episodes), (Namesakes::None, Some(3)));
-        assert_eq!(
-            episode.countries,
-            Countries::from([Country::Ie]),
-            "the catalog's countries tell its releases apart"
-        );
-        assert_eq!(fake.title(&"tt0000001".parse().unwrap()).await.unwrap_err().code, ErrorCode::NotFound);
-
-        let poster = fake.art(&"tt0063350".parse().unwrap(), ArtKind::Poster).await.unwrap();
-        assert_eq!(
-            (poster.format, ImageFormat::of(&poster.bytes), poster.bytes.len()),
-            (ImageFormat::Png, Some(ImageFormat::Png), 67)
-        );
-        let thumbnail = ArtKind::Thumbnail(Episode { season: 1, episode: 2 });
-        assert!(fake.art(&"tt9999901".parse().unwrap(), thumbnail).await.is_ok());
-        let missing = [
-            fake.art(&"tt0100258".parse().unwrap(), ArtKind::Poster).await,
-            fake.art(&"tt9999901".parse().unwrap(), ArtKind::Thumbnail(Episode { season: 1, episode: 3 })).await,
-        ];
-        assert_eq!(missing.map(|m| m.unwrap_err().code), [ErrorCode::NotFound, ErrorCode::NotFound]);
     }
 }

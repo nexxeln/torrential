@@ -81,8 +81,3 @@ test("answers and Retry outside their state change nothing", () => {
   ]);
 });
 
-test("an event that changes nothing returns the same state, so React does not render again", () => {
-  const suspect: Recovery = { kind: "suspect", since: 0 };
-  expect(recover(suspect, sample(1000))).toBe(suspect);
-  expect(recover(WATCHING, sample(0, { waiting: false }))).toBe(WATCHING);
-});

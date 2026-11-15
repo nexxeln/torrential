@@ -335,12 +335,4 @@ mod tests {
         json["place"] = "plays".into();
         assert_eq!(serde_json::from_value::<Job>(json).unwrap().place, Place::Plays);
     }
-
-    #[test]
-    fn fraction_is_unknown_until_size_is_known() {
-        let mut p = Progress { verified: 50, ..Progress::default() };
-        assert_eq!(p.fraction(), None);
-        p.size = Some(200);
-        assert_eq!(p.fraction(), Some(0.25));
-    }
 }

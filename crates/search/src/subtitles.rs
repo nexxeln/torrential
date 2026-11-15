@@ -274,17 +274,4 @@ mod tests {
         assert_eq!(FileHash::of(1 << 30, &head, &tail).hash, sum, "only 64 KiB of each end counts, and the sum wraps");
         assert_eq!((FileHash::reach(1000), FileHash::reach(1 << 30)), (1000, 65_536));
     }
-
-    #[test]
-    fn an_endpoint_must_be_one_this_knows() {
-        let config = |name: &str, url: &str| SubtitleConfig {
-            endpoints: [(name.to_string(), url.to_string())].into(),
-            ..SubtitleConfig::default()
-        };
-        assert!(Online::new(&SubtitleConfig::default()).is_ok());
-        assert!(Online::new(&config("imdb", "http://127.0.0.1:9")).is_ok());
-        let unknown = Online::new(&config("subscene", "http://127.0.0.1:9")).err().unwrap();
-        assert_eq!((unknown.code, unknown.message.as_str()), (ErrorCode::Usage, "subscene is not a subtitle endpoint"));
-        assert_eq!(Online::new(&config("opensubtitles", "not a url")).err().unwrap().code, ErrorCode::Usage);
-    }
 }

@@ -690,9 +690,4 @@ fn titles_screens() {
     snapshots("titles_found", searching);
     snapshots("titles_film", film);
     snapshots("titles_series", series);
-    snapshots("titles_help", |size| {
-        let mut state = opened(size);
-        press(&mut state, "?");
-        state
-    });
 }

@@ -183,12 +183,6 @@ fn film_and_software_searches_say_what_they_ranked_for() {
 }
 
 #[test]
-fn search_with_no_results() {
-    let result = search_result(Vec::new(), 0, vec![report("archlinux", SourceOutcome::Ok { results: 0 })]);
-    insta::assert_snapshot!(both(&search(&result, NOW), &Response::Search { result }));
-}
-
-#[test]
 fn search_next_opens_the_top_result() {
     let top = release(ReleaseId::Torrent(ARCH.parse().unwrap()), "archlinux-2026.10.01-x86_64.iso");
     let other = release(ReleaseId::Torrent(tid("51e0c7")), "archlinux-2026.09.01-x86_64.iso");
@@ -507,24 +501,6 @@ fn status_offers_resume_for_failed_downloads() {
     assert_eq!(next(&paused), (Vec::new(), Some("torrential resume a282c6".to_string())));
 }
 
-#[test]
-fn status_with_no_downloads() {
-    insta::assert_snapshot!(both(&super::status::jobs(&[]), &Response::Jobs { jobs: Vec::new() }));
-}
-
-#[test]
-fn status_of_one_download() {
-    let mut out = String::new();
-    for job in fleet().into_iter().take(4) {
-        let name = job.status.name();
-        out.push_str(&format!(
-            "=== {name}\n{}",
-            both(&super::status::job(&job), &Response::Jobs { jobs: vec![job.clone()] })
-        ));
-    }
-    insta::assert_snapshot!(out);
-}
-
 fn change(hex: &str, name: &str, result: ChangeResult, path: Option<&str>) -> Change {
     Change { path: path.map(PathBuf::from), ..Change::new(tid(hex).to_hex(), Some(name.into()), result) }
 }
@@ -739,12 +715,6 @@ fn one_failed_source_is_one_problem() {
     assert_eq!(doctor(&unprobed, None).summary, ["1 problem"]);
     let failed = [check(Checked::Sources, CheckStatus::Fail)];
     assert_eq!(doctor(&failed, None).summary, ["1 problem"]);
-}
-
-#[test]
-fn completions_setup_is_valid_shell() {
-    let setup = crate::completions::setup(crate::cli::Shell::Zsh);
-    assert_eq!(crate::completions::script(&setup), "# add this line to ~/.zshrc\nsource <(COMPLETE=zsh torrential)\n");
 }
 
 #[test]

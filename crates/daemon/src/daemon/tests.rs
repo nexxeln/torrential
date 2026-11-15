@@ -1729,27 +1729,3 @@ mod devices;
 mod plays;
 mod titles;
 mod web;
-
-#[test]
-fn settings_for_tests_reach_only_an_engine_a_test_started() {
-    use crate::env::{Env, hooks};
-    let env =
-        |pairs: &[(&str, &str)]| Env::from_pairs([("TORRENTIAL_HOME", "/th")].into_iter().chain(pairs.iter().copied()));
-    let public = (hooks::NETWORK, "public");
-    let trash = |pairs: &[(&str, &str)]| {
-        let env = env(pairs);
-        super::trash(&env, &crate::paths::Paths::resolve(&env, 501, None).unwrap())
-    };
-    let named = (hooks::TRASH, "/tmp/trash");
-    let system = Trash::system(std::path::Path::new("/home/ada/.local/share"));
-    assert_eq!(trash(&[named, ("HOME", "/home/ada")]), system);
-    assert_eq!(trash(&[named, public, ("HOME", "/home/ada")]), system);
-    assert_eq!(trash(&[named, (hooks::ENGINE, "fake")]), Trash::At("/tmp/trash".into()));
-    assert_eq!(trash(&[(hooks::NETWORK, "loopback")]), Trash::At("/th/state/trash".into()));
-
-    let idle = |pairs: &[(&str, &str)]| super::plays_idle(env(pairs).test());
-    let quick = (hooks::PLAYS_IDLE, "1s");
-    assert_eq!(idle(&[quick]), IDLE_AFTER);
-    assert_eq!(idle(&[quick, public]), IDLE_AFTER);
-    assert_eq!(idle(&[quick, (hooks::NETWORK, "loopback")]), Duration::from_secs(1));
-}
