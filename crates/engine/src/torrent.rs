@@ -283,7 +283,6 @@ pub enum Progress {
 }
 
 impl Progress {
-    /// Total size of the files not set to `FilePriority::Skip`.
     pub fn selected_bytes(&self) -> u64 {
         self.selected().map(|f| f.size).sum()
     }

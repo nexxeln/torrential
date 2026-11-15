@@ -105,7 +105,6 @@ pub enum Doom {
     Files { dir: PathBuf, files: Vec<PathBuf> },
 }
 
-/// What one deletion did.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Report {
     pub deleted: Vec<PathBuf>,
@@ -205,7 +204,6 @@ impl What {
     }
 }
 
-/// How a run of one deletion ended.
 enum Outcome {
     Done(Report),
     /// It is tried again at the next run.

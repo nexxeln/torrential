@@ -128,7 +128,6 @@ impl Titles {
         going_on.chain(home.saved.iter().map(|card| Pick::Saved(card.id.clone()))).collect()
     }
 
-    /// The title a row belongs to.
     pub fn card(&self, pick: &Pick) -> Option<&TitleCard> {
         let home = match &self.home {
             Load::Ready(home) => Some(home),

@@ -116,7 +116,6 @@ impl Page {
         (size > 0).then_some(chunk)
     }
 
-    /// The next server-sent event.
     async fn event(&mut self) -> Value {
         let chunk = tokio::time::timeout(Duration::from_secs(10), self.chunk()).await.expect("an event arrives");
         let chunk = String::from_utf8(chunk.expect("the stream stays open")).unwrap();
@@ -1264,7 +1263,6 @@ async fn a_finished_file_has_every_part_without_asking_the_engine() {
     assert_eq!(get(&h, &format!("/api/pieces?id={id}&file=0")).await, (200, json!({ "pieces": "8".repeat(200) })));
 }
 
-/// The lines of an NDJSON answer.
 fn lines(body: &[u8]) -> Vec<Value> {
     String::from_utf8(body.to_vec()).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
 }

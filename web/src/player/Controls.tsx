@@ -70,7 +70,6 @@ interface Props {
   nextLabel: string;
   /** Safari can send this video to an AirPlay screen. */
   airPlay: (() => void) | null;
-  /** Play on TV. */
   cast: ReactNode;
   /** The timeline, above the buttons. */
   seekBar: ReactNode;

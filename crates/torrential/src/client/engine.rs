@@ -73,7 +73,6 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
 }
 
 torrential_core::words! {
-    /// What `engine stop` did.
     enum Stop {
         Stopped = "stopped",
         AlreadyStopped = "already_stopped",

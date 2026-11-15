@@ -352,7 +352,6 @@ impl Owner {
         self.make_room(Some(Share { id, bytes, watched_at: SystemTime::now(), busy: true }));
     }
 
-    /// Whether `id` is leaving the plays folder.
     pub(super) fn leaving(&self, id: TorrentId) -> bool {
         self.tending.leaving.contains_key(&id)
     }

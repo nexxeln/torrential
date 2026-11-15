@@ -49,7 +49,6 @@ const MISSES: u8 = 2;
 const DESCRIBE_WITHIN: Duration = Duration::from_secs(4);
 /// How many devices a search describes at once.
 const DESCRIBING: usize = 4;
-/// How often a cast asks the TV where it is.
 const POLL: Duration = Duration::from_secs(1);
 /// How often a cast asks the TV its volume, in polls.
 const VOLUME_EVERY: u32 = 5;
@@ -443,7 +442,6 @@ async fn renderer(http: &reqwest::Client, heard: &Heard) -> Option<Renderer> {
     Some(Renderer::new(description, heard.from.to_string(), sink))
 }
 
-/// What a cast found to play.
 struct Found {
     id: TorrentId,
     file: u32,
@@ -458,7 +456,6 @@ struct Found {
     subtitle: Option<(u32, String)>,
 }
 
-/// What a cast's task holds.
 struct Run {
     ctx: Arc<Ctx>,
     tv: Arc<Renderer>,
@@ -894,7 +891,6 @@ impl Transport {
     }
 }
 
-/// What the TV said on one poll.
 struct Polled {
     /// `None` when its answer said no state, which says nothing of what it does.
     transport: Option<Transport>,

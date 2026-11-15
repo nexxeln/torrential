@@ -208,7 +208,6 @@ pub fn root(state: &Path) -> PathBuf {
     state.join("ffmpeg")
 }
 
-/// How a fetch is going.
 #[derive(Clone, Debug)]
 pub enum Stage {
     /// Bytes of the archive so far. Unpacking follows the last of them.
@@ -363,7 +362,6 @@ fn programs(folder: &Path) -> Programs {
     Programs { ffmpeg: folder.join("ffmpeg"), ffprobe: folder.join("ffprobe") }
 }
 
-/// Why a fetch brought no ffmpeg.
 enum Failure {
     /// Another try can work: the network, the disk, or a download that is not the build.
     Again(Error),

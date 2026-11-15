@@ -235,7 +235,6 @@ impl Owner {
         Ok(Lease { reading, ended, _playing: playing })
     }
 
-    /// Whether someone holds a lease on `id`.
     pub(super) fn streamed_now(&self, id: TorrentId) -> bool {
         self.streams.readers.get(&id).is_some_and(|readers| readers.iter().any(|reading| reading.strong_count() > 0))
     }
