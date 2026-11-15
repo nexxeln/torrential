@@ -31,15 +31,8 @@ pub fn run(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path
     }
     let dir = args.dir.map(|d| absolute(&d, cwd, env));
     let dry_run = args.dry_run;
-    let setup_max_size = crate::config::preferences(&Paths::from_process(env)?)?.max_size;
-    let request = Request::Get(GetRequest {
-        target,
-        dir: dir.clone(),
-        files: args.files,
-        max_size: args.max_size,
-        setup_max_size,
-        dry_run,
-    });
+    let request =
+        Request::Get(GetRequest { target, dir: dir.clone(), files: args.files, max_size: args.max_size, dry_run });
     let reply: Box<GetReply> = conn.ask(&request)?;
     let exit = emit(mode, &get(&reply, dir.as_deref()), &Response::Get { reply: reply.clone() });
     if dry_run {

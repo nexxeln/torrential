@@ -5,7 +5,7 @@ use torrential_core::protocol::{
     Change, Event, FilesReply, Frame, GetReply, GetRequest, Home, Request, TitlePage, TitlePlayed, TitleRequest,
 };
 use torrential_core::{
-    AttemptEvent, Error, Machine, Preferences, Profile, SearchQuery, SearchResult, Target, TitleCard, TitleId, VideoRef,
+    AttemptEvent, Error, Machine, Preferences, SearchQuery, SearchResult, Target, TitleCard, TitleId, VideoRef,
 };
 
 use torrential_tui::{ColorMode, Edit, Exit};
@@ -59,8 +59,6 @@ impl torrential_tui::Backend for EngineBackend {
         query: SearchQuery,
         partial: &mut dyn FnMut(SearchResult, Vec<String>),
     ) -> Result<SearchResult, Error> {
-        let preferences = config::preferences(&self.paths)?;
-        let query = SearchQuery { profile: Profile { preferences, ..Profile::default() }, ..query };
         self.conn()?.stream(&Request::Search { query, stream: true }, |update| {
             if let Event::SearchUpdate { result, pending } = update {
                 partial(*result, pending);
@@ -78,7 +76,6 @@ impl torrential_tui::Backend for EngineBackend {
             dir: None,
             files: files.unwrap_or_default().iter().map(|path| globset::escape(path)).collect(),
             max_size: None,
-            setup_max_size: config::preferences(&self.paths)?.max_size,
             dry_run: false,
         });
         let reply: Box<GetReply> = self.conn()?.ask(&request)?;
@@ -90,7 +87,7 @@ impl torrential_tui::Backend for EngineBackend {
         let mut conn = self.conn()?;
         let target = Target::Prefix(reference.to_string());
         let listing = super::file_list(&mut conn, target.clone())?;
-        let reply = play::start(&mut conn, target, &listing, None, config.preferences.max_size)?;
+        let reply = play::start(&mut conn, target, &listing, None)?;
         let player = play::player(&config, &self.paths, &self.env, &reply.streams[0].url)?;
         let name = listing.name.unwrap_or_else(|| super::rows::short_ref(&listing.id));
         play::open(&player, &Playing { name, reply, title: None }, &self.env)?;

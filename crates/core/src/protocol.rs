@@ -29,7 +29,7 @@ pub const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
 pub const STEP_WITHIN: Duration = Duration::from_secs(240);
 const REPLY_WITHIN: Duration = Duration::from_secs(30);
 
-pub const WIRE_VERSION: u32 = 8;
+pub const WIRE_VERSION: u32 = 9;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -166,10 +166,9 @@ pub struct GetRequest {
     pub dir: Option<PathBuf>,
     /// Globs or exact paths. Empty means every file.
     pub files: Vec<String>,
-    /// `--max-size`, which wins over `setup_max_size`. On an existing download it replaces the cap.
+    /// `--max-size`, which wins over the max size in config.yaml. On an existing download it
+    /// replaces the cap.
     pub max_size: Option<u64>,
-    /// The max size from `torrential setup`, the cap of a new download without `--max-size`.
-    pub setup_max_size: Option<u64>,
     pub dry_run: bool,
 }
 
@@ -181,8 +180,6 @@ pub struct PlayRequest {
     /// `TorrentFile::index` of each file to play: the video first, then its subtitles. They join any
     /// files the download already has selected.
     pub files: Vec<u32>,
-    /// The max size from `torrential setup`, the cap of a new download.
-    pub setup_max_size: Option<u64>,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -642,6 +639,8 @@ mod tests {
         (6, &["devices", "add_device", "remove_device"]),
         (7, &["home"]),
         (8, &["tvs", "cast", "cast_control"]),
+        // `get` and `play` stopped carrying the max size: the engine reads config.yaml itself.
+        (9, &[]),
     ];
 
     #[test]

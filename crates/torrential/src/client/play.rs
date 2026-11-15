@@ -12,9 +12,7 @@ use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, Tit
 use torrential_core::stream::{self, Start};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
-use torrential_core::{
-    Category, Error, ErrorCode, Preferences, Profile, SearchQuery, SearchResult, Target, VideoRef, media,
-};
+use torrential_core::{Category, Error, ErrorCode, SearchQuery, SearchResult, Target, VideoRef, media};
 
 use super::connect::{self, Conn};
 use super::rows::{short_ids, short_ref};
@@ -97,20 +95,13 @@ pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Erro
             let (reply, title) = titles::play(&mut conn, TitleRequest { video, source: args.source }, mode)?;
             Playing { name: title.name.clone(), reply, title: Some(title) }
         }
-        None => torrent(&mut conn, args, mode, env, cwd, &config)?,
+        None => torrent(&mut conn, args, mode, env, cwd)?,
     };
     present(conn, playing, mode, env, &paths, &config)
 }
 
 /// Starts the video of the torrent `args` name, or of the top search result for its words.
-fn torrent(
-    conn: &mut Conn,
-    args: PlayArgs,
-    mode: Mode,
-    env: &Env,
-    cwd: &Path,
-    config: &Config,
-) -> Result<Playing, Error> {
+fn torrent(conn: &mut Conn, args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<Playing, Error> {
     let finding = (mode == Mode::Human).then(|| {
         let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr())
             .with_style(ProgressStyle::with_template("{spinner} {msg}").expect("the template is valid"));
@@ -118,13 +109,13 @@ fn torrent(
         bar.enable_steady_tick(Duration::from_millis(100));
         bar
     });
-    let found = resolve(conn, &args.words, cwd, config.preferences);
+    let found = resolve(conn, &args.words, cwd);
     if let Some(bar) = finding {
         bar.finish_and_clear();
     }
     let (target, title, listing) = found?;
     let dir = args.dir.map(|d| absolute(&d, cwd, env));
-    let reply = start(conn, target, &listing, dir, config.preferences.max_size)?;
+    let reply = start(conn, target, &listing, dir)?;
     let name = title.or(listing.name).unwrap_or_else(|| short_ref(&listing.id));
     Ok(Playing { name, reply, title: None })
 }
@@ -217,13 +208,7 @@ pub fn open(player: &Player, playing: &Playing, env: &Env) -> Result<(), Error> 
 }
 
 /// Picks the video and its subtitles from `listing` and asks the engine to stream them.
-pub fn start(
-    conn: &mut Conn,
-    target: Target,
-    listing: &FilesReply,
-    dir: Option<PathBuf>,
-    setup_max_size: Option<u64>,
-) -> Result<PlayReply, Error> {
+pub fn start(conn: &mut Conn, target: Target, listing: &FilesReply, dir: Option<PathBuf>) -> Result<PlayReply, Error> {
     let Some(playable) = stream::pick(&listing.files) else {
         let id = short_ref(&listing.id);
         let name = listing.name.clone().unwrap_or_else(|| id.clone());
@@ -232,19 +217,14 @@ pub fn start(
             .with_next(format!("torrential files {id}")));
     };
     let files = [playable.video].into_iter().chain(playable.subtitles).collect();
-    let reply: Box<PlayReply> = conn.ask(&Request::Play(PlayRequest { target, dir, files, setup_max_size }))?;
+    let reply: Box<PlayReply> = conn.ask(&Request::Play(PlayRequest { target, dir, files }))?;
     Ok(*reply)
 }
 
 /// The torrent the words name, with its files and, when a search found it, the result's name. A
 /// single word that names a download, a search result, or anything else `get` takes wins over a
 /// search for the words, which takes the top video result.
-fn resolve(
-    conn: &mut Conn,
-    words: &[String],
-    cwd: &Path,
-    preferences: Preferences,
-) -> Result<(Target, Option<String>, FilesReply), Error> {
+fn resolve(conn: &mut Conn, words: &[String], cwd: &Path) -> Result<(Target, Option<String>, FilesReply), Error> {
     if let [word] = words
         && let Ok(target) = Target::parse(word, cwd)
     {
@@ -255,11 +235,7 @@ fn resolve(
         }
     }
     let text = words.join(" ");
-    let query = SearchQuery {
-        category: Some(Category::Video),
-        profile: Profile { preferences, ..Profile::default() },
-        ..SearchQuery::new(text.clone())
-    };
+    let query = SearchQuery { category: Some(Category::Video), ..SearchQuery::new(text.clone()) };
     let result: SearchResult = conn.ask(&Request::Search { query, stream: false })?;
     let releases = result.releases;
     let Some(release) = releases.into_iter().next() else {
