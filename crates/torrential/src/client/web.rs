@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 
 use serde::Serialize;
 use torrential_core::{Error, ErrorCode};
@@ -11,12 +10,8 @@ use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
 use crate::env::Env;
-use crate::ffmpeg::Tools;
-use crate::ffmpeg::fetch::{self, Fetch, Ffmpeg, Found};
 use crate::output::theme::Token;
-use crate::output::views::{Check, CheckStatus};
 use crate::output::{Body, Cell, Doc, Mode, Typed};
-use crate::paths::Paths;
 
 #[derive(Serialize)]
 struct Web {
@@ -67,36 +62,4 @@ fn open(url: &str, env: &Env) -> Result<(), Error> {
             Error::new(ErrorCode::NotFound, format!("cannot open a browser with {}: {e}", program.display()))
                 .with_hint(format!("open {url} in your browser"))
         })
-}
-
-/// The `torrential doctor` line about ffmpeg, which the web player uses to play what the browser
-/// cannot read on its own: the one the engine runs, or what it does with none. `fetch` is what
-/// config.yaml says about fetching one.
-pub fn check(env: &Env, paths: &Paths, fetch: bool) -> Check {
-    let path = env.var("PATH").map(String::from);
-    let installed = Arc::new(move || Tools::find(path.as_deref()));
-    let found = Ffmpeg::new(installed, fetch::root(&paths.state), Fetch::from_env(env, fetch)).found();
-    let converts = "the web player converts what the browser cannot read";
-    let reads_itself = "the web player plays only MP4 and WebM files the browser reads itself";
-    let (status, detail) = match found {
-        Found::Installed(programs) => (CheckStatus::Ok, format!("{}; {converts}", programs.ffmpeg.display())),
-        Found::Fetched(programs) => {
-            (CheckStatus::Ok, format!("{}, fetched by torrential; {converts}", programs.ffmpeg.display()))
-        }
-        Found::Missing(Fetch::Build(build)) => (
-            CheckStatus::Ok,
-            format!(
-                "not installed; torrential fetches ffmpeg {} ({}) the first time a file needs converting",
-                build.version,
-                torrential_core::units::format_size(build.size)
-            ),
-        ),
-        Found::Missing(Fetch::Off(_)) => {
-            (CheckStatus::Warn, format!("not installed, and config.yaml turns off fetching it; {reads_itself}"))
-        }
-        Found::Missing(Fetch::Unavailable) => {
-            (CheckStatus::Warn, format!("ffmpeg and ffprobe not found; {reads_itself}"))
-        }
-    };
-    Check { check: "ffmpeg".into(), status, detail }
 }

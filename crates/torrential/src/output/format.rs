@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use torrential_core::Progress;
+use torrential_core::SourceOutcome;
+use torrential_core::text::sanitize;
 pub use torrential_core::units::{clock, count, elapsed, timestamp};
 use torrential_core::units::{format_duration, format_rate, format_size};
 
@@ -48,6 +50,18 @@ pub fn age(published: Option<i64>, now: i64) -> String {
 pub fn shell_word(word: &str) -> String {
     let plain = !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./:=@%+,".contains(&b));
     if plain { word.to_string() } else { format!("'{}'", word.replace('\'', r"'\''")) }
+}
+
+pub fn source_outcome(outcome: &SourceOutcome) -> String {
+    match outcome {
+        SourceOutcome::Ok { results } => count(*results as usize, "result"),
+        SourceOutcome::Cached { results } => format!("{}, cached", count(*results as usize, "result")),
+        SourceOutcome::Timeout => "timed out".to_string(),
+        SourceOutcome::Http { status } => format!("HTTP {status}"),
+        SourceOutcome::Connect { reason } => format!("connection failed ({})", sanitize(reason)),
+        SourceOutcome::BadResponse { reason } => format!("bad response ({})", sanitize(reason)),
+        SourceOutcome::Irrelevant => "no relevant results".to_string(),
+    }
 }
 
 #[cfg(test)]
