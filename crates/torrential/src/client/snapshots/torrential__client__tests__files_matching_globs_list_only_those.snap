@@ -1,5 +1,5 @@
 ---
-source: crates/torrential/src/output/views/tests.rs
+source: crates/torrential/src/client/tests.rs
 expression: "both(&doc, &Typed\n{ kind: \"files\", body: Files { files: reply, matched: Some(matched) } })"
 ---
 SIZE	DONE	PATH

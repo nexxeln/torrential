@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use torrential_core::text::sanitize;
 use torrential_core::{Error, FileRisk, InfoHash, Selection};
+pub use torrential_engine::on_disk;
 
 use super::engine_port::{MetaFile, Metainfo};
 use crate::selection::{compile, some_match};
@@ -18,17 +19,31 @@ pub fn wanted(metainfo: &Metainfo, selection: &Selection) -> Result<Vec<bool>, E
 }
 
 pub fn targets(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {
-    metainfo.files.iter().zip(wanted).filter(|(_, w)| **w).map(|(f, _)| dir.join(relative(metainfo, f))).collect()
+    metainfo.files.iter().zip(wanted).filter(|(_, w)| **w).map(|(f, _)| path(metainfo, f, dir)).collect()
 }
 
+/// Where `file` of a download in `dir` is on disk, as libtorrent names the folder and the file.
+pub fn path(metainfo: &Metainfo, file: &MetaFile, dir: &Path) -> PathBuf {
+    on_disk(dir).join(relative(metainfo, file))
+}
+
+/// Where `file` is inside the download's folder, as libtorrent names it on disk, which can differ
+/// from the name the torrent lists.
 pub fn relative(metainfo: &Metainfo, file: &MetaFile) -> PathBuf {
-    if metainfo.single_file { PathBuf::from(&metainfo.name) } else { Path::new(&metainfo.name).join(&file.path) }
+    let listed =
+        if metainfo.single_file { PathBuf::from(&metainfo.name) } else { Path::new(&metainfo.name).join(&file.path) };
+    on_disk(&listed)
+}
+
+/// The torrent's folder or single file in `dir`, as libtorrent names it on disk.
+pub fn root(dir: &Path, name: &str) -> PathBuf {
+    on_disk(&dir.join(name))
 }
 
 /// Where a download writes in `dir`: at or below the torrent's folder or single file, and to the
 /// parts file where libtorrent keeps pieces a selected file shares with one that is not selected.
 pub fn footprint(metainfo: &Metainfo, dir: &Path) -> [PathBuf; 2] {
-    [dir.join(&metainfo.name), dir.join(parts_file(&metainfo.info_hash))]
+    [root(dir, &metainfo.name), on_disk(&dir.join(parts_file(&metainfo.info_hash)))]
 }
 
 /// libtorrent names the parts file after the torrent's v2 hash cut to 20 bytes, or after its v1

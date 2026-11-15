@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <libtorrent/alert_types.hpp>
+#include <libtorrent/aux_/path.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/create_torrent.hpp>
 #include <libtorrent/entry.hpp>
@@ -805,5 +806,11 @@ rust::Vec<std::uint8_t> create_torrent(rust::Str path, std::uint32_t piece_size,
 }
 
 rust::String libtorrent_version() { return rust::String(lt::version()); }
+
+rust::Vec<std::uint8_t> native_path(rust::Slice<const std::uint8_t> path) {
+  std::string const native =
+      lt::convert_to_native_path_string(std::string(reinterpret_cast<char const*>(path.data()), path.size()));
+  return to_vec(std::vector<char>(native.begin(), native.end()));
+}
 
 }

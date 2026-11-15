@@ -1,4 +1,8 @@
+use std::path::Path;
+
 use serde::Serialize;
+use torrential_core::Machine;
+use torrential_core::units::format_limit;
 use torrential_core::units::size_text;
 use torrential_core::{Error, Preferences, Profile};
 
@@ -7,7 +11,9 @@ use crate::config;
 use crate::config::Policy;
 use crate::env::Env;
 use crate::fsutil::Writes;
-use crate::output::{Mode, Typed, views};
+use crate::output::theme::Token;
+use crate::output::{Body, Cell, Doc};
+use crate::output::{Mode, Typed};
 use crate::paths::Paths;
 
 #[derive(Serialize)]
@@ -45,7 +51,7 @@ pub fn run(args: SetupArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
     }
     let file = config::file(&paths)?;
     let profile = Profile { detected: Some(crate::machine::detect(env)?), preferences: wanted, ..Profile::default() };
-    let doc = views::setup(&profile, updates, &file, result);
+    let doc = setup(&profile, updates, &file, result);
     let report = Report { result, profile: &profile, updates, file: file.display().to_string() };
     Ok(super::emit(mode, &doc, &Typed { kind: "setup", body: report }))
 }
@@ -58,6 +64,36 @@ fn command(preferences: &Preferences, updates: Policy) -> String {
         preferences.playback.map_or("auto", |p| p.as_str()),
         updates.as_str(),
     )
+}
+
+pub fn setup(profile: &Profile, updates: Policy, file: &Path, result: &str) -> Doc {
+    let detected = profile.detected.as_ref().map_or_else(|| "nothing".to_string(), machine);
+    let fields = vec![
+        ("detected", Cell::new(detected)),
+        ("updates", Cell::new(updates.as_str())),
+        ("file", Cell::new(file.display().to_string())),
+    ];
+    let title = match result {
+        "shown" => Vec::new(),
+        word => vec![Cell::styled(word, Token::Mint)],
+    };
+    let overrides = profile.overrides().unwrap_or_else(|| "none".to_string());
+    let mut summary = vec![format!("ranking for {} · overrides: {overrides}", profile.describe())];
+    if let Some(max) = profile.preferences.max_size {
+        summary.push(format!("get rejects downloads over {} unless --max-size is higher", format_limit(max)));
+    }
+    let next = if result == "shown" { crate::cli::SETUP_FLAGS } else { "torrential search <words>" };
+    Doc { body: Body::Fields { title, fields }, summary, next: Some(next.to_string()) }
+}
+
+fn machine(machine: &Machine) -> String {
+    let display = match machine.display {
+        Some(d) => format!("{}x{} display{}", d.width, d.height, if d.hdr { " with HDR" } else { "" }),
+        None => "no display".to_string(),
+    };
+    let arch = machine.arch.map(|a| a.as_str().to_string());
+    let language = machine.language.as_ref().map(|l| l.name().to_string());
+    [Some(display), arch, language].into_iter().flatten().collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]

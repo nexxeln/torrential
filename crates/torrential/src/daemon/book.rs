@@ -185,7 +185,7 @@ impl JobEntry {
             self.metainfo.as_deref().zip(self.wanted()).map(|(m, wanted)| files::targets(m, &self.record.dir, &wanted));
         match targets.as_deref() {
             Some([only]) => Some(only.clone()),
-            _ => self.record.name.as_ref().map(|n| self.record.dir.join(n)),
+            _ => self.record.name.as_ref().map(|n| files::root(&self.record.dir, n)),
         }
     }
 

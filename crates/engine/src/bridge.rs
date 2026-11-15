@@ -248,6 +248,7 @@ pub(crate) mod ffi {
         fn parse_resume_data(bytes: &[u8]) -> Result<ParsedTorrent>;
         fn create_torrent(path: &str, piece_size: u32, hybrid: bool) -> Result<Vec<u8>>;
         fn libtorrent_version() -> Result<String>;
+        fn native_path(path: &[u8]) -> Vec<u8>;
     }
 }
 

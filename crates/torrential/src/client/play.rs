@@ -7,19 +7,23 @@ use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
+use torrential_core::Job;
 use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, Response, TitlePlayed, TitleRequest};
 use torrential_core::stream::{self, Start};
 use torrential_core::text::sanitize;
+use torrential_core::units::format_size;
 use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, Target, media};
 
 use super::connect::{self, Conn};
+use super::rows::{short_ids, short_ref};
+use super::titles::view::resuming;
 use super::{absolute, answer, emit, file_list, titles};
 use crate::cli::PlayArgs;
 use crate::config::{self, Config};
 use crate::env::Env;
-use crate::output::format::shell_word;
+use crate::output::format::{self, shell_word};
 use crate::output::theme::{Token, paint};
-use crate::output::{Doc, Mode, Typed, views};
+use crate::output::{Body, Cell, Doc, Mode, Typed};
 use crate::paths::Paths;
 use crate::player::{self, Launch, Player};
 
@@ -119,38 +123,38 @@ fn torrent(
     let (target, title, listing) = found?;
     let dir = args.dir.map(|d| absolute(&d, cwd, env));
     let reply = start(conn, target, &listing, dir, config.preferences.max_size)?;
-    let name = title.or(listing.name).unwrap_or_else(|| views::short_ref(&listing.id));
+    let name = title.or(listing.name).unwrap_or_else(|| short_ref(&listing.id));
     Ok(Playing { name, reply, title: None })
 }
 
 /// Hands the video to the person's player, or with `--json` prints where it is served.
 fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, config: &Config) -> Result<u8, Error> {
-    let doc = views::play(&playing, None);
+    let doc = play(&playing, None);
     if mode == Mode::Json {
         return Ok(emit(mode, &doc, &Typed { kind: "play", body: &playing }));
     }
     let player = player(config, paths, env, &playing.reply.streams[0].url)?;
     if let Some(at) = resume_at(&playing) {
-        anstream::eprintln!("{}", views::resuming(at));
+        anstream::eprintln!("{}", resuming(at));
     }
     if mode == Mode::Plain {
         open(&player, &playing, env)?;
         let summary = vec![format!("playing in {} · the download continues", player.name())];
         return Ok(emit(mode, &Doc { summary, ..doc }, &Typed { kind: "play", body: &playing }));
     }
-    let id = views::short_ids(&[playing.reply.job.id]).remove(0);
+    let id = short_ids(&[playing.reply.job.id]).remove(0);
     let _ = ctrlc::set_handler(move || {
         eprintln!("\nThe download continues in the background: torrential status {id}");
         std::process::exit(130);
     });
     let runtime = countdown(conn, &playing)?;
     open(&player, &playing, env)?;
-    let mut out = Doc { next: None, ..views::play(&playing, known(runtime)) }.human();
+    let mut out = Doc { next: None, ..play(&playing, known(runtime)) }.human();
     if runtime == Runtime::Unknown {
-        out.push_str(&paint(Token::Muted, views::UNKNOWN_RUNTIME));
+        out.push_str(&paint(Token::Muted, UNKNOWN_RUNTIME));
         out.push('\n');
     }
-    out.push_str(&views::playing(&player.name(), &playing.reply.job));
+    out.push_str(&playing_line(&player.name(), &playing.reply.job));
     anstream::print!("{out}");
     Ok(0)
 }
@@ -195,7 +199,7 @@ pub fn start(
     setup_max_size: Option<u64>,
 ) -> Result<PlayReply, Error> {
     let Some(playable) = stream::pick(&listing.files) else {
-        let id = views::short_ref(&listing.id);
+        let id = short_ref(&listing.id);
         let name = listing.name.clone().unwrap_or_else(|| id.clone());
         return Err(Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
             .with_hint(format!("run torrential files {id} to list its files"))
@@ -313,8 +317,8 @@ fn countdown(mut conn: Conn, playing: &Playing) -> Result<Runtime, Error> {
         };
         let rate = rates.mean(Instant::now(), rate);
         let Some(why) = hold(runtime, video.size, have, rate) else { break };
-        let header = Doc { next: None, ..views::play(playing, known(runtime)) }.human();
-        bar.set_message(format!("{header}{}", paint(Token::Accent, &views::hold(why))));
+        let header = Doc { next: None, ..play(playing, known(runtime)) }.human();
+        bar.set_message(format!("{header}{}", paint(Token::Accent, &hold_line(why))));
         match rx.recv_timeout(TICK) {
             Ok(Wake::Enter) => break,
             Ok(Wake::Runtime(read)) => runtime = read.map_or(Runtime::Unknown, Runtime::Known),
@@ -351,6 +355,51 @@ fn fetch(url: &str, range: &str) -> std::io::Result<Vec<u8>> {
         }
         _ => Err(std::io::ErrorKind::InvalidData.into()),
     }
+}
+
+pub const UNKNOWN_RUNTIME: &str = "could not read the video's runtime, so playback may pause while it downloads";
+
+/// The release, the files it plays, and how long the video runs once that is known. A title play
+/// also names the source it chose.
+pub fn play(playing: &Playing, runtime: Option<Duration>) -> Doc {
+    let reply = &playing.reply;
+    let id = short_ids(&[reply.job.id]).remove(0);
+    let title = vec![Cell::styled(id.clone(), Token::Accent), Cell::new(&playing.name)];
+    let mut fields = Vec::new();
+    if let Some(title) = &playing.title {
+        fields.push(("source", Cell::new(&title.release.name)));
+    }
+    if let [video, subtitles @ ..] = reply.streams.as_slice() {
+        fields.push(("video", Cell::new(format!("{} ({})", video.path, format_size(video.size)))));
+        if !subtitles.is_empty() {
+            let paths: Vec<&str> = subtitles.iter().map(|s| s.path.as_str()).collect();
+            fields.push(("subtitles", Cell::new(paths.join(", "))));
+        }
+    }
+    if let Some(runtime) = runtime {
+        fields.push(("runtime", Cell::new(format::clock(runtime))));
+    }
+    Doc { body: Body::Fields { title, fields }, summary: Vec::new(), next: Some(format!("torrential status {id}")) }
+}
+
+pub fn hold_line(hold: Hold) -> String {
+    match hold {
+        Hold::Reading => "Buffering…".to_string(),
+        Hold::Buffering(wait) => format!("Buffering… ready in {}", format::clock(wait)),
+        Hold::Countdown(wait) => {
+            format!("Starts in {} so playback does not pause. Press Enter to start now", format::clock(wait))
+        }
+        Hold::Stalled => "Waiting for peers".to_string(),
+    }
+}
+
+pub fn playing_line(player: &str, job: &Job) -> String {
+    let id = short_ids(&[job.id]).remove(0);
+    format!(
+        "{} Playing in {}. The download continues: torrential status {id}\n",
+        paint(Token::Mint, "▶"),
+        sanitize(player)
+    )
 }
 
 #[cfg(test)]

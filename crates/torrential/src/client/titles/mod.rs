@@ -1,18 +1,19 @@
 //! Films and series: finding one, showing it, listing its sources, and playing or downloading it
 //! from the first of its sources that starts.
 
+pub mod view;
+
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use serde::Serialize;
-use torrential_core::protocol::{GetReply, PlayReply, Request, Response, TitleFrame, TitlePlayed, TitleRequest};
+use torrential_core::protocol::{PlayReply, Request, Response, TitleFrame, TitlePlayed, TitleRequest};
 use torrential_core::title::Episode;
-use torrential_core::{AttemptEvent, Error, ErrorCode, Job, VideoRef};
+use torrential_core::{AttemptEvent, Error, ErrorCode, VideoRef};
 
 use super::connect::{self, Conn};
 use super::{answer, emit};
 use crate::output::theme::{Token, paint};
-use crate::output::{Mode, Typed, views};
+use crate::output::{Mode, Typed};
 
 /// The longest a title play goes between two steps: its whole budget, and the search before it.
 const STEP_WITHIN: Duration = Duration::from_secs(240);
@@ -90,7 +91,7 @@ pub fn titles(mut conn: Conn, words: &[String], mode: Mode) -> Result<u8, Error>
     let words = words.join(" ");
     match answer(conn.call(&Request::Titles { words: words.clone() })?)? {
         Response::Titles { titles } => {
-            let doc = views::titles(&titles, &words);
+            let doc = view::titles(&titles, &words);
             Ok(emit(mode, &doc, &Response::Titles { titles }))
         }
         other => Err(connect::unexpected(&other)),
@@ -100,7 +101,7 @@ pub fn titles(mut conn: Conn, words: &[String], mode: Mode) -> Result<u8, Error>
 pub fn title(mut conn: Conn, video: VideoRef, mode: Mode) -> Result<u8, Error> {
     let request = Request::Title { id: video.title.clone() };
     match answer(conn.call(&request)?).map_err(|e| findable(e, &video))? {
-        Response::Title { title } => Ok(emit(mode, &views::title(&title), &Response::Title { title })),
+        Response::Title { title } => Ok(emit(mode, &view::title(&title), &Response::Title { title })),
         other => Err(connect::unexpected(&other)),
     }
 }
@@ -109,7 +110,7 @@ pub fn sources(mut conn: Conn, video: VideoRef, mode: Mode) -> Result<u8, Error>
     let request = Request::Sources { video: video.clone() };
     match answer(conn.call(&request)?).map_err(|e| findable(e, &video))? {
         Response::Sources { sources } => {
-            let doc = views::sources(&sources, torrential_core::time::now());
+            let doc = view::sources(&sources, torrential_core::time::now());
             Ok(emit(mode, &doc, &Typed { kind: "sources", body: &*sources }))
         }
         other => Err(connect::unexpected(&other)),
@@ -136,27 +137,6 @@ pub fn play_each(
     }
 }
 
-/// Downloads a film or an episode from the first of its sources that starts, and answers the exit
-/// code and the download.
-pub fn get(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(u8, Job), Error> {
-    let video = request.video.clone();
-    let shown = Shown::new(mode);
-    let answered = steps(conn, &Request::GetTitle(request), &video, |step| shown.step(step, "Downloading"));
-    drop(shown);
-    let (reply, title) = match answered? {
-        Response::GetTitle { reply, title } => (*reply, *title),
-        other => return Err(connect::unexpected(&other)),
-    };
-    #[derive(Serialize)]
-    struct Got<'a> {
-        reply: &'a GetReply,
-        title: &'a TitlePlayed,
-    }
-    let doc = views::get_title(&reply, &title.name);
-    let exit = emit(mode, &doc, &Typed { kind: "get", body: Got { reply: &reply, title: &title } });
-    Ok((exit, reply.job))
-}
-
 /// Sends a title play and hands each of its steps to `each` until the reply. When no source of
 /// the title is found, a search for its name comes next.
 pub(super) fn steps(
@@ -171,7 +151,7 @@ pub(super) fn steps(
         match conn.read_within::<TitleFrame>(STEP_WITHIN)? {
             TitleFrame::Step { step } => {
                 if let AttemptEvent::Resolved { video, title, .. } = &*step {
-                    search = Some(views::search_for(&torrential_core::title::title_name(title, video.episode)));
+                    search = Some(view::search_for(&torrential_core::title::title_name(title, video.episode)));
                 }
                 each(&step);
             }
@@ -209,9 +189,9 @@ impl Shown {
             return;
         }
         if let (AttemptEvent::Check { check }, Some(bar)) = (step, &self.bar) {
-            bar.set_message(views::check(*check));
+            bar.set_message(view::check(*check));
         }
-        let Some(line) = views::step(step, started) else { return };
+        let Some(line) = view::step(step, started) else { return };
         let line = match step {
             AttemptEvent::Skipped { .. } => paint(Token::Muted, &line),
             AttemptEvent::Playing { .. } => paint(Token::Mint, &line),
