@@ -3322,6 +3322,7 @@ dependencies = [
  "crossterm",
  "insta",
  "ratatui",
+ "serde_json",
  "torrential-core",
 ]
 

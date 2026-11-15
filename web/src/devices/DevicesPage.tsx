@@ -3,6 +3,7 @@ import { addDevice, type ApiError, asApiError, type Device, type DeviceList, dev
 import { age, sentence } from "../lib/format";
 import { Button } from "../ui/Button";
 import { Header } from "../ui/Header";
+import { PAIRING_MINUTES } from "../wire";
 
 /** How often the page asks for the list, so a device that pairs shows up while the code is on screen. */
 const POLL_MS = 2000;
@@ -145,7 +146,7 @@ export function DevicesPage() {
               <Button variant="primary" size="large" disabled={busy !== null} onClick={() => act("add", addDevice)}>
                 Add a device
               </Button>
-              <p className="text-sm text-pencil">Shows a code that lets one phone or TV in for 5 minutes.</p>
+              <p className="text-sm text-pencil">Shows a code that lets one phone or TV in for {PAIRING_MINUTES} minutes.</p>
             </div>
           ))}
         {problem && (

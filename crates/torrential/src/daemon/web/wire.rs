@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use torrential_core::PieceMap;
+use torrential_core::watching::{FINISHED_SHARE, FINISHED_WITHIN};
 use ts_rs::{Config, TS};
 
 use super::cast::Start;
@@ -10,7 +12,8 @@ use super::media::{Audio, Chapter, Media, Subtitle, Video};
 use super::online::{Listed, Named, Online};
 use super::play::Playing;
 use super::titles::{Found, Measured, Play, PlayingLine, Saved};
-use super::{FfmpegLine, Pieces, SearchLine, VersionReply};
+use super::{FfmpegLine, Pieces, SearchLine, VersionReply, thumbnail};
+use crate::daemon::devices::OFFER;
 use crate::daemon::downloads::Served;
 use crate::ffmpeg::fetch::Readiness;
 
@@ -49,6 +52,29 @@ fn declarations(cfg: &Config) -> Vec<String> {
     all
 }
 
+/// Numbers the web app and the engine must agree on: each name, what it is, and its value.
+fn constants() -> [(&'static str, &'static str, String); 9] {
+    [
+        ("SLICES", "Equal runs of a torrent's pieces in `Progress.piece_map`.", PieceMap::SLICES.to_string()),
+        ("PIECE_RUNS", "Equal runs of a file's bytes in `GET /api/pieces`.", super::watch::RUNS.to_string()),
+        ("SEARCH_LIMIT", "Results `POST /api/search` answers when it names no limit.", super::SEARCH_LIMIT.to_string()),
+        ("PAIRING_MINUTES", "How long a pairing code works.", (OFFER.as_secs() / 60).to_string()),
+        ("THUMBNAIL_EVERY", "Seconds of video one thumbnail stands for.", thumbnail::EVERY.to_string()),
+        (
+            "THUMBNAIL_MARGIN_BYTES",
+            "Bytes a thumbnail needs on disk each side of its frame.",
+            thumbnail::MARGIN.to_string(),
+        ),
+        (
+            "THUMBNAIL_MARGIN_SHARE",
+            "The share of a large file a thumbnail needs on disk each side of its frame.",
+            (1.0 / thumbnail::MARGIN_SHARE as f64).to_string(),
+        ),
+        ("FINISHED_SHARE", "The share of a video at its end that counts as credits.", FINISHED_SHARE.to_string()),
+        ("FINISHED_WITHIN", "Seconds at the end of a video that count as credits.", FINISHED_WITHIN.to_string()),
+    ]
+}
+
 #[test]
 fn the_web_apps_types_are_the_ones_the_engine_writes() {
     let cfg = Config::new().with_large_int("number");
@@ -56,6 +82,9 @@ fn the_web_apps_types_are_the_ones_the_engine_writes() {
     for declaration in declarations(&cfg) {
         let lines: Vec<&str> = declaration.lines().map(str::trim_end).collect();
         text.push_str(&format!("export {}\n\n", lines.join("\n")));
+    }
+    for (name, what, value) in constants() {
+        text.push_str(&format!("/** {what} */\nexport const {name} = {value};\n\n"));
     }
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/wire.ts");
     let committed = std::fs::read_to_string(&path).unwrap_or_default();

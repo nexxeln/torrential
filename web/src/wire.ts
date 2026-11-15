@@ -497,3 +497,30 @@ source?: string,
  */
 ref?: string, file?: number, subtitle?: number, start_at?: number, };
 
+/** Equal runs of a torrent's pieces in `Progress.piece_map`. */
+export const SLICES = 64;
+
+/** Equal runs of a file's bytes in `GET /api/pieces`. */
+export const PIECE_RUNS = 200;
+
+/** Results `POST /api/search` answers when it names no limit. */
+export const SEARCH_LIMIT = 50;
+
+/** How long a pairing code works. */
+export const PAIRING_MINUTES = 5;
+
+/** Seconds of video one thumbnail stands for. */
+export const THUMBNAIL_EVERY = 10;
+
+/** Bytes a thumbnail needs on disk each side of its frame. */
+export const THUMBNAIL_MARGIN_BYTES = 8388608;
+
+/** The share of a large file a thumbnail needs on disk each side of its frame. */
+export const THUMBNAIL_MARGIN_SHARE = 0.02;
+
+/** The share of a video at its end that counts as credits. */
+export const FINISHED_SHARE = 0.03;
+
+/** Seconds at the end of a video that count as credits. */
+export const FINISHED_WITHIN = 20;
+

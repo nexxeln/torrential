@@ -90,10 +90,10 @@ export interface RemuxOptions {
 }
 
 /** Seconds buffered ahead of the playhead before reading the stream pauses. */
-const AHEAD = 60;
+const BUFFER_AHEAD = 60;
 const LEAST_AHEAD = 8;
 /** Seconds kept behind the playhead for short seeks back. */
-const BEHIND = 45;
+const BUFFER_BEHIND = 45;
 /** A seek this close past the buffered end waits for the running stream instead of starting another. */
 const NEARLY = 10;
 /** Rapid seeks, as from a held arrow key, settle for this long before a stream starts. */
@@ -126,7 +126,7 @@ export class RemuxSource implements Source {
   private stream = { start: 0, ended: false };
   /** Where the last stream stopped short of the end, to tell a retry that makes no progress. */
   private shortAt: number | null = null;
-  private ahead = AHEAD;
+  private ahead = BUFFER_AHEAD;
   private settle: ReturnType<typeof setTimeout> | undefined;
   private failed = false;
   /** Where playback begins, until the element has metadata and holds that time itself. */
@@ -366,7 +366,7 @@ export class RemuxSource implements Source {
       } catch (error) {
         const full = error instanceof DOMException && error.name === "QuotaExceededError";
         if (!full || attempt >= 20) throw error;
-        // The buffer holds less of a high-bitrate video than AHEAD seconds. Keep less, and wait for playback to use some.
+        // The buffer holds less of a high-bitrate video than BUFFER_AHEAD seconds. Keep less, and wait for playback to use some.
         this.ahead = Math.max(LEAST_AHEAD, Math.min(this.ahead, this.aheadNow()) * 0.7);
         await this.remove(buffer, 0, Math.max(0, this.element.currentTime - 5));
         while (current() && this.aheadNow() > this.ahead) await sleep(250);
@@ -395,8 +395,8 @@ export class RemuxSource implements Source {
 
   private async trim(buffer: SourceBuffer): Promise<void> {
     const { buffered, currentTime } = this.element;
-    if (buffered.length && buffered.start(0) < currentTime - BEHIND * 2) {
-      await this.remove(buffer, 0, currentTime - BEHIND);
+    if (buffered.length && buffered.start(0) < currentTime - BUFFER_BEHIND * 2) {
+      await this.remove(buffer, 0, currentTime - BUFFER_BEHIND);
     }
   }
 

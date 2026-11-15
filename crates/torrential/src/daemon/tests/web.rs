@@ -1034,6 +1034,8 @@ async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
     assert!(headers.contains("cache-control: private, max-age=3600\n"), "{headers}");
     assert_eq!(jpeg[..3], [0xff, 0xd8, 0xff], "a JPEG");
     assert_eq!(fetch(&h, "GET", &format!("/api/thumbnail?id={id}&file=0&t=10"), &[], "").await.2, jpeg);
+    let within = fetch(&h, "GET", &format!("/api/thumbnail?id={id}&file=0&t=11.5"), &[], "").await.2;
+    assert_eq!(within, jpeg, "a time in the same ten seconds shares the picture");
     let past_the_end = get(&h, &format!("/api/thumbnail?id={id}&file=0&t=12")).await;
     assert_eq!(
         error(&past_the_end),

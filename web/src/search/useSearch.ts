@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { type ApiError, asApiError, search, type SearchMessage, type SearchResult } from "../api";
+import { SEARCH_LIMIT } from "../wire";
 
 export type SearchState =
   | { kind: "idle" }
@@ -8,7 +9,6 @@ export type SearchState =
   | { kind: "done"; result: SearchResult }
   | { kind: "failed"; error: ApiError };
 
-const LIMIT = 50;
 
 /** Follows the search stream that `open` starts, and starts it again whenever `key` changes. A null key is idle. */
 export function useSearchStream(key: string | null, open: (signal: AbortSignal) => AsyncGenerator<SearchMessage>): SearchState {
@@ -48,6 +48,6 @@ export function useSearchStream(key: string | null, open: (signal: AbortSignal) 
 export function useSearch(query: string, everything: boolean): SearchState {
   const words = query.trim();
   return useSearchStream(words ? `${everything}:${words}` : null, (signal) =>
-    search(words, { category: everything ? undefined : "video", limit: LIMIT, signal }),
+    search(words, { category: everything ? undefined : "video", limit: SEARCH_LIMIT, signal }),
   );
 }

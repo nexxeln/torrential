@@ -28,7 +28,7 @@ const PIPE: usize = 64 * 1024;
 /// How much of what ffmpeg prints about a failure the engine keeps.
 const COMPLAINT: usize = 4 * 1024;
 /// How many runs `pieces` cuts a file into. The player's seek bar draws one mark for each.
-const RUNS: u32 = 200;
+pub(super) const RUNS: u32 = 200;
 
 /// A program to run, its arguments, and what to write to its stdin.
 type Conversion = (PathBuf, Vec<String>, Option<Vec<u8>>);
