@@ -332,6 +332,11 @@ fn play_starts_the_player_where_the_person_stopped() {
              http://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n"
         )
     );
+
+    let finished = r#"{"video": "tt0063350", "position": 5750.0, "duration": 5760.0}"#;
+    assert_eq!(post_to_web(player_port(&first), "/api/watched", finished), "HTTP/1.1 200 OK");
+    let again = home.json(&["play", "tt0063350", "--json"]);
+    assert_eq!(again["title"]["resume_at"], Value::Null, "a film watched to its credits starts at the beginning");
 }
 
 /// Plays the part of mpv at the socket in `argv`: says each of `said` and quits.

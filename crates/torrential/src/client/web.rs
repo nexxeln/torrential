@@ -6,9 +6,9 @@ use torrential_core::{Error, ErrorCode};
 use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
-use crate::env::Env;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
+use torrential_daemon::env::Env;
 
 #[derive(Serialize)]
 struct Web {
@@ -26,7 +26,7 @@ pub fn run(conn: &Conn, args: WebArgs, mode: Mode, env: &Env) -> Result<u8, Erro
     let url = format!("http://127.0.0.1:{}", conn.http_port);
     let opened = !args.no_open && mode != Mode::Json;
     if opened {
-        crate::player::open_url(&url, env)?;
+        torrential_daemon::player::open_url(&url, env)?;
     }
     let state = if opened { "opened in your browser" } else { "ready" };
     let doc = Doc {

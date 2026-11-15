@@ -7,18 +7,16 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::env::Env;
 use crate::fsutil::write_atomic;
 use crate::log::{log, persist};
-use crate::output::Mode;
 use crate::paths::Paths;
 
 pub mod release;
 
-pub(crate) const DAY: i64 = 24 * 60 * 60;
-pub(crate) const HOUR: i64 = 60 * 60;
+pub const DAY: i64 = 24 * 60 * 60;
+pub const HOUR: i64 = 60 * 60;
 pub(crate) const CHECKED: &str = "update.json";
-pub(crate) const UPDATED: &str = "updated.json";
+pub const UPDATED: &str = "updated.json";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Version {
@@ -80,11 +78,11 @@ pub struct Checked {
 }
 
 impl Checked {
-    pub(crate) fn read(paths: &Paths) -> Checked {
+    pub fn read(paths: &Paths) -> Checked {
         read_json(&paths.state.join(CHECKED)).unwrap_or_default()
     }
 
-    pub(crate) fn write(&self, paths: &Paths) {
+    pub fn write(&self, paths: &Paths) {
         write_json(&paths.state.join(CHECKED), self);
     }
 
@@ -110,9 +108,9 @@ pub fn due(last: Option<i64>, now: i64) -> bool {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Updated {
-    pub(crate) from: String,
-    pub(crate) to: String,
+pub struct Updated {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,16 +120,7 @@ pub enum Audience {
 }
 
 impl Audience {
-    pub fn of(mode: Mode, env: &Env, stderr_is_terminal: bool) -> Option<Audience> {
-        match mode {
-            Mode::Json => None,
-            _ if env.agent().is_some() => Some(Audience::Agent),
-            _ if stderr_is_terminal => Some(Audience::Person),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn out(self, current: &str, latest: Version) -> String {
+    pub fn out(self, current: &str, latest: Version) -> String {
         let news =
             format!("torrential {latest} is available (you have {current}). Run torrential update to install it.");
         match self {
@@ -140,14 +129,14 @@ impl Audience {
         }
     }
 
-    pub(crate) fn updated(self, from: &str, to: &str) -> String {
+    pub fn updated(self, from: &str, to: &str) -> String {
         match self {
             Self::Person => format!("Updated torrential to {to}."),
             Self::Agent => format!("# updated torrential from {from} to {to}"),
         }
     }
 
-    pub(crate) fn notice_file(self, paths: &Paths) -> PathBuf {
+    pub fn notice_file(self, paths: &Paths) -> PathBuf {
         let name = match self {
             Self::Person => "update-notice-person",
             Self::Agent => "update-notice-agent",
@@ -158,7 +147,7 @@ impl Audience {
 
 /// The record at `path`, or `None` when there is none. One that cannot be read is logged and
 /// read as none, so the next write replaces it.
-pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -258,12 +247,7 @@ mod tests {
 
     #[test]
     fn people_and_agents_get_their_own_lines() {
-        let env = |pairs: &[(&str, &str)]| Env::from_pairs(pairs.iter().copied());
         let latest = version("0.1.1");
-        assert_eq!(Audience::of(Mode::Json, &env(&[("CLAUDECODE", "1")]), true), None);
-        assert_eq!(Audience::of(Mode::Plain, &env(&[("CLAUDECODE", "1")]), false), Some(Audience::Agent));
-        assert_eq!(Audience::of(Mode::Human, &env(&[]), true), Some(Audience::Person));
-        assert_eq!(Audience::of(Mode::Plain, &env(&[]), false), None);
         assert_eq!(
             Audience::Person.out("0.1.0", latest),
             "torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it."

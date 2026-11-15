@@ -3244,12 +3244,45 @@ dependencies = [
  "clap",
  "clap_complete",
  "ctrlc",
+ "flate2",
+ "globset",
+ "httparse",
+ "indicatif",
+ "insta",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "torrential-core",
+ "torrential-daemon",
+ "torrential-engine",
+ "torrential-search",
+ "torrential-tui",
+ "url",
+]
+
+[[package]]
+name = "torrential-core"
+version = "0.5.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
+name = "torrential-daemon"
+version = "0.5.1"
+dependencies = [
+ "clap",
  "dirs",
  "flate2",
  "getrandom 0.3.4",
  "globset",
  "httparse",
- "indicatif",
  "insta",
  "libc",
  "lzma-rust2",
@@ -3270,18 +3303,8 @@ dependencies = [
  "torrential-core",
  "torrential-engine",
  "torrential-search",
- "torrential-tui",
  "ts-rs",
  "url",
-]
-
-[[package]]
-name = "torrential-core"
-version = "0.5.1"
-dependencies = [
- "serde",
- "serde_json",
- "ts-rs",
 ]
 
 [[package]]

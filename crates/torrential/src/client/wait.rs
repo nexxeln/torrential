@@ -11,11 +11,11 @@ use torrential_core::{Error, ErrorCode, Job, JobStatus, TorrentId};
 use super::connect::{self, Conn};
 use super::rows::{job_row, next_for_stopped, short_ids};
 use crate::cli::Until;
-use crate::env::Env;
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, json_document, json_line};
-use crate::paths::Paths;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(100);
 const HUMAN_HEARTBEAT: Duration = Duration::from_secs(240);
@@ -418,8 +418,8 @@ impl WaitEnd {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Done | Self::Metadata => 0,
-            Self::Timeout | Self::Stopped { .. } => crate::exit::PENDING,
-            Self::Failed { .. } => crate::exit::DOWNLOAD,
+            Self::Timeout | Self::Stopped { .. } => torrential_daemon::exit::PENDING,
+            Self::Failed { .. } => torrential_daemon::exit::DOWNLOAD,
         }
     }
 

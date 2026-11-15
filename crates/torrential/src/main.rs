@@ -1,26 +1,9 @@
 mod cli;
 mod client;
 mod completions;
-mod config;
-mod daemon;
-mod disk;
-mod env;
-mod exit;
-mod ffmpeg;
-mod fsutil;
-mod log;
-mod machine;
 mod output;
-mod paths;
-mod playback;
-mod player;
-mod qr;
 mod schema;
-mod selection;
-mod service;
 mod skill;
-mod update;
-mod wire;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -30,11 +13,12 @@ use clap_complete::CompleteEnv;
 use torrential_core::{Error, ErrorCode};
 
 use cli::{Cli, Command, DaemonCommand};
-use env::Env;
 use output::Mode;
 use output::theme::{Token, paint};
-use paths::Paths;
-use update::Audience;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
+use torrential_daemon::update::Audience;
+use torrential_daemon::{daemon, service};
 
 const SHORT_HELP: &str = "torrential searches torrent indexes and downloads torrents.
 
@@ -70,7 +54,7 @@ fn main() -> ExitCode {
             let json = args.iter().any(|a| a == "--json");
             let mode = Mode::detect(json, stdout_is_terminal, &env);
             client::print_error(mode, &usage_error(&e, &args));
-            return ExitCode::from(crate::exit::code(ErrorCode::Usage));
+            return ExitCode::from(torrential_daemon::exit::code(ErrorCode::Usage));
         }
     };
     let Some(command) = cli.command else {
@@ -101,7 +85,7 @@ fn engine(service: bool, http_port: Option<u16>, mode: Mode, env: &Env) -> u8 {
         Ok(_) => daemon::run(env, service, http_port),
         Err(error) => {
             client::print_error(mode, &error);
-            crate::exit::code(error.code)
+            torrential_daemon::exit::code(error.code)
         }
     }
 }
@@ -118,10 +102,21 @@ fn usage_error(e: &clap::Error, args: &[String]) -> Error {
     Error::new(ErrorCode::Usage, message).with_hint(hint.clone()).with_next(hint)
 }
 
+/// Who reads the notices after a command: no one when it prints JSON, an agent when one runs
+/// torrential, and a person at a terminal.
+fn audience(mode: Mode, env: &Env, stderr_is_terminal: bool) -> Option<Audience> {
+    match mode {
+        Mode::Json => None,
+        _ if env.agent().is_some() => Some(Audience::Agent),
+        _ if stderr_is_terminal => Some(Audience::Person),
+        _ => None,
+    }
+}
+
 /// Prints, after a command, that the engine added the login service and that an update is
 /// out, each once.
 fn print_notices(mode: Mode, env: &Env) {
-    let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
+    let Some(audience) = audience(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
     let lines = [
         service::notice(&paths, audience),
@@ -132,5 +127,19 @@ fn print_notices(mode: Mode, env: &Env) {
             Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),
             Audience::Agent => eprintln!("{line}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_has_no_notices_and_agents_get_theirs_without_a_terminal() {
+        let env = |pairs: &[(&str, &str)]| Env::from_pairs(pairs.iter().copied());
+        assert_eq!(audience(Mode::Json, &env(&[("CLAUDECODE", "1")]), true), None);
+        assert_eq!(audience(Mode::Plain, &env(&[("CLAUDECODE", "1")]), false), Some(Audience::Agent));
+        assert_eq!(audience(Mode::Human, &env(&[]), true), Some(Audience::Person));
+        assert_eq!(audience(Mode::Plain, &env(&[]), false), None);
     }
 }

@@ -14,7 +14,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 use torrential_core::protocol::{encode_frame, read_frame};
 
-#[path = "../../src/env/hooks.rs"]
+#[path = "../../../daemon/src/env/hooks.rs"]
 pub mod hooks;
 
 /// The machine every engine in these tests runs on, so none probes the real one.

@@ -7,8 +7,8 @@ use torrential_core::error::Details;
 use torrential_core::protocol::SCHEMA_VERSION;
 use torrential_core::text::sanitize;
 
-use crate::env::Env;
 use theme::{Token, paint};
+use torrential_daemon::env::Env;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {

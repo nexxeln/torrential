@@ -13,7 +13,7 @@ use crate::cli::DevicesCommand;
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::qr::qr;
+use torrential_daemon::qr::qr;
 
 pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Result<u8, Error> {
     let request = match command {

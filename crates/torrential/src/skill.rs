@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use torrential_core::error::Details;
 use torrential_core::{Error, ErrorCode};
 
-use crate::env::Env;
-use crate::fsutil::{Writes, sha256, temporary, write_atomic};
 use crate::output::format;
+use torrential_daemon::env::Env;
+use torrential_daemon::fsutil::{Writes, sha256, temporary, write_atomic};
 
 pub const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
 const FILE: &str = "SKILL.md";
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn a_blocked_write_in_a_sandbox_names_the_command_for_the_human() {
         use std::os::unix::fs::PermissionsExt;
-        if crate::paths::uid() == 0 {
+        if torrential_daemon::paths::uid() == 0 {
             return;
         }
         let home = Home::new();

@@ -41,14 +41,12 @@ impl Env {
         Self { vars: std::env::vars().collect(), executable: running_binary() }
     }
 
-    #[cfg(test)]
     pub fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         let vars = pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         Self { vars, executable: running_binary() }
     }
 
     /// This environment as one whose torrential binary is at `path`.
-    #[cfg(test)]
     pub fn with_executable(self, path: &Path) -> Self {
         Self { executable: Ok(path.to_path_buf()), ..self }
     }

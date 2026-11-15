@@ -19,7 +19,7 @@ use crate::daemon::media::tracks::{Audio, Chapter, Media, Subtitle, Video};
 use crate::ffmpeg::fetch::Readiness;
 
 const HEADER: &str = "// The engine's JSON, as the Rust types that write it describe it. `cargo test` writes this file\n\
-// from crates/core and crates/torrential/src/daemon/web, and fails when it was out of date.\n\n";
+// from crates/core and crates/daemon/src/daemon/web, and fails when it was out of date.\n\n";
 
 /// The web app's wire types: core's, then the engine's own, each declared once.
 fn declarations(cfg: &Config) -> Vec<String> {

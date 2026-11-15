@@ -27,18 +27,18 @@ use torrential_core::protocol::{FilesReply, JobAction, Request, Response};
 use torrential_core::{Error, ErrorCode, Job, Target};
 
 use crate::cli::Command;
-use crate::env::Env;
 use crate::output::{self, DocKind, Mode, Typed, render};
-use crate::paths::Paths;
 use connect::Conn;
 use torrential_core::protocol::METADATA_WAIT;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
 
 pub fn run(command: Command, mode: Mode, env: &Env) -> u8 {
     match dispatch(command, mode, env) {
         Ok(exit) => exit,
         Err(error) => {
             print_error(mode, &error);
-            crate::exit::code(error.code)
+            torrential_daemon::exit::code(error.code)
         }
     }
 }

@@ -1,5 +1,5 @@
 // The engine's JSON, as the Rust types that write it describe it. `cargo test` writes this file
-// from crates/core and crates/torrential/src/daemon/web, and fails when it was out of date.
+// from crates/core and crates/daemon/src/daemon/web, and fails when it was out of date.
 
 export type ErrorCode = "usage" | "confirmation_required" | "invalid_ref" | "invalid_torrent" | "not_found" | "ambiguous_ref" | "job_conflict" | "path_conflict" | "providers_unavailable" | "metadata_timeout" | "network_unavailable" | "fetch_failed" | "sandbox_network_blocked" | "sandbox_write_blocked" | "daemon_unavailable" | "daemon_version" | "state_corrupt" | "disk_full" | "too_large" | "no_selection" | "storage_error" | "verification_failed" | "no_source" | "interrupted" | "not_paired" | "local_only" | "internal";
 

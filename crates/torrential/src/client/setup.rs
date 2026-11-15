@@ -7,14 +7,14 @@ use torrential_core::units::size_text;
 use torrential_core::{Error, Preferences, Profile};
 
 use crate::cli::{Limit, PlaybackArg, ScreenArg, SetupArgs};
-use crate::config;
-use crate::config::Policy;
-use crate::env::Env;
-use crate::fsutil::Writes;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc};
 use crate::output::{DocKind, Mode, Typed};
-use crate::paths::Paths;
+use torrential_daemon::config;
+use torrential_daemon::config::Policy;
+use torrential_daemon::env::Env;
+use torrential_daemon::fsutil::Writes;
+use torrential_daemon::paths::Paths;
 
 torrential_core::words! {
     /// What `setup` did with the settings it was given.
@@ -59,7 +59,8 @@ pub fn run(args: SetupArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
         result = if changed { Setup::Saved } else { Setup::Unchanged };
     }
     let file = config::file(&paths)?;
-    let profile = Profile { detected: Some(crate::machine::detect(env)?), preferences: wanted, ..Profile::default() };
+    let profile =
+        Profile { detected: Some(torrential_daemon::machine::detect(env)?), preferences: wanted, ..Profile::default() };
     let doc = setup(&profile, updates, &file, result);
     let report = Report { result, profile: &profile, updates, file: file.display().to_string() };
     Ok(super::emit(mode, &doc, &Typed { kind: DocKind::Setup, body: report }))

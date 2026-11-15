@@ -5,8 +5,8 @@ use torrential_core::protocol::Request;
 use crate::cli::Shell;
 use crate::client::connect;
 use crate::client::rows::short_ids;
-use crate::env::Env;
-use crate::paths::Paths;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
 
 pub fn complete_download_ids() -> Vec<CompletionCandidate> {
     let env = Env::from_process();
