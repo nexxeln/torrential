@@ -581,8 +581,8 @@ MissingCounts Session::missing_pieces(rust::Slice<const std::uint8_t> id) const 
   return r;
 }
 
-bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
-                         std::uint64_t length) {
+std::uint64_t Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
+                                  std::uint64_t length) {
   lt::torrent_handle const h = find_with_metadata(id);
   auto const ti = h.torrent_file();
   lt::file_storage const& fs = ti->layout();
@@ -592,11 +592,15 @@ bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file,
   lt::piece_index_t const last = fs.map_file(f, static_cast<std::int64_t>(end - 1), 0).piece;
   lt::piece_index_t const file_last = fs.map_file(f, fs.file_size(f) - 1, 0).piece;
   Written const written_piece(h);
-  bool written = true;
+  // The bytes from `offset` on that the file holds, up to the first piece not yet written.
+  std::uint64_t written = end;
   int deadline_ms = 0;
   for (lt::piece_index_t p = first; p <= last; ++p) {
     if (written_piece(p)) continue;
-    written = false;
+    if (written == end) {
+      std::int64_t const piece_start = static_cast<std::int64_t>(static_cast<int>(p)) * fs.piece_length();
+      written = std::max(offset, static_cast<std::uint64_t>(std::max<std::int64_t>(piece_start - fs.file_offset(f), 0)));
+    }
     h.set_piece_deadline(p, deadline_ms);
     deadline_ms += 100;
   }
@@ -606,7 +610,7 @@ bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file,
   // and then returns to where it plays, and a range of one piece would leave
   // every other peer picking at random.
   if (last < file_last) h.set_sequential_range(first, file_last);
-  return written;
+  return written - offset;
 }
 
 rust::Vec<PieceCounts> Session::written_pieces(rust::Slice<const std::uint8_t> id, std::uint32_t file,
@@ -762,6 +766,12 @@ rust::Vec<AlertRecord> Session::wait_alerts(std::uint32_t timeout_ms) {
     if (keep) out.push_back(std::move(r));
   }
   return out;
+}
+
+void Session::set_alert_notify(rust::Box<AlertWaker> waker) {
+  // libtorrent may call this until the session is gone, so the call owns the waker.
+  auto const shared = std::make_shared<rust::Box<AlertWaker>>(std::move(waker));
+  session_.set_alert_notify([shared] { wake(**shared); });
 }
 
 std::unique_ptr<Session> new_session(SessionSettings const& settings) {

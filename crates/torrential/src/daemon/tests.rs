@@ -376,6 +376,10 @@ impl<E: Engine> Engine for Gated<E> {
         self.port.port()
     }
 
+    fn notify(&mut self, wake: Box<dyn Fn() + Send + Sync>) -> bool {
+        self.port.notify(wake)
+    }
+
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         let events = self.port.poll(max_wait);
         let (closed, held) = &mut *self.gate.state.lock().unwrap();

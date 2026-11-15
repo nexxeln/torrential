@@ -23,9 +23,9 @@ fn a_wanted_range_is_written_before_most_of_the_file() {
     add.peers = vec![seeder.addr()];
     let id = leecher.add(add);
     let (file, offset, length) = (FileIndex::new(0), 1_300_000, 100_000);
-    assert!(!leecher.session.want_range(id, file, offset, length).unwrap(), "nothing has arrived yet");
+    assert_eq!(leecher.session.want_range(id, file, offset, length).unwrap(), 0, "nothing has arrived yet");
     let deadline = Instant::now() + TIMEOUT;
-    while !leecher.session.want_range(id, file, offset, length).unwrap() {
+    while leecher.session.want_range(id, file, offset, length).unwrap() < length {
         assert!(Instant::now() < deadline, "the range never arrived");
         leecher.idle(Duration::from_millis(50));
     }
@@ -62,7 +62,7 @@ fn the_written_pieces_of_a_file_are_counted_without_asking_for_any() {
     // The middle of the film arrives first, as when a player seeks there.
     let (offset, length) = (1_300_000, 100_000);
     let deadline = Instant::now() + TIMEOUT;
-    while !leecher.session.want_range(id, film, offset, length).unwrap() {
+    while leecher.session.want_range(id, film, offset, length).unwrap() < length {
         assert!(Instant::now() < deadline, "the range never arrived");
         leecher.idle(Duration::from_millis(50));
     }

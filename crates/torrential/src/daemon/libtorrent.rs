@@ -464,7 +464,7 @@ impl EnginePort for Libtorrent {
         Ok(self.verified_bytes(id)?.1)
     }
 
-    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<u64, Error> {
         let index = self.torrents.get(&id).and_then(|t| t.files.as_ref()?.get(file as usize).copied());
         let index = index.ok_or_else(|| Error::internal(format!("the engine has no file {file} in torrent {id}")))?;
         self.session.want_range(id, index, offset, length).map_err(engine_error)
@@ -501,6 +501,11 @@ impl EnginePort for Libtorrent {
 impl Engine for Libtorrent {
     fn port(&mut self) -> &mut dyn EnginePort {
         self
+    }
+
+    fn notify(&mut self, wake: Box<dyn Fn() + Send + Sync>) -> bool {
+        self.session.notify(wake);
+        true
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {

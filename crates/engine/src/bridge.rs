@@ -181,6 +181,11 @@ pub(crate) mod ffi {
         bytes: Vec<u8>,
     }
 
+    extern "Rust" {
+        type AlertWaker;
+        fn wake(waker: &AlertWaker);
+    }
+
     unsafe extern "C++" {
         include!("torrential-engine/cpp/shim.h");
 
@@ -204,7 +209,7 @@ pub(crate) mod ffi {
         fn status(self: &Session, id: &[u8]) -> Result<StatusRecord>;
         fn piece_slices(self: &Session, id: &[u8], slices: u32) -> Result<Vec<PieceCounts>>;
         fn missing_pieces(self: &Session, id: &[u8]) -> Result<MissingCounts>;
-        fn want_range(self: Pin<&mut Session>, id: &[u8], file: u32, offset: u64, length: u64) -> Result<bool>;
+        fn want_range(self: Pin<&mut Session>, id: &[u8], file: u32, offset: u64, length: u64) -> Result<u64>;
         fn written_pieces(
             self: &Session,
             id: &[u8],
@@ -218,6 +223,7 @@ pub(crate) mod ffi {
         fn save_state(self: &Session) -> Result<Vec<u8>>;
         fn listen_port(self: &Session) -> Result<u16>;
         fn wait_alerts(self: Pin<&mut Session>, timeout_ms: u32) -> Result<Vec<AlertRecord>>;
+        fn set_alert_notify(self: Pin<&mut Session>, waker: Box<AlertWaker>);
 
         fn parse_magnet(uri: &str) -> Result<ParsedTorrent>;
         fn parse_metainfo(bytes: &[u8]) -> Result<ParsedTorrent>;
@@ -225,6 +231,13 @@ pub(crate) mod ffi {
         fn create_torrent(path: &str, piece_size: u32, hybrid: bool) -> Result<Vec<u8>>;
         fn native_path(path: &[u8]) -> Vec<u8>;
     }
+}
+
+/// What libtorrent calls, on its own thread, when alerts arrive while none were waiting.
+pub(crate) struct AlertWaker(pub(crate) Box<dyn Fn() + Send + Sync>);
+
+fn wake(waker: &AlertWaker) {
+    (waker.0)();
 }
 
 // SAFETY: lt::session has no thread affinity. Its calls are marshalled to

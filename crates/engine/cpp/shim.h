@@ -42,6 +42,7 @@ struct AlertRecord;
 struct PriorityRecord;
 struct PieceCounts;
 struct MissingCounts;
+struct AlertWaker;
 
 class Session {
  public:
@@ -67,13 +68,14 @@ class Session {
   MissingCounts missing_pieces(rust::Slice<const std::uint8_t> id) const;
   rust::Vec<PieceCounts> written_pieces(rust::Slice<const std::uint8_t> id, std::uint32_t file,
                                         std::uint64_t offset, std::uint64_t length, std::uint32_t runs) const;
-  bool want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
-                  std::uint64_t length);
+  std::uint64_t want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
+                           std::uint64_t length);
   void download_in_order(rust::Slice<const std::uint8_t> id);
   void set_download_limit(rust::Slice<const std::uint8_t> id, std::uint32_t bytes_per_second);
   rust::Vec<std::uint8_t> save_state() const;
   std::uint16_t listen_port() const;
   rust::Vec<AlertRecord> wait_alerts(std::uint32_t timeout_ms);
+  void set_alert_notify(rust::Box<AlertWaker> waker);
 
  private:
   lt::torrent_handle find(rust::Slice<const std::uint8_t> id) const;

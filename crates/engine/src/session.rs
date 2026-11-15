@@ -180,16 +180,11 @@ impl Session {
     }
 
     /// Needs metadata. Asks peers for the pieces under `length` bytes of `file` from `offset` before
-    /// any other piece, the earliest first, then for the rest of the file in order. True once every
-    /// one of them is verified and written, so reading that range of the file returns the torrent's
-    /// bytes. Ask again until then: each call renews the request.
-    pub fn want_range(
-        &mut self,
-        id: TorrentId,
-        file: FileIndex,
-        offset: u64,
-        length: u64,
-    ) -> Result<bool, EngineError> {
+    /// any other piece, the earliest first, then for the rest of the file in order. Answers how many
+    /// bytes from `offset` on are verified and written, so reading them from the file returns the
+    /// torrent's bytes: all of the range once every piece under it is. Ask again until then: each
+    /// call renews the request.
+    pub fn want_range(&mut self, id: TorrentId, file: FileIndex, offset: u64, length: u64) -> Result<u64, EngineError> {
         let r = self.native.pin_mut().want_range(id.as_bytes(), file.get(), offset, length);
         r.map_err(|e| with_id(e, id))
     }
@@ -236,6 +231,13 @@ impl Session {
     pub fn listen_port(&self) -> Result<Option<u16>, EngineError> {
         let port = self.native.listen_port().map_err(bridge::error)?;
         Ok((port != 0).then_some(port))
+    }
+
+    /// Calls `wake`, on libtorrent's own thread, whenever alerts arrive while none were waiting, so
+    /// a thread can sleep until there is something to read. `wake` must only signal: it may not call
+    /// into the session.
+    pub fn notify(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        self.native.pin_mut().set_alert_notify(Box::new(bridge::AlertWaker(Box::new(wake))));
     }
 
     /// Waits up to `timeout` for alerts, then returns the queued ones this

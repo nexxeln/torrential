@@ -647,26 +647,33 @@ impl Connection<'_> {
         while offset < end {
             let length = CHUNK.min(end - offset);
             lease.waiting(offset);
-            if !complete {
-                complete = self.arrived(id, index, offset, length).await?;
-            }
+            let ready = if complete {
+                length
+            } else {
+                match self.arrived(id, index, offset, length).await? {
+                    Arrived::Bytes(bytes) => bytes,
+                    Arrived::Done => {
+                        complete = true;
+                        length
+                    }
+                }
+            };
             let disk = match &mut disk {
                 Some(disk) => disk,
                 None => disk.insert(tokio::fs::File::open(&file.path).await?),
             };
-            let chunk = &mut buf[..length as usize];
+            let chunk = &mut buf[..ready as usize];
             disk.seek(SeekFrom::Start(offset)).await?;
             disk.read_exact(chunk).await?;
             lease.writing(offset);
             self.wr.write_all(chunk).await?;
-            offset += length;
+            offset += ready;
         }
         Ok(())
     }
 
-    /// Waits until the engine has written `length` bytes at `offset`. True once the whole download
-    /// is done, which takes it out of the engine.
-    async fn arrived(&mut self, id: TorrentId, index: u32, offset: u64, length: u64) -> io::Result<bool> {
+    /// Waits until the engine has written bytes at `offset`, and says how many, up to `length`.
+    async fn arrived(&mut self, id: TorrentId, index: u32, offset: u64, length: u64) -> io::Result<Arrived> {
         let ctx = self.ctx;
         // A player that seeks closes this connection and opens another.
         tokio::select! {
@@ -676,16 +683,23 @@ impl Connection<'_> {
     }
 }
 
-/// Waits until the engine has written `length` bytes of a file at `offset`. True once the whole
-/// download is done, which takes it out of the engine.
-async fn arrived(ctx: &Ctx, id: TorrentId, index: u32, offset: u64, length: u64) -> io::Result<bool> {
+/// What the engine has written of a file at an offset.
+enum Arrived {
+    /// This many bytes from the offset on, at least one.
+    Bytes(u64),
+    /// The whole download is done, which takes it out of the engine, so every byte is on disk.
+    Done,
+}
+
+/// Waits until the engine has written bytes of a file at `offset`, up to `length` of them.
+async fn arrived(ctx: &Ctx, id: TorrentId, index: u32, offset: u64, length: u64) -> io::Result<Arrived> {
     let started = Instant::now();
     loop {
-        if matches!(ctx.engine.ask(move |e| e.want_range(id, index, offset, length)).await, Ok(true)) {
-            return Ok(false);
+        if let Ok(bytes @ 1..) = ctx.engine.ask(move |e| e.want_range(id, index, offset, length)).await {
+            return Ok(Arrived::Bytes(bytes));
         }
         match ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await {
-            Ok(file) if file.complete => return Ok(true),
+            Ok(file) if file.complete => return Ok(Arrived::Done),
             Ok(_) => {}
             Err(e) => return Err(io::Error::other(e.message)),
         }
@@ -711,8 +725,10 @@ pub async fn read(
     let mut offset = start;
     while offset < end && !complete {
         let length = CHUNK.min(end - offset);
-        complete = arrived(ctx, id, index, offset, length).await?;
-        offset += length;
+        match arrived(ctx, id, index, offset, length).await? {
+            Arrived::Bytes(bytes) => offset += bytes,
+            Arrived::Done => complete = true,
+        }
     }
     let mut disk = tokio::fs::File::open(&file.path).await?;
     disk.seek(SeekFrom::Start(start)).await?;
