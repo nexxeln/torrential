@@ -6,6 +6,7 @@ pub mod filetype;
 pub mod id;
 pub mod job;
 pub mod media;
+pub mod name;
 pub mod preferences;
 pub mod profile;
 pub mod protocol;

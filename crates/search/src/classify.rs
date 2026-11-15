@@ -1,4 +1,4 @@
-use torrential_core::Category;
+use torrential_core::{Category, name};
 
 use crate::terms::Terms;
 
@@ -29,17 +29,16 @@ pub(crate) fn is_cam(name: &str, category: Option<Category>) -> bool {
     if category.is_some_and(|c| c != Category::Video) {
         return false;
     }
-    let tokens: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).collect();
     let mut after_year = false;
     let mut previous = "";
-    for token in tokens {
+    for token in name::words(name) {
         if CAM_ANY_CASE.contains(&token.to_ascii_lowercase().as_str()) {
             return true;
         }
         if after_year && CAM_AFTER_YEAR.contains(&token) && !previous.eq_ignore_ascii_case("mpeg") {
             return true;
         }
-        after_year |= token.len() == 4 && token.parse::<u16>().is_ok_and(|y| (1900..=2099).contains(&y));
+        after_year |= name::year(token).is_some();
         previous = token;
     }
     false
@@ -68,8 +67,7 @@ const EXTRAS: [&[&str]; 16] = [
 /// Whether a name is a trailer, a clip, or another extra rather than the work itself. Words
 /// the query holds do not count, so Trailer Park Boys is no trailer.
 pub(crate) fn is_extra(name: &str, terms: &Terms) -> bool {
-    let words: Vec<String> =
-        name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let words: Vec<String> = name::words(name).map(str::to_lowercase).collect();
     let asked = |extra: &[&str]| extra.iter().all(|word| terms.words().iter().any(|own| own == word));
     EXTRAS
         .iter()
@@ -78,7 +76,7 @@ pub(crate) fn is_extra(name: &str, terms: &Terms) -> bool {
 }
 
 pub(crate) fn is_adult(name: &str) -> bool {
-    name.split(|c: char| !c.is_alphanumeric()).any(|t| ADULT.contains(&t.to_lowercase().as_str()))
+    name::words(name).any(|t| ADULT.contains(&t.to_lowercase().as_str()))
 }
 
 #[cfg(test)]

@@ -83,8 +83,6 @@ impl fmt::Debug for TorznabConfig {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct SourceInfo {
     pub name: String,
-    /// Searched when a query names no sources.
-    pub default_on: bool,
     /// A catalog of content its publishers share, ranked ahead of general indexes.
     pub lawful: bool,
 }
@@ -121,11 +119,7 @@ impl Search {
 
     /// Every enabled source, most authoritative first.
     pub fn sources(&self) -> Vec<SourceInfo> {
-        self.inner
-            .sources
-            .iter()
-            .map(|s| SourceInfo { name: s.meta.name.clone(), default_on: s.default_on, lawful: s.meta.lawful })
-            .collect()
+        self.inner.sources.iter().map(|s| SourceInfo { name: s.meta.name.clone(), lawful: s.meta.lawful }).collect()
     }
 
     /// Returns by the query's deadline, ranked for the query's profile. A source that has
@@ -291,7 +285,7 @@ impl Search {
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {
         let all = &self.inner.sources;
         if names.is_empty() {
-            return Ok(all.iter().filter(|s| s.default_on).cloned().collect());
+            return Ok(all.clone());
         }
         let mut chosen: Vec<Arc<Source>> = Vec::new();
         for name in names {

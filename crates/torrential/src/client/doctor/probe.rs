@@ -30,7 +30,7 @@ pub fn checks(paths: &Paths, settings: Result<Config, Error>, network: bool) -> 
         None => format!("no {}; using the defaults", config::path(paths).display()),
     };
     let mut checks = vec![check(Checked::Config, CheckStatus::Ok, detail)];
-    let enabled: Vec<String> = search.sources().into_iter().filter(|s| s.default_on).map(|s| s.name).collect();
+    let enabled: Vec<String> = search.sources().into_iter().map(|s| s.name).collect();
     if !network {
         let detail = format!("{} enabled; run torrential doctor --network to test each one", enabled.len());
         checks.push(check(Checked::Sources, CheckStatus::Skipped, detail));

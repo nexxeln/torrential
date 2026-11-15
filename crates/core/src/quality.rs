@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::name;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
 pub struct Quality {
     /// `None` when the name carries no resolution tag.
@@ -73,11 +75,7 @@ impl Quality {
     /// The first resolution and codec tags in the name. Tags are whole words, so
     /// `x264aac` and a bare `HD` stay unknown.
     pub fn parse(name: &str) -> Quality {
-        let tokens: Vec<String> = name
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect();
+        let tokens = name::tags(name);
         let mut quality = Quality::default();
         let mut dolby_vision = false;
         for (i, token) in tokens.iter().enumerate() {
