@@ -7,11 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::Event as TermEvent;
-use torrential_core::protocol::Event;
+use torrential_core::protocol::{Event, JobAction};
 use torrential_core::{Error, ErrorCode};
 
 use crate::backend::Backend;
-use crate::state::{JobAction, State, Tone, Upgrade};
+use crate::state::{State, Tone, Upgrade};
 use crate::theme::ColorMode;
 use crate::update::{Effect, Msg};
 use crate::view;
@@ -223,9 +223,7 @@ fn perform<B: Backend>(effect: Effect, backend: &Arc<B>, tx: &Sender<Msg>) {
             });
         }
         Effect::Open(path) => {
-            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-            let _ =
-                Command::new(opener).arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            let _ = backend.open(&path);
         }
         Effect::Copy(text) => copy(&text),
         Effect::SavePreferences(edit) => {

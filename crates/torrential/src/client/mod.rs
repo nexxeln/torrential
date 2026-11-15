@@ -23,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use torrential_core::protocol::{FilesReply, Request, Response};
+use torrential_core::protocol::{FilesReply, JobAction, Request, Response};
 use torrential_core::{Error, ErrorCode, Job, Target};
 
 use crate::cli::Command;
@@ -109,28 +109,20 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
                 _ => wait::run(following, refs, args.until, timeout, &wait::Printer { mode }),
             }
         }
-        Command::Pause(args) => changes::run(
-            engine()?,
-            Request::Pause { refs: job_refs(&args.references, &cwd)? },
-            changes::ChangeCommand::Pause,
-            mode,
-        ),
+        Command::Pause(args) => {
+            changes::run(engine()?, Request::Pause { refs: job_refs(&args.references, &cwd)? }, JobAction::Pause, mode)
+        }
         Command::Resume(args) => {
             let request = Request::Resume { refs: job_refs(&args.references, &cwd)?, all: args.all };
-            changes::run(engine()?, request, changes::ChangeCommand::Resume, mode)
+            changes::run(engine()?, request, JobAction::Resume, mode)
         }
         Command::Rm(args) => {
             let request = Request::Remove { refs: job_refs(&args.references, &cwd)?, delete: args.delete };
-            changes::run(engine()?, request, changes::ChangeCommand::Remove, mode)
+            changes::run(engine()?, request, JobAction::Remove, mode)
         }
         Command::Verify(args) => {
             let reference = job_refs(std::slice::from_ref(&args.reference), &cwd)?.remove(0);
-            changes::run(
-                engine()?,
-                Request::Verify { reference, repair: args.repair },
-                changes::ChangeCommand::Verify,
-                mode,
-            )
+            changes::run(engine()?, Request::Verify { reference, repair: args.repair }, JobAction::Verify, mode)
         }
         Command::Setup(args) => setup::run(args, mode, env),
         Command::Doctor(args) => Ok(doctor::run(env, mode, args.network)),

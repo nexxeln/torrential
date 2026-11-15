@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use torrential_core::{Error, ErrorCode};
 
-use crate::env::Env;
+use crate::env::{Env, hooks};
 
 /// The `player` key of config.yaml.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -114,6 +114,27 @@ pub fn find(choice: Option<&Choice>, env: &Env) -> Option<Player> {
         None if cfg!(target_os = "macos") => iina().or_else(mpv).or_else(vlc),
         None => mpv().or_else(vlc).or_else(|| on_path("xdg-open", env).map(|open| player(Kind::Opener, open))),
     }
+}
+
+/// Opens `url`, or a folder, in the default app. A test names a program in `OPENER` to run in its
+/// place.
+pub fn open_url(url: &str, env: &Env) -> Result<(), Error> {
+    let program = match env.test().and_then(|test| test.path(hooks::OPENER)) {
+        Some(program) => program.to_path_buf(),
+        None if cfg!(target_os = "macos") => PathBuf::from("/usr/bin/open"),
+        None => PathBuf::from("xdg-open"),
+    };
+    Command::new(&program)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|e| {
+            Error::new(ErrorCode::NotFound, format!("cannot open a browser with {}: {e}", program.display()))
+                .with_hint(format!("open {url} in your browser"))
+        })
 }
 
 /// The error for no player, which names the URL so any player can open it.

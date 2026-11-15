@@ -44,6 +44,8 @@ pub trait Backend: Send + Sync + 'static {
     /// Installs the latest torrential over this binary and returns its version, or `None` when
     /// this binary is already the latest.
     fn upgrade(&self) -> Result<Option<String>, Error>;
+    /// Opens a folder in the desktop's file manager.
+    fn open(&self, folder: &std::path::Path) -> Result<(), Error>;
     /// The films and episodes to go on with, and the saved titles.
     fn home(&self) -> Result<Home, Error>;
     /// Films and series named like `words`.

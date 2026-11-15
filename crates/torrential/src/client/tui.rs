@@ -157,6 +157,10 @@ impl torrential_tui::Backend for EngineBackend {
         })
     }
 
+    fn open(&self, folder: &Path) -> Result<(), Error> {
+        crate::player::open_url(&folder.display().to_string(), &self.env)
+    }
+
     fn home(&self) -> Result<Home, Error> {
         let home: Box<Home> = self.conn()?.ask(&Request::Home)?;
         Ok(*home)

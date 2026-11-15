@@ -15,7 +15,7 @@ use crate::format::{
 use crate::layout::{self, Block, Indent, MASTHEAD, SEARCH, Screen};
 use crate::state::{
     Engine, Files, Focus, Input, Item, Page, ROWS, RankedFor, Ranking, Row, SearchPhase, Sort, State, Tone, Upgrade,
-    label,
+    label, progressive,
 };
 use crate::theme::*;
 use crate::titles;
@@ -611,7 +611,7 @@ fn download_row(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, y: u16) {
     let room = why.as_ref().map_or(g.rule, |why| g.rule.min(bar_end.saturating_sub(width(why) as u16))) - 2 - content;
     put(buf, content, y, room, &format::name(&name, room.into()), ink);
     let pending =
-        state.pending.get(&job.id).map(|action| [(action.progressive(), fg(PENCIL)), (state.spinner(), fg(PENCIL))]);
+        state.pending.get(&job.id).map(|action| [(progressive(*action), fg(PENCIL)), (state.spinner(), fg(PENCIL))]);
     if let (Some(pending), None) = (&pending, g.tail) {
         spans(buf, g.rule, y, g.right - g.rule, pending);
         return;
