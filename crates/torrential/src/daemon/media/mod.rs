@@ -23,6 +23,9 @@ pub use tracks::Media;
 
 /// Files whose tracks are kept. Each is about a kilobyte.
 const PROBES_KEPT: usize = 256;
+/// ffmpeg prints its version at once. One that has not in this long converts unpaced this time
+/// and is asked again the next.
+const VERSION_WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
 /// A subtitle file is text. Anything larger is something else with a subtitle's name.
 const LARGEST_SUBTITLE_FILE: u64 = 16 * 1024 * 1024;
 
@@ -40,6 +43,8 @@ pub struct State {
     /// Thumbnails, by file and the start of the seconds each stands for.
     thumbnails: Mutex<Kept<(TorrentId, u32, u32), Made>>,
     thumbnailing: tokio::sync::Semaphore,
+    /// Whether each ffmpeg run here can pace its reading.
+    paces: Mutex<HashMap<PathBuf, bool>>,
 }
 
 impl State {
@@ -49,7 +54,24 @@ impl State {
             probes: Mutex::new(Kept::new(PROBES_KEPT)),
             thumbnails: Mutex::new(Kept::new(thumbnail::KEPT)),
             thumbnailing: tokio::sync::Semaphore::new(thumbnail::AT_ONCE),
+            paces: Mutex::default(),
         }
+    }
+
+    /// Whether the ffmpeg at `program` paces its reading. Each program is asked until it answers.
+    async fn paces(&self, program: &Path) -> bool {
+        if let Some(known) = self.paces.lock().expect("no holder panics").get(program) {
+            return *known;
+        }
+        let version =
+            tokio::process::Command::new(program).arg("-version").stdin(Stdio::null()).kill_on_drop(true).output();
+        let paces = match tokio::time::timeout(VERSION_WITHIN, version).await {
+            Ok(Ok(output)) => ffmpeg::paces(&String::from_utf8_lossy(&output.stdout)),
+            Ok(Err(_)) => false,
+            Err(_) => return false,
+        };
+        self.paces.lock().expect("no holder panics").insert(program.to_path_buf(), paces);
+        paces
     }
 }
 
@@ -147,7 +169,8 @@ pub async fn stream(
         ));
     }
     let url = http::url(ctx.http_port, id, index, &name);
-    Ok((program, ffmpeg::stream(&url, &media, t, audio, picture, Encoder::of_host()), None))
+    let paced = ctx.media.paces(&program).await;
+    Ok((program, ffmpeg::stream(&url, &media, t, audio, picture, Encoder::of_host(), paced), None))
 }
 
 /// The command that writes WebVTT of the subtitle track at `stream` inside file `index` of a
@@ -178,7 +201,8 @@ pub async fn subtitles(ctx: &Ctx, id: TorrentId, index: u32, stream: Option<u32>
         Some(_) => {}
     }
     let url = http::url(ctx.http_port, id, index, &name);
-    Ok((program, ffmpeg::embedded_subtitles(&url, stream, t), None))
+    let paced = ctx.media.paces(&program).await;
+    Ok((program, ffmpeg::embedded_subtitles(&url, stream, t, paced), None))
 }
 
 /// The file's name, which gives ffmpeg its extension.
