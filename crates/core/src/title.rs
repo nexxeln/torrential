@@ -941,6 +941,21 @@ mod tests {
     }
 
     #[test]
+    fn a_year_after_a_tag_or_between_bars_is_the_releases_year() {
+        let original = film_named("Night of the Living Dead", 1968, Namesakes::Leading);
+        let remake = film_named("Night of the Living Dead", 1990, Namesakes::Shadowed);
+        let year = |wanted: &Wanted, release| wanted.fit(release).map(|named| named.year);
+        // The first two as archive.org names them in tests/fixtures/archive.org.
+        let rows = [
+            ("Night Of The Living Dead 720p 1968", Some(Some(1968)), None),
+            ("Night of the Living Dead |1968| WebRip US (HD 1080p)", Some(Some(1968)), None),
+            ("Night.of.the.Living.Dead.720p.BluRay.x264.1990", None, Some(Some(1990))),
+        ];
+        let read = rows.map(|(release, ..)| (release, year(&original, release), year(&remake, release)));
+        assert_eq!(read, rows);
+    }
+
+    #[test]
     fn a_year_in_the_title_is_part_of_the_name() {
         let releases = [
             "Blade.Runner.2049.2017.2160p.UHD.BluRay.x265",

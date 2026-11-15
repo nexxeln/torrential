@@ -680,7 +680,8 @@ mod tests {
         let film = "night of the living dead 1968";
         assert_eq!(marked("Night Of The Living Dead ( 1968) Doblada Al Español FULL HD", film), ["es"]);
         assert_eq!(marked("Night Of The Living Dead ( 1968) English FULL HD", film), ["en"]);
-        assert_eq!(marked("Night Of The Living Dead (with spanish subtitles)", film), ["es"]);
+        assert_eq!(marked("Night Of The Living Dead (with spanish subtitles)", film), Vec::<String>::new());
+        assert_eq!(marked("Movie 2024 1080p English Subs", "movie"), Vec::<String>::new());
         assert_eq!(marked("Night of the Living Dead (1968) [colorised, 4k, 60FPS]", film), Vec::<String>::new());
         assert_eq!(marked("Big Buck Bunny (2008) German Blu-ray Disc", "big buck bunny"), ["de"]);
         assert_eq!(marked("Ubuntu Facile - Aprile 2015, [Pdf - Ita] [TNTVillage]", "ubuntu"), ["it"]);

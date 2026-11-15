@@ -285,6 +285,64 @@ mod tests {
         assert_eq!(line(&[], "tt0063350", &many), top);
     }
 
+    #[test]
+    fn a_download_here_takes_the_row_of_the_release_it_was_found_as() {
+        let dir = tempfile::tempdir().unwrap();
+        let titles = titles(&dir);
+        let listed = |id: ReleaseId, name: &str, source: &str| Release {
+            id,
+            name: name.into(),
+            size: Some(1_416_157_892),
+            seeders: Some(12),
+            leechers: None,
+            published: Some(1_294_411_507),
+            category: Some(Category::Video),
+            flags: [torrential_core::Flag::PublicDomain].into(),
+            sources: vec![source.into()],
+            magnet: None,
+            torrent_url: None,
+            info_url: None,
+            span: Some(Span::Film),
+            swarm: None,
+            failed: None,
+        };
+        let by_link = ReleaseId::Locator(torrential_core::LocatorId::from_bytes([5; 20]));
+        let by_hash = ReleaseId::Torrent(TorrentId::from_bytes([6; 20]));
+        let ranked = vec![
+            listed(by_link, "Night.of.the.Living.Dead.1968.720p.x264", "knaben"),
+            listed(by_hash, "Night Of The Living Dead (with spanish subtitles)", "archive.org"),
+            listed(ReleaseId::Torrent(TorrentId::from_bytes([7; 20])), "Night of the Living Dead (1968)", "archive.org"),
+        ];
+        let job = |n: u8, name: &str, release: ReleaseId| Job {
+            id: TorrentId::from_bytes([n; 20]),
+            info_hash: InfoHash::V1([n; 20]),
+            name: Some(name.into()),
+            dir: "/downloads".into(),
+            path: None,
+            status: JobStatus::Queued,
+            progress: Progress { size: Some(734_003_200), ..Progress::default() },
+            selection: Selection::All,
+            added_at: 0,
+            title: Some(TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: Some(release) }),
+            place: torrential_core::Place::Folder,
+        };
+        let jobs = [job(50, "Night.1968.720p", by_link), job(6, "NightOfTheLivingDeadwithSpanishSubtitles_595", by_hash)];
+        let line = titles.line(&jobs, &video("tt0063350"), ranked, Player::External, false);
+        let rows: Vec<(String, &str, Vec<String>, Option<u64>, Option<i64>)> = line
+            .iter()
+            .map(|r| (r.id.to_ref()[..2].to_string(), r.name.as_str(), r.sources.clone(), r.size, r.published))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("32".into(), "Night.of.the.Living.Dead.1968.720p.x264", vec!["knaben".into()], Some(734_003_200), Some(1_294_411_507)),
+                ("06".into(), "Night Of The Living Dead (with spanish subtitles)", vec!["archive.org".into()], Some(734_003_200), Some(1_294_411_507)),
+                ("07".into(), "Night of the Living Dead (1968)", vec!["archive.org".into()], Some(1_416_157_892), Some(1_294_411_507)),
+            ],
+            "each download here once, under the name, source, and age of the release it was found as"
+        );
+    }
+
     #[tokio::test]
     async fn a_series_plays_its_next_aired_episode_and_never_one_that_has_not_aired() {
         let dir = tempfile::tempdir().unwrap();
