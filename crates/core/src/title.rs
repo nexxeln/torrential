@@ -489,8 +489,8 @@ impl Reading {
                 reading.counted = number(0);
             }
         }
-        let year = (1..end).rev().find_map(|i| Some((i, year(&lower[i])?)));
-        match year {
+        let dated = (1..end).rev().find_map(|i| Some((i, year(&lower[i])?)));
+        match dated {
             Some((at, year)) => {
                 reading.year = Some(year);
                 reading.words = words(&tokens[..at]);
@@ -498,7 +498,11 @@ impl Reading {
                     reading.with_year = Some(words(&tokens[..end]));
                 }
             }
-            None => reading.words = words(&tokens[..end]),
+            // A year can follow the tags, as in `Night Of The Living Dead 720p 1968`.
+            None => {
+                reading.words = words(&tokens[..end]);
+                reading.year = lower[end..].iter().find_map(|token| year(token));
+            }
         }
         reading
     }
@@ -509,8 +513,8 @@ impl Reading {
     }
 }
 
-/// The name's words. Dots and underscores separate them, `[...]` is dropped, and `(...)` is
-/// dropped but for the first year in it, as in `(Howard Hawks, 1940)`. Also whether the name
+/// The name's words. Dots, underscores, and bars separate them, `[...]` is dropped, and `(...)`
+/// is dropped but for the first year in it, as in `(Howard Hawks, 1940)`. Also whether the name
 /// starts with a `[Group]`.
 fn tokens(name: &str) -> (Vec<String>, bool) {
     let grouped = name.trim_start().starts_with('[');
@@ -534,7 +538,7 @@ fn tokens(name: &str) -> (Vec<String>, bool) {
                 }
             }
             c if depth > 0 => held.push(c),
-            '.' | '_' | ',' | ':' => spaced.push(' '),
+            '.' | '_' | ',' | ':' | '|' => spaced.push(' '),
             c => spaced.push(c),
         }
     }
@@ -938,6 +942,21 @@ mod tests {
         ]
         .map(|(wanted, release)| wanted.fit(release).map(|n| n.span.to_string()));
         assert_eq!(read, [None, Some("film".into()), Some("s1e1".into())]);
+    }
+
+    #[test]
+    fn a_year_after_a_tag_or_between_bars_is_the_releases_year() {
+        let original = film_named("Night of the Living Dead", 1968, Namesakes::Leading);
+        let remake = film_named("Night of the Living Dead", 1990, Namesakes::Shadowed);
+        let year = |wanted: &Wanted, release| wanted.fit(release).map(|named| named.year);
+        // The first two as archive.org names them in tests/fixtures/archive.org.
+        let rows = [
+            ("Night Of The Living Dead 720p 1968", Some(Some(1968)), None),
+            ("Night of the Living Dead |1968| WebRip US (HD 1080p)", Some(Some(1968)), None),
+            ("Night.of.the.Living.Dead.720p.BluRay.x264.1990", None, Some(Some(1990))),
+        ];
+        let read = rows.map(|(release, ..)| (release, year(&original, release), year(&remake, release)));
+        assert_eq!(read, rows);
     }
 
     #[test]

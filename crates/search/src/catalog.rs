@@ -247,7 +247,8 @@ impl Catalog {
     /// Films and series named like `words`: the films and series IMDb suggests, in IMDb's order,
     /// then those Cinemeta lists that IMDb did not. Of Cinemeta's, titles whose normalized name is
     /// the words come first, then the rest, each group in Cinemeta's order with films and series
-    /// in turn. Answers when IMDb or either of Cinemeta's listings does. Empty when turned off.
+    /// in turn. When any title's name holds every word, only those are listed. Answers when IMDb
+    /// or either of Cinemeta's listings does. Empty when turned off.
     pub async fn search(&self, words: &str) -> Result<Vec<TitleCard>, Error> {
         if !self.online || words.trim().is_empty() {
             return Ok(Vec::new());
@@ -262,7 +263,7 @@ impl Catalog {
             return Err(failed("search IMDb or Cinemeta", e.clone()));
         }
         let listed = ranked(words, films.unwrap_or_default(), series.unwrap_or_default());
-        Ok(self.remember(merged(suggested.unwrap_or_default(), listed)))
+        Ok(self.remember(holding(words, merged(suggested.unwrap_or_default(), listed))))
     }
 
     /// The titles of `card`'s kind under its normalized name, `card` among them, in the order a
@@ -457,6 +458,21 @@ fn ranked(words: &str, films: Vec<Listed>, series: Vec<Listed>) -> Vec<Listed> {
     ranked
 }
 
+/// The titles of `listed` whose names hold every word of `words`: a word of the name starts with
+/// it, or it is the title's year. All of `listed` when none does, as for misspelled words, which
+/// IMDb's suggestions still guess at.
+fn holding(words: &str, listed: Vec<Listed>) -> Vec<Listed> {
+    let words = normalized(words);
+    let holds = |listed: &Listed| {
+        let name = normalized(&listed.card.name);
+        let year = listed.card.year.map(|year| year.to_string());
+        words
+            .split(' ')
+            .all(|word| name.split(' ').any(|named| named.starts_with(word)) || year.as_deref() == Some(word))
+    };
+    if listed.iter().any(holds) { listed.into_iter().filter(holds).collect() } else { listed }
+}
+
 /// IMDb's titles in IMDb's order, then Cinemeta's others in Cinemeta's. A title both list keeps
 /// IMDb's place and card, and Cinemeta's poster when IMDb names none.
 fn merged(imdb: Vec<Listed>, mut cinemeta: Vec<Listed>) -> Vec<Listed> {
@@ -524,6 +540,27 @@ mod tests {
 
     fn ids(listed: Vec<Listed>) -> Vec<String> {
         listed.into_iter().map(|listed| listed.card.id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_title_whose_name_misses_a_word_is_left_out_unless_every_title_does() {
+        let dated = |id, name, year| Listed {
+            card: TitleCard { year: Some(year), ..listed(id, Kind::Film, name).card },
+            poster: None,
+        };
+        let found = || {
+            vec![
+                listed("tt1727587", Kind::Film, "Sintel"),
+                dated("tt0816692", "Interstellar", 2014),
+                listed("tt1196946", Kind::Series, "The Mentalist"),
+                dated("tt0063350", "Night of the Living Dead", 1968),
+                dated("tt0100258", "Night of the Living Dead", 1990),
+            ]
+        };
+        assert_eq!(ids(holding("sintel", found())), ["tt1727587"]);
+        assert_eq!(ids(holding("SINT", found())), ["tt1727587"], "a word a name starts with, as it is typed");
+        assert_eq!(ids(holding("night living 1968", found())), ["tt0063350"], "a year is the title's");
+        assert_eq!(ids(holding("interstelar", found())).len(), 5, "a misspelling keeps the suggestions");
     }
 
     #[test]

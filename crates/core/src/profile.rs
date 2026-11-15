@@ -237,11 +237,20 @@ impl Language {
     }
 
     /// The languages a release name marks, as `Doblada Al Español` marks Spanish. Words
-    /// of the query do not count, so a search for The French Connection finds no French.
+    /// of the query do not count, so a search for The French Connection finds no French, and
+    /// neither do subtitles, as in `with spanish subtitles`.
     pub fn named_in(name: &str, query_words: &[String]) -> Vec<Language> {
+        const SUBTITLES: [&str; 5] = ["sub", "subs", "subbed", "subtitle", "subtitles"];
         let lower = name.to_lowercase();
-        let words: Vec<&str> =
-            lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !query_words.iter().any(|q| q == w)).collect();
+        let all: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let words: Vec<&str> = all
+            .iter()
+            .enumerate()
+            .filter(|(i, w)| {
+                !query_words.iter().any(|q| q == *w) && !all.get(i + 1).is_some_and(|next| SUBTITLES.contains(next))
+            })
+            .map(|(_, w)| *w)
+            .collect();
         MARKERS
             .iter()
             .filter(|(_, _, markers)| words.iter().any(|w| markers.contains(w)))
@@ -680,7 +689,8 @@ mod tests {
         let film = "night of the living dead 1968";
         assert_eq!(marked("Night Of The Living Dead ( 1968) Doblada Al Español FULL HD", film), ["es"]);
         assert_eq!(marked("Night Of The Living Dead ( 1968) English FULL HD", film), ["en"]);
-        assert_eq!(marked("Night Of The Living Dead (with spanish subtitles)", film), ["es"]);
+        assert_eq!(marked("Night Of The Living Dead (with spanish subtitles)", film), Vec::<String>::new());
+        assert_eq!(marked("Movie 2024 1080p English Subs", "movie"), Vec::<String>::new());
         assert_eq!(marked("Night of the Living Dead (1968) [colorised, 4k, 60FPS]", film), Vec::<String>::new());
         assert_eq!(marked("Big Buck Bunny (2008) German Blu-ray Disc", "big buck bunny"), ["de"]);
         assert_eq!(marked("Ubuntu Facile - Aprile 2015, [Pdf - Ita] [TNTVillage]", "ubuntu"), ["it"]);
