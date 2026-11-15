@@ -17,7 +17,7 @@ jobs:
   fmt:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup component add rustfmt
       - run: cargo fmt --all --check
 
@@ -27,7 +27,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The bun the flake's nixpkgs gives `nix develop`.
       - uses: oven-sh/setup-bun@v2
         with:
@@ -48,7 +48,7 @@ jobs:
             target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: ./.github/actions/toolchain
