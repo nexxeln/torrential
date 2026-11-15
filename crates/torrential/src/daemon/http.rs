@@ -17,7 +17,7 @@ use tokio::sync::{oneshot, watch};
 use torrential_core::filetype::FileType;
 use torrential_core::{ErrorCode, TorrentId};
 
-use super::cast::Dlna;
+use super::cast::{Dlna, HELLO};
 use super::ctx::Ctx;
 use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, Lease, StreamFile};
@@ -439,6 +439,10 @@ impl Connection<'_> {
     }
 
     async fn answer(&mut self, request: Request, asker: &Asker) -> io::Result<bool> {
+        if request.path == HELLO {
+            let hello = self.ctx.casts.hello().as_bytes();
+            return self.send("200 OK", "text/plain", "Cache-Control: no-store\r\n", hello, &request).await;
+        }
         match asker {
             Asker::Stranger { removed } => return web::devices::stranger(self, &request, *removed).await,
             Asker::Cast(_) if request.method == Method::Post => {
