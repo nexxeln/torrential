@@ -7,16 +7,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
 use serde_json::Value;
 use sha2::Digest;
 use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame, read_frame};
 use torrential_core::{Target, TorrentId};
 use torrential_engine as lt;
 
-#[allow(dead_code)]
-#[path = "../src/env/hooks.rs"]
-mod hooks;
+mod common;
+use common::{Home, hooks};
 
 const PIECE: u32 = 16 * 1024;
 const SLOW: Option<NonZeroU32> = NonZeroU32::new(256 * 1024);
@@ -25,62 +23,10 @@ const SLOW: Option<NonZeroU32> = NonZeroU32::new(256 * 1024);
 /// that gap.
 const RECONNECT: &str = "4m";
 
-struct Home {
-    dir: tempfile::TempDir,
-    peers: String,
-    save_resume_every: Option<&'static str>,
-    stall_after: Option<&'static str>,
-    /// The engine's `LANG`, which decides how libtorrent spells file names on disk on Linux.
-    lang: Option<&'static str>,
-}
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
 impl Home {
-    fn new(seeder: &Seeder) -> Self {
-        Self::seeded_by(&[seeder])
-    }
-
     fn seeded_by(seeders: &[&Seeder]) -> Self {
         let peers = seeders.iter().map(|s| s.addr.to_string()).collect::<Vec<_>>().join(",");
-        Self { dir: tempfile::tempdir().unwrap(), peers, save_resume_every: None, stall_after: None, lang: None }
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::cargo_bin("torrential").unwrap();
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::ENGINE] {
-            cmd.env_remove(key);
-        }
-        cmd.args(args)
-            .env("HOME", self.dir.path())
-            .env("TORRENTIAL_HOME", self.dir.path().join("th"))
-            .env(hooks::NETWORK, "loopback")
-            .env(hooks::PEERS, &self.peers)
-            .env(hooks::DISK, "roomy")
-            .timeout(Duration::from_secs(300));
-        if let Some(every) = self.save_resume_every {
-            cmd.env(hooks::SAVE_RESUME_EVERY, every);
-        }
-        if let Some(after) = self.stall_after {
-            cmd.env(hooks::STALL_AFTER, after);
-        }
-        if let Some(lang) = self.lang {
-            cmd.env("LANG", lang);
-        }
-        cmd
-    }
-
-    fn run(&self, args: &[&str]) -> Run {
-        let out = self.command(args).output().unwrap();
-        Run {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8(out.stdout).unwrap(),
-            stderr: String::from_utf8(out.stderr).unwrap(),
-        }
+        Home::new().with(hooks::PEERS, &peers).with(hooks::DISK, "roomy")
     }
 
     fn ok(&self, args: &[&str]) -> Value {
@@ -122,8 +68,10 @@ impl Home {
     }
 
     fn logged_addrs(&self) -> Vec<SocketAddr> {
-        let log = std::fs::read_to_string(self.dir.path().join("th/state/engine.log")).unwrap_or_default();
-        log.lines().filter_map(|l| l.split_once(" listening on ")?.1.strip_suffix(" (tcp)")?.parse().ok()).collect()
+        self.log()
+            .lines()
+            .filter_map(|l| l.split_once(" listening on ")?.1.strip_suffix(" (tcp)")?.parse().ok())
+            .collect()
     }
 
     fn downloads(&self) -> PathBuf {
@@ -135,12 +83,6 @@ impl Home {
         let mut args = vec!["get", target, "--dir", &dir];
         args.extend(extra);
         self.ok(&args)
-    }
-}
-
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]).output();
     }
 }
 
@@ -304,7 +246,7 @@ const BIG: [(&str, usize); 2] = [("a.bin", 1_200_000), ("b.bin", 900_000)];
 fn a_torrent_file_downloads_and_every_file_matches_its_source() {
     let fixture = Fixture::new("set", &SET, 1);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     let get = home.get(&fixture.torrent_file(), &[]);
     assert_eq!(get["reply"]["outcome"], "started", "{get:#}");
     let wait = home.run(&["wait", &fixture.short()]);
@@ -320,7 +262,7 @@ fn a_torrent_file_downloads_and_every_file_matches_its_source() {
 fn a_magnet_downloads_and_every_file_matches_its_source() {
     let fixture = Fixture::new("set", &SET, 2);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.magnet(), &[]);
     let wait = home.run(&["wait", &fixture.short()]);
     assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
@@ -334,7 +276,7 @@ fn a_magnet_downloads_and_every_file_matches_its_source() {
 fn a_files_glob_downloads_only_the_matching_files() {
     let fixture = Fixture::new("set", &SET, 3);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.magnet(), &["--files", "*.bin"]);
     let wait = home.run(&["wait", &fixture.short()]);
     assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
@@ -356,14 +298,14 @@ fn a_files_glob_downloads_only_the_matching_files() {
 fn a_removed_torrent_reuses_completed_files_without_a_peer() {
     let fixture = Fixture::new("set", &[("a.bin", 4 * PIECE as usize), ("b.bin", 4 * PIECE as usize)], 21);
     let seeder = Seeder::start(&fixture, None);
-    let mut home = Home::new(&seeder);
+    let mut home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &["--files", "a.bin"]);
     assert_eq!(home.run(&["wait", &fixture.short()]).code, 0);
     home.ok(&["rm", &fixture.short()]);
     home.ok(&["daemon", "stop"]);
     let before = snapshot(&home.downloads());
     drop(seeder);
-    home.peers.clear();
+    home.set(hooks::PEERS, "");
 
     home.get(&fixture.torrent_file(), &["--files", "a.bin"]);
     let wait = home.run(&["wait", &fixture.short(), "--timeout", "20s"]);
@@ -375,7 +317,7 @@ fn a_removed_torrent_reuses_completed_files_without_a_peer() {
     home.ok(&["rm", &fixture.short()]);
     home.ok(&["daemon", "stop"]);
     let seeder = Seeder::start(&fixture, None);
-    home.peers = seeder.addr.to_string();
+    home.set(hooks::PEERS, &seeder.addr.to_string());
     home.get(&fixture.magnet(), &["--files", "b.bin"]);
     let wait = home.run(&["wait", &fixture.short()]);
     assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
@@ -392,7 +334,7 @@ fn a_removed_torrent_reuses_completed_files_without_a_peer() {
 fn a_removed_partial_torrent_reuses_pieces_with_a_new_file_selection() {
     let fixture = Fixture::new("set", &[("a.bin", 1_200_000), ("b.bin", 900_000), ("docs/readme.txt", 70_000)], 22);
     let seeder = Seeder::start(&fixture, SLOW);
-    let mut home = Home::new(&seeder);
+    let mut home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.magnet(), &["--files", "*.bin"]);
     home.until(&fixture.id(), "a quarter is verified", |j| verified(j) >= 500_000);
     home.ok(&["pause", &fixture.short()]);
@@ -403,7 +345,7 @@ fn a_removed_partial_torrent_reuses_pieces_with_a_new_file_selection() {
     home.ok(&["daemon", "stop"]);
     drop(seeder);
     let seeder = Seeder::start(&fixture, None);
-    home.peers = seeder.addr.to_string();
+    home.set(hooks::PEERS, &seeder.addr.to_string());
 
     home.get(&fixture.magnet(), &["--files", "*.bin", "--files", "docs/readme.txt"]);
     let wait = home.run(&["wait", &fixture.short()]);
@@ -427,7 +369,7 @@ fn a_removed_partial_torrent_reuses_pieces_with_a_new_file_selection() {
 fn a_magnet_hashes_existing_files_after_fetching_its_metadata() {
     let fixture = Fixture::new("set", &[("a.bin", 4 * PIECE as usize), ("b.bin", 4 * PIECE as usize)], 23);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     let path = fixture.downloaded(&home, "a.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = fixture.files["a.bin"].clone();
@@ -446,7 +388,7 @@ fn a_magnet_hashes_existing_files_after_fetching_its_metadata() {
 fn pause_stops_writes_and_resume_finishes() {
     let fixture = Fixture::new("big", &BIG, 4);
     let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &[]);
     home.until(&fixture.id(), "a quarter is verified", |j| verified(j) >= fixture.total() / 4);
     let pause = home.ok(&["pause", &fixture.short()]);
@@ -477,7 +419,7 @@ fn pause_stops_writes_and_resume_finishes() {
 fn a_paused_download_keeps_its_file_progress_across_an_engine_restart() {
     let fixture = Fixture::new("big", &BIG, 9);
     let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &[]);
     home.until(&fixture.id(), "a third is verified", |j| verified(j) >= fixture.total() / 3);
     assert_eq!(home.ok(&["pause", &fixture.short()])["changes"][0]["result"], "paused");
@@ -498,7 +440,7 @@ fn a_paused_download_keeps_its_file_progress_across_an_engine_restart() {
 fn a_killed_engine_resumes_by_itself_without_downloading_verified_pieces_again() {
     let fixture = Fixture::new("big", &BIG, 5);
     let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &[]);
     let job = home.until(&fixture.id(), "a third is verified", |j| verified(j) >= fixture.total() / 3);
     let before_kill = verified(&job);
@@ -526,8 +468,8 @@ fn a_killed_engine_resumes_by_itself_without_downloading_verified_pieces_again()
 fn a_killed_engine_trusts_its_last_periodic_save_instead_of_hashing_the_files() {
     let fixture = Fixture::new("big", &BIG, 8);
     let seeder = Seeder::start(&fixture, SLOW);
-    let mut home = Home::new(&seeder);
-    home.save_resume_every = Some("1s");
+    let mut home = Home::seeded_by(&[&seeder]);
+    home.set(hooks::SAVE_RESUME_EVERY, "1s");
     home.get(&fixture.torrent_file(), &[]);
     home.until(&fixture.id(), "a third is verified", |j| verified(j) >= fixture.total() / 3);
     drop(seeder);
@@ -559,8 +501,8 @@ fn a_download_whose_seeder_lacks_the_rest_stops_with_no_source_and_keeps_what_it
     let fixture = Fixture::new("big", &BIG, 10);
     let a_alone = 73 * u64::from(PIECE);
     let seeder = Seeder::lacking(&fixture, "b.bin", a_alone);
-    let mut home = Home::new(&seeder);
-    home.stall_after = Some("3s");
+    let mut home = Home::seeded_by(&[&seeder]);
+    home.set(hooks::STALL_AFTER, "3s");
     home.get(&fixture.torrent_file(), &[]);
     let wait = home.run(&["wait", &fixture.short(), "--timeout", "60s", "--json"]);
     assert_eq!(wait.code, 7, "{}{}", wait.stdout, wait.stderr);
@@ -600,7 +542,7 @@ impl Drop for Locked {
 fn after_a_storage_error_resume_downloads_what_never_reached_the_disk() {
     let fixture = Fixture::new("set", &[("a.bin", 4_000_000), ("b.bin", 300_000)], 14);
     let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &["--files", "a.bin"]);
     home.until(&fixture.id(), "part of a.bin is verified", |j| verified(j) >= 512 * 1024);
     let Some(locked) = Locked::new(home.downloads().join(fixture.name), 0o555) else { return };
@@ -622,7 +564,7 @@ fn after_a_storage_error_resume_downloads_what_never_reached_the_disk() {
 fn a_check_that_cannot_read_a_file_fails_and_keeps_what_was_verified() {
     let fixture = Fixture::new("set", &SET, 15);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &[]);
     assert_eq!(home.run(&["wait", &fixture.short()]).code, 0);
     let Some(locked) = Locked::new(fixture.downloaded(&home, "a.bin"), 0o000) else { return };
@@ -641,8 +583,8 @@ fn a_check_that_cannot_read_a_file_fails_and_keeps_what_was_verified() {
 fn a_download_whose_only_seeder_leaves_keeps_waiting() {
     let fixture = Fixture::new("big", &BIG, 12);
     let seeder = Seeder::start(&fixture, SLOW);
-    let mut home = Home::new(&seeder);
-    home.stall_after = Some("2s");
+    let mut home = Home::seeded_by(&[&seeder]);
+    home.set(hooks::STALL_AFTER, "2s");
     home.get(&fixture.torrent_file(), &[]);
     home.until(&fixture.id(), "a third is verified", |j| verified(j) >= fixture.total() / 3);
     drop(seeder);
@@ -655,7 +597,7 @@ fn a_download_whose_only_seeder_leaves_keeps_waiting() {
 fn verify_reports_a_corrupted_byte_and_repair_fixes_it() {
     let fixture = Fixture::new("set", &SET, 6);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &[]);
     assert_eq!(home.run(&["wait", &fixture.short()]).code, 0);
     let damaged = fixture.downloaded(&home, "a.bin");
@@ -682,7 +624,7 @@ fn verify_reports_a_corrupted_byte_and_repair_fixes_it() {
 fn a_failed_check_outlives_the_engine_and_resume_repairs_the_damage() {
     let fixture = Fixture::new("set", &SET, 11);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.torrent_file(), &[]);
     assert_eq!(home.run(&["wait", &fixture.short()]).code, 0);
     let damaged = fixture.downloaded(&home, "a.bin");
@@ -711,7 +653,7 @@ fn a_failed_check_outlives_the_engine_and_resume_repairs_the_damage() {
 fn wait_exits_8_on_a_short_timeout_and_0_when_done() {
     let fixture = Fixture::new("big", &BIG, 7);
     let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.get(&fixture.magnet(), &[]);
     let short = home.run(&["wait", &fixture.short(), "--timeout", "1s"]);
     assert_eq!(short.code, 8, "{}{}", short.stdout, short.stderr);
@@ -724,7 +666,7 @@ fn wait_exits_8_on_a_short_timeout_and_0_when_done() {
 fn a_symbolic_link_inside_the_download_folder_is_refused_and_nothing_lands_where_it_points() {
     let fixture = Fixture::new("set", &SET, 16);
     let seeder = Seeder::start(&fixture, None);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     let outside = home.dir.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::create_dir_all(home.downloads()).unwrap();
@@ -732,7 +674,7 @@ fn a_symbolic_link_inside_the_download_folder_is_refused_and_nothing_lands_where
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let dir = home.downloads().display().to_string();
     let get = home.run(&["get", &fixture.torrent_file(), "--dir", &dir, "--json"]);
-    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(home.ok(&["status"])["jobs"], Value::Array(Vec::new()), "the engine holds nothing that could write");
     let landed: Vec<PathBuf> = snapshot(&outside).into_keys().collect();
     assert_eq!((get.code, landed), (4, Vec::new()), "{}{}", get.stdout, get.stderr);
     let error = &serde_json::from_str::<Value>(&get.stdout).unwrap()["error"];
@@ -742,7 +684,6 @@ fn a_symbolic_link_inside_the_download_folder_is_refused_and_nothing_lands_where
         format!("{} is a symbolic link, and torrential writes only inside {dir}", link.display())
     );
     assert_eq!(error["hint"], "remove the link, or choose another folder with --dir");
-    assert_eq!(home.ok(&["status"])["jobs"], Value::Array(Vec::new()));
 }
 
 #[test]
@@ -810,9 +751,9 @@ fn get_range(url: &str, range: &str) -> (String, Vec<u8>) {
 fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
     let fixture = Fixture::new("film", &[("film.mkv", 20 << 20), ("film.srt", 3_000)], 23);
     let seeder = Seeder::start(&fixture, SLOW);
-    let home = Home::new(&seeder);
+    let home = Home::seeded_by(&[&seeder]);
     home.ok(&["status"]);
-    let mut socket = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    let mut socket = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
     ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
     let play = PlayRequest {
         target: Target::TorrentFile(fixture.torrent_file().into()),
@@ -837,10 +778,10 @@ fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
     assert!(kept, "the seeder needs a LANG ending in .UTF-8 to keep the torrent's names as they are");
     let fixture = Fixture::new("Sintel - Français", &[("Sintel - Français.mkv", 300_000)], 29);
     let seeder = Seeder::start(&fixture, None);
-    let mut home = Home::new(&seeder);
-    home.lang = Some("C");
+    let mut home = Home::seeded_by(&[&seeder]);
+    home.set("LANG", "C");
     home.ok(&["status"]);
-    let mut socket = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    let mut socket = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
     ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
     let play = PlayRequest {
         target: Target::TorrentFile(fixture.torrent_file().into()),

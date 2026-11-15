@@ -7,15 +7,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use assert_cmd::Command;
 use serde_json::{Map, Value, json};
 
-#[allow(dead_code)]
-#[path = "../src/env/hooks.rs"]
-mod hooks;
-
-const MAC: &str =
-    r#"{"os": "macos", "display": {"width": 3024, "height": 1964, "hdr": true}, "arch": "arm64", "language": "en"}"#;
+mod common;
+use common::{Home, hooks};
 
 /// The archive.org release of Night of the Living Dead.
 const ARCHIVE: &str = "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c";
@@ -53,56 +48,30 @@ const VOLATILE: &[&str] = &[
     "watched_at",
 ];
 
-struct Home {
-    dir: tempfile::TempDir,
-    vars: Vec<(&'static str, String)>,
-}
-
 impl Home {
     /// A fake engine whose downloads do not move, so a title play gives up on each release after a
     /// second. Its only player is a stub `mpv` that starts nothing. `ffmpeg` and `ffprobe` are stubs
     /// that fail, found before any the machine has, so what plays does not depend on the machine.
     /// Its TV search asks an address no TV answers.
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
+    fn held() -> Self {
+        let home = Home::new();
         for (program, script) in [("mpv", "exit 0"), ("ffmpeg", "exit 1"), ("ffprobe", "exit 1")] {
-            let path = bin.join(program);
-            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            home.stub(program, script);
         }
-        std::fs::create_dir_all(dir.path().join("th/config")).unwrap();
-        std::fs::write(dir.path().join("th/config/config.yaml"), "player: mpv\n").unwrap();
-        let vars = vec![
-            ("HOME", dir.path().display().to_string()),
-            ("TORRENTIAL_HOME", dir.path().join("th").display().to_string()),
-            (hooks::ENGINE, "fake".to_string()),
-            (hooks::FAKE_RATE, "0".to_string()),
-            (hooks::TITLE_WAIT, "1s".to_string()),
-            (hooks::NETWORK, "loopback".to_string()),
-            (hooks::MACHINE, MAC.to_string()),
-            (hooks::HTTP_PORT, "0".to_string()),
-            (hooks::SSDP, "127.0.0.1:9".to_string()),
-            (hooks::OPENER, "/usr/bin/true".to_string()),
-            ("NO_COLOR", "1".to_string()),
-            ("PATH", bin.display().to_string()),
-        ];
-        Self { dir, vars }
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_torrential"));
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::VERSION] {
-            cmd.env_remove(key);
-        }
-        cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str())));
-        cmd.timeout(Duration::from_secs(60));
-        cmd
+        home.write_config("player: mpv\n");
+        let bin = home.path("bin").display().to_string();
+        home.with(hooks::ENGINE, "fake")
+            .with(hooks::FAKE_RATE, "0")
+            .with(hooks::TITLE_WAIT, "1s")
+            .with(hooks::HTTP_PORT, "0")
+            .with(hooks::SSDP, "127.0.0.1:9")
+            .with(hooks::OPENER, "/usr/bin/true")
+            .with("NO_COLOR", "1")
+            .with("PATH", &bin)
     }
 
     /// The exit code, stdout and stderr of `torrential <args>`, each read as JSON when it is.
-    fn run(&self, args: &[&str]) -> Value {
+    fn answer(&self, args: &[&str]) -> Value {
         let out = self.command(args).output().unwrap();
         let mut doc = Map::new();
         doc.insert("code".into(), json!(out.status.code()));
@@ -142,12 +111,6 @@ impl Home {
         let home = self.dir.path();
         let real = home.canonicalize().unwrap();
         redact(value, &[real.display().to_string(), home.display().to_string()])
-    }
-}
-
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]).output();
     }
 }
 
@@ -290,7 +253,7 @@ fn snapshots(answers: impl IntoIterator<Item = (String, Value)>) {
 
 #[test]
 fn every_command_answers_in_json_as_it_did() {
-    let home = Home::new();
+    let home = Home::held();
     home.settle();
     let steps: &[(&str, &[&str])] = &[
         ("search", &["search", "night", "of", "the", "living", "dead", "--json"]),
@@ -326,12 +289,12 @@ fn every_command_answers_in_json_as_it_did() {
         ("doctor", &["doctor", "--json"]),
         ("schema", &["schema"]),
     ];
-    snapshots(steps.iter().map(|(name, args)| (format!("cli_{name}"), home.run(args))));
+    snapshots(steps.iter().map(|(name, args)| (format!("cli_{name}"), home.answer(args))));
 }
 
 #[test]
 fn every_api_route_answers_as_it_did() {
-    let home = Home::new();
+    let home = Home::held();
     home.settle();
     let port = home.port();
     let running = full_id(&home, RUNNING);

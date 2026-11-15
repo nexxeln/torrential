@@ -17,21 +17,11 @@ use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode
 
 use super::super::cast::Find;
 use super::super::fake;
-use super::super::names::Names;
-use super::devices::{listening, squatter};
+use super::devices::{lan, listening, squatter};
 use super::titles::listed;
 use super::web::{magnet_link, post};
 use super::{GIB, Harness, MIB, Outside, prefix, torrent, written};
 use crate::ffmpeg::Tools;
-
-/// The machine's address on the home network, or `None` on one with no network to test over.
-fn lan() -> Option<Ipv4Addr> {
-    let found = Names::read().lan.first().copied();
-    if found.is_none() {
-        eprintln!("skipped: this machine has no address on a home network");
-    }
-    found
-}
 
 /// What the fake TV has been told, and what it is doing.
 #[derive(Default)]
@@ -537,7 +527,7 @@ fn kept(h: &Harness) -> Option<(f64, Option<f64>)> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_plays_a_download_on_the_tv_through_its_grant_and_the_grant_ends_with_it() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(80, "Night", &[("Night.mkv", 4 * MIB), ("Night.srt", 1_000)]);
@@ -630,7 +620,7 @@ async fn a_cast_plays_a_download_on_the_tv_through_its_grant_and_the_grant_ends_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_stopped_on_the_tv_ends_and_keeps_where_it_stopped() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(81, "Night", &[("Night.mp4", 2 * MIB)]);
@@ -654,7 +644,7 @@ async fn a_cast_stopped_on_the_tv_ends_and_keeps_where_it_stopped() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_that_resumes_shows_where_it_resumes_while_the_tv_seeks_there() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(89, "Night", &[("Night.mp4", 2 * MIB)]);
@@ -691,7 +681,7 @@ async fn a_cast_that_resumes_shows_where_it_resumes_while_the_tv_seeks_there() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_play_while_a_cast_plays_resumes_where_the_tv_last_was() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let film = torrent(0xb8, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
     let catalog = vec![listed(&film, "knaben", Some(40))];
@@ -719,7 +709,7 @@ async fn a_title_play_while_a_cast_plays_resumes_where_the_tv_last_was() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_video_in_a_container_the_tv_does_not_take_is_refused_before_it_downloads() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, "http-get:*:video/mp4:*").await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(82, "Night", &[("Night.avi", 2 * MIB)]);
@@ -738,7 +728,7 @@ async fn a_video_in_a_container_the_tv_does_not_take_is_refused_before_it_downlo
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_cast_passes_over_a_source_the_tv_cannot_play_and_plays_the_next() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let avi = torrent(0xb1, "Night.of.the.Living.Dead.1968.DVDRip.XviD", &[("Night.1968.avi", 700 * MIB)]);
     let mkv = torrent(0xb2, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
@@ -762,7 +752,7 @@ async fn a_title_cast_passes_over_a_source_the_tv_cannot_play_and_plays_the_next
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_holds_off_an_update_while_it_finds_its_source_and_none_starts_while_one_installs() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     // Nothing seeds the only source, so the cast goes on finding it.
     let mkv = torrent(0xb5, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
@@ -790,7 +780,7 @@ async fn a_cast_holds_off_an_update_while_it_finds_its_source_and_none_starts_wh
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_cast_passes_over_a_download_here_the_tv_cannot_decode_though_ffmpeg_is_there() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let hevc = torrent(0xb3, "Night.of.the.Living.Dead.1968.2160p.UHD.HEVC", &[("Night.1968.2160p.mkv", 2 * MIB)]);
     let avc = torrent(0xb4, "Night.of.the.Living.Dead.1968.1080p.x264", &[("Night.1968.1080p.mkv", 2 * MIB)]);
@@ -815,7 +805,7 @@ async fn a_title_cast_passes_over_a_download_here_the_tv_cannot_decode_though_ff
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_that_sends_the_engine_to_loopback_or_another_host_is_never_followed_there() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     // A renderer on 127.0.0.1 stands for the engine's own loopback and for another host.
     let bystander = FakeTv::start(Ipv4Addr::LOCALHOST, SINK).await;
     let liar = Liar::start(ip, bystander.http, |at| {
@@ -849,7 +839,7 @@ async fn a_device_that_sends_the_engine_to_loopback_or_another_host_is_never_fol
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_the_engine() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let liar = Liar::start(ip, tv.http, |at| {
         let mut answers = vec![
@@ -885,7 +875,7 @@ async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tv_that_stops_while_it_fails_to_say_where_it_is_ends_the_cast_and_its_grant() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(83, "Night", &[("Night.mp4", 2 * MIB)]);
@@ -895,9 +885,15 @@ async fn a_tv_that_stops_while_it_fails_to_say_where_it_is_ends_the_cast_and_its
     h.until("done", |jobs| jobs[0].status.name() == "done").await;
 
     cast(&h, by_hand(Target::Prefix(prefix(&film)))).await.unwrap();
-    let uri = tv.screen.lock().unwrap().uri.clone();
+    let (uri, asked) = {
+        let screen = tv.screen.lock().unwrap();
+        (screen.uri.clone(), screen.actions.len())
+    };
     tv.set(|screen| screen.faults.push("GetPositionInfo"));
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    tv.until("a position ask the TV fails", |screen| {
+        screen.actions[asked..].iter().any(|(action, _)| action == "GetPositionInfo")
+    })
+    .await;
     tv.set(|screen| screen.transport = "STOPPED");
     let ended = until(&h, "its end", Cast::ended).await;
     assert_eq!(ended.state, CastState::Ended { error: None });
@@ -914,7 +910,7 @@ async fn a_tv_that_stops_while_it_fails_to_say_where_it_is_ends_the_cast_and_its
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_that_takes_the_tv_waits_until_the_one_before_lets_go() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(84, "Night", &[("Night.mkv", 2 * MIB), ("Extra.mkv", 2 * MIB)]);
@@ -951,7 +947,7 @@ async fn a_cast_that_takes_the_tv_waits_until_the_one_before_lets_go() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(85, "Night", &[("Night.mp4", 2 * MIB)]);
@@ -969,7 +965,7 @@ async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(86, "Night", &[("Night.mkv", 2 * MIB)]);
@@ -1005,7 +1001,7 @@ async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tab_that_resumes_a_video_a_tv_plays_keeps_its_place_until_the_tv_resumes() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(99, "Night", &[("Night.mkv", 2 * MIB)]);
@@ -1034,7 +1030,7 @@ async fn a_tab_that_resumes_a_video_a_tv_plays_keeps_its_place_until_the_tv_resu
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = Harness::with_outside(
         fake::Search::new(Vec::new()),
@@ -1047,8 +1043,6 @@ async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
     control(&h, CastAction::Pause).await.unwrap();
     tv.until("its fetches of the video", |screen| screen.fetches.len() == 3).await;
-    // When a play was watched is kept to the second.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
 
     let newer = torrent(88, "newer", &[("newer.mp4", 2 * GIB)]);
     h.swarm.publish(newer.clone());
@@ -1070,7 +1064,7 @@ async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest_fail() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let here = torrent(0xb5, "Night.of.the.Living.Dead.1968.2160p.UHD.HEVC", &[("Night.1968.2160p.mkv", 2 * MIB)]);
     let x265 = torrent(0xb6, "Night.of.the.Living.Dead.1968.1080p.x265", &[("Night.1968.1080p.mkv", 2 * MIB)]);
@@ -1108,7 +1102,7 @@ async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_never_gives_the_tv_an_address_where_another_program_answers() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(98, "Night", &[("Night.mkv", 2 * MIB)]);
