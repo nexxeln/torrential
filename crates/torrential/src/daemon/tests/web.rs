@@ -1009,7 +1009,7 @@ async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
             media["duration"],
             media["container"],
             media["direct"],
-            media["remux"],
+            media["ffmpeg"],
             media["video"]["codec"],
             media["video"]["width"],
             media["video"]["fps"],
@@ -1018,7 +1018,7 @@ async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
             media["subtitles"][0]["codec"],
             media["subtitles"][0]["text"],
         ]),
-        json!([12.0, "matroska", null, true, "h264", 160, 24.0, "ac3", "eng", "subrip", true])
+        json!([12.0, "matroska", null, "ready", "h264", 160, 24.0, "ac3", "eng", "subrip", true])
     );
     assert!(media["video"]["mime"].as_str().unwrap().starts_with("avc1."), "{media}");
     assert_eq!(

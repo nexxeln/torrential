@@ -17,6 +17,8 @@ pub mod subtitle;
 pub mod text;
 pub mod time;
 pub mod title;
+#[cfg(feature = "ts")]
+pub mod ts;
 pub mod units;
 pub mod watching;
 pub mod words;

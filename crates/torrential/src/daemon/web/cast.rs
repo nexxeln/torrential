@@ -20,6 +20,7 @@ pub async fn search(ctx: &Ctx, request: Search) -> Result<Value, Error> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "CastStart", optional_fields))]
 pub struct Start {
     /// A TV's ID. Without it, the only TV on the network.
     tv: Option<String>,

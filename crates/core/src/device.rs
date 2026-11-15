@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// A browser on the home network that this machine let in. It holds a token in a cookie, which
 /// the engine keeps only hashed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Device {
     /// Eight hex digits, which `torrential devices remove` takes.
     pub id: String,
@@ -18,6 +19,7 @@ pub struct Device {
 
 /// A short code that lets one device in, open for a few minutes.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PairingOffer {
     /// Six digits.
     pub code: String,
@@ -34,6 +36,7 @@ pub struct PairingOffer {
 
 /// The devices this machine let in, and the pairing offer open now.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DeviceList {
     /// The most recently added last.
     pub devices: Vec<Device>,

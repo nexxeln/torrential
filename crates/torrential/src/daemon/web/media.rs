@@ -8,6 +8,7 @@ use crate::ffmpeg::fetch::Readiness;
 
 /// The JSON of `GET /api/media`.
 #[derive(Clone, PartialEq, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "MediaInfo"))]
 pub struct Media {
     /// Seconds.
     pub duration: Option<f64>,
@@ -24,6 +25,7 @@ pub struct Media {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Chapter {
     /// Seconds.
     pub start: f64,
@@ -32,6 +34,7 @@ pub struct Chapter {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "VideoTrack"))]
 pub struct Video {
     pub stream: u32,
     pub codec: String,
@@ -45,6 +48,7 @@ pub struct Video {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "AudioTrack"))]
 pub struct Audio {
     pub stream: u32,
     pub codec: String,
@@ -55,6 +59,7 @@ pub struct Audio {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "SubtitleTrack"))]
 pub struct Subtitle {
     pub stream: u32,
     pub codec: String,

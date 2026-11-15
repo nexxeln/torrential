@@ -1,7 +1,7 @@
 // The engine's HTTP API, served on the same origin as this app (http://127.0.0.1:47919 by default,
 // or the Mac's address on the home network for a paired phone or TV).
 //
-// Every JSON type here mirrors a Rust type in crates/core or crates/torrential/src/daemon/web.
+// Every JSON type comes from wire.ts, which `cargo test` writes from the Rust types that make the JSON.
 // A failed request answers with a 4xx or 5xx status and `{ "error": ApiError }`.
 //
 //   POST /api/search      { q, category?, limit?, fresh? }   NDJSON stream of SearchMessage
@@ -16,7 +16,7 @@
 //   GET  /api/pieces?id=&file=                          FilePieces
 //   GET  /api/events                                    server-sent events, each `data:` a JobEvent
 //   GET  /api/jobs                                      { jobs: Job[] }
-//   POST /api/files       { ref }                       FileListing
+//   POST /api/files       { ref }                       FilesReply
 //   POST /api/pause | /api/resume  { refs }               { changes: Change[] }
 //   POST /api/remove      { refs, delete? }              { changes: Change[] }
 //   GET  /{id}/{file index}/{name}                      the file's bytes, with Range support
@@ -51,432 +51,146 @@
 //   POST /api/cast             CastStart                   { cast: Cast }, at once
 //   POST /api/cast/control     { tv?, ...CastAction }       { cast: Cast }
 
-export type Category = "video" | "audio" | "software" | "book" | "game" | "dataset" | "other";
-export type Flag = "official" | "trusted" | "public_domain" | "creative_commons" | "cam" | "adult";
-export type Resolution = "sd" | "720p" | "1080p" | "2160p";
-export type NameCodec = "h264" | "hevc" | "av1";
+import type {
+  AttemptEvent,
+  AudioTrack,
+  Cast,
+  CastAction,
+  CastStart,
+  CastState,
+  Category,
+  Change,
+  Chapter,
+  Check,
+  Codec,
+  Container,
+  Continue,
+  Country,
+  Device,
+  DeviceList,
+  EpisodeInfo,
+  Error,
+  ErrorCode,
+  Event,
+  FfmpegMessage,
+  FilePieces,
+  FilesReply,
+  Flag,
+  Home,
+  Job,
+  Kind,
+  Me,
+  MediaInfo,
+  Next,
+  OnlineSubtitle,
+  OnlineSubtitles,
+  OnlineTitle,
+  PairingOffer,
+  PlayInfo,
+  Playback,
+  PlayingLine,
+  PlayTitle,
+  Progress,
+  Quality,
+  Release,
+  Resolution,
+  SearchMessage as EngineSearchMessage,
+  SearchResult,
+  Season,
+  Skip,
+  SourceReport,
+  StreamedFile,
+  SubtitleTrack,
+  Swarm,
+  TitleCard,
+  TitlePage,
+  TitleSearch,
+  TorrentFile,
+  Tv,
+  TvList,
+  Version,
+  VideoTrack,
+  Viewer,
+  Watched,
+} from "./wire";
 
-/** What a release's name says about its video. */
-export interface Quality {
-  resolution: Resolution | null;
-  codec: NameCodec | null;
-  hdr: boolean;
-}
+export type {
+  AudioTrack,
+  Cast,
+  CastAction,
+  CastStart,
+  CastState,
+  Category,
+  Change,
+  Chapter,
+  Check,
+  Codec,
+  Container,
+  Continue,
+  Country,
+  Device,
+  DeviceList,
+  EpisodeInfo,
+  ErrorCode,
+  FfmpegMessage,
+  FilePieces,
+  FilesReply,
+  Flag,
+  Home,
+  Job,
+  Kind,
+  Me,
+  MediaInfo,
+  Next,
+  OnlineSubtitle,
+  OnlineSubtitles,
+  OnlineTitle,
+  PairingOffer,
+  PlayInfo,
+  Playback,
+  PlayTitle,
+  Progress,
+  Quality,
+  Release,
+  Resolution,
+  SearchResult,
+  Season,
+  Skip,
+  SourceReport,
+  StreamedFile,
+  SubtitleTrack,
+  Swarm,
+  TitleCard,
+  TitlePage,
+  TitleSearch,
+  TorrentFile,
+  Tv,
+  TvList,
+  Version,
+  VideoTrack,
+  Viewer,
+  Watched,
+};
 
-export interface Release {
-  /** A 40-hex infohash, or `u` and a digest for a result that only links a .torrent file. Pass it as `ref`. */
-  id: string;
-  name: string;
-  size: number | null;
-  seeders: number | null;
-  leechers: number | null;
-  /** Unix seconds. */
-  published: number | null;
-  category: Category | null;
-  quality: Quality;
-  flags: Flag[];
-  /** Sources that listed it, most authoritative first. */
-  sources: string[];
-  magnet: string | null;
-  torrent_url: string | null;
-  info_url: string | null;
-  /** What of a title the release holds. Only in a title's sources. */
-  span?: Span;
-  /** How likely its swarm is to send data now. Only in a title's sources. */
-  swarm?: Swarm;
-  /** Why it did not start when Play last tried it, in the last 6 hours. Only in a title's sources, which list it last. */
-  failed?: Skip;
-}
+/** A failed request's error: the engine's, or one this app names when the engine cannot answer. */
+export type ApiError = Omit<Error, "code"> & { code: ErrorCode | AppErrorCode };
 
-export type SourceReport = { source: string; elapsed_ms: number } & (
-  | { outcome: "ok" | "cached"; results: number }
-  | { outcome: "timeout" | "irrelevant" }
-  | { outcome: "http"; status: number }
-  | { outcome: "connect" | "bad_response"; reason: string }
-);
-
-export interface SearchResult {
-  /** Ranked by the engine for this machine. Show them in this order. */
-  releases: Release[];
-  /** Matching releases before the limit. */
-  total: number;
-  hidden_adult: number;
-  sources: SourceReport[];
-  elapsed_ms: number;
-}
+/** The codes this app gives what fails in the browser, beside the engine's. */
+type AppErrorCode = "engine_unreachable" | "stream_failed" | "stream_ended_early" | `media_error_${number}`;
 
 /** One line of the /api/search stream. `update` repeats with the results so far as each source answers. */
-export type SearchMessage =
-  | { type: "update"; result: SearchResult; pending: string[] }
-  | { type: "done"; result: SearchResult }
-  | { type: "error"; error: ApiError };
+export type SearchMessage = Exclude<EngineSearchMessage, { type: "error" }> | { type: "error"; error: ApiError };
 
-export interface ApiError {
-  /** A stable snake_case code such as `not_found`, `metadata_timeout`, or `no_source`. */
-  code: string;
-  message: string;
-  hint?: string;
-}
+export type JobState = Job["state"];
 
-export type JobState =
-  | "queued"
-  | "metadata"
-  | "checking"
-  | "downloading"
-  | "paused"
-  | "done"
-  | "error";
-
-export interface Progress {
-  /** Bytes selected for download. Null until the file list arrives. */
-  size: number | null;
-  verified: number;
-  /**
-   * 64 characters, one per equal run of the torrent's pieces in order: `0` to `8` for the eighths
-   * of the run that arrived, `-` for a run with nothing selected. Absent before the first sample
-   * and once the download is done.
-   */
-  piece_map?: string;
-  /** Bytes per second. */
-  down_rate: number;
-  up_rate: number;
-  peers: number;
-  seeds: number;
-  /** Seconds, or null while the rate is unknown. */
-  eta: number | null;
-}
-
-export interface Job {
-  id: string;
-  name: string | null;
-  dir: string;
-  path: string | null;
-  state: JobState;
-  /** With `state: "done"`. Unix seconds. */
-  finished_at?: number;
-  /** With `state: "error"`. */
-  error?: ApiError;
-  progress: Progress;
-  /** Unix seconds. */
-  added_at: number;
-  /** The title this download was made for, when it was made by playing a title. */
-  title?: { title: string; span: Span; release: string | null };
-  /**
-   * `plays`: a play in torrential's own folder, whose files go when it is removed.
-   * `folder`: a download in a folder the person chose, whose files stay unless they delete them.
-   */
-  place: "plays" | "folder";
-}
-
-export type JobEvent =
-  | { event: "snapshot"; jobs: Job[] }
-  | { event: "job"; job: Job }
-  | { event: "removed"; id: string }
-  | { event: "heartbeat"; at: number };
-
-export interface TorrentFile {
-  index: number;
-  /** Relative to the torrent's folder. */
-  path: string;
-  size: number;
-  selected: boolean;
-  verified: number;
-  risk?: "executable";
-}
-
-export interface FileListing {
-  id: string;
-  name: string | null;
-  total_size: number;
-  files: TorrentFile[];
-}
-
-export interface Change {
-  id: string;
-  name: string | null;
-  result: string;
-  /** What a remove deleted from disk: a play's folder. */
-  deleted?: string[];
-  /** What a remove with `delete` moved to the Trash: the files of a download in a folder the person chose. */
-  trashed?: string[];
-  /** What a remove was to delete or move to the Trash and left, and why. */
-  kept?: { path: string; reason: string }[];
-}
-
-/** A file the engine serves while it downloads. */
-export interface StreamedFile {
-  index: number;
-  path: string;
-  size: number;
-  /** Same-origin path to the file's bytes. */
-  url: string;
-  /** Where the file sits in the torrent, to read its part of `Progress.piece_map`. */
-  offset: number;
-}
-
-/** The answer to POST /api/play: the download has started and `video` is being fetched in playing order. */
-export interface PlayInfo {
-  id: string;
-  name: string;
-  job: Job;
-  /** Every file in the torrent, so a season can list its other episodes. */
-  files: TorrentFile[];
-  /** The torrent's total bytes, the length `Progress.piece_map` spans. */
-  total_size: number;
-  video: StreamedFile;
-  /** Subtitle files in the torrent that belong with `video`. */
-  subtitles: StreamedFile[];
-}
-
-export interface VideoTrack {
-  stream: number;
-  /** ffmpeg's name: `h264`, `hevc`, `av1`, `vp9`, `mpeg4`, ... */
-  codec: string;
-  /** The RFC 6381 codec string, such as `avc1.640028` or `hvc1.2.4.L150.B0`. Null when MP4 cannot carry the codec. */
-  mime: string | null;
-  width: number;
-  height: number;
-  bit_depth: number;
-  hdr: boolean;
-  fps: number | null;
-}
-
-export interface AudioTrack {
-  stream: number;
-  /** ffmpeg's name: `aac`, `ac3`, `eac3`, `dts`, `truehd`, `opus`, `flac`, ... */
-  codec: string;
-  channels: number;
-  /** ISO 639-2, such as `eng`. */
-  language: string | null;
-  title: string | null;
-  default: boolean;
-}
-
-export interface SubtitleTrack {
-  stream: number;
-  /** ffmpeg's name: `subrip`, `ass`, `webvtt`, `hdmv_pgs_subtitle`, ... */
-  codec: string;
-  language: string | null;
-  title: string | null;
-  default: boolean;
-  forced: boolean;
-  /** False for picture subtitles (PGS, VobSub), which cannot become WebVTT. */
-  text: boolean;
-}
-
-/**
- * What is inside a video file. The request waits for the first and last pieces of the file to
- * arrive, so it can take a while on a slow swarm.
- */
-export interface MediaInfo {
-  /** Seconds. */
-  duration: number | null;
-  /** `mp4`, `matroska`, `webm`, `avi`, `mpegts`, ... */
-  container: string;
-  video: VideoTrack | null;
-  audio: AudioTrack[];
-  subtitles: SubtitleTrack[];
-  /**
-   * A full type such as `video/mp4; codecs="avc1.640028, mp4a.40.2"` when the file's container is
-   * one browsers read. If `canPlayType` accepts it, play the file's own URL.
-   */
-  direct: string | null;
-  /**
-   * Whether /api/stream, embedded subtitles, and thumbnails work: `ready` now, `fetch` once
-   * POST /api/ffmpeg has fetched ffmpeg, or `missing` when ffmpeg is not installed and the engine
-   * does not fetch it.
-   */
-  ffmpeg: "ready" | "fetch" | "missing";
-  /** The file's own chapters, in order. Empty for most files. */
-  chapters: Chapter[];
-}
-
-export interface Chapter {
-  /** Seconds. */
-  start: number;
-  end: number;
-  title: string | null;
-}
-
-/** A subtitle found online for this video. It is not part of the torrent. */
-export interface OnlineSubtitle {
-  /** Pass to onlineSubtitleUrl. */
-  id: string;
-  /** ISO 639-2, such as `eng`, `fre`, or `pob`. */
-  language: string;
-  /** The subtitle's file or release name, to tell versions apart. */
-  name: string | null;
-  /** Made for this exact file, so its timing fits. Others can be early or late. */
-  exact: boolean;
-  /** Where it comes from, such as `opensubtitles`. */
-  source: string;
-}
-
-/** The film or episode the engine read from the torrent's names, and found online. */
-export interface OnlineTitle {
-  name: string;
-  year: number | null;
-  season: number | null;
-  episode: number | null;
-}
-
-/**
- * Subtitles for the video from online sources, best first within each language. `title` is null
- * and the list empty when the engine cannot tell what the video is, when no source answers, or
- * when config.yaml turns online subtitles off.
- */
-export interface OnlineSubtitles {
-  title: OnlineTitle | null;
-  subtitles: OnlineSubtitle[];
-}
-
-/**
- * Which parts of one file have downloaded: 200 characters, one per equal run of the file's bytes
- * in order, `0` to `8` for the eighths of the run that arrived.
- */
-export interface FilePieces {
-  pieces: string;
-}
-
-export type Kind = "film" | "series";
-/** What of a title a release holds: `film`, `s3e5`, `s3`, `s1-5`, or `complete`. */
-export type Span = string;
-/** What the browser decodes, from MediaSource.isTypeSupported. */
-export type Playback = "h264" | "hevc" | "hevc-hdr";
-/** The screen a title plays on and what its browser decodes. The engine ranks the title's sources for it. */
-export interface Viewer {
-  /** The screen in device pixels. */
-  width: number;
-  height: number;
-  /** Device pixels to a CSS pixel. */
-  scale: number;
-  playback: Playback;
-}
-/**
- * How likely a release's swarm is to send data now: `strong` is 20 or more seeders or a lawful catalog that does not
- * count them, `fair` 5 to 19, `weak` 1 to 4, and `unknown` uncounted, or 0 in a lawful catalog.
- */
-export type Swarm = "strong" | "fair" | "weak" | "unknown";
-/** A country whose code release names carry, as `US` in `The.Office.US.S02E01`. */
-export type Country = "US" | "UK" | "AU" | "CA" | "NZ" | "IE";
-
-export interface TitleCard {
-  /** An IMDb ID such as `tt0063350`. */
-  id: string;
-  kind: Kind;
-  name: string;
-  /** A film's year, or the year a series began. */
-  year: number | null;
-  /** 0 to 10. */
-  rating: number | null;
-}
-
-export interface TitleSearch {
-  titles: TitleCard[];
-  /** Title lookups are turned off in config.yaml, so `titles` is empty. */
-  offline?: boolean;
-}
-
-export interface EpisodeInfo {
-  season: number;
-  episode: number;
-  name: string | null;
-  /** Unix seconds. Null when no date is announced. An episode in the future has not aired. */
-  aired: number | null;
-  overview: string | null;
-  thumbnail: boolean;
-}
-
-export interface Season {
-  /** 0 holds specials. */
-  number: number;
-  episodes: EpisodeInfo[];
-}
-
-/** Where a person stopped one film or episode. */
-export interface Watched {
-  /** `tt0063350`, or `tt0903747:3:5`. */
-  video: string;
-  /** Seconds. */
-  position: number;
-  duration: number | null;
-  finished: boolean;
-  /** Unix seconds of the last update. */
-  at: number;
-}
-
-/** What Play on a title page plays. */
-export interface Next {
-  video: string;
-  /** Seconds to resume at, or null to start from the beginning. */
-  resume_at: number | null;
-}
-
-export interface TitlePage extends TitleCard {
-  synopsis: string | null;
-  genres: string[];
-  runtime_min: number | null;
-  cast: string[];
-  /** The countries the title is from, of those whose codes release names carry. */
-  countries: Country[];
-  /** Which pictures artUrl can serve. */
-  art: { poster: boolean; background: boolean; logo: boolean };
-  /** Empty for a film. */
-  seasons: Season[];
-  saved: boolean;
-  /** Every film or episode of this title with a position. */
-  watched: Watched[];
-  /** Null when a film is finished or a series is caught up. Play then starts over. */
-  next: Next | null;
-  /** Downloads made by playing this title. */
-  downloads: Job[];
-}
-
-export interface PlayTitle {
-  /** `tt0063350`, `tt0903747:3:5`, or a series ID for its next episode. */
-  video: string;
-  /** The engine ranks for what this browser decodes, on this screen from another device and on the Mac's display from the Mac. */
-  viewer?: Viewer;
-  /** Play only this release, with no fallback. */
-  source?: string;
-  /** The download that stalled. The engine plays another source, then pauses this one. */
-  replace?: string;
-}
-
-export type Check = "file_list" | "start" | "first_bytes";
-
-export type Skip =
-  | { reason: "no_file_list" | "no_data"; waited_s: number }
-  | { reason: "no_video" | "stalled" }
-  | { reason: "unplayable" | "not_on_tv"; container: string }
-  | { reason: "too_large" | "failed"; error: ApiError };
+/** The events of GET /api/events. */
+export type JobEvent = Exclude<Event, { event: "search_update" }>;
 
 /** One line of the /api/title/play stream. The last is `playing` or `failed`. */
-export type PlayMessage =
-  | { type: "resolved"; video: string; title: TitleCard; episode: EpisodeInfo | null }
-  | { type: "searched"; found: number; sources: SourceReport[] }
-  | { type: "trying"; rank: number; of: number; release: Release }
-  | { type: "check"; check: Check }
-  | { type: "skipped"; release: string; reason: Skip }
-  | { type: "playing"; video: string; release: Release; play: PlayInfo; resume_at: number | null }
-  | { type: "failed"; error: ApiError; tried: { release: string; reason: Skip }[] };
+export type PlayMessage = Exclude<AttemptEvent, { type: "playing" }> | PlayingLine;
 
-export interface ContinueItem {
-  title: TitleCard;
-  /** The film or episode to play. */
-  video: string;
-  /** Null for a film. */
-  episode: EpisodeInfo | null;
-  /** Null when `video` has not been started, as the next episode after a finished one. */
-  resume_at: number | null;
-  duration: number | null;
-}
-
-export interface Home {
-  /** Newest first. */
-  continue: ContinueItem[];
-  saved: TitleCard[];
-}
+/** What of a title a release holds: `film`, `s3e5`, `s3`, `s1-5`, or `complete`. */
+export type Span = string;
 
 export class EngineError extends Error {
   constructor(
@@ -568,9 +282,6 @@ export function media(id: string, file: number, signal?: AbortSignal): Promise<M
   return fetch(`/api/media?id=${id}&file=${file}`, { signal }).then(json<MediaInfo>);
 }
 
-/** A line of POST /api/ffmpeg: bytes of the download so far, then `ready` or `error`. */
-export type FfmpegMessage = { type: "progress"; done: number; size: number } | { type: "ready" } | { type: "error"; error: ApiError };
-
 /** Has the engine fetch ffmpeg, saying how far the download is. The fetch carries on when this stops. */
 export async function* fetchFfmpeg(signal?: AbortSignal): AsyncGenerator<FfmpegMessage> {
   const init = { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal };
@@ -636,47 +347,9 @@ export function jobs(signal?: AbortSignal): Promise<Job[]> {
     .then((body) => body.jobs);
 }
 
-export function files(ref: string, signal?: AbortSignal): Promise<FileListing> {
+export function files(ref: string, signal?: AbortSignal): Promise<FilesReply> {
   return post("/api/files", { ref }, signal);
 }
-
-/** A phone or TV this Mac let in. */
-export interface Device {
-  /** Eight hex digits. */
-  id: string;
-  /** What its browser runs on, such as `iPhone` or `LG TV`. */
-  name: string;
-  /** Unix seconds. */
-  added_at: number;
-  /** Unix seconds of its last request, to within a minute. */
-  seen_at: number;
-}
-
-/** A six-digit code that lets one more device in, for a few minutes. */
-export interface PairingOffer {
-  code: string;
-  /** The page that pairs a phone, with the code in it. */
-  url: string;
-  /** What to type into a TV's browser: the Mac's .local name and the port. */
-  address: string;
-  /** The Mac's address on the home network, for a browser that cannot open .local names. */
-  lan_address: string | null;
-  /** Unix seconds. */
-  expires_at: number;
-  /** The QR code of `url`: rows of `1` and `0`, without the quiet zone. */
-  qr: string[];
-}
-
-export interface DeviceList {
-  /** The most recently added last. */
-  devices: Device[];
-  offer: PairingOffer | null;
-  /** Why no phone or TV can reach the Mac while one should, in one sentence. */
-  unreachable: string | null;
-}
-
-/** Whether the browser asking is the Mac itself or a paired device. */
-export type Me = { asker: "mac" } | { asker: "device"; device: Device | null };
 
 export function me(): Promise<Me> {
   return fetch("/api/me").then(json<Me>);
@@ -768,76 +441,9 @@ export function home(signal?: AbortSignal): Promise<Home> {
   return fetch("/api/home", { signal }).then(json<Home>);
 }
 
-/** The engine's version, and the line to show about a newer one, such as "Updated torrential to 0.5.1.". */
-export interface Version {
-  version: string;
-  notice: string | null;
-}
-
 export function version(signal?: AbortSignal): Promise<Version> {
   return fetch("/api/version", { signal }).then(json<Version>);
 }
-
-/** A container a TV plays as it is. */
-export type Container = "mkv" | "mp4" | "webm" | "avi" | "ts" | "mov" | "mpeg" | "wmv";
-
-/** A TV, or another media renderer, on the home network. */
-export interface Tv {
-  /** The renderer's UDN and its address. A device that copies a TV's UDN from another address is another TV. */
-  id: string;
-  name: string;
-  address: string;
-  plays: Container[];
-  /** The newest codec it says it decodes. */
-  decodes: Playback;
-  /** Whether torrential can set its volume. */
-  volume: boolean;
-}
-
-export type CastState =
-  | { state: "finding" | "loading" | "playing" | "paused" }
-  /** `error` says why when it did not end as asked or at the end of the video. */
-  | { state: "ended"; error: ApiError | null };
-
-/** One cast on one TV, listed until a minute after it ends. */
-export type Cast = CastState & {
-  tv: string;
-  tv_name: string;
-  name: string;
-  video: string | null;
-  download: string | null;
-  file: number | null;
-  subtitle: string | null;
-  /** Seconds, as the TV last said. */
-  position: number | null;
-  duration: number | null;
-  /** From 0 to 100. */
-  volume: number | null;
-  started_at: number;
-};
-
-export interface TvList {
-  tvs: Tv[];
-  casts: Cast[];
-}
-
-/** What to cast: a film or an episode by `video`, or a file of a torrent by `ref`, with the film it holds as `video`. */
-export interface CastStart {
-  tv: string;
-  video?: string;
-  source?: string;
-  ref?: string;
-  file?: number;
-  /** A subtitle file of the same torrent. */
-  subtitle?: number;
-  /** Seconds, in place of where the person stopped. */
-  start_at?: number;
-}
-
-export type CastAction =
-  | { action: "pause" | "resume" | "stop" }
-  | { action: "seek"; position: number }
-  | { action: "volume"; level: number };
 
 export function tvs(signal?: AbortSignal): Promise<TvList> {
   return fetch("/api/tvs", { signal }).then(json<TvList>);

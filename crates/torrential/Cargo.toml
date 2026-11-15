@@ -50,3 +50,5 @@ insta = { version = "1.49", features = ["json"] }
 lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 tempfile = "3.27"
 tokio = { version = "1.53", features = ["test-util"] }
+torrential-core = { path = "../core", features = ["ts"] }
+ts-rs = "12"

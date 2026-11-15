@@ -230,6 +230,7 @@ pub enum Response {
 
 /// One title as the catalog describes it, with what this engine knows of it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitlePage {
     #[serde(flatten)]
     pub details: TitleDetails,
@@ -245,6 +246,7 @@ pub struct TitlePage {
 /// What the home screens list: for each title watched lately, its video to go on with, and the
 /// saved titles. The socket's `home` and `GET /api/home` both answer with it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Home {
     /// The most recently watched first.
     #[serde(rename = "continue")]
@@ -254,6 +256,7 @@ pub struct Home {
 
 /// A film or episode to go on with.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Continue {
     pub title: TitleCard,
     pub video: VideoRef,
@@ -296,6 +299,7 @@ pub enum TitleFrame {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FilesReply {
     pub id: String,
     pub name: Option<String>,
@@ -362,6 +366,7 @@ pub struct DownloadPlan {
 
 crate::words! {
     /// Where a torrent's file list came from.
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum MetadataSource {
         Download = "download",
         Cache = "cache",
@@ -373,6 +378,7 @@ crate::words! {
 
 crate::words! {
     /// What a pause, resume, remove, or verify did to one download.
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum ChangeResult {
         Paused = "paused",
         AlreadyPaused = "already_paused",
@@ -388,6 +394,7 @@ crate::words! {
 
 /// The result of a pause, resume, remove, or verify for one download.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Change {
     pub id: String,
     pub name: Option<String>,
@@ -414,6 +421,7 @@ impl Change {
 
 /// A file or folder `rm` was to delete or move to the Trash and left, and why.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Kept {
     pub path: PathBuf,
     pub reason: String,
@@ -421,6 +429,7 @@ pub struct Kept {
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Event {
     /// The first event of every watch: the current state of each watched download.
     Snapshot {

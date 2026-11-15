@@ -38,10 +38,12 @@ pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
 
 /// What `GET /api/titles` answers.
 #[derive(Serialize)]
-struct Found {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "TitleSearch"))]
+pub(super) struct Found {
     titles: Vec<TitleCard>,
     /// Title lookups are off in config.yaml.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(as = "Option<bool>", optional))]
     offline: bool,
 }
 
@@ -120,7 +122,8 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request, asker: &Asker
 
 /// The screen that pressed play and what its player decodes, as the web app measures them.
 #[derive(Deserialize)]
-struct Measured {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "Viewer"))]
+pub(super) struct Measured {
     /// The screen in device pixels.
     width: u32,
     height: u32,
@@ -176,7 +179,8 @@ fn playback(text: &str) -> Result<Playback, Error> {
 }
 
 #[derive(Deserialize)]
-struct Play {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "PlayTitle", optional_fields))]
+pub(super) struct Play {
     /// `tt0063350`, `tt0903747:3:5`, or a series for its next episode.
     video: VideoRef,
     /// The screen that pressed play and what its browser decodes.
@@ -237,7 +241,7 @@ pub(in crate::daemon) async fn last(ctx: &Ctx, outcome: Outcome) -> Value {
             let Played { video, release, job, file, resume_at, tried, .. } = *played;
             match super::play::playing_file(ctx, job, file).await {
                 Ok(play) => {
-                    let line = PlayingLine { video, release, play, resume_at };
+                    let line = PlayingLine::Playing { video, release, play, resume_at };
                     return serde_json::to_value(line).expect("steps serialize");
                 }
                 Err(error) => (error, tried),
@@ -250,12 +254,10 @@ pub(in crate::daemon) async fn last(ctx: &Ctx, outcome: Outcome) -> Value {
 
 /// The `playing` line of a title play: the video, and where the player gets it.
 #[derive(Serialize)]
-#[serde(tag = "type", rename = "playing")]
-struct PlayingLine {
-    video: VideoRef,
-    release: Release,
-    play: super::play::Playing,
-    resume_at: Option<f64>,
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) enum PlayingLine {
+    Playing { video: VideoRef, release: Release, play: super::play::Playing, resume_at: Option<f64> },
 }
 
 #[derive(Deserialize)]
@@ -284,7 +286,8 @@ pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
 
 /// What `POST /api/watched` answers.
 #[derive(Serialize)]
-struct Saved {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct Saved {
     watched: Watched,
     /// False while a TV plays the video.
     kept: bool,

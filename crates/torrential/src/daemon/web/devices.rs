@@ -91,7 +91,8 @@ struct Paired {
 /// `GET /api/me`: whether the browser asking is this Mac or a paired device.
 #[derive(Serialize)]
 #[serde(tag = "asker", rename_all = "snake_case")]
-enum Me {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) enum Me {
     Device { device: Option<Device> },
     Mac,
 }
@@ -134,21 +135,26 @@ fn local_only(asker: &Asker) -> Result<(), Error> {
     }
 }
 
+/// The devices as the web app shows them, with the offer's QR code.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "DeviceList"))]
+pub(super) struct Shown {
+    devices: Vec<Device>,
+    offer: Option<Offer>,
+    unreachable: Option<String>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "PairingOffer"))]
+pub(super) struct Offer {
+    #[serde(flatten)]
+    offer: PairingOffer,
+    /// Rows of `1` and `0`, without the quiet zone.
+    qr: Vec<String>,
+}
+
 /// The list as the web app shows it, with the offer's QR code.
 fn shown(DeviceList { devices, offer, unreachable }: DeviceList) -> Result<Value, Error> {
-    #[derive(Serialize)]
-    struct Shown {
-        devices: Vec<Device>,
-        offer: Option<Offer>,
-        unreachable: Option<String>,
-    }
-    #[derive(Serialize)]
-    struct Offer {
-        #[serde(flatten)]
-        offer: PairingOffer,
-        /// Rows of `1` and `0`, without the quiet zone.
-        qr: Vec<String>,
-    }
     let offer = offer.map(|offer| Offer { qr: qr(&offer.url), offer });
     value(Shown { devices, offer, unreachable })
 }

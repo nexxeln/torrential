@@ -24,6 +24,7 @@ pub struct Title {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Episode {
     pub season: u32,
     pub episode: u32,

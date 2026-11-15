@@ -55,6 +55,7 @@ impl fmt::Display for TitleId {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Kind {
     Film,
     Series,
@@ -126,6 +127,7 @@ impl fmt::Display for VideoRef {
 
 /// Enough of a title to list it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitleCard {
     pub id: TitleId,
     pub kind: Kind,
@@ -145,6 +147,7 @@ fn one_decimal<S: Serializer>(rating: &Option<f32>, s: S) -> Result<S::Ok, S::Er
 /// One title as the catalog describes it. Pictures are served by title ID, so only whether each
 /// exists shows here.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitleDetails {
     #[serde(flatten)]
     pub card: TitleCard,
@@ -175,7 +178,7 @@ pub enum Country {
 }
 
 impl Country {
-    const ALL: [Country; 6] = [Country::Us, Country::Uk, Country::Au, Country::Ca, Country::Nz, Country::Ie];
+    pub(crate) const ALL: [Country; 6] = [Country::Us, Country::Uk, Country::Au, Country::Ca, Country::Nz, Country::Ie];
 
     /// The code release names use, and the names a catalog writes the country by.
     fn spellings(self) -> (&'static str, &'static [&'static str]) {
@@ -278,6 +281,7 @@ impl fmt::Debug for Countries {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Art {
     pub poster: bool,
     pub background: bool,
@@ -294,12 +298,14 @@ pub enum ArtKind {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Season {
     pub number: u32,
     pub episodes: Vec<EpisodeInfo>,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EpisodeInfo {
     #[serde(flatten)]
     pub episode: Episode,

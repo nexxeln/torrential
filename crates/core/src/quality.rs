@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::name;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Quality {
     /// `None` when the name carries no resolution tag.
     pub resolution: Option<Resolution>,
@@ -15,6 +16,7 @@ pub struct Quality {
 }
 
 crate::words! {
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum Resolution {
         /// 576 lines or fewer, such as a DVD rip.
         Sd = "sd",
@@ -40,6 +42,7 @@ impl Resolution {
 }
 
 crate::words! {
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum Codec {
         /// x264, H.264, or AVC.
         H264 = "h264",

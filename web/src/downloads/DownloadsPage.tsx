@@ -66,7 +66,7 @@ function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiErro
             {facts(job)}
             {job.state !== "done" && progress.size ? ` · ${percent(fraction)}` : ""}
           </p>
-          {job.error && (
+          {job.state === "error" && (
             <p className="text-pretty text-error">
               {sentence(job.error.message)}
               {job.error.hint && <span className="text-pencil"> {sentence(job.error.hint)}</span>}

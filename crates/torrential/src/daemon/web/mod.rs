@@ -15,6 +15,8 @@ pub mod play;
 mod thumbnail;
 pub(super) mod titles;
 pub mod watch;
+#[cfg(test)]
+mod wire;
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -194,6 +196,7 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
 
 /// `GET /api/version`.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "Version"))]
 struct VersionReply<'a> {
     version: &'a str,
     /// What the update board says, if anything.
@@ -202,6 +205,7 @@ struct VersionReply<'a> {
 
 /// `GET /api/pieces`: one character a run of the file, as `watch::pieces` writes them.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "FilePieces"))]
 struct Pieces {
     pieces: String,
 }
@@ -227,6 +231,7 @@ pub struct ErrorBody<'a> {
 /// A line of `POST /api/search`: the results so far as each source answers, then the last.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "SearchMessage"))]
 enum SearchLine {
     Update { result: SearchResult, pending: Vec<String> },
     Done { result: SearchResult },
@@ -236,6 +241,7 @@ enum SearchLine {
 /// A line of `POST /api/ffmpeg`.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "FfmpegMessage"))]
 enum FfmpegLine {
     Progress { done: u64, size: u64 },
     Ready,

@@ -48,6 +48,7 @@ impl Screen {
 }
 
 crate::words! {
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum Playback {
         HevcHdr = "hevc-hdr",
         Hevc = "hevc",

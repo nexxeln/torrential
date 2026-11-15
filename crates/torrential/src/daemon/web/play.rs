@@ -25,6 +25,7 @@ pub struct Play {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "PlayInfo"))]
 pub struct Playing {
     id: String,
     name: String,

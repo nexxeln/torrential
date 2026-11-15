@@ -33,18 +33,21 @@ impl Watched {
     }
 }
 
+/// Where a person stopped, as it goes on the wire: whether they finished, and not the release.
+#[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Watched"))]
+pub(crate) struct WatchedWire<'a> {
+    video: &'a VideoRef,
+    position: f64,
+    duration: Option<f64>,
+    finished: bool,
+    at: i64,
+}
+
 impl Serialize for Watched {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Fields<'a> {
-            video: &'a VideoRef,
-            position: f64,
-            duration: Option<f64>,
-            finished: bool,
-            at: i64,
-        }
         let Watched { video, position, duration, release: _, at } = self;
-        Fields { video, position: *position, duration: *duration, finished: self.finished(), at: *at }
+        WatchedWire { video, position: *position, duration: *duration, finished: self.finished(), at: *at }
             .serialize(serializer)
     }
 }
@@ -66,6 +69,7 @@ impl<'de> Deserialize<'de> for Watched {
 
 /// What Play on a title page plays.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Next {
     pub video: VideoRef,
     /// Seconds to resume at, or `None` to start from the beginning.
@@ -115,6 +119,7 @@ pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Nex
 
 /// The title a download was made for, and what of it the download holds.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitleLink {
     pub title: TitleId,
     pub span: Span,
@@ -126,6 +131,7 @@ pub struct TitleLink {
 /// or `failed`.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum AttemptEvent {
     Resolved {
         video: VideoRef,
@@ -165,6 +171,7 @@ pub enum AttemptEvent {
 /// What a play waits for from the source under test.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Check {
     FileList,
     Start,
@@ -174,6 +181,7 @@ pub enum Check {
 /// Why a play moved past a source.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reason")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Skip {
     NoFileList {
         waited_s: u32,
@@ -216,6 +224,7 @@ impl fmt::Display for Skip {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Tried {
     pub release: ReleaseId,
     pub reason: Skip,
