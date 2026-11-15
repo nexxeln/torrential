@@ -3,6 +3,8 @@
 
 pub mod attempt;
 pub mod catalog_port;
+pub mod follow;
+pub mod watching;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -33,6 +35,7 @@ const CONTINUE_MOST: usize = 20;
 pub struct Titles {
     pub catalog: Arc<dyn CatalogPort>,
     pub shelf: Arc<Shelf>,
+    pub watching: Arc<watching::Watching>,
     pub timing: Timing,
     /// When each release last failed to play, and why. In memory, so a restart gives every one a
     /// chance.
@@ -66,7 +69,13 @@ impl Default for Timing {
 
 impl Titles {
     pub fn new(catalog: Arc<dyn CatalogPort>, shelf: Arc<Shelf>, timing: Timing) -> Self {
-        Self { catalog, shelf, timing, failed: Mutex::default() }
+        Self {
+            catalog,
+            watching: Arc::new(watching::Watching::new(shelf.clone())),
+            shelf,
+            timing,
+            failed: Mutex::default(),
+        }
     }
 
     fn failed(&self, release: ReleaseId, why: Skip) {

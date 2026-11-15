@@ -114,6 +114,14 @@ fn portless(text: &str) -> String {
     out + rest
 }
 
+/// The socket a player's arguments have it open, and the arguments with `SOCKET` in its place.
+fn socketless(argv: &str) -> (String, Option<PathBuf>) {
+    let flag = "--input-ipc-server=";
+    let socket = argv.lines().find_map(|line| line.strip_prefix(flag)).map(PathBuf::from);
+    let text = argv.lines().map(|line| if line.starts_with(flag) { "--input-ipc-server=SOCKET" } else { line });
+    (text.map(|line| format!("{line}\n")).collect(), socket)
+}
+
 fn eventually(what: &str, within: Duration, done: impl Fn() -> bool) {
     let deadline = Instant::now() + within;
     while !done() {
@@ -325,10 +333,10 @@ fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
     let argv = home.path("argv");
     eventually("the player starts", Duration::from_secs(10), || argv.exists());
     assert_eq!(
-        portless(&std::fs::read_to_string(&argv).unwrap()),
+        socketless(&portless(&std::fs::read_to_string(&argv).unwrap())).0,
         format!(
             "--sub-file=http://127.0.0.1:PORT/{ARCHIVE}/3/night_of_the_living_dead.srt\n--slang=en\n\
-             --force-media-title=Night of the Living Dead (1968)\n\
+             --force-media-title=Night of the Living Dead (1968)\n--input-ipc-server=SOCKET\n\
              http://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n"
         )
     );
@@ -395,13 +403,52 @@ fn play_starts_the_player_where_the_person_stopped() {
     let argv = home.path("argv");
     eventually("the player starts", Duration::from_secs(10), || argv.exists());
     assert_eq!(
-        portless(&std::fs::read_to_string(&argv).unwrap()),
+        socketless(&portless(&std::fs::read_to_string(&argv).unwrap())).0,
         format!(
             "--sub-file=http://127.0.0.1:PORT/{ARCHIVE}/3/night_of_the_living_dead.srt\n--slang=en\n\
-             --force-media-title=Night of the Living Dead (1968)\n--start=200\n\
+             --force-media-title=Night of the Living Dead (1968)\n--start=200\n--input-ipc-server=SOCKET\n\
              http://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n"
         )
     );
+}
+
+/// Plays the part of mpv at the socket in `argv`: says each of `said` and quits.
+fn say(argv: &Path, said: &[(&str, Value)]) {
+    let socket = socketless(&std::fs::read_to_string(argv).unwrap()).1.expect("mpv opens a socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (mut player, _) = listener.accept().unwrap();
+    let mut asked = String::new();
+    let mut byte = [0u8];
+    while asked.matches('\n').count() < 3 {
+        player.read_exact(&mut byte).unwrap();
+        asked.push(byte[0] as char);
+    }
+    assert_eq!(asked.matches("observe_property").count(), 3, "{asked}");
+    for (name, data) in said {
+        let line = json!({ "event": "property-change", "id": 1, "name": name, "data": data });
+        player.write_all(format!("{line}\n").as_bytes()).unwrap();
+    }
+}
+
+#[test]
+fn play_keeps_where_the_player_says_it_stopped() {
+    let home = Home::new(&[]);
+    let run = home.run(&["play", "tt0063350"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let argv = home.path("argv");
+    eventually("the player starts", Duration::from_secs(10), || argv.exists());
+    say(&argv, &[("duration", json!(5760.0)), ("time-pos", json!(1234.5)), ("time-pos", Value::Null)]);
+    let place = || home.json(&["title", "tt0063350", "--json"])["title"]["next"]["resume_at"].clone();
+    eventually("the engine keeps the place", Duration::from_secs(10), || place() == json!(1234.5));
+
+    std::fs::remove_file(&argv).unwrap();
+    let run = home.run(&["play", "tt0063350"]);
+    assert_eq!((run.code, run.stderr.lines().last()), (0, Some("Resuming at 20:34")), "{}", run.stderr);
+    eventually("the player starts", Duration::from_secs(10), || argv.exists());
+    say(&argv, &[("duration", json!(5760.0)), ("time-pos", json!(5750.0))]);
+    eventually("a player that reached the credits finishes the film", Duration::from_secs(10), || {
+        home.json(&["title", "tt0063350", "--json"])["title"]["watched"][0]["finished"] == json!(true)
+    });
 }
 
 #[test]
@@ -418,8 +465,10 @@ fn a_player_set_as_a_path_named_mpv_starts_where_the_person_stopped() {
     let argv = home.path("argv");
     eventually("the player starts", Duration::from_secs(10), || argv.exists());
     assert_eq!(
-        portless(&std::fs::read_to_string(&argv).unwrap()),
-        format!("--start=200\nhttp://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n")
+        socketless(&portless(&std::fs::read_to_string(&argv).unwrap())).0,
+        format!(
+            "--start=200\n--input-ipc-server=SOCKET\nhttp://127.0.0.1:PORT/{ARCHIVE}/0/night_of_the_living_dead.mp4\n"
+        )
     );
 }
 

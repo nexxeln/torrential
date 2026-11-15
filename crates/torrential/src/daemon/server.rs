@@ -22,7 +22,7 @@ use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::search_port::Progress;
 use super::titles::attempt::{self, Outcome, PlayTitle, Played};
-use super::titles::{home, pinned, sources, title_page};
+use super::titles::{follow, home, pinned, sources, title_page};
 use crate::log::log;
 use crate::update::Version;
 use crate::wire;
@@ -76,6 +76,10 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             ctx.casts.control(tv.as_deref(), action).await.map(|cast| Response::Cast { cast: Box::new(cast) })
         }
         Request::Home => home(ctx).await.map(|home| Response::Home { home: Box::new(home) }),
+        Request::Follow { video, release, socket } => {
+            follow::follow(ctx.titles.watching.clone(), video, release, socket);
+            Ok(Response::Ok)
+        }
     };
     result.unwrap_or_else(|error| Response::Error { error })
 }

@@ -1449,6 +1449,17 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
         json!(["Harbor Lights", false, "tt9999901:1:1", true, { "video": "tt9999901:1:2", "resume_at": null }, []])
     );
 
+    assert_eq!(post(&h, "/api/watched/forget", json!({ "video": "tt0063350" })).await, (200, json!({})));
+    let (status, saved) = post(&h, "/api/watched", watch("tt0063350", 4.0, 5760.0)).await;
+    assert_eq!((status, &saved["kept"]), (200, &json!(true)));
+    let (_, page) = get(&h, "/api/title?id=tt0063350").await;
+    assert_eq!(
+        json!([page["watched"], page["next"]]),
+        json!([[], { "video": "tt0063350", "resume_at": null }]),
+        "a forgotten film starts over, and a place in its first seconds is not kept"
+    );
+    post(&h, "/api/watched", watch("tt0063350", 1834.2, 5760.0)).await;
+
     post(&h, "/api/watched", watch("tt9999901:2:1", 2639.0, 2640.0)).await;
     let (_, page) = get(&h, "/api/title?id=tt9999901").await;
     assert_eq!(page["next"], Value::Null, "2x2 has not aired, so nothing comes after 2x1");

@@ -23,6 +23,7 @@ use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::Progress;
 use super::Resolved;
+use crate::log::log;
 
 const MOST_TRIED: usize = 6;
 /// Sources after the one under test whose file lists are asked for early, so dead swarms in a row
@@ -228,9 +229,13 @@ impl Searching<'_> {
     }
 }
 
-/// Where the person stopped `video`, unless they finished it.
+/// Where the person stopped `video`, unless they finished it. A place that cannot be read plays
+/// from the beginning, and the log says why.
 fn resume_at(ctx: &Ctx, video: &VideoRef) -> Option<f64> {
-    torrential_core::watching::resume_at(&ctx.titles.shelf.watched(&video.title).ok()?, video)
+    ctx.titles.watching.resume_at(video).unwrap_or_else(|error| {
+        log(&format!("{video} plays from the beginning, for where it stopped cannot be read: {error}"));
+        None
+    })
 }
 
 /// A title play's way through its sources.

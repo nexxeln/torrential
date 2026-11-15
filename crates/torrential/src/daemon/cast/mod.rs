@@ -32,11 +32,13 @@ use super::owner::{Command, MetaTarget};
 use super::playing::Open;
 use super::titles;
 use super::titles::attempt::{self, Outcome, PlayTitle, Played};
+use super::titles::watching::{Screen, Watching};
 use crate::log::log;
 pub use ssdp::Find;
 use ssdp::Heard;
 use torrential_core::protocol::METADATA_WAIT;
 use torrential_core::title::title_name;
+use torrential_core::watching::{SAVE_EVERY, WORTH_SAVING};
 use upnp::{Failed, Renderer, Service};
 
 /// A search this recent answers a request for the TVs without searching again.
@@ -51,10 +53,6 @@ const DESCRIBING: usize = 4;
 const POLL: Duration = Duration::from_secs(1);
 /// How often a cast asks the TV its volume, in polls.
 const VOLUME_EVERY: u32 = 5;
-/// How often the position goes to the watch history, as the web player saves it.
-const SAVE_EVERY: Duration = Duration::from_secs(5);
-/// A position this close to the start is not kept, as in the web player.
-const WORTH_SAVING: f64 = 5.0;
 /// How long a TV may take to start playing once it has the URL. The first bytes are in by then.
 const START_WITHIN: Duration = Duration::from_secs(90);
 /// A TV that answers nothing for this long has gone.
@@ -95,9 +93,6 @@ struct State {
     casts: BTreeMap<String, Entry>,
     /// How each file a cast grant serves goes to the TV, by the grant's path.
     served: HashMap<String, Dlna>,
-    /// The cast that keeps each video's place in the watch history: of the casts playing it, the
-    /// one started last.
-    keeping: HashMap<VideoRef, u64>,
     next: u64,
 }
 
@@ -208,15 +203,6 @@ impl Casts {
         let mut casts: Vec<Cast> = state.casts.values().map(|entry| entry.view.borrow().clone()).collect();
         casts.sort_by_key(|cast| cast.started_at);
         TvList { tvs: state.tvs(), casts }
-    }
-
-    /// Whether a cast of `video` is under way, which keeps its place in the watch history to itself.
-    pub fn plays(&self, video: &VideoRef) -> bool {
-        let state = self.state();
-        state.casts.values().any(|entry| {
-            let cast = entry.view.borrow();
-            !cast.ended() && cast.video.as_ref() == Some(video)
-        })
     }
 
     /// The TVs and the casts, after a search of the home network unless one ran in the last 30
@@ -558,7 +544,7 @@ impl Run {
             served.push((grant.path().to_string(), Dlna { mime: format!("text/{kind}"), caption: None, video: false }));
         }
         let _serving = Serving::new(&ctx.casts, served);
-        let _keeping = found.video.as_ref().map(|video| Keeping::new(&ctx.casts, video, self.id));
+        let _keeping = found.video.as_ref().map(|video| Keeping::new(&ctx.titles.watching, video, self.id));
         let duration = media::probed(ctx, found.id, found.file).and_then(|media| media.duration);
         let film = found.video.as_ref().is_some_and(|video| video.episode.is_none());
         let kind = found.subtitle.as_ref().map(|(_, path)| extension(path));
@@ -621,9 +607,13 @@ impl Run {
                     if matches!(action, CastAction::Seek { .. }) && done.is_ok() {
                         resume = None;
                     }
+                    if action == CastAction::Resume && done.is_ok() {
+                        self.start(found);
+                    }
                     let stop = action == CastAction::Stop;
                     if stop {
                         self.save(found);
+                        self.let_go(found);
                         self.view.send_modify(|cast| cast.state = CastState::Ended { error: None });
                     } else if matches!(action, CastAction::Pause) && done.is_ok() {
                         self.save(found);
@@ -647,6 +637,9 @@ impl Run {
                     Transport::Playing | Transport::Paused if !elsewhere => {
                         contact.played = true;
                         let paused = transport == Transport::Paused;
+                        if !paused && self.view.borrow().state == CastState::Paused {
+                            self.start(found);
+                        }
                         let duration = polled.duration.or(known);
                         resume = resume.filter(|resume| !resume.over(polled.position, now));
                         let position = resume.map(|resume| resume.at).or(polled.position);
@@ -762,16 +755,28 @@ impl Run {
         upnp::call(&self.ctx.casts.http, service, action, args, &self.tv.tv.name).await
     }
 
-    /// Keeps where the TV is in the watch history, as the web player keeps it, unless a cast
-    /// of the same video started since.
+    /// The TV resumed the video, so it keeps the place from now on.
+    fn start(&self, found: &Found) {
+        if let Some(video) = &found.video {
+            self.ctx.titles.watching.start(&Screen::Cast(self.id), video);
+        }
+    }
+
+    /// The cast stops before it answers, so another screen that plays the video keeps the place
+    /// from its next save.
+    fn let_go(&self, found: &Found) {
+        if let Some(video) = &found.video {
+            self.ctx.titles.watching.stop(&Screen::Cast(self.id), video);
+        }
+    }
+
+    /// Keeps where the TV is in the watch history, unless another screen started or resumed the
+    /// video since.
     fn save(&self, found: &Found) {
         let cast = self.view.borrow().clone();
         let (Some(video), Some(position), Some(duration)) = (&found.video, cast.position, cast.duration) else {
             return;
         };
-        if position <= WORTH_SAVING || self.ctx.casts.state().keeping.get(video) != Some(&self.id) {
-            return;
-        }
         let watched = Watched {
             video: video.clone(),
             position: position.min(duration),
@@ -779,7 +784,7 @@ impl Run {
             release: found.release,
             at: now(),
         };
-        if let Err(error) = self.ctx.titles.shelf.watch(&watched) {
+        if let Err(error) = self.ctx.titles.watching.save(&Screen::Cast(self.id), &watched) {
             log(&format!("cannot keep where {} stopped: {error}", found.name));
         }
     }
@@ -994,7 +999,7 @@ async fn find(
             let video = request.video.clone().or_else(|| job.title.as_ref().and_then(video_of));
             let release = job.title.as_ref().and_then(|link| link.release);
             let resume_at = match &video {
-                Some(video) => resume_at(ctx, video)?,
+                Some(video) => ctx.titles.watching.resume_at(video)?,
                 None => None,
             };
             let name = match &video {
@@ -1054,12 +1059,6 @@ fn video_of(link: &TitleLink) -> Option<VideoRef> {
         Span::Season(_) | Span::Seasons { .. } | Span::Complete => return None,
     };
     Some(VideoRef { title: link.title.clone(), episode })
-}
-
-/// Where the person stopped `video`, unless they finished it.
-fn resume_at(ctx: &Ctx, video: &VideoRef) -> Result<Option<f64>, Error> {
-    let watched = ctx.titles.shelf.watched(&video.title)?;
-    Ok(watched.iter().find(|w| &w.video == video).filter(|w| !w.finished()).map(|w| w.position))
 }
 
 fn refused(tv: &Tv, path: &str) -> Error {
@@ -1133,29 +1132,25 @@ impl Drop for Serving<'_> {
     }
 }
 
-/// A cast's claim on its video's place in the watch history, until it is dropped. A cast started
-/// after another of the same video takes the place from it, and keeps it once that one is gone.
+/// A cast's claim on its video's place in the watch history, from its start until it is
+/// dropped. A screen that starts or resumes the video later takes the place from it.
 struct Keeping<'a> {
-    casts: &'a Casts,
+    watching: &'a Watching,
     video: VideoRef,
-    id: u64,
+    screen: Screen,
 }
 
 impl<'a> Keeping<'a> {
-    fn new(casts: &'a Casts, video: &VideoRef, id: u64) -> Self {
-        let mut state = casts.state();
-        let keeper = state.keeping.entry(video.clone()).or_insert(id);
-        *keeper = (*keeper).max(id);
-        Self { casts, video: video.clone(), id }
+    fn new(watching: &'a Watching, video: &VideoRef, id: u64) -> Self {
+        let screen = Screen::Cast(id);
+        watching.start(&screen, video);
+        Self { watching, video: video.clone(), screen }
     }
 }
 
 impl Drop for Keeping<'_> {
     fn drop(&mut self) {
-        let mut state = self.casts.state();
-        if state.keeping.get(&self.video) == Some(&self.id) {
-            state.keeping.remove(&self.video);
-        }
+        self.watching.stop(&self.screen, &self.video);
     }
 }
 

@@ -2,6 +2,7 @@
 //! title play reports.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -29,6 +30,10 @@ pub struct Watched {
 pub const FINISHED_SHARE: f64 = 0.03;
 /// Seconds at the end of a video that count as credits, when that is more than the share.
 pub const FINISHED_WITHIN: f64 = 20.0;
+/// Seconds at the start of a video too few to keep: a place there plays from the beginning.
+pub const WORTH_SAVING: f64 = 5.0;
+/// How often a screen that plays a video saves where it is.
+pub const SAVE_EVERY: Duration = Duration::from_secs(5);
 
 impl Watched {
     /// Stopping in the credits finishes the video.
@@ -82,9 +87,17 @@ pub struct Next {
     pub resume_at: Option<f64>,
 }
 
+impl Watched {
+    /// Where to resume the video: the place, unless the person finished it or stopped too near
+    /// the start to keep.
+    pub fn resume_at(&self) -> Option<f64> {
+        Some(self.position).filter(|at| *at > WORTH_SAVING && !self.finished())
+    }
+}
+
 /// Where the person stopped `video`, of what they `watched`, unless they finished it.
 pub fn resume_at(watched: &[Watched], video: &VideoRef) -> Option<f64> {
-    watched.iter().find(|w| w.video == *video && !w.finished()).map(|w| w.position)
+    watched.iter().find(|w| w.video == *video)?.resume_at()
 }
 
 /// What of a title to play: an unfinished film or episode to resume, or else the first aired
@@ -93,7 +106,7 @@ pub fn resume_at(watched: &[Watched], video: &VideoRef) -> Option<f64> {
 /// catalog does not list, or that has not aired, counts as never watched.
 pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Next> {
     let title = &details.card.id;
-    let resume = |w: &Watched| Next { video: w.video.clone(), resume_at: Some(w.position) };
+    let resume = |w: &Watched| Next { video: w.video.clone(), resume_at: w.resume_at() };
     let at = |episode: Option<Episode>| VideoRef { title: title.clone(), episode };
     let entry = |video: &VideoRef| watched.iter().find(|w| w.video == *video);
     if details.card.kind == Kind::Film {
@@ -348,6 +361,9 @@ mod tests {
         let halfway = [watched("tt0063350", 1834.2, Some(5760.0), 10), watched("tt0100258", 10.0, None, 20)];
         assert_eq!(next(&halfway), Some(Next { video: video("tt0063350"), resume_at: Some(1834.2) }));
         assert_eq!(next(&[watched("tt0063350", 5750.0, Some(5760.0), 10)]), None);
+        let near_the_start = [watched("tt0063350", WORTH_SAVING, Some(5760.0), 10)];
+        assert_eq!(next(&near_the_start), Some(Next { video: video("tt0063350"), resume_at: None }));
+        assert_eq!(resume_at(&near_the_start, &video("tt0063350")), None);
     }
 
     /// Breaking Bad with one special, two episodes in season 1, and in season 2 one aired, one

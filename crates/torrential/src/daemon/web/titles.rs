@@ -20,6 +20,7 @@ use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Shelving};
 use super::super::titles;
 use super::super::titles::attempt::{self, Outcome, PlayTitle, Played};
+use super::super::titles::watching::Screen;
 use super::{NDJSON, fail, line, number, required, value};
 use torrential_core::title::title_name;
 
@@ -262,27 +263,37 @@ pub(super) enum PlayingLine {
     Playing { video: VideoRef, release: Release, play: super::play::Playing, resume_at: Option<f64> },
 }
 
+/// What `POST /api/watched` takes.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Position {
     video: VideoRef,
     /// Seconds.
     position: f64,
     duration: Option<f64>,
     release: Option<ReleaseId>,
+    /// A word the tab made up for the video it plays. A tab that sends none is one tab.
+    #[serde(default)]
+    tab: String,
+    /// The tab started or resumed the video since its last save, so it keeps the place.
+    #[serde(default)]
+    starts: bool,
 }
 
-/// `POST /api/watched`: where a film or episode stopped. The player sends it every few seconds.
-/// `kept` is false while a TV plays the video, whose own place stands until the cast ends.
+/// `POST /api/watched`: where a film or episode stopped. The player sends it every few seconds,
+/// and when it starts, resumes or pauses. `kept` is false while another screen that started or
+/// resumed the video since keeps its place.
 pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
-    let Position { video, position, duration, release } = request;
+    let Position { video, position, duration, release, tab, starts } = request;
     check_times(position, duration)?;
     let now = now();
     watchable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
-    let kept = !ctx.casts.plays(&video);
-    let watched = Watched { video, position, duration, release, at: now };
-    if kept {
-        ctx.titles.shelf.watch(&watched)?;
+    let screen = Screen::Tab(tab);
+    if starts {
+        ctx.titles.watching.start(&screen, &video);
     }
+    let watched = Watched { video, position, duration, release, at: now };
+    let kept = ctx.titles.watching.save(&screen, &watched)?;
     value(Saved { watched, kept })
 }
 
@@ -291,8 +302,22 @@ pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(super) struct Saved {
     watched: Watched,
-    /// False while a TV plays the video.
+    /// False while another screen keeps the place.
     kept: bool,
+}
+
+/// What `POST /api/watched/forget` takes.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Forget {
+    video: VideoRef,
+}
+
+/// `POST /api/watched/forget`: forgets where a film or episode stopped, so it plays from the
+/// beginning and leaves Continue.
+pub async fn forget(ctx: &Ctx, request: Forget) -> Result<Value, Error> {
+    ctx.titles.watching.forget(&request.video)?;
+    Ok(serde_json::json!({}))
 }
 
 /// No video runs longer, in seconds.

@@ -34,7 +34,7 @@ function primaryOf(page: Title): Primary | null {
   const target = page.next ?? restart(page);
   if (!target) return null;
   const episode = findEpisode(page, target.video);
-  const resuming = target.resume_at !== null && target.resume_at > 0;
+  const resuming = target.resume_at !== null;
   const verb = resuming ? "Resume" : "Play";
   const duration = page.watched.find((entry) => entry.video === target.video)?.duration ?? (page.runtime_min ? page.runtime_min * 60 : null);
   return {
