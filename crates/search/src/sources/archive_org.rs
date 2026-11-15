@@ -148,7 +148,7 @@ fn category(doc: &Doc) -> Option<Category> {
     })
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Item {
     identifier: String,
     metadata: Url,
@@ -169,7 +169,26 @@ pub(super) fn item(base: &Url, name: &str, web_seeds: &[String]) -> Option<Item>
     })
 }
 
+/// The item whose `.torrent` file is at `url`, as archive.org links it:
+/// `<base>download/<identifier>/<file>.torrent`.
+pub(super) fn item_of_link(base: &Url, url: &Url) -> Option<Item> {
+    let download = at(base, "download/");
+    if (url.scheme(), url.host_str(), url.port()) != (download.scheme(), download.host_str(), download.port()) {
+        return None;
+    }
+    let (identifier, file) = url.path().strip_prefix(download.path())?.split_once('/')?;
+    (is_identifier(identifier) && file.ends_with(".torrent")).then(|| Item {
+        identifier: identifier.to_string(),
+        metadata: at(base, &format!("metadata/{identifier}")),
+        scheme: base.scheme().to_string(),
+    })
+}
+
 impl Item {
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
     pub async fn mirrors(&self, http: &Http) -> Result<Vec<String>, Error> {
         const CAP: usize = 16 << 20;
         const WITHIN: Duration = Duration::from_secs(20);
@@ -285,6 +304,18 @@ mod tests {
             assert_eq!(super::item(&base, "BigBuckBunny_124", &seeds(list)), None, "{list:?}");
         }
         assert_eq!(super::item(&base, "..", &caminandes), None);
+    }
+
+    #[test]
+    fn a_torrent_link_on_archive_org_names_its_item() {
+        let base = Url::parse("https://archive.org/").unwrap();
+        let read = |link: &str| item_of_link(&base, &Url::parse(link).unwrap()).map(|item| item.identifier);
+        let night = "https://archive.org/download/night_of_the_living_dead/night_of_the_living_dead_archive.torrent";
+        assert_eq!(read(night).as_deref(), Some("night_of_the_living_dead"));
+        assert_eq!(read("https://archive.org/download/night_of_the_living_dead/film.mp4"), None, "not a .torrent");
+        assert_eq!(read("http://archive.org/download/night/night_archive.torrent"), None, "another scheme");
+        assert_eq!(read("https://example.com/download/night/night_archive.torrent"), None, "another host");
+        assert_eq!(read("https://archive.org/details/night/night_archive.torrent"), None, "not a download");
     }
 
     #[test]

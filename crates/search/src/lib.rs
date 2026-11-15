@@ -21,15 +21,15 @@ mod store;
 pub mod subtitles;
 mod terms;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::future::Either;
+use futures_util::future::{BoxFuture, Either, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ use crate::assemble::{Answer, Linked, Run, assemble, merged, vet};
 use crate::cache::AnswerKey;
 pub use crate::cache::ResultCache;
 use crate::http::{FetchError, Http, Retry};
-use crate::sources::{Ctx, Failure, Source, Stores};
+use crate::sources::{Ctx, Failure, Source, Stores, archive_org};
 pub use crate::sources::{SavedLink, lawful};
 use crate::terms::Terms;
 
@@ -111,7 +111,24 @@ struct Inner {
     disabled: Vec<String>,
     stores: Stores,
     cache: ResultCache,
+    /// archive.org's answers about an item's servers, asked for as its `.torrent` file was fetched,
+    /// so a download of it starts from those servers.
+    servers: Mutex<VecDeque<Servers>>,
 }
+
+type Lookup = Shared<BoxFuture<'static, Result<Vec<String>, Error>>>;
+
+/// One item's lookup of its servers, begun at `asked`.
+struct Servers {
+    identifier: String,
+    asked: Instant,
+    lookup: Lookup,
+}
+
+/// Lookups begun with a `.torrent` fetch whose download has not started yet.
+const SERVERS_KEPT: usize = 8;
+/// How long a lookup's answer is used for a download that starts after it.
+const SERVERS_FOR: Duration = Duration::from_secs(60);
 
 impl Search {
     /// Fails with `usage` when the config names an unknown source or a bad URL.
@@ -255,6 +272,9 @@ impl Search {
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .ok_or_else(|| Error::new(ErrorCode::InvalidRef, "a .torrent URL must start with http:// or https://"))?;
+        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item_of_link(&url)) {
+            self.inner.ask_servers(item);
+        }
         // A private tracker may count each request for a .torrent as a grab.
         let body = self.inner.http.fetch(&url, CAP, Instant::now() + WITHIN, Retry::Never).await;
         body.map_err(|e| {
@@ -278,7 +298,11 @@ impl Search {
     ) -> Option<impl Future<Output = Result<Vec<String>, Error>> + Send + 'static> {
         let inner = self.inner.clone();
         if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds)) {
-            return Some(Either::Left(async move { item.mirrors(&inner.http).await }));
+            let lookup = match self.inner.asked_servers(&item) {
+                Some(asked) => asked.boxed(),
+                None => async move { item.mirrors(&inner.http).await }.boxed(),
+            };
+            return Some(Either::Left(lookup));
         }
         let file = file.filter(|file| web_seeds.iter().any(|seed| redirect::request(seed, file).is_some()))?;
         let (file, web_seeds) = (file.to_path_buf(), web_seeds.to_vec());
@@ -314,7 +338,29 @@ impl Inner {
         let seeds = Http::public(http::USER_AGENT, redirect::policy()).map_err(no_client)?;
         let sources = sources::registry(config)?;
         let disabled = config.disabled.clone();
-        Ok(Inner { http, seeds, sources, disabled, stores: Stores::new(config.cache_dir.clone()), cache })
+        let stores = Stores::new(config.cache_dir.clone());
+        Ok(Inner { http, seeds, sources, disabled, stores, cache, servers: Mutex::default() })
+    }
+
+    /// Starts asking archive.org for `item`'s servers, for a download of it that may start soon.
+    fn ask_servers(&self, item: archive_org::Item) {
+        let identifier = item.identifier().to_string();
+        let lookup = servers(&self.http, item);
+        let mut kept = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        kept.retain(|s| s.identifier != identifier);
+        if kept.len() == SERVERS_KEPT {
+            kept.pop_front();
+        }
+        kept.push_back(Servers { identifier, asked: Instant::now(), lookup });
+    }
+
+    /// The lookup of `item`'s servers begun lately with its `.torrent` fetch, taken so a later
+    /// download asks again.
+    fn asked_servers(&self, item: &archive_org::Item) -> Option<Lookup> {
+        let mut kept = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        let at = kept.iter().position(|s| s.identifier == item.identifier())?;
+        let taken = kept.remove(at)?;
+        (taken.asked.elapsed() < SERVERS_FOR).then_some(taken.lookup)
     }
 
     fn saved_links(&self, linked: Vec<Linked>) -> Vec<(Release, Option<SavedLink>)> {
@@ -363,6 +409,15 @@ fn fetch_reason(e: FetchError) -> String {
 
 fn millis(d: Duration) -> u32 {
     u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
+}
+
+/// Asks archive.org for `item`'s servers on a task of its own, so the answer comes however long the
+/// caller takes to wait for it.
+fn servers(http: &Http, item: archive_org::Item) -> Lookup {
+    let http = http.detached();
+    let task = tokio::spawn(async move { item.mirrors(&http).await });
+    let joined = task.map(|joined| joined.unwrap_or_else(|e| Err(Error::internal(format!("the lookup stopped: {e}")))));
+    joined.boxed().shared()
 }
 
 fn no_client(e: reqwest::Error) -> Error {
