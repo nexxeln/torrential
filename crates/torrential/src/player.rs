@@ -92,7 +92,7 @@ impl Player {
 pub fn find(choice: Option<&Choice>, env: &Env) -> Option<Player> {
     let player = |kind, program| Player { kind, program };
     let iina = || {
-        let home = env.var("HOME").map(|home| Path::new(home).join("Applications/IINA.app"));
+        let home = env.home().map(|home| home.join("Applications/IINA.app"));
         [Some(PathBuf::from("/Applications/IINA.app")), home]
             .into_iter()
             .flatten()

@@ -26,11 +26,11 @@ pub enum Exit {
     Restart,
 }
 
-/// Runs the TUI until the user quits. Downloads keep running in the engine afterwards.
-pub fn run(backend: impl Backend) -> io::Result<Exit> {
-    let mode = ColorMode::detect(|key| std::env::var(key).ok());
+/// Runs the TUI until the user quits, in `colors`, with `~` meaning `home`. Downloads keep running
+/// in the engine afterwards.
+pub fn run(backend: impl Backend, colors: ColorMode, home: Option<PathBuf>) -> io::Result<Exit> {
     let mut terminal = ratatui::try_init()?;
-    let result = session(&mut terminal, Arc::new(backend), mode);
+    let result = session(&mut terminal, Arc::new(backend), colors, home);
     ratatui::restore();
     let state = result?;
     if state.upgrade == Some(Upgrade::Installed) {
@@ -44,9 +44,13 @@ pub fn run(backend: impl Backend) -> io::Result<Exit> {
     Ok(Exit::Quit)
 }
 
-fn session<B: Backend>(terminal: &mut ratatui::DefaultTerminal, backend: Arc<B>, mode: ColorMode) -> io::Result<State> {
+fn session<B: Backend>(
+    terminal: &mut ratatui::DefaultTerminal,
+    backend: Arc<B>,
+    mode: ColorMode,
+    home: Option<PathBuf>,
+) -> io::Result<State> {
     let size = terminal.size()?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut state = State::new(Instant::now(), torrential_core::time::now(), (size.width, size.height), home);
     state.say(Tone::Info, "Downloads keep running after you quit.");
     terminal.draw(|frame| draw(frame, &state, mode))?;

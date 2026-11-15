@@ -46,7 +46,7 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
         }
     };
     let settings = crate::config::Config::load(&paths, env);
-    let downloads = settings.as_ref().map_or_else(|_| paths.downloads.clone(), |s| s.downloads_dir(&paths));
+    let downloads = crate::config::downloads_dir(settings.as_ref(), &paths);
     match RealDisk.space(&downloads) {
         Ok(space) => {
             let low = space.free < reserve(space.total);

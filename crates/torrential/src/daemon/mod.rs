@@ -158,7 +158,7 @@ fn trash(env: &Env, paths: &Paths) -> owner::trash::Trash {
         let dir = test.path(hooks::TRASH).map_or_else(|| paths.state.join("trash"), Path::to_path_buf);
         return owner::trash::Trash::At(dir);
     }
-    let home = || Path::new(env.var("HOME").unwrap_or("/")).join(".local/share");
+    let home = || env.home().unwrap_or(Path::new("/")).join(".local/share");
     owner::trash::Trash::system(&env.var("XDG_DATA_HOME").map_or_else(home, PathBuf::from))
 }
 
@@ -285,7 +285,7 @@ impl From<Error> for Startup {
 fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     log(&format!("engine failed to start: {error}"));
     if let Some(paths) = paths {
-        let _ = std::fs::write(paths.startup_error(), serde_json::to_vec(error).expect("errors serialize"));
+        paths.record_startup_error(error);
     }
     error.code.exit_code()
 }

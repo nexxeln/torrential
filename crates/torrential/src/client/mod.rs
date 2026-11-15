@@ -188,11 +188,7 @@ pub fn file_list(conn: &mut Conn, target: Target) -> Result<FilesReply, Error> {
 }
 
 pub fn absolute(path: &Path, cwd: &Path, env: &Env) -> PathBuf {
-    let expanded = match (path.strip_prefix("~"), env.var("HOME")) {
-        (Ok(rest), Some(home)) => Path::new(home).join(rest),
-        _ => path.to_path_buf(),
-    };
-    cwd.join(expanded)
+    cwd.join(env.expand_home(path))
 }
 
 fn job_refs(references: &[String], cwd: &Path) -> Result<Vec<String>, Error> {
