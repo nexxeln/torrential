@@ -36,7 +36,6 @@ enum On {
 }
 
 impl On {
-    /// Pairs another device.
     async fn pair(h: &Harness) -> Self {
         use torrential_core::protocol::{Request, Response};
         let ip = super::devices::lan();
