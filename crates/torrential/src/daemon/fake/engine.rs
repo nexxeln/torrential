@@ -147,8 +147,19 @@ impl Torrent {
         self.landing().map(|l| l.files).unwrap_or_default()
     }
 
-    fn written(&self, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
-        Ok(self.runs(file, offset, length, 1)?.iter().all(|run| run.is_complete()))
+    /// How many bytes of a file from `offset` on, up to `length`, have arrived without a gap.
+    fn arrived(&self, file: u32, offset: u64, length: u64) -> Result<u64, Error> {
+        self.runs(file, offset, length, 1)?;
+        let metainfo = self.metainfo.as_ref().expect("runs checked the file list");
+        let start = metainfo.files[..file as usize].iter().map(|f| f.size).sum::<u64>() + offset;
+        let end = start + length.min(metainfo.files[file as usize].size - offset);
+        let piece = piece_size(metainfo.total());
+        let have = self.landing().map(|l| l.have).unwrap_or_default();
+        let mut at = start;
+        while at < end && have.get((at / piece) as usize) == Some(&true) {
+            at = (at / piece + 1) * piece;
+        }
+        Ok(at.min(end) - start)
     }
 
     /// How much of each of `runs` equal runs of a byte range of a file has arrived.
@@ -312,9 +323,9 @@ impl EnginePort for Engine {
         Ok(self.torrent(id)?.files())
     }
 
-    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<u64, Error> {
         self.swarm.0.lock().unwrap().wanted.entry(id).or_default().push((file, offset, length));
-        self.torrent(id)?.written(file, offset, length)
+        self.torrent(id)?.arrived(file, offset, length)
     }
 
     fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error> {

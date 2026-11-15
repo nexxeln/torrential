@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use crate::log::log;
@@ -103,8 +103,9 @@ pub trait EnginePort: Send {
     fn save_resume_data_if_progressed(&mut self, id: TorrentId) -> Result<(), Error>;
     fn remove(&mut self, id: TorrentId) -> Result<(), Error>;
     fn file_progress(&mut self, id: TorrentId) -> Result<Vec<u64>, Error>;
-    /// Fetches the pieces under this byte range of a file first. True when all of them are verified and on disk.
-    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error>;
+    /// Fetches the pieces under this byte range of a file first. Answers how many bytes from
+    /// `offset` on are verified and on disk: `length` once all of them are.
+    fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<u64, Error>;
     /// How much of each of `runs` equal runs of this byte range of a file is verified and on disk,
     /// in order. Unlike `want_range`, this asks peers for nothing.
     fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error>;
@@ -121,13 +122,20 @@ pub trait EnginePort: Send {
 pub trait Engine: Send {
     fn port(&mut self) -> &mut dyn EnginePort;
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent>;
+    /// Has the engine call `wake`, from any thread, when it has events, so the engine thread can
+    /// sleep until a request or an event comes. False for an engine that must be polled instead.
+    fn notify(&mut self, wake: Box<dyn Fn() + Send + Sync>) -> bool {
+        drop(wake);
+        false
+    }
 }
 
 type Request = Box<dyn FnOnce(&mut dyn EnginePort) -> Option<EngineEvent> + Send>;
 
 #[derive(Clone)]
 pub struct EngineHandle {
-    requests: mpsc::Sender<Request>,
+    /// Shared so the engine's waker can hold it weakly: the thread ends once every handle is gone.
+    requests: Arc<mpsc::Sender<Request>>,
 }
 
 impl EngineHandle {
@@ -172,29 +180,43 @@ impl EngineHandle {
     }
 }
 
+/// How long an engine that cannot wake the thread is given to wait for events between requests.
 const POLL: Duration = Duration::from_millis(50);
+/// How long the engine thread sleeps without a request or an event when the engine can wake it.
+/// The engine reports progress at least this often.
+const IDLE: Duration = Duration::from_millis(500);
 
 pub fn spawn(
     mut engine: Box<dyn Engine>,
     events: tokio_mpsc::UnboundedSender<EngineEvent>,
 ) -> (EngineHandle, std::thread::JoinHandle<()>) {
     let (requests, inbox) = mpsc::channel::<Request>();
+    let requests = Arc::new(requests);
+    let waker = Arc::downgrade(&requests);
+    let woken = engine.notify(Box::new(move || {
+        if let Some(requests) = waker.upgrade() {
+            let _ = requests.send(Box::new(|_| None));
+        }
+    }));
     let thread = std::thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
             loop {
+                // An engine that wakes the thread is waited on here; any other waits in `poll`.
+                let mut next = if woken { inbox.recv_timeout(IDLE) } else { waiting(&inbox) };
                 loop {
-                    match inbox.try_recv() {
+                    match next {
                         Ok(request) => {
                             if let Some(event) = request(engine.port()) {
                                 let _ = events.send(event);
                             }
                         }
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => return,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
                     }
+                    next = waiting(&inbox);
                 }
-                for event in engine.poll(POLL) {
+                for event in engine.poll(if woken { Duration::ZERO } else { POLL }) {
                     if events.send(event).is_err() {
                         return;
                     }
@@ -203,4 +225,12 @@ pub fn spawn(
         })
         .expect("spawning the engine thread");
     (EngineHandle { requests }, thread)
+}
+
+/// The next request already in `inbox`, without waiting for one.
+fn waiting(inbox: &mpsc::Receiver<Request>) -> Result<Request, mpsc::RecvTimeoutError> {
+    inbox.try_recv().map_err(|e| match e {
+        mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
+        mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
+    })
 }
