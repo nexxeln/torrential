@@ -14,11 +14,10 @@ use torrential_core::{
 
 use super::admission::{self, Cap};
 use super::book::{self, Home, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
-use super::engine_port::{
-    Activity, AddSource, AddTorrent, EngineCommand, EngineEvent, EngineHandle, Metainfo, ParseTorrent,
-};
+use super::engine_port::{Activity, AddSource, AddTorrent, EngineEvent, EngineHandle};
 use super::files;
 use super::magnet::{self, Magnet};
+use super::metainfo::{Metainfo, ParseTorrent};
 use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
@@ -30,6 +29,7 @@ use deleter::Deleter;
 use plays::{Destination, Plays, Tending};
 pub use streams::Lease;
 use streams::Streams;
+use torrential_search::WebSeeds;
 
 pub mod deleter;
 pub mod plays;
@@ -330,6 +330,8 @@ pub struct Owner {
     stopping: Option<Stopping>,
     ended: Option<Ended>,
     engine: EngineHandle,
+    /// Looks up the web seeds that serve every file of a torrent the engine downloads.
+    web_seeds: WebSeeds,
     parse: ParseTorrent,
     disk: Box<dyn Disk>,
     updates: broadcast::Sender<Update>,
@@ -338,10 +340,12 @@ pub struct Owner {
 }
 
 impl Owner {
+    #[expect(clippy::too_many_arguments, reason = "each is a separate part of the engine the owner coordinates")]
     pub fn new(
         mut store: Store,
         shelf: Arc<Shelf>,
         engine: EngineHandle,
+        web_seeds: WebSeeds,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
         playing: Playing,
@@ -381,6 +385,7 @@ impl Owner {
             stopping: None,
             ended: None,
             engine,
+            web_seeds,
             parse,
             disk,
             updates,
@@ -578,6 +583,29 @@ impl Owner {
         }
     }
 
+    /// Adds `torrent` to the engine. One added from its file list also gets the web seeds that
+    /// serve every file, once they are looked up.
+    fn add(&self, torrent: AddTorrent, metainfo: Option<&Metainfo>) {
+        let id = torrent.id;
+        self.engine.send(id, move |e| e.add(torrent));
+        let lookup = metainfo.and_then(|m| {
+            // libtorrent follows the redirect of a torrent's only file to a seed that has all of it.
+            let file = (m.files.len() > 1).then(|| Path::new(&m.name).join(&m.files[0].path));
+            self.web_seeds.lookup(&m.name, file.as_deref(), &m.web_seeds)
+        });
+        let Some(lookup) = lookup else { return };
+        let engine = self.engine.clone();
+        tokio::spawn(async move {
+            match lookup.await {
+                Ok(seeds) if !seeds.is_empty() => engine.run(move |e| e.add_web_seeds(id, &seeds)),
+                Ok(_) => {}
+                Err(error) => {
+                    log(&format!("{} keeps the torrent's own web seeds: {}", &id.to_hex()[..6], error.message));
+                }
+            }
+        });
+    }
+
     fn find_job(&self, hash: &InfoHash) -> Result<Option<TorrentId>, Error> {
         if self.jobs.contains_key(&hash.id()) {
             return Ok(Some(hash.id()));
@@ -733,7 +761,7 @@ impl Owner {
         self.store.insert(&record, metainfo.as_ref().map(|m| m.bytes.as_slice()), record.added_at)?;
         self.tombstones.retain(|t| t.id != id);
         if self.probes.remove(&id) {
-            self.engine.send(EngineCommand::Remove(id));
+            self.engine.send(id, move |e| e.remove(id));
             self.draining.insert(id);
         }
         self.jobs.insert(id, JobEntry::new(record, metainfo, Observed::Absent));
@@ -837,7 +865,8 @@ impl Owner {
             job.record.intent = Intent::Running;
         }
         if previous.is_some() && job.observed.in_engine() {
-            self.engine.send(EngineCommand::Select(id, plan.wanted.clone()));
+            let wanted = plan.wanted.clone();
+            self.engine.send(id, move |e| e.select(id, &wanted));
         }
         self.schedule();
         self.publish(id);
@@ -953,7 +982,7 @@ impl Owner {
         if finish == Finish::Stream {
             self.streamed.insert(id);
             if self.jobs[&id].observed.in_engine() {
-                self.engine.send(EngineCommand::Stream(id));
+                self.engine.send(id, move |e| e.stream(id));
             }
         }
         self.schedule();
@@ -1068,14 +1097,15 @@ impl Owner {
                     }
                     if !self.probes.contains(&id) && !self.draining.contains(&id) {
                         self.probes.insert(id);
-                        self.engine.send(EngineCommand::Add(AddTorrent {
+                        let probe = AddTorrent {
                             id,
                             source: AddSource::Magnet(magnet.uri),
                             save_path: self.config.probe_dir.clone(),
                             wanted: None,
                             resume_data: None,
                             paused: false,
-                        }));
+                        };
+                        self.add(probe, None);
                     }
                     self.metadata_waiters.push(MetadataWaiter { id, deadline, reply });
                     return;
@@ -1143,7 +1173,7 @@ impl Owner {
                         Observed::InEngine(Phase::Paused | Phase::Pausing) => {}
                         Observed::InEngine(_) => {
                             job.observed = Observed::InEngine(Phase::Pausing);
-                            self.engine.send(EngineCommand::Pause(id));
+                            self.engine.send(id, move |e| e.pause(id));
                         }
                         Observed::Absent => {}
                     }
@@ -1241,7 +1271,7 @@ impl Owner {
                     self.streamed.remove(&id);
                     self.under_test.remove(&id);
                     if job.observed.in_engine() {
-                        self.engine.send(EngineCommand::Remove(id));
+                        self.engine.send(id, move |e| e.remove(id));
                         self.draining.insert(id);
                     }
                     if self.draining.contains(&id) {
@@ -1310,16 +1340,17 @@ impl Owner {
         let dir = job.record.dir.clone();
         if !in_engine {
             let resume_data = self.store.resume(id)?;
-            self.engine.send(EngineCommand::Add(AddTorrent {
+            let paused = AddTorrent {
                 id,
                 source: AddSource::Metainfo(metainfo.bytes.clone()),
                 save_path: dir,
                 wanted: Some(wanted),
                 resume_data,
                 paused: true,
-            }));
+            };
+            self.add(paused, Some(&metainfo));
         }
-        self.engine.send(EngineCommand::Recheck(id));
+        self.engine.send(id, move |e| e.recheck(id));
         let job = self.jobs.get_mut(&id).expect("resolved above");
         job.verify = Some(if repair { Verify::Repair } else { Verify::Report });
         job.observed = Observed::InEngine(Phase::Checking);
@@ -1335,7 +1366,7 @@ impl Owner {
                         &format!("save the file list of {}", &id.to_hex()[..6]),
                         self.store.cache_metainfo(id, &metainfo.bytes, now()),
                     );
-                    self.engine.send(EngineCommand::Remove(id));
+                    self.engine.send(id, move |e| e.remove(id));
                     self.draining.insert(id);
                     let info =
                         FilesInfo { id, metainfo: Arc::new(metainfo), source: MetadataSource::Peers, download: None };
@@ -1378,7 +1409,7 @@ impl Owner {
                     )
                 {
                     job.observed = Observed::InEngine(Phase::Finishing { writes_stopped: false });
-                    self.engine.send(EngineCommand::Pause(id));
+                    self.engine.send(id, move |e| e.pause(id));
                 }
             }
             EngineEvent::Paused { id } => self.paused(id),
@@ -1390,7 +1421,7 @@ impl Owner {
             }
             EngineEvent::Failed { id, error } => {
                 if self.probes.remove(&id) {
-                    self.engine.send(EngineCommand::Remove(id));
+                    self.engine.send(id, move |e| e.remove(id));
                     self.draining.insert(id);
                     self.reply_metadata_waiters(id, Err(error));
                 } else if self.jobs.get(&id).is_some_and(|j| j.observed.in_engine()) {
@@ -1440,7 +1471,7 @@ impl Owner {
         match admitted {
             Ok(plan) => {
                 if self.jobs[&id].observed.in_engine() {
-                    self.engine.send(EngineCommand::Select(id, plan.wanted));
+                    self.engine.send(id, move |e| e.select(id, &plan.wanted));
                 }
                 self.publish(id);
                 let info = self.job_files(id).expect("metadata just stored");
@@ -1459,7 +1490,7 @@ impl Owner {
         if let Some(job) = self.jobs.remove(&id)
             && job.observed.in_engine()
         {
-            self.engine.send(EngineCommand::Remove(id));
+            self.engine.send(id, move |e| e.remove(id));
             self.draining.insert(id);
         }
         let _ = self.updates.send(Update::Removed(id));
@@ -1497,18 +1528,18 @@ impl Owner {
         let save = job.metainfo.is_some() && !saving && !disk;
         job.observed = match job.observed {
             Observed::InEngine(Phase::Paused | Phase::Finishing { writes_stopped: true }) if save => {
-                self.engine.send(EngineCommand::SaveResume(id));
+                self.engine.send(id, move |e| e.save_resume_data(id));
                 Observed::InEngine(Phase::Paused)
             }
             Observed::InEngine(Phase::Pausing | Phase::Finishing { writes_stopped: false }) if save => {
                 Observed::InEngine(Phase::Pausing)
             }
             Observed::InEngine(Phase::Downloading) if save => {
-                self.engine.send(EngineCommand::Pause(id));
+                self.engine.send(id, move |e| e.pause(id));
                 Observed::InEngine(Phase::Pausing)
             }
             Observed::InEngine(_) => {
-                self.engine.send(EngineCommand::Remove(id));
+                self.engine.send(id, move |e| e.remove(id));
                 self.draining.insert(id);
                 if let Some(stopping) = &mut self.stopping {
                     stopping.waiting.remove(&id);
@@ -1558,7 +1589,7 @@ impl Owner {
             Observed::InEngine(_) => job.observed = Observed::InEngine(Phase::Paused),
             Observed::Absent => return,
         }
-        self.engine.send(EngineCommand::SaveResume(id));
+        self.engine.send(id, move |e| e.save_resume_data(id));
         for pause in &mut self.pauses {
             pause.waiting.remove(&id);
         }
@@ -1620,7 +1651,7 @@ impl Owner {
             job.record.intent = Intent::Done { finished_at };
             job.record.verified = verified;
             job.observed = Observed::Absent;
-            self.engine.send(EngineCommand::Remove(id));
+            self.engine.send(id, move |e| e.remove(id));
             self.draining.insert(id);
             self.publish(id);
             return;
@@ -1641,7 +1672,7 @@ impl Owner {
         } else if job.held_for_save() {
             job.observed = Observed::Absent;
             job.forget_sources();
-            self.engine.send(EngineCommand::Remove(id));
+            self.engine.send(id, move |e| e.remove(id));
             self.draining.insert(id);
             self.publish(id);
         }
@@ -1655,7 +1686,7 @@ impl Owner {
         job.record.piece_map = piece_map;
         job.stats.piece_map = piece_map;
         job.record.files_verified = Some(files);
-        self.engine.send(EngineCommand::SaveResume(id));
+        self.engine.send(id, move |e| e.save_resume_data(id));
         let short = id.to_hex()[..6].to_string();
         let intent = job.record.intent.clone();
         let files = job.record.files_verified.clone().unwrap_or_default();
@@ -1668,7 +1699,7 @@ impl Owner {
                     record(&mut self.store, None);
                 }
                 job.observed = Observed::InEngine(Phase::Downloading);
-                self.engine.send(EngineCommand::Resume(id));
+                self.engine.send(id, move |e| e.resume(id));
             }
             (Intent::Paused, n, _) => {
                 if n > 0 {
@@ -1686,14 +1717,14 @@ impl Owner {
                 let job = self.jobs.get_mut(&id).expect("checked above");
                 job.record.intent = done;
                 job.observed = Observed::Absent;
-                self.engine.send(EngineCommand::Remove(id));
+                self.engine.send(id, move |e| e.remove(id));
                 self.draining.insert(id);
             }
             (Intent::Done { .. } | Intent::Failed { .. }, _, Verify::Repair) => {
                 record(&mut self.store, Some(&Intent::Running));
                 job.record.intent = Intent::Running;
                 job.observed = Observed::InEngine(Phase::Downloading);
-                self.engine.send(EngineCommand::Resume(id));
+                self.engine.send(id, move |e| e.resume(id));
             }
             (Intent::Failed { .. }, _, Verify::Report) => {
                 record(&mut self.store, None);
@@ -1733,7 +1764,7 @@ impl Owner {
         }
         let job = &self.jobs[&id];
         if job.observed == Observed::InEngine(Phase::Paused) {
-            self.engine.send(EngineCommand::Resume(id));
+            self.engine.send(id, move |e| e.resume(id));
             self.jobs.get_mut(&id).expect("scheduled").observed = Observed::InEngine(Phase::Downloading);
             self.publish(id);
             return;
@@ -1761,16 +1792,17 @@ impl Owner {
             (None, None) => AddSource::Magnet(magnet::from_hash(job.record.info_hash).uri),
         };
         let phase = if job.metainfo.is_some() { Phase::Checking } else { Phase::Metadata };
-        self.engine.send(EngineCommand::Add(AddTorrent {
+        let running = AddTorrent {
             id,
             source,
             save_path: job.record.dir.clone(),
             wanted: job.wanted(),
             resume_data,
             paused: false,
-        }));
+        };
+        self.add(running, job.metainfo.as_deref());
         if self.streamed.contains(&id) {
-            self.engine.send(EngineCommand::Stream(id));
+            self.engine.send(id, move |e| e.stream(id));
         }
         self.jobs.get_mut(&id).expect("scheduled").observed = Observed::InEngine(phase);
         self.publish(id);
@@ -1838,7 +1870,7 @@ impl Owner {
             self.probes.iter().copied().filter(|id| !self.metadata_waiters.iter().any(|w| w.id == *id)).collect();
         for id in abandoned {
             self.probes.remove(&id);
-            self.engine.send(EngineCommand::Remove(id));
+            self.engine.send(id, move |e| e.remove(id));
             self.draining.insert(id);
         }
     }
@@ -1850,7 +1882,8 @@ impl Owner {
         self.resume_saved_at = now;
         for job in self.jobs.values() {
             if job.record.intent == Intent::Running && job.observed == Observed::InEngine(Phase::Downloading) {
-                self.engine.send(EngineCommand::SaveResumeIfProgressed(job.id()));
+                let id = job.id();
+                self.engine.send(id, move |e| e.save_resume_data_if_progressed(id));
             }
         }
     }
@@ -1871,7 +1904,7 @@ impl Owner {
             let id = job.record.id;
             match job.observed {
                 Observed::InEngine(Phase::Paused) => {
-                    self.engine.send(EngineCommand::SaveResume(id));
+                    self.engine.send(id, move |e| e.save_resume_data(id));
                     waiting.insert(id);
                 }
                 Observed::InEngine(Phase::Pausing | Phase::Finishing { .. }) => {
@@ -1879,7 +1912,7 @@ impl Owner {
                 }
                 Observed::InEngine(_) => {
                     job.observed = Observed::InEngine(Phase::Pausing);
-                    self.engine.send(EngineCommand::Pause(id));
+                    self.engine.send(id, move |e| e.pause(id));
                     waiting.insert(id);
                 }
                 Observed::Absent => {}

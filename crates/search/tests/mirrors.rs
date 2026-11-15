@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use torrential_search::{ResultCache, Search, SearchConfig};
+use torrential_search::{SearchConfig, WebSeeds};
 
 /// A server that redirects a path under `download/` to `/0/items/`, redirects `/signed/...` to one
 /// signed file, names the servers of an archive.org item, and answers every other path with one
@@ -49,8 +49,8 @@ async fn seed() -> String {
     base
 }
 
-fn search(config: SearchConfig) -> Search {
-    Search::new(&config, ResultCache::new()).unwrap()
+fn web_seeds(config: SearchConfig) -> WebSeeds {
+    WebSeeds::new(&config).unwrap()
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn a_web_seed_that_redirects_a_file_adds_the_folder_it_redirects_to() {
     let file = Path::new("Big Set/disc 1.mkv");
     let seeds = [format!("{base}/download/"), "/7/items/".to_string()];
 
-    let found = search(SearchConfig::default()).mirrors("Big Set", Some(file), &seeds).unwrap().await.unwrap();
+    let found = web_seeds(SearchConfig::default()).lookup("Big Set", Some(file), &seeds).unwrap().await.unwrap();
 
     assert_eq!(found, [format!("{base}/0/items/")]);
 }
@@ -70,7 +70,7 @@ async fn web_seeds_that_serve_the_file_or_redirect_to_one_file_add_none() {
     let file = Path::new("Big Set/disc 1.mkv");
     let seeds = [format!("{base}/direct/"), format!("{base}/signed/"), "http://127.0.0.1:1/".to_string()];
 
-    let found = search(SearchConfig::default()).mirrors("Big Set", Some(file), &seeds).unwrap().await.unwrap();
+    let found = web_seeds(SearchConfig::default()).lookup("Big Set", Some(file), &seeds).unwrap().await.unwrap();
 
     assert_eq!(found, Vec::<String>::new());
 }
@@ -117,7 +117,7 @@ async fn a_web_seed_cannot_redirect_the_lookup_to_this_machine_or_the_home_netwo
     let file = Path::new("Big Set/disc 1.mkv");
     let seeds = [format!("{to_address}/set/"), format!("{to_name}/set/")];
 
-    let found = search(SearchConfig::default()).mirrors("Big Set", Some(file), &seeds).unwrap().await.unwrap();
+    let found = web_seeds(SearchConfig::default()).lookup("Big Set", Some(file), &seeds).unwrap().await.unwrap();
 
     assert_eq!(found, Vec::<String>::new());
     assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing reached the server inside");
@@ -125,12 +125,12 @@ async fn a_web_seed_cannot_redirect_the_lookup_to_this_machine_or_the_home_netwo
 
 #[tokio::test]
 async fn a_torrent_with_no_web_seed_to_ask_has_no_lookup() {
-    let search = search(SearchConfig::default());
+    let web_seeds = web_seeds(SearchConfig::default());
     let file = Path::new("Big Set/disc 1.mkv");
 
-    assert!(search.mirrors("Big Set", Some(file), &[]).is_none());
-    assert!(search.mirrors("Big Set", Some(file), &["/7/items/".to_string()]).is_none());
-    assert!(search.mirrors("one.iso", None, &["http://seed.example/".to_string()]).is_none());
+    assert!(web_seeds.lookup("Big Set", Some(file), &[]).is_none());
+    assert!(web_seeds.lookup("Big Set", Some(file), &["/7/items/".to_string()]).is_none());
+    assert!(web_seeds.lookup("one.iso", None, &["http://seed.example/".to_string()]).is_none());
 }
 
 #[tokio::test]
@@ -140,11 +140,12 @@ async fn archive_org_names_the_servers_of_its_torrent_unless_its_source_is_disab
     let file = Path::new("sintel/Sintel.mkv");
     let seeds = [format!("{base}/archive/download/")];
 
-    let enabled = search(SearchConfig { endpoints: endpoints.clone(), ..SearchConfig::default() });
-    let named = enabled.mirrors("sintel", Some(file), &seeds).unwrap().await.unwrap();
+    let enabled = web_seeds(SearchConfig { endpoints: endpoints.clone(), ..SearchConfig::default() });
+    let named = enabled.lookup("sintel", Some(file), &seeds).unwrap().await.unwrap();
     assert_eq!(named, ["http://ia1.example/3/items/"]);
 
-    let disabled = search(SearchConfig { endpoints, disabled: vec!["archive.org".into()], ..SearchConfig::default() });
-    let redirected = disabled.mirrors("sintel", Some(file), &seeds).unwrap().await.unwrap();
+    let disabled =
+        web_seeds(SearchConfig { endpoints, disabled: vec!["archive.org".into()], ..SearchConfig::default() });
+    let redirected = disabled.lookup("sintel", Some(file), &seeds).unwrap().await.unwrap();
     assert_eq!(redirected, [format!("{base}/0/items/")]);
 }

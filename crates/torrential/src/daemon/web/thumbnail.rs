@@ -82,7 +82,7 @@ async fn on_disk(ctx: &Ctx, id: TorrentId, index: u32, file: &StreamFile, share:
     let margin = MARGIN.max(file.size / MARGIN_SHARE);
     let at = ((file.size as f64 * share) as u64).min(file.size - 1);
     let (from, to) = (at.saturating_sub(margin), (at + margin).min(file.size));
-    match ctx.engine.written(id, index, from, to - from, 1).await {
+    match ctx.engine.ask(move |e| e.written(id, index, from, to - from, 1)).await {
         Ok(written) => written.iter().all(|run| run.is_complete()),
         Err(_) => false,
     }

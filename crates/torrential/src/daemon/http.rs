@@ -681,7 +681,7 @@ impl Connection<'_> {
 async fn arrived(ctx: &Ctx, id: TorrentId, index: u32, offset: u64, length: u64) -> io::Result<bool> {
     let started = Instant::now();
     loop {
-        if matches!(ctx.engine.want_range(id, index, offset, length).await, Ok(true)) {
+        if matches!(ctx.engine.ask(move |e| e.want_range(id, index, offset, length)).await, Ok(true)) {
             return Ok(false);
         }
         match ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await {

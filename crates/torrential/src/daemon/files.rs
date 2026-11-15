@@ -5,7 +5,7 @@ use torrential_core::text::sanitize;
 use torrential_core::{Error, FileRisk, InfoHash, Selection};
 pub use torrential_engine::on_disk;
 
-use super::engine_port::{MetaFile, Metainfo};
+use super::metainfo::{MetaFile, Metainfo};
 use crate::selection::{compile, some_match};
 
 pub fn wanted(metainfo: &Metainfo, selection: &Selection) -> Result<Vec<bool>, Error> {

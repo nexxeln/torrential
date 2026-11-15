@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use torrential_core::{Error, Slice, TorrentId};
 
 use super::super::book::{Intent, JobEntry, Observed, Phase};
-use super::super::engine_port::{EngineCommand, EngineHandle};
+use super::super::engine_port::EngineHandle;
 use super::super::playing::{Open, Playing};
 use super::Owner;
 use crate::log::log;
@@ -108,7 +108,8 @@ impl Lease {
             let at = self.reading.lock().expect("no holder panics").at;
             let rate = bitrate(size, runtime());
             let window = rate.saturating_mul(FREE_OVER.as_secs()).min(size.saturating_sub(at));
-            let measured = match engine.written(id, file, at, window, FREE_OVER.as_secs() as u32).await {
+            let measured = match engine.ask(move |e| e.written(id, file, at, window, FREE_OVER.as_secs() as u32)).await
+            {
                 Ok(runs) => lead(&runs, window, rate, at + window == size),
                 // The engine lets go of a download once it is done, and has nothing past the end.
                 Err(_) => Duration::MAX,
@@ -287,11 +288,11 @@ impl Owner {
         };
         // Sent every time, for a download the engine adds again starts with no limit.
         for &id in &held {
-            self.engine.send(EngineCommand::Limit(id, Some(TRICKLE)));
+            self.engine.limit(id, Some(TRICKLE));
         }
         for &id in streams.held.difference(&held) {
             if self.jobs.get(&id).is_some_and(|job| job.observed.in_engine()) {
-                self.engine.send(EngineCommand::Limit(id, None));
+                self.engine.limit(id, None);
             }
         }
         streams.held = held;

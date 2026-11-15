@@ -6,9 +6,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Slice, TorrentId};
 
-use crate::daemon::engine_port::{
-    Activity, AddSource, AddTorrent, EngineEvent, EnginePort, MetaFile, Metainfo, Missing, Stats,
-};
+use crate::daemon::engine_port::{self, Activity, AddSource, AddTorrent, EngineEvent, EnginePort, Missing, Stats};
+use crate::daemon::metainfo::{MetaFile, Metainfo};
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TorrentFile {
@@ -322,6 +321,14 @@ impl EnginePort for Engine {
     fn limit(&mut self, id: TorrentId, rate: Option<NonZeroU32>) -> Result<(), Error> {
         self.torrent(id)?.limit = rate;
         Ok(())
+    }
+
+    fn add_web_seeds(&mut self, _: TorrentId, _: &[String]) {}
+}
+
+impl engine_port::Engine for Engine {
+    fn port(&mut self) -> &mut dyn EnginePort {
+        self
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
