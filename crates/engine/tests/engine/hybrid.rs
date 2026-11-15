@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use torrential_engine::{AddTorrent, Alert, FileEntry, FileIndex, FileSelection, Magnet, TorrentFormat, TorrentSource};
+use torrential_engine::{
+    AddTorrent, Alert, Config, FileEntry, FileIndex, FileSelection, Magnet, TorrentFormat, TorrentSource,
+};
 
-use crate::support::{Fixture, Node, bencode, expected_hashes, info_hash, loopback, magnet, sha256_file};
+use crate::support::{Fixture, Node, bencode, expected_hashes, info_hash, magnet, sha256_file};
 
 #[test]
 fn hybrid_torrent_downloads_and_reports_both_hashes() {
@@ -19,10 +21,10 @@ fn hybrid_torrent_downloads_and_reports_both_hashes() {
         "pad files keep their indices but are not listed"
     );
 
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let magnet = Magnet::parse(&magnet(Some(hashes.0), Some(hashes.1))).unwrap();
     assert_eq!(magnet.info_hash(), expected);
@@ -59,10 +61,10 @@ fn a_hybrid_magnet_has_an_info_dictionary_when_metadata_arrives() {
     let fixture = Fixture::new("layers", &[("a.bin", 40_000), ("b.bin", 30_000)], 19);
     let torrent = fixture.torrent(TorrentFormat::Hybrid);
     let hashes = expected_hashes(torrent.as_bytes());
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let magnet = Magnet::parse(&magnet(Some(hashes.0), Some(hashes.1))).unwrap();
     let mut add = AddTorrent::new(TorrentSource::Magnet(magnet), download.path());

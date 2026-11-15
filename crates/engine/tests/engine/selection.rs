@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use torrential_engine::{
-    AddTorrent, Alert, FileIndex, FilePriority, FileSelection, Magnet, SelectedPieces, TorrentFormat, TorrentSource,
+    AddTorrent, Alert, Config, FileIndex, FilePriority, FileSelection, Magnet, SelectedPieces, TorrentFormat,
+    TorrentSource,
 };
 
-use crate::support::{Fixture, Node, expected_hashes, loopback, magnet, sha256_file};
+use crate::support::{Fixture, Node, expected_hashes, magnet, sha256_file};
 
 const FILES: [(&str, usize); 3] = [("a.bin", 40_000), ("b.bin", 30_000), ("c.bin", 50_000)];
 
@@ -13,10 +14,10 @@ const FILES: [(&str, usize); 3] = [("a.bin", 40_000), ("b.bin", 30_000), ("c.bin
 fn metadata_only_downloads_nothing_until_a_file_is_selected() {
     let fixture = Fixture::new("select", &FILES, 23);
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let magnet = Magnet::parse(&magnet(Some(expected_hashes(torrent.as_bytes()).0), None)).unwrap();
     let mut add = AddTorrent::new(TorrentSource::Magnet(magnet), download.path());
@@ -51,10 +52,10 @@ fn metadata_only_downloads_nothing_until_a_file_is_selected() {
 fn a_torrent_added_paused_waits_for_resume() {
     let fixture = Fixture::new("paused", &FILES, 29);
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent.clone()), download.path());
     add.paused = true;

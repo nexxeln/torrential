@@ -117,7 +117,7 @@ impl Item {
     }
 
     fn id(&self) -> String {
-        self.torrent.info_hash().v1().unwrap().as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        self.torrent.info_hash().id().to_hex()
     }
 
     fn torrent_file(&self, archive: &str) -> Vec<u8> {

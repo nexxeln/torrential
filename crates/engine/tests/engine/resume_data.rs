@@ -1,21 +1,21 @@
 use tempfile::TempDir;
 use torrential_engine::{AddTorrent, Alert, Config, TorrentFormat, TorrentSource, TorrentState};
 
-use crate::support::{Fixture, Node, PIECE, bencode, loopback, rate, sha256_file, total_size};
+use crate::support::{Fixture, Node, PIECE, bencode, sha256_file, total_size};
 
 #[test]
 fn resume_data_restarts_a_dropped_session_without_a_full_recheck() {
     let fixture = Fixture::new("resume", &[("a.bin", 200_000), ("b.bin", 280_000)], 5);
     let torrent = fixture.torrent(TorrentFormat::V1);
     let total = total_size(&torrent);
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
     let download = TempDir::new().unwrap();
 
-    let mut first = Node::new(Config { download_limit: rate(64 * 1024), ..loopback() });
+    let mut first = Node::new(Config::loopback());
     let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent.clone()), download.path());
     add.peers = vec![seeder.addr()];
-    let id = first.add(add);
+    let id = first.add_slowly(add, 64 * 1024);
     first
         .wait_until("some verified pieces", |s| s.status(id).unwrap().progress.verified_selected_bytes() >= 128 * 1024);
     let saved = first.status(id).progress.verified_selected_bytes();
@@ -30,7 +30,7 @@ fn resume_data_restarts_a_dropped_session_without_a_full_recheck() {
     let resumed = recorded_bytes(data.as_bytes(), total);
     assert!(resumed > 0, "the resume data records downloaded pieces");
 
-    let mut second = Node::new(loopback());
+    let mut second = Node::new(Config::loopback());
     let mut add = AddTorrent::new(TorrentSource::Resume(data), download.path());
     add.peers = vec![seeder.addr()];
     assert_eq!(second.add(add), id);
@@ -65,7 +65,7 @@ fn resume_data_restarts_a_dropped_session_without_a_full_recheck() {
 fn a_save_if_progressed_skips_a_torrent_with_nothing_new() {
     let fixture = Fixture::new("unchanged", &[("a.bin", 100_000)], 9);
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut node = Node::new(loopback());
+    let mut node = Node::new(Config::loopback());
     let id = node.seed(&torrent, fixture.save_path());
     let answer = |node: &mut Node| {
         node.session.save_resume_data_if_progressed(id).unwrap();

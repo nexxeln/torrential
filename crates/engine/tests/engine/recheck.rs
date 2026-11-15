@@ -2,17 +2,19 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 use tempfile::TempDir;
-use torrential_engine::{AddTorrent, Alert, ErrorKind, FileIndex, SelectedPieces, TorrentFormat, TorrentSource};
+use torrential_engine::{
+    AddTorrent, Alert, Config, ErrorKind, FileIndex, SelectedPieces, TorrentFormat, TorrentSource,
+};
 
-use crate::support::{Fixture, Node, PIECE, loopback, sha256_file, snapshot, total_size};
+use crate::support::{Fixture, Node, PIECE, sha256_file, snapshot, total_size};
 
 const FILES: [(&str, usize); 2] = [("a.bin", 40_000), ("b.bin", 30_000)];
 
-fn downloaded(fixture: &Fixture) -> (Node, TempDir, torrential_engine::TorrentId) {
+fn downloaded(fixture: &Fixture) -> (Node, TempDir, torrential_core::TorrentId) {
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent), download.path());
     add.peers = vec![seeder.addr()];
@@ -45,7 +47,7 @@ fn recheck_reports_a_damaged_piece_and_downloading_repairs_it() {
     assert_eq!(progress.verified_selected_bytes(), total - u64::from(PIECE));
     assert_eq!(leecher.session.selected_pieces(id).unwrap(), SelectedPieces { selected: 5, verified: 4 });
 
-    let mut repair = Node::new(loopback());
+    let mut repair = Node::new(Config::loopback());
     repair.seed(&torrent, fixture.save_path());
     leecher.session.connect_peer(id, repair.addr()).unwrap();
     leecher.finish(id);

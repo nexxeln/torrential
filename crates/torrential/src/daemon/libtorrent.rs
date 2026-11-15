@@ -139,9 +139,9 @@ impl Libtorrent {
 
     /// The download an alert names. A v2-only magnet is keyed by its truncated v2 hash and learns
     /// its v1 hash with the metadata, so both keys are tried.
-    fn download<T>(map: &BTreeMap<TorrentId, T>, hash: lt::InfoHash) -> Option<TorrentId> {
-        let v2 = hash.v2().map(|v2| lt::InfoHash::V2(v2).id());
-        [Some(hash.id()), v2].into_iter().flatten().map(daemon_id).find(|id| map.contains_key(id))
+    fn download<T>(map: &BTreeMap<TorrentId, T>, hash: InfoHash) -> Option<TorrentId> {
+        let v2 = hash.v2().map(|v2| InfoHash::V2(v2).id());
+        [Some(hash.id()), v2].into_iter().flatten().find(|id| map.contains_key(id))
     }
 
     fn apply_selection(&mut self, id: TorrentId) -> Result<(), Error> {
@@ -152,7 +152,7 @@ impl Libtorrent {
             .zip(wanted)
             .map(|(&index, &w)| (index, if w { lt::FilePriority::Normal } else { lt::FilePriority::Skip }))
             .collect();
-        self.session.set_file_priorities(engine_id(id), &priorities).map_err(engine_error)?;
+        self.session.set_file_priorities(id, &priorities).map_err(engine_error)?;
         self.torrent(id)?.unconfirmed += 1;
         Ok(())
     }
@@ -162,7 +162,7 @@ impl Libtorrent {
         if t.wanted.is_none() || t.unconfirmed > 0 || t.check != Check::Idle || t.failed {
             return;
         }
-        if let Ok(status) = self.session.status(engine_id(id))
+        if let Ok(status) = self.session.status(id)
             && matches!(status.state, lt::TorrentState::Finished | lt::TorrentState::Seeding)
         {
             self.events.push(EngineEvent::Finished { id });
@@ -170,9 +170,9 @@ impl Libtorrent {
     }
 
     fn start_hashing(&mut self, id: TorrentId, hold: bool) -> Result<(), Error> {
-        self.session.force_recheck(engine_id(id)).map_err(engine_error)?;
+        self.session.force_recheck(id).map_err(engine_error)?;
         if hold {
-            self.session.resume(engine_id(id)).map_err(engine_error)?;
+            self.session.resume(id).map_err(engine_error)?;
         }
         self.torrent(id)?.check = Check::Hashing { hold, started: false };
         Ok(())
@@ -237,11 +237,8 @@ impl Libtorrent {
                 t.unconfirmed = t.unconfirmed.saturating_sub(1);
                 self.report_if_finished(id);
             }
-            (A::ListenSucceeded { address, transport }, _) => {
-                log(&format!("listening on {address} ({})", transport_name(transport)));
-            }
+            (A::ListenSucceeded { address, transport }, _) => log(&format!("listening on {address} ({transport})")),
             (A::ListenFailed { interface, port, transport, operation, error }, _) => {
-                let transport = transport_name(transport);
                 log(&format!("cannot listen on {interface} port {port} ({transport}): {operation}: {error}"));
             }
             (A::DhtBootstrapped, _) => {
@@ -252,15 +249,14 @@ impl Libtorrent {
                 // A torrent added before the bootstrap announced to an empty routing table, and
                 // libtorrent would wait 15 minutes to announce it again.
                 for &id in self.torrents.keys() {
-                    let _ = self.session.announce_to_dht(engine_id(id));
+                    let _ = self.session.announce_to_dht(id);
                 }
             }
             (
                 A::TorrentResumed { .. }
                 | A::TorrentRemoved { .. }
                 | A::ResumeDataUnchanged { .. }
-                | A::HashFailed { .. }
-                | A::SessionStats(_),
+                | A::HashFailed { .. },
                 _,
             ) => {}
             (_, None) => {}
@@ -271,7 +267,7 @@ impl Libtorrent {
         match found {
             Ok(seeds) if !seeds.is_empty() && self.torrents.contains_key(&id) => {
                 for seed in &seeds {
-                    if let Err(e) = self.session.add_web_seed(engine_id(id), seed) {
+                    if let Err(e) = self.session.add_web_seed(id, seed) {
                         log(&format!("{} cannot add the web seed {seed}: {e}", short(id)));
                     }
                 }
@@ -293,9 +289,8 @@ impl Libtorrent {
     }
 
     fn metadata(&mut self, id: TorrentId) {
-        let eid = engine_id(id);
-        let torrent_file = match self.session.metainfo(eid) {
-            Err(e) if e.kind() == lt::ErrorKind::NoMetadata => self.session.info_dictionary(eid),
+        let torrent_file = match self.session.metainfo(id) {
+            Err(e) if e.kind() == lt::ErrorKind::NoMetadata => self.session.info_dictionary(id),
             other => other,
         };
         let torrent_file = torrent_file.map_err(engine_error);
@@ -320,7 +315,7 @@ impl Libtorrent {
             }
             (Check::Queued { hold }, S::CheckingFiles) => {
                 t.check = Check::Hashing { hold, started: true };
-                if hold && let Err(e) = self.session.resume(engine_id(id)) {
+                if hold && let Err(e) = self.session.resume(id) {
                     self.events.push(EngineEvent::Failed { id, error: engine_error(e) });
                 }
             }
@@ -338,7 +333,6 @@ impl Libtorrent {
     }
 
     fn checked(&mut self, id: TorrentId) {
-        let eid = engine_id(id);
         match self.torrents[&id].check {
             Check::Idle | Check::Hashing { started: false, .. } => {}
             Check::Queued { hold } => {
@@ -350,7 +344,7 @@ impl Libtorrent {
                 self.torrents.get_mut(&id).expect("found above").check = Check::Idle;
                 let counts = self
                     .session
-                    .selected_pieces(eid)
+                    .selected_pieces(id)
                     .map_err(engine_error)
                     .and_then(|pieces| Ok((pieces, self.verified_bytes(id)?)));
                 match counts {
@@ -363,7 +357,7 @@ impl Libtorrent {
                 }
                 if !hold {
                     self.report_if_finished(id);
-                } else if let Err(e) = self.session.pause(eid) {
+                } else if let Err(e) = self.session.pause(id) {
                     self.events.push(EngineEvent::Failed { id, error: engine_error(e) });
                 } else {
                     self.torrents.get_mut(&id).expect("found above").own_pause_pending = true;
@@ -374,14 +368,14 @@ impl Libtorrent {
 
     fn verified_bytes(&self, id: TorrentId) -> Result<(u64, Vec<u64>), Error> {
         let t = self.torrents.get(&id).ok_or_else(|| Error::internal(format!("the engine has no torrent {id}")))?;
-        let status = self.session.status(engine_id(id)).map_err(engine_error)?;
+        let status = self.session.status(id).map_err(engine_error)?;
         let all = t.files.as_ref().map(|files| vec![true; files.len()]);
         Ok((sample(&status, t).verified, verified(&status.progress, t.files.as_deref(), all.as_deref())))
     }
 
     fn stats(&mut self) {
         for (&id, t) in &self.torrents {
-            let Ok(status) = self.session.status(engine_id(id)) else { continue };
+            let Ok(status) = self.session.status(id) else { continue };
             if !status.paused {
                 let (piece_map, missing) = (piece_map(&self.session, id, t), missing(&self.session, id, t));
                 let stats = Stats { piece_map, missing, ..sample(&status, t) };
@@ -391,7 +385,7 @@ impl Libtorrent {
     }
 
     fn report_paused(&mut self, id: TorrentId) {
-        if let (Some(t), Ok(status)) = (self.torrents.get(&id), self.session.status(engine_id(id))) {
+        if let (Some(t), Ok(status)) = (self.torrents.get(&id), self.session.status(id)) {
             let stats = Stats { piece_map: piece_map(&self.session, id, t), ..sample(&status, t) };
             self.events.push(EngineEvent::Stats { id, stats });
         }
@@ -463,7 +457,7 @@ impl EnginePort for Libtorrent {
     }
 
     fn pause(&mut self, id: TorrentId) -> Result<(), Error> {
-        let paused = self.session.status(engine_id(id)).map_err(engine_error)?.paused;
+        let paused = self.session.status(id).map_err(engine_error)?.paused;
         let t = self.torrent(id)?;
         if let Check::Hashing { started, .. } = t.check {
             t.check = Check::Hashing { hold: false, started };
@@ -471,7 +465,7 @@ impl EnginePort for Libtorrent {
         match (paused, t.own_pause_pending) {
             (true, true) => t.own_pause_pending = false,
             (true, false) => self.report_paused(id),
-            (false, _) => self.session.pause(engine_id(id)).map_err(engine_error)?,
+            (false, _) => self.session.pause(id).map_err(engine_error)?,
         }
         Ok(())
     }
@@ -483,13 +477,13 @@ impl EnginePort for Libtorrent {
             Check::Hashing { started, .. } => Check::Hashing { hold: false, started },
             Check::Idle => Check::Idle,
         };
-        self.session.resume(engine_id(id)).map_err(engine_error)?;
+        self.session.resume(id).map_err(engine_error)?;
         self.report_if_finished(id);
         Ok(())
     }
 
     fn recheck(&mut self, id: TorrentId) -> Result<(), Error> {
-        let status = self.session.status(engine_id(id)).map_err(engine_error)?;
+        let status = self.session.status(id).map_err(engine_error)?;
         let hold = status.paused;
         match status.state {
             lt::TorrentState::CheckingResumeData => self.torrent(id)?.check = Check::Queued { hold },
@@ -503,15 +497,15 @@ impl EnginePort for Libtorrent {
     }
 
     fn save_resume_data(&mut self, id: TorrentId) -> Result<(), Error> {
-        self.session.save_resume_data(engine_id(id)).map_err(engine_error)
+        self.session.save_resume_data(id).map_err(engine_error)
     }
 
     fn save_resume_data_if_progressed(&mut self, id: TorrentId) -> Result<(), Error> {
-        self.session.save_resume_data_if_progressed(engine_id(id)).map_err(engine_error)
+        self.session.save_resume_data_if_progressed(id).map_err(engine_error)
     }
 
     fn remove(&mut self, id: TorrentId) -> Result<(), Error> {
-        let removing = self.session.remove(engine_id(id));
+        let removing = self.session.remove(id);
         self.torrents.remove(&id);
         match removing {
             Ok(()) => *self.removing.entry(id).or_default() += 1,
@@ -528,22 +522,22 @@ impl EnginePort for Libtorrent {
     fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
         let index = self.torrents.get(&id).and_then(|t| t.files.as_ref()?.get(file as usize).copied());
         let index = index.ok_or_else(|| Error::internal(format!("the engine has no file {file} in torrent {id}")))?;
-        self.session.want_range(engine_id(id), index, offset, length).map_err(engine_error)
+        self.session.want_range(id, index, offset, length).map_err(engine_error)
     }
 
     fn written(&mut self, id: TorrentId, file: u32, offset: u64, length: u64, runs: u32) -> Result<Vec<Slice>, Error> {
         let index = self.torrents.get(&id).and_then(|t| t.files.as_ref()?.get(file as usize).copied());
         let index = index.ok_or_else(|| Error::internal(format!("the engine has no file {file} in torrent {id}")))?;
-        let counted = self.session.written_pieces(engine_id(id), index, offset, length, runs).map_err(engine_error)?;
+        let counted = self.session.written_pieces(id, index, offset, length, runs).map_err(engine_error)?;
         Ok(counted.into_iter().map(|run| Slice::of(run.written, run.pieces)).collect())
     }
 
     fn stream(&mut self, id: TorrentId) -> Result<(), Error> {
-        self.session.download_in_order(engine_id(id)).map_err(engine_error)
+        self.session.download_in_order(id).map_err(engine_error)
     }
 
     fn limit(&mut self, id: TorrentId, rate: Option<NonZeroU32>) -> Result<(), Error> {
-        self.session.set_download_limit(engine_id(id), rate).map_err(engine_error)
+        self.session.set_download_limit(id, rate).map_err(engine_error)
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
@@ -582,13 +576,8 @@ pub fn parse(bytes: &[u8]) -> Result<Metainfo, Error> {
 fn config(network: &Network, port: u16) -> lt::Config {
     let off = lt::Config {
         listen: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
-        dht: lt::Dht::Off,
-        lsd: false,
-        upnp: false,
-        natpmp: false,
         upload: lt::UploadPolicy::Off,
-        connections: lt::ConnectionLimits { multiple_per_ip: true, ..lt::ConnectionLimits::default() },
-        ..lt::Config::default()
+        ..lt::Config::loopback()
     };
     match network {
         Network::Loopback { .. } => off,
@@ -598,9 +587,7 @@ fn config(network: &Network, port: u16) -> lt::Config {
                 SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port),
             ],
             dht: lt::Dht::On { bootstrap_nodes: BOOTSTRAP_NODES.map(String::from).to_vec() },
-            lsd: true,
-            upnp: true,
-            natpmp: true,
+            local_network: true,
             connections: lt::ConnectionLimits::default(),
             ..off
         },
@@ -634,7 +621,7 @@ fn metainfo(m: lt::Metainfo) -> Result<Metainfo, Error> {
         })?;
         files.push(MetaFile { path: path.to_string(), size: f.size });
     }
-    Metainfo::new(info_hash(m.info_hash()), name, files, single_file, m.into_bytes())
+    Metainfo::new(m.info_hash(), name, files, single_file, m.into_bytes())
 }
 
 fn file_indices(m: &lt::Metainfo) -> Vec<lt::FileIndex> {
@@ -663,7 +650,7 @@ fn piece_map(session: &lt::Session, id: TorrentId, t: &Torrent) -> Option<PieceM
     if t.files.is_none() || t.wanted.is_none() {
         return None;
     }
-    let slices = session.piece_slices(engine_id(id), PieceMap::SLICES as u32).ok()?;
+    let slices = session.piece_slices(id, PieceMap::SLICES as u32).ok()?;
     let slices: [lt::SelectedPieces; PieceMap::SLICES] = slices.try_into().ok()?;
     Some(PieceMap::new(slices.map(|s| Slice::of(s.verified, s.selected))))
 }
@@ -672,7 +659,7 @@ fn missing(session: &lt::Session, id: TorrentId, t: &Torrent) -> Option<Missing>
     if t.files.is_none() || t.wanted.is_none() {
         return None;
     }
-    let m = session.missing_pieces(engine_id(id)).ok()?;
+    let m = session.missing_pieces(id).ok()?;
     Some(Missing { pieces: m.missing, unavailable: m.unavailable })
 }
 
@@ -695,28 +682,8 @@ fn engine_error(e: lt::EngineError) -> Error {
     }
 }
 
-fn transport_name(transport: lt::Transport) -> String {
-    format!("{transport:?}").to_ascii_lowercase()
-}
-
 fn short(id: TorrentId) -> String {
     id.to_hex()[..6].to_string()
-}
-
-fn info_hash(hash: lt::InfoHash) -> InfoHash {
-    match hash {
-        lt::InfoHash::V1(v1) => InfoHash::V1(*v1.as_bytes()),
-        lt::InfoHash::V2(v2) => InfoHash::V2(*v2.as_bytes()),
-        lt::InfoHash::Hybrid { v1, v2 } => InfoHash::Hybrid { v1: *v1.as_bytes(), v2: *v2.as_bytes() },
-    }
-}
-
-fn engine_id(id: TorrentId) -> lt::TorrentId {
-    lt::TorrentId::from_bytes(*id.as_bytes())
-}
-
-fn daemon_id(id: lt::TorrentId) -> TorrentId {
-    TorrentId::from_bytes(*id.as_bytes())
 }
 
 #[cfg(test)]
