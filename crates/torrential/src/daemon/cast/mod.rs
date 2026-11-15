@@ -25,10 +25,11 @@ use torrential_core::{
 use super::ctx::Ctx;
 use super::devices::names::Names;
 use super::downloads;
-use super::owner::{Command, Finish, MetaTarget};
+use super::owner::plays::Destination;
+use super::owner::{Command, MetaTarget};
 use super::playing::Open;
 use super::titles;
-use super::titles::attempt::{self, Containers, PlayTitle};
+use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
 use super::web::{play, watch as web_watch};
 use crate::log::log;
 pub use ssdp::Find;
@@ -953,30 +954,21 @@ async fn find(
                 // A TV says what it decodes but not its screen, and 1080p plays well on any TV.
                 player: Player::Device(Viewer { screen: Resolution::P1080, playback: tv.tv.decodes }),
                 containers: Containers::Tv(tv.tv.plays),
-                finish: Finish::Stream,
+                to: Destination::Plays,
             };
-            let (mut card, mut end) = (None, None);
-            attempt::run(ctx, ask, |step| {
-                match &step {
-                    AttemptEvent::Resolved { title, video, .. } => {
-                        view.send_modify(|cast| cast.name = title_name(title, video.episode));
-                        card = Some(title.clone());
-                    }
-                    AttemptEvent::Playing { .. } | AttemptEvent::Failed { .. } => end = Some(step.clone()),
-                    _ => {}
+            let outcome = attempt::run(ctx, ask, |step| {
+                if let AttemptEvent::Resolved { title, video, .. } = &step {
+                    view.send_modify(|cast| cast.name = title_name(title, video.episode));
                 }
                 let _ = steps.send(step);
             })
             .await;
-            match end {
-                Some(AttemptEvent::Playing { video, release, job, file, resume_at }) => {
-                    let card =
-                        card.ok_or_else(|| Error::internal("the title play played before it found the title"))?;
-                    let name = title_name(&card, video.episode);
+            match outcome {
+                Outcome::Played(played) => {
+                    let Played { name, video, release, job, file, resume_at, .. } = *played;
                     (job, file, name, Some(video), Some(release.id), resume_at)
                 }
-                Some(AttemptEvent::Failed { error, .. }) => return Err(error),
-                _ => return Err(Error::internal("the title play ended without playing or failing")),
+                Outcome::Failed { error, .. } => return Err(error),
             }
         }
         target => {

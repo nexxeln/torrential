@@ -9,9 +9,8 @@ use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, Target, TorrentFile, TorrentId};
 
 use super::super::ctx::Ctx;
-use super::super::downloads;
+use super::super::downloads::{self, Served, served};
 use super::super::engine_port::Metainfo;
-use super::super::http;
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
 use torrential_core::protocol::METADATA_WAIT;
@@ -32,20 +31,8 @@ pub struct Playing {
     job: Job,
     files: Vec<TorrentFile>,
     total_size: u64,
-    video: Streamed,
-    subtitles: Vec<Streamed>,
-}
-
-/// A file the engine serves while it downloads.
-#[derive(Serialize)]
-struct Streamed {
-    index: u32,
-    path: String,
-    size: u64,
-    /// The path of `http::url`, for a page on the engine's own origin.
-    url: String,
-    /// Where the file starts in the torrent, in bytes.
-    offset: u64,
+    video: Served,
+    subtitles: Vec<Served>,
 }
 
 pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
@@ -116,17 +103,7 @@ pub async fn playing_file(ctx: &Ctx, id: TorrentId, file: u32) -> Result<Playing
 /// title play's `playing` line both answer with it.
 async fn playing(ctx: &Ctx, job: Job, info: &FilesInfo, playable: &Playable) -> Playing {
     let metainfo = &info.metainfo;
-    let streamed = |index: u32| {
-        let file = &metainfo.files[index as usize];
-        let path = sanitize(&file.path);
-        Streamed {
-            index,
-            url: http::route_of(job.id, index, &path),
-            path,
-            size: file.size,
-            offset: metainfo.files[..index as usize].iter().map(|f| f.size).sum(),
-        }
-    };
+    let streamed = |index: u32| served(job.id, metainfo, index);
     Playing {
         id: job.id.to_hex(),
         name: sanitize(&metainfo.name),
@@ -140,17 +117,7 @@ async fn playing(ctx: &Ctx, job: Job, info: &FilesInfo, playable: &Playable) -> 
 
 /// The file to watch and its subtitles: the one the page chose, or the torrent's main video.
 pub fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable, Error> {
-    let listing: Vec<TorrentFile> = (0..)
-        .zip(&metainfo.files)
-        .map(|(index, f)| TorrentFile {
-            index,
-            path: sanitize(&f.path),
-            size: f.size,
-            selected: false,
-            verified: 0,
-            risk: None,
-        })
-        .collect();
+    let listing = metainfo.listing();
     let name = sanitize(&metainfo.name);
     match file {
         Some(index) => stream::around(&listing, index).ok_or_else(|| {

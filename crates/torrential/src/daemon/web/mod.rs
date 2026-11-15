@@ -13,7 +13,7 @@ pub mod media;
 mod online;
 pub mod play;
 mod thumbnail;
-mod titles;
+pub(super) mod titles;
 pub mod watch;
 
 use std::collections::{HashMap, VecDeque};
