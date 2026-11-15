@@ -11,11 +11,17 @@ use torrential_core::{
     SearchResult, Selection, SourceOutcome, SourceReport, TorrentFile, TorrentId,
 };
 
-use super::*;
-use crate::client::play::{Hold, Playing};
-use crate::client::wait::Printer;
-use crate::client::{Files, keep_matching};
-use crate::output::{Mode, Typed, render};
+use super::changes::{ChangeCommand, changes};
+use super::doctor::{Check, CheckStatus, Checked, doctor, skill_check};
+use super::engine::{DaemonReport, daemon_status};
+use super::files::{Files, files, keep_matching};
+use super::get::get;
+use super::play::{Hold, Playing, hold_line, play, playing_line};
+use super::search::search;
+use super::skill::{skill_changes, skill_status};
+use super::titles::view::*;
+use super::wait::{Printer, WaitEnd, wait_row, watched};
+use crate::output::{Body, Doc, Mode, Typed, render};
 
 const NOW: i64 = 1_792_314_723;
 const DAY: i64 = 86_400;
@@ -475,13 +481,13 @@ fn fleet() -> Vec<Job> {
 #[test]
 fn status_lists_every_state() {
     let jobs = fleet();
-    insta::assert_snapshot!(both(&super::jobs(&jobs), &Response::Jobs { jobs }));
+    insta::assert_snapshot!(both(&super::status::jobs(&jobs), &Response::Jobs { jobs }));
 }
 
 #[test]
 fn status_offers_resume_for_failed_downloads() {
     let next = |jobs: &[Job]| {
-        let doc = super::jobs(jobs);
+        let doc = super::status::jobs(jobs);
         (doc.summary[1..].to_vec(), doc.next)
     };
     let fleet = fleet();
@@ -498,7 +504,7 @@ fn status_offers_resume_for_failed_downloads() {
 
 #[test]
 fn status_with_no_downloads() {
-    insta::assert_snapshot!(both(&super::jobs(&[]), &Response::Jobs { jobs: Vec::new() }));
+    insta::assert_snapshot!(both(&super::status::jobs(&[]), &Response::Jobs { jobs: Vec::new() }));
 }
 
 #[test]
@@ -506,7 +512,10 @@ fn status_of_one_download() {
     let mut out = String::new();
     for job in fleet().into_iter().take(4) {
         let name = job.status.name();
-        out.push_str(&format!("=== {name}\n{}", both(&super::job(&job), &Response::Jobs { jobs: vec![job.clone()] })));
+        out.push_str(&format!(
+            "=== {name}\n{}",
+            both(&super::status::job(&job), &Response::Jobs { jobs: vec![job.clone()] })
+        ));
     }
     insta::assert_snapshot!(out);
 }
@@ -678,21 +687,25 @@ fn daemon_status_running_and_stopped() {
 #[test]
 fn doctor_report() {
     let checks = vec![
-        Check { check: "sandbox".into(), status: CheckStatus::Fail, detail: "CODEX_SANDBOX_NETWORK_DISABLED=1".into() },
+        Check { check: Checked::Sandbox, status: CheckStatus::Fail, detail: "CODEX_SANDBOX_NETWORK_DISABLED=1".into() },
         Check {
-            check: "disk".into(),
+            check: Checked::Disk,
             status: CheckStatus::Ok,
             detail: "410.2 GiB free in /Users/ada/Downloads/torrential".into(),
         },
-        Check { check: "state".into(), status: CheckStatus::Ok, detail: "/Users/ada/.local/state/torrential".into() },
+        Check { check: Checked::State, status: CheckStatus::Ok, detail: "/Users/ada/.local/state/torrential".into() },
         Check {
-            check: "engine".into(),
+            check: Checked::Engine,
             status: CheckStatus::Ok,
             detail: "not running; the next command starts it".into(),
         },
-        Check { check: "sources".into(), status: CheckStatus::Fail, detail: "1 of 2 responded".into() },
-        Check { check: "source archive.org".into(), status: CheckStatus::Ok, detail: "12 results, 380 ms".into() },
-        Check { check: "source knaben".into(), status: CheckStatus::Fail, detail: "HTTP 503, 211 ms".into() },
+        Check { check: Checked::Sources, status: CheckStatus::Fail, detail: "1 of 2 responded".into() },
+        Check {
+            check: Checked::Source("archive.org".into()),
+            status: CheckStatus::Ok,
+            detail: "12 results, 380 ms".into(),
+        },
+        Check { check: Checked::Source("knaben".into()), status: CheckStatus::Fail, detail: "HTTP 503, 211 ms".into() },
     ];
     let fix = Some(
         "in interactive Codex, rerun with sandbox_permissions \"require_escalated\" and prefix_rule [\"torrential\"]"
@@ -706,16 +719,16 @@ fn doctor_report() {
 
 #[test]
 fn one_failed_source_is_one_problem() {
-    let check = |check: &str, status| Check { check: check.into(), status, detail: String::new() };
+    let check = |check: Checked, status| Check { check, status, detail: String::new() };
     let probed = [
-        check("sources", CheckStatus::Fail),
-        check("source archive.org", CheckStatus::Ok),
-        check("source knaben", CheckStatus::Fail),
+        check(Checked::Sources, CheckStatus::Fail),
+        check(Checked::Source("archive.org".into()), CheckStatus::Ok),
+        check(Checked::Source("knaben".into()), CheckStatus::Fail),
     ];
     assert_eq!(doctor(&probed, None).summary, ["1 problem"]);
-    let unprobed = [check("config", CheckStatus::Fail), check("sources", CheckStatus::Skipped)];
+    let unprobed = [check(Checked::Config, CheckStatus::Fail), check(Checked::Sources, CheckStatus::Skipped)];
     assert_eq!(doctor(&unprobed, None).summary, ["1 problem"]);
-    let failed = [check("sources", CheckStatus::Fail)];
+    let failed = [check(Checked::Sources, CheckStatus::Fail)];
     assert_eq!(doctor(&failed, None).summary, ["1 problem"]);
 }
 
@@ -935,7 +948,7 @@ fn skill_status_suggests_install_only_when_it_loses_no_edits() {
          # claude was not written by torrential\n\
          # to replace them: torrential skill install --force\n"
     );
-    let check = |status, detail: &str| Check { check: "skill".into(), status, detail: detail.into() };
+    let check = |status, detail: &str| Check { check: Checked::Skill, status, detail: detail.into() };
     assert_eq!(
         skill_check(&stale),
         (check(CheckStatus::Warn, "agents outdated, claude missing"), Some("torrential skill install".into()))
@@ -1021,7 +1034,7 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
         ]
     );
     assert_eq!(
-        playing("IINA", &film),
+        playing_line("IINA", &film),
         "\u{1b}[38;2;153;255;228m▶\u{1b}[0m Playing in IINA. The download continues: torrential status 6bc1af\n"
     );
 }
@@ -1029,10 +1042,10 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
 #[test]
 fn a_held_start_says_why_and_for_how_long() {
     let lines = [
-        hold(Hold::Reading),
-        hold(Hold::Buffering(Duration::from_secs(4))),
-        hold(Hold::Countdown(Duration::from_secs(29 * 60 + 40))),
-        hold(Hold::Stalled),
+        hold_line(Hold::Reading),
+        hold_line(Hold::Buffering(Duration::from_secs(4))),
+        hold_line(Hold::Countdown(Duration::from_secs(29 * 60 + 40))),
+        hold_line(Hold::Stalled),
     ];
     assert_eq!(
         lines,

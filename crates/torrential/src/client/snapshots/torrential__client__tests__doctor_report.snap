@@ -1,5 +1,5 @@
 ---
-source: crates/torrential/src/output/views/tests.rs
+source: crates/torrential/src/client/tests.rs
 expression: "both(&doctor(&checks, fix), &crate::output::Typed\n{ kind: \"doctor\", body: serde_json::json!({\"checks\": checks}) })"
 ---
 CHECK	STATUS	DETAIL

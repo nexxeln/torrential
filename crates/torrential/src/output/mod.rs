@@ -1,6 +1,5 @@
 pub mod format;
 pub mod theme;
-pub mod views;
 
 use serde::Serialize;
 use torrential_core::Error;
@@ -252,7 +251,7 @@ fn detail_lines(details: Option<&Details>) -> Vec<String> {
             candidates.iter().map(|c| format!("{}\t{}\t{}", c.id, sanitize(&c.name), c.kind)).collect()
         }
         Some(Details::Sources(reports)) => {
-            reports.iter().map(|r| format!("{}: {}", r.source, views::source_outcome(&r.outcome))).collect()
+            reports.iter().map(|r| format!("{}: {}", r.source, format::source_outcome(&r.outcome))).collect()
         }
         Some(Details::Space { .. }) => Vec::new(),
         Some(Details::Sandbox { signal, harness }) => match harness {

@@ -3,8 +3,8 @@ use torrential_core::protocol::{Request, Response};
 
 use crate::cli::Shell;
 use crate::client::connect;
+use crate::client::rows::short_ids;
 use crate::env::Env;
-use crate::output::views::short_ids;
 use crate::paths::Paths;
 
 pub fn complete_download_ids() -> Vec<CompletionCandidate> {

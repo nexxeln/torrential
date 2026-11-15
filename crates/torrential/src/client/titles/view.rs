@@ -3,15 +3,15 @@
 
 use std::time::Duration;
 
-use torrential_core::protocol::{GetReply, TitlePage, TitleSources};
+use torrential_core::protocol::{TitlePage, TitleSources};
 use torrential_core::text::sanitize;
 use torrential_core::title::title_name;
 use torrential_core::{AttemptEvent, Check, Kind, Release, TitleCard, Watched};
 
-use super::super::format::{self, NONE, UNKNOWN};
-use super::super::theme::Token;
-use super::super::{Body, Cell, Doc};
-use super::{get, ranked_for, release_ids, release_row, short_ids, short_ref, source_outcome};
+use crate::client::rows::{ranked_for, release_ids, release_row, short_ids, short_ref};
+use crate::output::format::{self, NONE, UNKNOWN, source_outcome};
+use crate::output::theme::Token;
+use crate::output::{Body, Cell, Doc};
 
 fn rating(rating: Option<f32>) -> String {
     rating.map_or_else(|| UNKNOWN.to_string(), |r| format!("{r:.1}"))
@@ -266,15 +266,6 @@ fn described(release: &Release) -> String {
     }
     parts.push(format::size(release.size));
     parts.join(", ")
-}
-
-/// A download a title play started, as `get` shows one, under the title's name.
-pub fn get_title(reply: &GetReply, name: &str) -> Doc {
-    let mut doc = get(reply, None);
-    if let Body::Fields { fields, .. } = &mut doc.body {
-        fields.insert(0, ("title", Cell::new(name)));
-    }
-    doc
 }
 
 #[cfg(test)]

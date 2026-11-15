@@ -1,5 +1,5 @@
 ---
-source: crates/torrential/src/output/views/tests.rs
+source: crates/torrential/src/client/tests.rs
 expression: out
 ---
 === started from a magnet

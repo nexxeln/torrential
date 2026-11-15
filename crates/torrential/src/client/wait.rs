@@ -5,14 +5,16 @@ use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use torrential_core::protocol::{Event, Request};
+use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, JobStatus, TorrentId};
 
 use super::connect::{self, Conn};
+use super::rows::{job_row, next_for_stopped, short_ids};
 use crate::cli::Until;
 use crate::env::Env;
+use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::views::{self, WaitEnd, Watched};
-use crate::output::{Body, Doc, Mode, json_document, json_line};
+use crate::output::{Body, Cell, Doc, Mode, json_document, json_line};
 use crate::paths::Paths;
 use crate::wire;
 
@@ -66,7 +68,7 @@ impl Printer {
     pub fn header(&self) -> String {
         match self.mode {
             Mode::Json => String::new(),
-            _ => format!("{}\n", views::WAIT_HEADER.join("\t")),
+            _ => format!("{}\n", WAIT_HEADER.join("\t")),
         }
     }
 
@@ -74,14 +76,14 @@ impl Printer {
         match self.mode {
             Mode::Json => json_line(&ProgressLine { kind: "progress", elapsed: elapsed.as_secs(), job }),
             _ => {
-                let cells: Vec<String> = views::wait_row(elapsed, id, job).into_iter().map(|c| c.text).collect();
+                let cells: Vec<String> = wait_row(elapsed, id, job).into_iter().map(|c| c.text).collect();
                 format!("{}\n", cells.join("\t"))
             }
         }
     }
 
     pub fn end(&self, end: &WaitEnd, elapsed: Duration, watched: &[Watched]) -> String {
-        let (summary, next) = views::wait_end(end, elapsed, watched);
+        let (summary, next) = wait_end(end, elapsed, watched);
         match self.mode {
             Mode::Json => {
                 let jobs = watched.iter().map(|w| &w.job).collect();
@@ -101,7 +103,7 @@ struct State {
 impl State {
     fn new(jobs: Vec<Job>) -> Self {
         let printed = vec![""; jobs.len()];
-        Self { watched: views::watched(jobs), printed }
+        Self { watched: watched(jobs), printed }
     }
 
     fn update(&mut self, job: Job) -> Option<usize> {
@@ -301,7 +303,7 @@ pub fn attach(
             .or_else(|| deadline.is_some_and(|d| Instant::now() >= d).then_some(WaitEnd::Timeout));
         if let Some(end) = end {
             let _ = bars.clear();
-            let (summary, next) = views::wait_end(&end, started.elapsed(), &state.watched);
+            let (summary, next) = wait_end(&end, started.elapsed(), &state.watched);
             anstream::print!(
                 "{}",
                 Doc { body: Body::Fields { title: Vec::new(), fields: Vec::new() }, summary, next }.human()
@@ -345,6 +347,100 @@ fn live_message(job: &Job) -> String {
     }
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub enum WaitEnd {
+    Done,
+    Metadata,
+    Timeout,
+    Failed { id: String },
+    Stopped { id: String },
+}
+
+impl WaitEnd {
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Done | Self::Metadata => 0,
+            Self::Timeout | Self::Stopped { .. } => torrential_core::error::EXIT_PENDING,
+            Self::Failed { .. } => 7,
+        }
+    }
+
+    pub fn outcome(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Metadata => "metadata",
+            Self::Timeout => "timeout",
+            Self::Failed { .. } => "error",
+            Self::Stopped { .. } => "stopped",
+        }
+    }
+}
+
+pub const WAIT_HEADER: [&str; 9] = ["ELAPSED", "ID", "STATE", "PROGRESS", "SIZE", "DOWN", "PEERS", "ETA", "NAME"];
+
+pub fn wait_row(elapsed: Duration, id: &str, job: &Job) -> Vec<Cell> {
+    let mut row = vec![Cell::styled(format::elapsed(elapsed), Token::Muted)];
+    row.extend(job_row(id, job));
+    row
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Watched {
+    pub id: String,
+    pub job: Job,
+}
+
+pub fn watched(jobs: Vec<Job>) -> Vec<Watched> {
+    let ids = short_ids(&jobs.iter().map(|j| j.id).collect::<Vec<_>>());
+    ids.into_iter().zip(jobs).map(|(id, job)| Watched { id, job }).collect()
+}
+
+pub fn wait_end(end: &WaitEnd, elapsed: Duration, watched: &[Watched]) -> (Vec<String>, Option<String>) {
+    let after = format::elapsed(elapsed);
+    let all = watched.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(" ");
+    let find = |id: &str| watched.iter().find(|w| w.id == id).map(|w| &w.job);
+    match end {
+        WaitEnd::Done => {
+            let paths: Vec<String> = watched
+                .iter()
+                .map(|w| sanitize(&w.job.path.as_deref().unwrap_or(&w.job.dir).display().to_string()))
+                .collect();
+            (vec![format!("done after {after} · path {}", paths.join(", "))], None)
+        }
+        WaitEnd::Metadata => (vec![format!("file list ready after {after}")], Some(format!("torrential files {all}"))),
+        WaitEnd::Timeout => {
+            let eta = watched.iter().filter_map(|w| w.job.progress.eta).max();
+            let mut line = format!("still running after {after}");
+            if let Some(eta) = eta {
+                line.push_str(&format!(" · eta {}", format::eta(Some(eta))));
+            }
+            (vec![line], Some(format!("torrential wait {all}")))
+        }
+        WaitEnd::Failed { id } => {
+            let mut lines = Vec::new();
+            let status = find(id).map(|j| &j.status);
+            if let Some(JobStatus::Error { error }) = status {
+                lines.push(format!(
+                    "{id} stopped after {after} with error[{}]: {}",
+                    error.code,
+                    sanitize(&error.message)
+                ));
+                if let Some(hint) = &error.hint {
+                    lines.push(format!("hint: {hint}"));
+                }
+            }
+            (lines, status.and_then(|s| next_for_stopped(s, id)))
+        }
+        WaitEnd::Stopped { id } => {
+            let state = find(id).map_or("stopped", |j| j.status.name());
+            (
+                vec![format!("{id} is {state} and will not finish until resumed")],
+                Some(format!("torrential resume {id}")),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,21 +476,15 @@ mod tests {
         let done = JobStatus::Done { finished_at: 1 };
         let failed = JobStatus::Error { error: Error::new(ErrorCode::DiskFull, "full") };
         let both_done = [job(1, done.clone(), Some(5)), job(2, done.clone(), Some(5))];
-        assert_eq!(evaluate(&views::watched(both_done.to_vec()), Until::Done), Some(WaitEnd::Done));
+        assert_eq!(evaluate(&watched(both_done.to_vec()), Until::Done), Some(WaitEnd::Done));
         let running = [job(1, done.clone(), Some(5)), job(2, JobStatus::Downloading, Some(5))];
-        assert_eq!(evaluate(&views::watched(running.to_vec()), Until::Done), None);
-        assert_eq!(evaluate(&views::watched(running.to_vec()), Until::Metadata), Some(WaitEnd::Metadata));
+        assert_eq!(evaluate(&watched(running.to_vec()), Until::Done), None);
+        assert_eq!(evaluate(&watched(running.to_vec()), Until::Metadata), Some(WaitEnd::Metadata));
         let one_failed = [job(1, JobStatus::Downloading, None), job(2, failed, Some(5))];
-        assert_eq!(
-            evaluate(&views::watched(one_failed.to_vec()), Until::Done),
-            Some(WaitEnd::Failed { id: "020202".into() })
-        );
+        assert_eq!(evaluate(&watched(one_failed.to_vec()), Until::Done), Some(WaitEnd::Failed { id: "020202".into() }));
         let paused = [job(1, JobStatus::Paused, Some(5)), job(2, done, Some(5))];
-        assert_eq!(
-            evaluate(&views::watched(paused.to_vec()), Until::Done),
-            Some(WaitEnd::Stopped { id: "010101".into() })
-        );
-        assert_eq!(evaluate(&views::watched(paused.to_vec()), Until::Metadata), Some(WaitEnd::Metadata));
+        assert_eq!(evaluate(&watched(paused.to_vec()), Until::Done), Some(WaitEnd::Stopped { id: "010101".into() }));
+        assert_eq!(evaluate(&watched(paused.to_vec()), Until::Metadata), Some(WaitEnd::Metadata));
     }
 
     #[test]
