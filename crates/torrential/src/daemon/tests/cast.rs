@@ -92,8 +92,11 @@ impl FakeTv {
         tv
     }
 
+    /// The SOAP actions the TV was sent. A request without one, such as another test's engine
+    /// fetching something else from this port, is no action.
     fn actions(&self) -> Vec<String> {
-        self.screen.lock().unwrap().actions.iter().map(|(name, _)| name.clone()).collect()
+        let screen = self.screen.lock().unwrap();
+        screen.actions.iter().map(|(name, _)| name.clone()).filter(|name| !name.is_empty()).collect()
     }
 
     /// The body of the last action named `name`.
