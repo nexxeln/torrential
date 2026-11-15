@@ -3,7 +3,6 @@
 
 pub mod attempt;
 pub mod catalog_port;
-pub mod shelf;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,8 +19,8 @@ use torrential_core::{
 use super::ctx::Ctx;
 use super::downloads::search;
 use super::owner::Command;
+use super::shelf::Shelf;
 use catalog_port::{CatalogPort, season_episodes, wanted};
-use shelf::Shelf;
 
 /// How long a release that failed stays at the back of the line.
 const FAILED_FOR: Duration = Duration::from_secs(6 * 60 * 60);
@@ -33,7 +32,7 @@ const CONTINUE_MOST: usize = 20;
 /// What the engine knows about films and series, beside its downloads.
 pub struct Titles {
     pub catalog: Arc<dyn CatalogPort>,
-    pub shelf: Shelf,
+    pub shelf: Arc<Shelf>,
     pub timing: Timing,
     /// When each release last failed to play, and why. In memory, so a restart gives every one a
     /// chance.
@@ -66,7 +65,7 @@ impl Default for Timing {
 }
 
 impl Titles {
-    pub fn new(catalog: Arc<dyn CatalogPort>, shelf: Shelf, timing: Timing) -> Self {
+    pub fn new(catalog: Arc<dyn CatalogPort>, shelf: Arc<Shelf>, timing: Timing) -> Self {
         Self { catalog, shelf, timing, failed: Mutex::default() }
     }
 
@@ -326,8 +325,8 @@ mod tests {
 
     fn titles(dir: &tempfile::TempDir) -> Titles {
         let path = dir.path().join("state.db");
-        drop(crate::daemon::store::Store::open(&path).unwrap());
-        Titles::new(Arc::new(catalog_port::Fake::default()), Shelf::open(&path).unwrap(), Timing::default())
+        let shelf = Shelf::open(&crate::daemon::db::connect(&path).unwrap()).unwrap();
+        Titles::new(Arc::new(catalog_port::Fake::default()), Arc::new(shelf), Timing::default())
     }
 
     #[test]

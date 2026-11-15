@@ -1,123 +1,13 @@
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use torrential_core::{
-    Error, ErrorCode, InfoHash, Kind, PieceMap, Release, Selection, TitleCard, TitleId, TitleLink, TorrentId,
-};
+use torrential_core::{Error, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
-use super::book::{Home, Intent, JobRecord, Linked, Play};
-use super::owner::deleter::{Identity, PlayName};
+use super::book::{Home, Identity, Intent, JobRecord, Linked, Play, PlayName};
+use super::db::{Db, corrupt, sql_error};
 use super::search_port::SavedLink;
-
-const MIGRATIONS: &[&str] = &[
-    r#"
-CREATE TABLE jobs (
-    id TEXT PRIMARY KEY,
-    info_hash TEXT NOT NULL,
-    name TEXT,
-    dir BLOB NOT NULL,
-    selection TEXT NOT NULL,
-    max_size INTEGER NOT NULL,
-    magnet TEXT,
-    intent TEXT NOT NULL CHECK (intent IN ('running', 'paused', 'done', 'failed')),
-    finished_at INTEGER,
-    error TEXT,
-    added_at INTEGER NOT NULL,
-    verified INTEGER NOT NULL DEFAULT 0,
-    CHECK ((intent = 'done') = (finished_at IS NOT NULL)),
-    CHECK ((intent = 'failed') = (error IS NOT NULL))
-) STRICT;
-CREATE TABLE aliases (
-    hash TEXT PRIMARY KEY,
-    job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE
-) STRICT;
-CREATE TABLE metainfo (
-    id TEXT PRIMARY KEY,
-    bytes BLOB NOT NULL,
-    saved_at INTEGER NOT NULL
-) STRICT;
-CREATE TABLE resume (
-    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
-    bytes BLOB NOT NULL,
-    saved_at INTEGER NOT NULL
-) STRICT;
-CREATE TABLE tombstones (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    path BLOB,
-    removed_at INTEGER NOT NULL
-) STRICT;
-CREATE TABLE results (
-    id TEXT PRIMARY KEY,
-    release TEXT NOT NULL,
-    seen_at INTEGER NOT NULL
-) STRICT;
-"#,
-    "ALTER TABLE jobs ADD COLUMN piece_map TEXT;",
-    "ALTER TABLE jobs ADD COLUMN files_verified TEXT;",
-    "ALTER TABLE jobs ADD COLUMN max_size_from_setup INTEGER NOT NULL DEFAULT 0;",
-    "ALTER TABLE results ADD COLUMN link TEXT;",
-    r#"
-CREATE TABLE job_titles (
-    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    span TEXT NOT NULL,
-    release TEXT,
-    played INTEGER NOT NULL DEFAULT 0 CHECK (played IN (0, 1)),
-    linked_at INTEGER NOT NULL
-) STRICT;
-CREATE INDEX job_titles_by_title ON job_titles(title);
-CREATE TABLE watched (
-    video TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    position REAL NOT NULL CHECK (position >= 0),
-    duration REAL CHECK (duration IS NULL OR duration > 0),
-    release TEXT,
-    updated_at INTEGER NOT NULL
-) STRICT;
-CREATE INDEX watched_by_title ON watched(title, updated_at);
-CREATE TABLE library (
-    title TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('film', 'series')),
-    name TEXT NOT NULL,
-    year INTEGER,
-    rating REAL,
-    saved_at INTEGER NOT NULL
-) STRICT;
-"#,
-    r#"
-CREATE TABLE devices (
-    id TEXT PRIMARY KEY,
-    token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
-    name TEXT NOT NULL,
-    added_at INTEGER NOT NULL,
-    seen_at INTEGER NOT NULL
-) STRICT;
-"#,
-    r#"
-CREATE TABLE plays (
-    job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
-    watched_at INTEGER NOT NULL,
-    by_hand INTEGER NOT NULL DEFAULT 0 CHECK (by_hand IN (0, 1)),
-    device INTEGER NOT NULL,
-    inode INTEGER NOT NULL
-) STRICT;
-CREATE TABLE plays_folder (
-    one INTEGER PRIMARY KEY CHECK (one = 1),
-    device INTEGER NOT NULL,
-    inode INTEGER NOT NULL
-) STRICT;
-CREATE TABLE deletions (
-    job TEXT NOT NULL,
-    play TEXT NOT NULL,
-    device INTEGER NOT NULL,
-    inode INTEGER NOT NULL,
-    bytes INTEGER NOT NULL
-) STRICT;
-"#,
-];
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Tombstone {
@@ -156,64 +46,12 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self, Error> {
-        let existed = path.exists();
-        let conn = Connection::open(path).map_err(|e| corrupt(path, &e.to_string()))?;
-        let store = Self { conn, path: path.to_path_buf() };
-        store.configure()?;
-        if existed {
-            let check: String =
-                store.conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(|e| store.fail(e))?;
-            if check != "ok" {
-                return Err(corrupt(path, &check));
-            }
-        }
-        store.migrate(MIGRATIONS)?;
-        Ok(store)
-    }
-
-    fn configure(&self) -> Result<(), Error> {
-        let mode: String =
-            self.conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0)).map_err(|e| self.fail(e))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(corrupt(&self.path, &format!("SQLite could not switch to WAL mode and is in {mode} mode")));
-        }
-        self.conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;").map_err(|e| self.fail(e))?;
-        self.conn.busy_timeout(std::time::Duration::from_secs(1)).map_err(|e| self.fail(e))
-    }
-
-    fn migrate(&self, migrations: &[&str]) -> Result<(), Error> {
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| self.fail(e))?;
-        let version = usize::try_from(version)
-            .map_err(|_| corrupt(&self.path, &format!("schema version {version} is not valid")))?;
-        if version > migrations.len() {
-            return Err(newer(&self.path, version, migrations.len()));
-        }
-        if version == migrations.len() {
-            return Ok(());
-        }
-        if version > 0 {
-            let backup = self.path.with_extension(format!("v{version}.bak"));
-            let _ = std::fs::remove_file(&backup);
-            self.conn
-                .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
-                .map_err(|e| corrupt(&self.path, &format!("backup before migrating failed: {e}")))?;
-        }
-        let tx = self.conn.unchecked_transaction().map_err(|e| self.fail(e))?;
-        for migration in &migrations[version..] {
-            tx.execute_batch(migration).map_err(|e| corrupt(&self.path, &format!("migration failed: {e}")))?;
-        }
-        tx.pragma_update(None, "user_version", migrations.len() as i64).map_err(|e| self.fail(e))?;
-        tx.commit().map_err(|e| self.fail(e))
+    pub fn open(db: &Db) -> Result<Self, Error> {
+        Ok(Self { conn: db.open()?, path: db.path().to_path_buf() })
     }
 
     fn fail(&self, e: rusqlite::Error) -> Error {
         sql_error(&self.path, e)
-    }
-
-    /// The database file, which the shelf opens a second connection to.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     fn write<T>(&mut self, f: impl FnOnce(&Transaction) -> rusqlite::Result<T>) -> Result<T, Error> {
@@ -607,41 +445,6 @@ impl Store {
         self.write(|tx| tx.execute("UPDATE plays SET by_hand = 1 WHERE job = ?1", [id.to_hex()]).map(drop))
     }
 
-    /// The titles saved to the library.
-    pub fn saved_titles(&self) -> Result<std::collections::BTreeSet<TitleId>, Error> {
-        let mut stmt = self.conn.prepare("SELECT title FROM library").map_err(|e| self.fail(e))?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| self.fail(e))?;
-        let mut saved = std::collections::BTreeSet::new();
-        for row in rows {
-            let title = row.map_err(|e| self.fail(e))?;
-            saved
-                .insert(title.parse().map_err(|_| corrupt(&self.path, &format!("saved title {title} is unreadable")))?);
-        }
-        Ok(saved)
-    }
-
-    /// Saves `card` in the library, keeping when it was first saved, so the library lists the
-    /// title even when the catalog cannot be reached.
-    pub fn save_title(&mut self, card: &TitleCard, now: i64) -> Result<(), Error> {
-        let kind = match card.kind {
-            Kind::Film => "film",
-            Kind::Series => "series",
-        };
-        self.write(|tx| {
-            tx.execute(
-                "INSERT INTO library (title, kind, name, year, rating, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT (title) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
-                 year = excluded.year, rating = excluded.rating",
-                params![card.id.as_str(), kind, card.name, card.year, card.rating, now],
-            )
-            .map(drop)
-        })
-    }
-
-    pub fn unsave_title(&mut self, title: &TitleId) -> Result<(), Error> {
-        self.write(|tx| tx.execute("DELETE FROM library WHERE title = ?1", [title.as_str()]).map(drop))
-    }
-
     /// Links a download that already existed to the title a play joined it for.
     pub fn link(&mut self, id: TorrentId, link: &TitleLink, now: i64) -> Result<(), Error> {
         self.write(|tx| insert_link(tx, id, link, now))
@@ -728,52 +531,9 @@ impl Store {
     }
 }
 
-pub(super) fn sql_error(path: &Path, e: rusqlite::Error) -> Error {
-    use rusqlite::ErrorCode as Sql;
-    match e.sqlite_error_code() {
-        Some(Sql::DatabaseCorrupt | Sql::NotADatabase) => corrupt(path, &e.to_string()),
-        Some(Sql::DiskFull) => {
-            Error::new(ErrorCode::StorageError, format!("the disk containing {} is full", path.display()))
-                .with_hint("free some space on that disk")
-        }
-        _ => Error::new(ErrorCode::StateCorrupt, format!("{}: {e}", path.display()))
-            .with_hint(format!("see {}", path.with_file_name("engine.log").display())),
-    }
-}
-
 /// A file's identity as the store keeps it, in two signed columns.
 fn identity(device: i64, inode: i64) -> Identity {
     Identity { device: device as u64, inode: inode as u64 }
-}
-
-fn corrupt(path: &Path, reason: &str) -> Error {
-    Error::new(ErrorCode::StateCorrupt, format!("the state database {} is damaged: {reason}", path.display()))
-        .with_hint(format!(
-            "the state is never reset automatically; move {} aside to start fresh, or restore a backup",
-            path.display()
-        ))
-}
-
-/// A newer torrential migrated the database past `known`. It kept the database it migrated from
-/// as `state.v{known}.bak`, the state this version last wrote.
-fn newer(path: &Path, version: usize, known: usize) -> Error {
-    let backup = path.with_extension(format!("v{known}.bak"));
-    let error = Error::new(
-        ErrorCode::StateCorrupt,
-        format!(
-            "the state database {} is from a newer torrential (schema version {version}; this version reads up to {known})",
-            path.display()
-        ),
-    );
-    if backup.is_file() {
-        error.with_hint(format!(
-            "install the newer torrential again, or stop it and replace {} with {}, the state from before the update",
-            path.display(),
-            backup.display()
-        ))
-    } else {
-        error.with_hint("install the newer torrential again")
-    }
 }
 
 fn json(value: &impl serde::Serialize) -> String {
@@ -880,11 +640,17 @@ fn save_resume(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
+    use crate::daemon::db;
     use crate::daemon::devices::Devices;
-    use torrential_core::ReleaseId;
+    use torrential_core::{ErrorCode, ReleaseId};
+
+    fn open(path: &Path) -> Store {
+        Store::open(&db::connect(path).unwrap()).unwrap()
+    }
 
     fn record(n: u8) -> JobRecord {
         JobRecord {
@@ -909,7 +675,7 @@ mod tests {
     fn jobs_round_trip_through_every_intent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        let mut store = Store::open(&path).unwrap();
+        let mut store = open(&path);
         store.insert(&record(1), Some(b"torrent"), 100).unwrap();
         store
             .set_intent(
@@ -923,7 +689,7 @@ mod tests {
         store.insert(&record(5), None, 100).unwrap();
         store.save_resume(TorrentId::from_bytes([5; 20]), b"resume", 9, Some(map), Some(&[4, 5]), 150).unwrap();
         drop(store);
-        let store = Store::open(&path).unwrap();
+        let store = open(&path);
         let jobs = store.jobs().unwrap();
         assert_eq!(jobs[0].record.intent, Intent::Failed { error: Error::new(ErrorCode::DiskFull, "full") });
         assert_eq!(jobs[0].metainfo.as_deref(), Some(&b"torrent"[..]));
@@ -937,7 +703,7 @@ mod tests {
     fn a_title_link_keeps_whether_it_played_and_goes_with_its_job() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        let mut store = Store::open(&path).unwrap();
+        let mut store = open(&path);
         let link = TitleLink {
             title: "tt9999901".parse().unwrap(),
             span: "s1".parse().unwrap(),
@@ -949,7 +715,7 @@ mod tests {
         store.link(TorrentId::from_bytes([3; 20]), &link, 110).unwrap();
         store.played(TorrentId::from_bytes([3; 20])).unwrap();
         drop(store);
-        let mut store = Store::open(&path).unwrap();
+        let mut store = open(&path);
         let titles: Vec<Option<Linked>> = store.jobs().unwrap().into_iter().map(|j| j.record.title).collect();
         assert_eq!(titles, [Some(made), Some(Linked { link, played: true })]);
 
@@ -964,7 +730,7 @@ mod tests {
     #[test]
     fn a_failed_check_replaces_the_progress_and_drops_the_resume_data_it_contradicts() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = open(&dir.path().join("state.db"));
         let id = TorrentId::from_bytes([6; 20]);
         store.insert(&record(6), None, 100).unwrap();
         store.finish(id, 200, b"every piece", 42).unwrap();
@@ -979,7 +745,7 @@ mod tests {
     #[test]
     fn both_hashes_of_a_hybrid_resolve_to_one_job() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = open(&dir.path().join("state.db"));
         store.insert(&record(1), None, 100).unwrap();
         let id = TorrentId::from_bytes([1; 20]);
         assert_eq!(store.alias_owners(&InfoHash::V1([1; 20])).unwrap(), [id]);
@@ -990,7 +756,7 @@ mod tests {
     #[test]
     fn removal_leaves_a_short_tombstone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = open(&dir.path().join("state.db"));
         store.insert(&record(1), None, 100).unwrap();
         let tomb = Tombstone {
             id: TorrentId::from_bytes([1; 20]),
@@ -1008,7 +774,7 @@ mod tests {
     fn a_play_keeps_its_place_and_its_deletion_outlives_the_engine_until_done() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        let mut store = Store::open(&path).unwrap();
+        let mut store = open(&path);
         let folder = Identity { device: u64::MAX, inode: 7 };
         let play = JobRecord {
             dir: "/th/data/plays/0101010101010101-0".into(),
@@ -1026,7 +792,7 @@ mod tests {
         let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
         store.left_to_delete(key, 200).unwrap();
         drop(store);
-        let mut store = Store::open(&path).unwrap();
+        let mut store = open(&path);
         assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder, bytes: 200 }]);
         assert_eq!(store.jobs().unwrap().len(), 1);
         store.deleted(key).unwrap();
@@ -1036,7 +802,7 @@ mod tests {
     #[test]
     fn a_plays_folder_other_than_the_one_used_before_turns_its_plays_into_downloads_in_a_folder() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = open(&dir.path().join("state.db"));
         let first = Identity { device: 1, inode: 2 };
         let stopped = Error::new(ErrorCode::PathConflict, "the plays folder it was in was moved");
         assert_eq!(store.plays_folder().unwrap(), None);
@@ -1059,7 +825,7 @@ mod tests {
     #[test]
     fn cached_file_lists_expire_and_fit_a_budget_but_a_downloads_stays() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = open(&dir.path().join("state.db"));
         let id = TorrentId::from_bytes;
         let largest = vec![7; 16 << 20];
         let t0 = 1_000_000;
@@ -1079,43 +845,16 @@ mod tests {
         assert_eq!(store.jobs().unwrap()[0].metainfo.as_deref(), Some(&b"tracked"[..]));
     }
 
-    #[test]
-    fn damaged_state_is_reported_never_reset() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        std::fs::write(&path, b"this is not a database, but it is somebody's data").unwrap();
-        let err = Store::open(&path).err().unwrap();
-        assert_eq!(err.code, ErrorCode::StateCorrupt);
-        assert_eq!(std::fs::read(&path).unwrap(), b"this is not a database, but it is somebody's data");
-    }
-
-    #[test]
-    fn migrating_backs_up_the_old_database_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        let mut store = Store::open(&path).unwrap();
-        store.insert(&record(1), None, 100).unwrap();
-        store.migrate(&[MIGRATIONS, &["ALTER TABLE jobs ADD COLUMN note TEXT"]].concat()).unwrap();
-        let shipped = MIGRATIONS.len() as i64;
-        let version: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, shipped + 1);
-        let backup = Connection::open(dir.path().join(format!("state.v{shipped}.bak"))).unwrap();
-        let rows: i64 = backup.query_row("SELECT count(*) FROM jobs", [], |r| r.get(0)).unwrap();
-        let backup_version: i64 = backup.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!((rows, backup_version), (1, shipped));
-    }
-
     #[tokio::test]
     async fn a_database_from_0_4_0_gains_devices_and_plays_and_keeps_its_downloads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        let mut old = Store { conn: Connection::open(&path).unwrap(), path: path.clone() };
-        old.configure().unwrap();
-        old.migrate(&MIGRATIONS[..6]).unwrap();
+        let mut old = Store::open(&db::connect_with(&path, &db::MIGRATIONS[..6]).unwrap()).unwrap();
         old.insert(&record(1), Some(b"torrent"), 100).unwrap();
         drop(old);
 
-        let mut store = Store::open(&path).unwrap();
+        let db = db::connect(&path).unwrap();
+        let mut store = Store::open(&db).unwrap();
         let version: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, 8);
         assert!(dir.path().join("state.v6.bak").is_file());
@@ -1131,43 +870,10 @@ mod tests {
         let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
         assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder, bytes: 300 }]);
 
-        let devices = Arc::new(Devices::open(&path).unwrap());
+        let devices = Arc::new(Devices::open(&db).unwrap());
         let code = devices.add(47919, 1_800_000_000).unwrap().offer.unwrap().code;
         let phone = std::net::IpAddr::from([192, 168, 1, 40]);
         let (device, _) = devices.pair(&code, Some("iPhone"), phone, 1_800_000_000).unwrap();
-        assert_eq!(Devices::open(&path).unwrap().list(47919).devices, [device]);
-    }
-
-    #[test]
-    fn a_newer_schema_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        drop(Store::open(&path).unwrap());
-        let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 99).unwrap();
-        drop(conn);
-        let known = MIGRATIONS.len();
-        let err = Store::open(&path).err().unwrap();
-        assert_eq!(err.code, ErrorCode::StateCorrupt);
-        assert_eq!(
-            err.message,
-            format!(
-                "the state database {} is from a newer torrential (schema version 99; this version reads up to {known})",
-                path.display()
-            )
-        );
-        assert_eq!(err.hint.as_deref(), Some("install the newer torrential again"));
-
-        let backup = dir.path().join(format!("state.v{known}.bak"));
-        std::fs::write(&backup, b"the state before the update").unwrap();
-        let err = Store::open(&path).err().unwrap();
-        assert_eq!(
-            err.hint,
-            Some(format!(
-                "install the newer torrential again, or stop it and replace {} with {}, the state from before the update",
-                path.display(),
-                backup.display()
-            ))
-        );
+        assert_eq!(Devices::open(&db).unwrap().list(47919).devices, [device]);
     }
 }

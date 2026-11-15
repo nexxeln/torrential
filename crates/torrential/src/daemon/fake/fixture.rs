@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn each_unfinished_seed_draws_its_progress_with_pieces_out_of_order() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = Store::open(&crate::daemon::db::connect(&dir.path().join("state.db")).unwrap()).unwrap();
         seed(&mut store, dir.path(), 0).unwrap();
         let mut mapped = Vec::new();
         for stored in store.jobs().unwrap() {
