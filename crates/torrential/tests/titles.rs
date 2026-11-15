@@ -196,6 +196,7 @@ fn title_shows_a_film_or_a_series_and_what_plays_next() {
             "saved": false,
             "watched": [],
             "next": {"video": "tt0063350", "resume_at": null},
+            "play_target": {"video": "tt0063350", "resume_at": null},
             "downloads": []
         })
     );
@@ -278,7 +279,7 @@ fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
                     "code": "no_source",
                     "message": "this source of Night of the Living Dead (1968) does not play now",
                     "hint": "let torrential choose a source",
-                    "details": {"tried": [{"release": ARCHIVE, "reason": {"reason": "no_data", "waited_s": 1}}]}
+                    "details": {"tried": [{"release": ARCHIVE, "reason": {"reason": "no_data", "waited_s": 1, "text": "no data arrived in 1s"}}]}
                 },
                 "next": "torrential search Night of the Living Dead 1968"
             })
@@ -301,7 +302,13 @@ fn sources_lists_a_release_that_failed_lately_last_and_says_why() {
         .collect();
     assert_eq!(
         releases,
-        ["b7f20d null", "e3a915 null", "09cd47 null", "7a0c3f null", r#"4c1e9a {"reason":"no_data","waited_s":1}"#]
+        [
+            "b7f20d null",
+            "e3a915 null",
+            "09cd47 null",
+            "7a0c3f null",
+            r#"4c1e9a {"reason":"no_data","waited_s":1,"text":"no data arrived in 1s"}"#
+        ]
     );
     let text = home.run(&["sources", "tt0063350"]);
     let why = text.stdout.lines().find(|line| line.contains("failed lately"));

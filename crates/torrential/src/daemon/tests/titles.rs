@@ -429,7 +429,8 @@ async fn getting_a_title_skips_a_source_whose_folder_already_exists_and_gets_the
                 ),
                 "hint": "move it away, or run torrential get a3a3a3 to download this torrent yourself",
                 "details": { "paths": [theirs.display().to_string()] },
-            }
+            },
+            "text": format!("{} already exists, and playing a title writes only where nothing is", theirs.display()),
         }))
     );
     assert_eq!(step(steps.last().unwrap()), "playing tt0063350 a4a4a4 file 0 at null");
@@ -1019,7 +1020,7 @@ async fn a_play_starts_on_a_lawful_catalog_at_once_and_does_not_wait_for_a_slow_
             "searched 1",
             "trying 1 of 1 Night.of.the.Living.Dead.1968.DVDRip.x264",
             "check file_list",
-            r#"skipped c1c1c1 {"reason":"no_file_list","waited_s":1}"#,
+            r#"skipped c1c1c1 {"reason":"no_file_list","waited_s":1,"text":"no peer sent its file list in 1s"}"#,
             "trying 2 of 2 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
             "check file_list",
             "check start",
@@ -1051,13 +1052,13 @@ async fn three_dead_swarms_in_a_row_cost_one_wait_for_a_file_list() {
             "searched 4",
             "trying 1 of 4 Night.of.the.Living.Dead.1968.480p.WEB.x264",
             "check file_list",
-            r#"skipped d1d1d1 {"reason":"no_file_list","waited_s":1}"#,
+            r#"skipped d1d1d1 {"reason":"no_file_list","waited_s":1,"text":"no peer sent its file list in 1s"}"#,
             "trying 2 of 4 Night.of.the.Living.Dead.1968.576p.WEB.x264",
             "check file_list",
-            r#"skipped d2d2d2 {"reason":"no_file_list","waited_s":1}"#,
+            r#"skipped d2d2d2 {"reason":"no_file_list","waited_s":1,"text":"no peer sent its file list in 1s"}"#,
             "trying 3 of 4 Night.of.the.Living.Dead.1968.720p.WEB.x264",
             "check file_list",
-            r#"skipped d3d3d3 {"reason":"no_file_list","waited_s":1}"#,
+            r#"skipped d3d3d3 {"reason":"no_file_list","waited_s":1,"text":"no peer sent its file list in 1s"}"#,
             "trying 4 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
             "check file_list",
             "check start",
@@ -1082,7 +1083,7 @@ async fn a_paused_download_a_trial_resumes_is_paused_again_when_it_does_not_star
             "check file_list",
             "check start",
             "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
+            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1,"text":"no data arrived in 1s"}"#,
         ]
     );
     assert_eq!(h.states().await, ["paused"]);
@@ -1142,7 +1143,7 @@ async fn replace_skips_a_release_whose_torrent_file_turns_out_to_be_the_stalled_
             "searched 2",
             "trying 1 of 2 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
             "check file_list",
-            r#"skipped ueeeee {"reason":"stalled"}"#,
+            r#"skipped ueeeee {"reason":"stalled","text":"it stalled"}"#,
             "trying 2 of 2 night_of_the_living_dead",
             "check file_list",
             "check start",
@@ -1208,9 +1209,9 @@ async fn replace_with_no_other_source_fails_and_leaves_the_stalled_download_alon
         steps.last().unwrap(),
         concat!(
             "failed no_source: no other source of Night of the Living Dead (1968) plays now [",
-            r#""a1a1a1 {\"reason\":\"no_file_list\",\"waited_s\":1}", "#,
-            r#""a2a2a2 {\"reason\":\"no_video\"}", "#,
-            r#""a3a3a3 {\"reason\":\"no_data\",\"waited_s\":1}"]"#
+            r#""a1a1a1 {\"reason\":\"no_file_list\",\"waited_s\":1,\"text\":\"no peer sent its file list in 1s\"}", "#,
+            r#""a2a2a2 {\"reason\":\"no_video\",\"text\":\"none of its files is the video\"}", "#,
+            r#""a3a3a3 {\"reason\":\"no_data\",\"waited_s\":1,\"text\":\"no data arrived in 1s\"}"]"#
         )
     );
     let after = h.job(&night[3]).await.unwrap();
@@ -1233,10 +1234,10 @@ async fn a_pinned_source_that_fails_is_the_only_one_tried() {
             "check file_list",
             "check start",
             "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
+            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1,"text":"no data arrived in 1s"}"#,
             concat!(
                 "failed no_source: this source of Night of the Living Dead (1968) does not play now ",
-                r#"["a3a3a3 {\"reason\":\"no_data\",\"waited_s\":1}"]"#
+                r#"["a3a3a3 {\"reason\":\"no_data\",\"waited_s\":1,\"text\":\"no data arrived in 1s\"}"]"#
             ),
         ]
     );

@@ -304,8 +304,7 @@ pub struct Season {
     pub episodes: Vec<EpisodeInfo>,
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Clone, PartialEq, Debug, Deserialize)]
 pub struct EpisodeInfo {
     #[serde(flatten)]
     pub episode: Episode,
@@ -314,6 +313,38 @@ pub struct EpisodeInfo {
     pub aired: Option<i64>,
     pub overview: Option<String>,
     pub thumbnail: bool,
+}
+
+impl EpisodeInfo {
+    /// An episode plays once its air date has passed. One with no date announced has not aired.
+    pub fn aired_by(&self, now: i64) -> bool {
+        self.aired.is_some_and(|aired| aired <= now)
+    }
+}
+
+/// An episode as it goes on the wire, with whether it has aired by the engine's clock. A read
+/// leaves that out, so a copy kept on disk says nothing stale.
+#[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "EpisodeInfo"))]
+pub(crate) struct EpisodeInfoWire<'a> {
+    #[serde(flatten)]
+    episode: Episode,
+    name: &'a Option<String>,
+    /// Unix seconds. `None` when no date is announced.
+    aired: Option<i64>,
+    /// The air date has passed, so the episode plays.
+    has_aired: bool,
+    overview: &'a Option<String>,
+    thumbnail: bool,
+}
+
+impl Serialize for EpisodeInfo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let EpisodeInfo { episode, name, aired, overview, thumbnail } = self;
+        let has_aired = self.aired_by(crate::time::now());
+        EpisodeInfoWire { episode: *episode, name, aired: *aired, has_aired, overview, thumbnail: *thumbnail }
+            .serialize(serializer)
+    }
 }
 
 #[cfg(test)]

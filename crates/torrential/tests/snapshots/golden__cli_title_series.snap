@@ -38,6 +38,7 @@ expression: value
               "episode": 1,
               "name": "Lights Out",
               "aired": 1608768000,
+              "has_aired": true,
               "overview": null,
               "thumbnail": false
             }
@@ -51,6 +52,7 @@ expression: value
               "episode": 1,
               "name": "Pilot",
               "aired": 1556668800,
+              "has_aired": true,
               "overview": null,
               "thumbnail": true
             },
@@ -59,6 +61,7 @@ expression: value
               "episode": 2,
               "name": "Undertow",
               "aired": 1557273600,
+              "has_aired": true,
               "overview": null,
               "thumbnail": true
             },
@@ -67,6 +70,7 @@ expression: value
               "episode": 3,
               "name": "Fog Bell",
               "aired": 1557878400,
+              "has_aired": true,
               "overview": null,
               "thumbnail": false
             }
@@ -80,6 +84,7 @@ expression: value
               "episode": 1,
               "name": "Return",
               "aired": 1588291200,
+              "has_aired": true,
               "overview": null,
               "thumbnail": false
             },
@@ -88,6 +93,7 @@ expression: value
               "episode": 2,
               "name": "Tide Tables",
               "aired": 4102444800,
+              "has_aired": false,
               "overview": null,
               "thumbnail": false
             },
@@ -96,6 +102,7 @@ expression: value
               "episode": 3,
               "name": "Untitled",
               "aired": null,
+              "has_aired": false,
               "overview": null,
               "thumbnail": false
             }
@@ -105,6 +112,10 @@ expression: value
       "saved": false,
       "watched": [],
       "next": {
+        "video": "tt9999901:1:1",
+        "resume_at": null
+      },
+      "play_target": {
         "video": "tt9999901:1:1",
         "resume_at": null
       },
