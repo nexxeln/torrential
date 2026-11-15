@@ -543,7 +543,12 @@ fn a_killed_engine_trusts_its_last_periodic_save_instead_of_hashing_the_files() 
     let files = home.ok(&["files", &fixture.short()]);
     let in_engine: u64 =
         files["files"]["files"].as_array().unwrap().iter().map(|f| f["verified"].as_u64().unwrap()).sum();
-    assert_eq!(in_engine, saved, "the engine kept the saved pieces, which a hash of the zeroed files would reject");
+    // The verified count saved with the resume data is read when its alert arrives, and the
+    // resume data can trail it by the pieces still being written, so only "some, at most that" holds.
+    assert!(
+        (1..=saved).contains(&in_engine),
+        "the engine kept {in_engine} of {saved} saved bytes, where a hash of the zeroed files keeps none"
+    );
 }
 
 #[test]
