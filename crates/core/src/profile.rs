@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::name;
 use crate::preferences::{Playback, Preferences, Screen};
 use crate::quality::{Quality, Resolution};
 use crate::units::{format_limit, size_text};
@@ -178,11 +179,7 @@ impl Arch {
     /// Every architecture a name mentions, as in `debian-13.7.0-arm64-netinst.iso` or
     /// `Ubuntu 11.04 Desktop dvd amd64 (x64)`.
     pub fn named_in(name: &str) -> Vec<Arch> {
-        let tokens: Vec<String> = name
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect();
+        let tokens = name::tags(name);
         let mut named = Vec::new();
         for (i, token) in tokens.iter().enumerate() {
             let next = tokens.get(i + 1).map_or("", String::as_str);
@@ -242,7 +239,7 @@ impl Language {
     pub fn named_in(name: &str, query_words: &[String]) -> Vec<Language> {
         const SUBTITLES: [&str; 5] = ["sub", "subs", "subbed", "subtitle", "subtitles"];
         let lower = name.to_lowercase();
-        let all: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let all: Vec<&str> = name::words(&lower).collect();
         let words: Vec<&str> = all
             .iter()
             .enumerate()

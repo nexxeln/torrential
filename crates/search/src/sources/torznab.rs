@@ -2,24 +2,75 @@
 //! indexers may be private trackers, so a row that only links a `.torrent` keeps the
 //! link as a locator. Fetching it here could count as a grab.
 
+use sha1::{Digest, Sha1};
 use torrential_core::{Category, Flag};
-use url::Url;
+use url::{Url, form_urlencoded};
 
-use super::{Ctx, Failure, rss};
+use super::{Ctx, Failure, SavedLink, rss};
 use crate::http::Retry;
-use crate::observation::{Identity, Observation, Peers, count, infohash, parse_magnet, web_url};
+use crate::observation::{Identity, Observation, Peers, count, hex, infohash, parse_magnet, web_url};
 
-pub(super) async fn search(ctx: &Ctx<'_>, endpoint: &Url, api_key: Option<&str>) -> Result<Vec<Observation>, Failure> {
-    let mut url = endpoint.clone();
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("t", "search").append_pair("q", ctx.terms.text());
-        if let Some(key) = api_key {
-            pairs.append_pair("apikey", key);
+/// A configured endpoint and the API key its links are issued under.
+pub(crate) struct Torznab {
+    pub api_key: Option<String>,
+}
+
+impl Torznab {
+    pub(super) async fn search(&self, ctx: &Ctx<'_>, endpoint: &Url) -> Result<Vec<Observation>, Failure> {
+        let mut url = endpoint.clone();
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("t", "search").append_pair("q", ctx.terms.text());
+            if let Some(key) = &self.api_key {
+                pairs.append_pair("apikey", key);
+            }
+        }
+        let body = ctx.http.fetch(&url, 8 << 20, ctx.deadline, Retry::Never).await?;
+        parse(&body).map_err(Failure::BadResponse)
+    }
+
+    /// The endpoint, and a digest of the key, since another key may see other indexers.
+    pub(super) fn scope(&self, endpoint: &Url) -> String {
+        match &self.api_key {
+            Some(key) => format!("{endpoint} key:{}", hex(&Sha1::digest(key.as_bytes())[..8])),
+            None => endpoint.to_string(),
         }
     }
-    let body = ctx.http.fetch(&url, 8 << 20, ctx.deadline, Retry::Never).await?;
-    parse(&body).map_err(Failure::BadResponse)
+
+    /// `url` without the query parameters whose value is the key. `None` when the key is
+    /// elsewhere in it.
+    pub(super) fn save_link(&self, source: &str, url: &str) -> Option<SavedLink> {
+        let mut url = Url::parse(url).ok()?;
+        let mut key_params = Vec::new();
+        if let Some(key) = self.api_key.as_deref().filter(|k| !k.is_empty()) {
+            let mut kept = Vec::new();
+            for pair in url.query().unwrap_or_default().split('&') {
+                match form_urlencoded::parse(pair.as_bytes()).next() {
+                    Some((name, value)) if value == key => key_params.push(name.into_owned()),
+                    _ => kept.push(pair),
+                }
+            }
+            let query = kept.join("&");
+            url.set_query((!query.is_empty()).then_some(query.as_str()));
+            if form_urlencoded::parse(url.as_str().as_bytes()).any(|(a, b)| a.contains(key) || b.contains(key)) {
+                return None;
+            }
+        }
+        Some(SavedLink { source: source.to_string(), url: url.into(), key_params })
+    }
+
+    /// A saved link with the current key back in its parameters.
+    pub(super) fn link(&self, saved: &SavedLink) -> Option<String> {
+        let mut url = Url::parse(&saved.url).ok()?;
+        if !saved.key_params.is_empty() {
+            let key = self.api_key.as_ref()?;
+            let mut pairs = url.query_pairs_mut();
+            for name in &saved.key_params {
+                pairs.append_pair(name, key);
+            }
+        }
+        Some(url.into())
+    }
 }
 
 fn parse(body: &[u8]) -> Result<Vec<Observation>, String> {

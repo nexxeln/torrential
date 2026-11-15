@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Countries, Country, TitleCard};
 use crate::error::{Error, ErrorCode};
+use crate::name::{self, year};
 use crate::quality::Quality;
 
 /// A film, or with `episode` one episode of a series.
@@ -543,7 +544,7 @@ fn tokens(name: &str) -> (Vec<String>, bool) {
             ']' | ')' | '}' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    let dated = held.split(|c: char| !c.is_alphanumeric()).find(|word| year(word).is_some());
+                    let dated = name::words(&held).find(|word| year(word).is_some());
                     if c == ')'
                         && let Some(dated) = dated
                     {
@@ -576,11 +577,6 @@ fn digits(token: &str, min: usize, max: usize) -> Option<u32> {
         _ => token,
     };
     ((min..=max).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_digit())).then(|| token.parse().ok())?
-}
-
-fn year(token: &str) -> Option<u16> {
-    let year: u16 = (token.len() == 4 && token.bytes().all(|b| b.is_ascii_digit())).then(|| token.parse().ok())??;
-    (1900..2100).contains(&year).then_some(year)
 }
 
 /// `s01e02` and `1x02` as season, first, and last episode. The last differs in `s01e02e03`,
