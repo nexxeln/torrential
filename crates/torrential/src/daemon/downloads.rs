@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
+use torrential_core::media::RUNTIME_BYTES;
 use torrential_core::protocol::{Change, Event, FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
@@ -452,7 +453,18 @@ pub(super) async fn begin(
     let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
     let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
     let info = metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
+    fetch_end(ctx, job.id, playable.video, info.metainfo.files[playable.video as usize].size);
     Ok((job, info))
+}
+
+/// Asks the engine for the end of file `index` of a download that starts playing. A player, and
+/// ffprobe, read the file's index there before they can start, so it comes with the first bytes
+/// instead of after them. The engine does this beside the play, which does not wait for it.
+pub(super) fn fetch_end(ctx: &Ctx, id: TorrentId, index: u32, size: u64) {
+    let length = size.min(RUNTIME_BYTES);
+    ctx.engine.run(move |engine| {
+        let _ = engine.want_range(id, index, size - length, length);
+    });
 }
 
 /// The file to watch and its subtitles: the one the page chose, or the torrent's main video.

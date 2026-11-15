@@ -428,6 +428,7 @@ impl Trial<'_> {
                     _ => Skip::Failed { error },
                 },
             )?;
+        downloads::fetch_end(ctx, job.id, playable.video, metainfo.files[playable.video as usize].size);
 
         report(AttemptEvent::Check { check: Check::FirstBytes });
         let begun = Instant::now();

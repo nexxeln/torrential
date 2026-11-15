@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use torrential_core::media::RUNTIME_BYTES;
 use torrential_core::{
     ArtKind, Display, Error, Playback, Preferences, Screen, Target, TitleCard, TitleDetails, TitleId,
 };
@@ -350,6 +351,13 @@ async fn play_picks_the_video_and_its_subtitles_and_says_where_they_are() {
     assert_eq!(json!([chosen["video"]["index"], chosen["video"]["offset"]]), json!([2, 3 * GIB + 40_000]));
     assert_eq!(selected(&chosen), [true, true, true, false]);
     assert_eq!(h.status().await.len(), 1, "both plays are one download");
+    let tail = RUNTIME_BYTES;
+    let wanted = [(0, 3 * GIB - tail, tail), (2, GIB - tail, tail)];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.swarm.wanted(film.info_hash.id()).len() < 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(h.swarm.wanted(film.info_hash.id()), wanted, "each play fetches the end of its video first");
 
     let papers = torrent(61, "papers", &[("a.pdf", 1000), ("b.pdf", 1000)]);
     h.swarm.publish(papers.clone());
