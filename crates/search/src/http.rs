@@ -1,10 +1,11 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::time::{Instant, timeout_at};
 use url::Url;
 
-const USER_AGENT: &str = concat!("torrential/", env!("CARGO_PKG_VERSION"));
+pub(crate) const USER_AGENT: &str = concat!("torrential/", env!("CARGO_PKG_VERSION"));
 
 pub type Recorded = Vec<(String, Vec<u8>)>;
 
@@ -38,19 +39,32 @@ impl Http {
 
     /// A client that introduces itself as `agent`.
     pub fn named(agent: &str, record: bool) -> Result<Http, reqwest::Error> {
-        Http::redirecting(agent, record, reqwest::redirect::Policy::default())
+        Http::build(agent, record, reqwest::redirect::Policy::default(), false)
     }
 
-    /// A client that introduces itself as `agent` and follows only the redirects `policy` allows.
-    pub fn redirecting(agent: &str, record: bool, policy: reqwest::redirect::Policy) -> Result<Http, reqwest::Error> {
-        let client = reqwest::Client::builder()
+    /// A client for the public internet that introduces itself as `agent` and follows only the
+    /// redirects `policy` allows. It resolves each host name once and connects only to the public
+    /// addresses it found.
+    pub fn public(agent: &str, policy: reqwest::redirect::Policy) -> Result<Http, reqwest::Error> {
+        Http::build(agent, false, policy, true)
+    }
+
+    fn build(
+        agent: &str,
+        record: bool,
+        policy: reqwest::redirect::Policy,
+        public: bool,
+    ) -> Result<Http, reqwest::Error> {
+        let mut builder = reqwest::Client::builder()
             .user_agent(agent)
             .gzip(true)
             .brotli(true)
             .connect_timeout(Duration::from_secs(5))
-            .redirect(policy)
-            .build()?;
-        Ok(Http { client, recorded: record.then(Mutex::default) })
+            .redirect(policy);
+        if public {
+            builder = builder.dns_resolver(PublicOnly);
+        }
+        Ok(Http { client: builder.build()?, recorded: record.then(Mutex::default) })
     }
 
     pub fn detached(&self) -> Http {
@@ -160,6 +174,55 @@ async fn first_ok<T, E>(a: impl Future<Output = Result<T, E>>, b: impl Future<Ou
 
 /// `err` as a fetch error. A timeout, such as connecting taking longer than the client allows,
 /// says how long the fetch begun at `started` waited.
+/// Whether `ip` is on the public internet: not this machine, the home network, a link-local or
+/// shared address, or a range no server is at.
+pub(crate) fn public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [first, second, ..] = ip.octets();
+            let shared = first == 100 && (64..128).contains(&second);
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || shared
+                || first == 0
+                || first >= 240)
+        }
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(mapped) => public(IpAddr::V4(mapped)),
+            None => {
+                !(ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local())
+            }
+        },
+    }
+}
+
+/// Resolves a host name and keeps only its public addresses, which the client then connects
+/// to, so no name leads a request to this machine or the home network.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let found: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let reachable: Vec<SocketAddr> = found.into_iter().filter(|at| public(at.ip())).collect();
+            if reachable.is_empty() {
+                return Err(format!("{host} has no address on the public internet").into());
+            }
+            Ok(Box::new(reachable.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 fn classify(err: reqwest::Error, started: Instant) -> FetchError {
     if err.is_timeout() {
         return FetchError::Timeout(started.elapsed());
@@ -181,7 +244,41 @@ fn classify(err: reqwest::Error, started: Instant) -> FetchError {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::dns::Resolve;
+
     use super::*;
+
+    #[test]
+    fn only_addresses_on_the_public_internet_are_public() {
+        let cases = [
+            ("93.184.215.14", true),
+            ("1.1.1.1", true),
+            ("2606:4700:4700::1111", true),
+            ("127.0.0.1", false),
+            ("10.0.0.7", false),
+            ("172.16.4.1", false),
+            ("192.168.1.31", false),
+            ("169.254.169.254", false),
+            ("100.64.0.1", false),
+            ("0.0.0.0", false),
+            ("255.255.255.255", false),
+            ("224.0.0.251", false),
+            ("::1", false),
+            ("::", false),
+            ("fe80::1", false),
+            ("fd12:3456::1", false),
+            ("::ffff:127.0.0.1", false),
+            ("::ffff:93.184.215.14", true),
+        ];
+        let read = cases.map(|(ip, _)| (ip, public(ip.parse().unwrap())));
+        assert_eq!(read, cases);
+    }
+
+    #[tokio::test]
+    async fn a_name_that_leads_only_to_this_machine_resolves_to_nothing() {
+        let error = PublicOnly.resolve("localhost".parse().unwrap()).await.err().map(|e| e.to_string());
+        assert_eq!(error.as_deref(), Some("localhost has no address on the public internet"));
+    }
 
     #[tokio::test]
     async fn a_fetch_with_no_answer_says_how_long_it_waited() {

@@ -11,9 +11,33 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use percent_encoding::percent_decode_str;
 use tokio::time::Instant;
-use url::Url;
+use url::{Host, Url};
 
-use crate::http::Http;
+use crate::http::{Http, public};
+
+/// Redirects the lookup follows from one web seed.
+const REDIRECTS: usize = 10;
+
+/// What the lookup follows: a redirect, unless it leads to an address off the public internet
+/// that the request was not at already, such as another server on this machine or the home
+/// network. A host name is held to the public internet when the client resolves it.
+pub(crate) fn policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let inside = match attempt.url().host() {
+            Some(Host::Ipv4(ip)) => !public(ip.into()),
+            Some(Host::Ipv6(ip)) => !public(ip.into()),
+            _ => false,
+        };
+        let stays = attempt.previous().last().is_some_and(|from| from.origin() == attempt.url().origin());
+        if attempt.previous().len() >= REDIRECTS {
+            attempt.error("too many redirects")
+        } else if inside && !stays {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
 
 /// The URL libtorrent asks the web seed `seed` for `file`, a path that starts with the torrent's
 /// name.

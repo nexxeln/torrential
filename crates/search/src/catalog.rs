@@ -179,8 +179,8 @@ impl PictureFrom {
             && url.password().is_none()
     }
 
-    /// A client for pictures. A redirect to an address a picture may not come from stops, and
-    /// its answer then reads as a picture elsewhere.
+    /// A client for pictures, which connects only to public addresses. A redirect to an address
+    /// a picture may not come from stops, and its answer then reads as a picture elsewhere.
     fn client(&self) -> Result<Http, Error> {
         let from = self.clone();
         let policy = reqwest::redirect::Policy::custom(move |attempt| {
@@ -192,7 +192,7 @@ impl PictureFrom {
                 attempt.stop()
             }
         });
-        Http::redirecting(AGENT, false, policy).map_err(no_client)
+        Http::public(AGENT, policy).map_err(no_client)
     }
 }
 
