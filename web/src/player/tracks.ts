@@ -71,6 +71,9 @@ function onlineOption(subtitle: OnlineSubtitle): SubtitleOption {
   };
 }
 
+/** How long the page waits to ask again while the engine has searched without the file's hash. */
+const LOOK_AGAIN_MS = 10_000;
+
 /** What the online lookup has found so far. */
 export type OnlineLookup =
   | { kind: "looking" }
@@ -79,23 +82,43 @@ export type OnlineLookup =
   | { kind: "nothing" }
   | { kind: "failed" };
 
+/**
+ * The engine's online subtitles for a file. Until it has searched with the file's hash, which it
+ * can once both ends of the file have downloaded, it is asked again now and then.
+ */
 function useOnlineLookup(id: string, file: number): OnlineLookup {
   const [lookup, setLookup] = useState<OnlineLookup>({ kind: "looking" });
   useEffect(() => {
     const stop = new AbortController();
-    onlineSubtitles(id, file, stop.signal)
-      .then((found) => {
-        const options = found.subtitles.map(onlineOption);
-        // A stable sort keeps the engine's order within a language and within each kind of match.
-        options.sort((a, b) => Number(b.exact) - Number(a.exact));
-        setLookup(options.length ? { kind: "found", options } : { kind: "nothing" });
-      })
-      .catch(() => {
-        if (!stop.signal.aborted) setLookup({ kind: "failed" });
-      });
-    return () => stop.abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ask = () =>
+      onlineSubtitles(id, file, stop.signal)
+        .then((found) => {
+          const options = found.subtitles.map(onlineOption);
+          // A stable sort keeps the engine's order within a language and within each kind of match.
+          options.sort((a, b) => Number(b.exact) - Number(a.exact));
+          setLookup(options.length ? { kind: "found", options } : { kind: "nothing" });
+          if (!found.hashed) timer = setTimeout(ask, LOOK_AGAIN_MS);
+        })
+        .catch(() => {
+          if (!stop.signal.aborted) setLookup((before) => (before.kind === "found" ? before : { kind: "failed" }));
+        });
+    ask();
+    return () => {
+      stop.abort();
+      clearTimeout(timer);
+    };
   }, [id, file]);
   return lookup;
+}
+
+/**
+ * The exact match to show in place of `showing`, an online track timed for another release, or
+ * null to keep it. A track the person `picked` from the menu stays.
+ */
+export function upgrade(showing: SubtitleOption | null, picked: string | null, found: SubtitleOption[]): SubtitleOption | null {
+  if (!showing || showing.exact || showing.key === picked) return null;
+  return found.find((option) => option.exact && option.tag === showing.tag) ?? null;
 }
 
 function bestIn(options: SubtitleOption[], languages: string[]): SubtitleOption | null {
@@ -125,7 +148,8 @@ export interface Subtitles {
 /**
  * The subtitle tracks of one video and which one shows. The online lookup runs beside playback
  * and never holds it up. When the person has subtitles on in a language the torrent lacks, the
- * best online track in that language turns on by itself once it is found.
+ * best online track in that language turns on by itself once it is found, and gives way to one
+ * timed for this exact file when the engine finds that later.
  */
 export function useSubtitleTracks(play: PlayInfo, media: MediaInfo): Subtitles {
   const local = useMemo(() => localOptions(play, media), [play, media]);
@@ -137,18 +161,22 @@ export function useSubtitleTracks(play: PlayInfo, media: MediaInfo): Subtitles {
   const [key, setKey] = useState<string | null>(() => bestIn(local, wanted.current ? [wanted.current] : [])?.key ?? null);
   /** The person has chosen in this session, so nothing turns on by itself any more. */
   const decided = useRef(false);
+  /** The track the person last picked from the menu. */
+  const picked = useRef<string | null>(null);
   const last = useRef(key);
 
   useEffect(() => {
-    if (decided.current || key !== null || !found || !wanted.current) return;
-    const match = bestIn(found, [wanted.current]);
-    if (match) {
-      last.current = match.key;
-      setKey(match.key);
+    if (!found) return;
+    const showing = found.find((option) => option.key === key) ?? null;
+    const turnOn = !decided.current && key === null && wanted.current ? bestIn(found, [wanted.current]) : null;
+    const next = upgrade(showing, picked.current, found) ?? turnOn;
+    if (next) {
+      last.current = next.key;
+      setKey(next.key);
     }
   }, [found, key]);
 
-  const choose = useCallback(
+  const show = useCallback(
     (next: string | null) => {
       decided.current = true;
       if (next) last.current = next;
@@ -162,18 +190,26 @@ export function useSubtitleTracks(play: PlayInfo, media: MediaInfo): Subtitles {
     [all],
   );
 
+  const choose = useCallback(
+    (next: string | null) => {
+      if (next) picked.current = next;
+      show(next);
+    },
+    [show],
+  );
+
   const toggle = useCallback((): SubtitleOption | null | "none" => {
     if (key) {
-      choose(null);
+      show(null);
       return null;
     }
     const languages = preferredLanguages(wanted.current);
     const again = all.find((option) => option.key === last.current && option.source);
     const pick = again ?? bestIn(local, languages) ?? bestIn(found ?? [], languages) ?? local.find((option) => option.source);
     if (!pick) return "none";
-    choose(pick.key);
+    show(pick.key);
     return pick;
-  }, [key, all, local, found, choose]);
+  }, [key, all, local, found, show]);
 
   const chosen = all.find((option) => option.key === key) ?? null;
   return { local, online, chosen, choose, toggle };

@@ -15,9 +15,11 @@ use super::super::media;
 use super::super::owner::{Command, StreamFile};
 use super::{file_of, required};
 
-/// `GET /api/subtitles/online`: what the engine found for the file, by the names in its torrent.
+/// `GET /api/subtitles/online`: what the engine found for the file, by the names in its torrent
+/// and, once both of its ends have downloaded, by its hash.
 pub async fn list(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Value, Error> {
-    let found = found(ctx, id, index).await?;
+    let searched = found(ctx, id, index).await?;
+    let found = &searched.found;
     let title = found.title.as_ref().map(|title| Named {
         name: &title.name,
         year: title.year,
@@ -29,7 +31,7 @@ pub async fn list(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Value, Error> 
         .iter()
         .map(|s| Listed { id: &s.id, language: &s.language, name: s.name.as_deref(), exact: s.exact, source: s.source })
         .collect();
-    super::value(Online { title, subtitles })
+    super::value(Online { title, subtitles, hashed: searched.hashed })
 }
 
 /// What `GET /api/subtitles/online` answers.
@@ -39,6 +41,16 @@ pub(super) struct Online<'a> {
     /// What the names in the torrent say the video is.
     title: Option<Named<'a>>,
     subtitles: Vec<Listed<'a>>,
+    /// The search had the file's hash. Until it does, asking again once both ends of the file have
+    /// downloaded can find subtitles timed for this exact file.
+    hashed: bool,
+}
+
+/// What the sources had for a file, and whether the search knew its hash.
+#[derive(Default)]
+pub(super) struct Searched {
+    found: Found,
+    hashed: bool,
 }
 
 #[derive(Serialize)]
@@ -70,8 +82,8 @@ pub async fn vtt(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
     if let Some(vtt) = kept {
         return Ok(vtt);
     }
-    let found = found(ctx, id, index).await?;
-    let subtitle = found.subtitles.iter().find(|s| s.id == wanted).ok_or_else(|| {
+    let searched = found(ctx, id, index).await?;
+    let subtitle = searched.found.subtitles.iter().find(|s| s.id == wanted).ok_or_else(|| {
         Error::new(ErrorCode::NotFound, format!("no subtitle {wanted} was found for this file"))
             .with_hint("ask for the file's online subtitles again, and pick one of those")
     })?;
@@ -85,23 +97,24 @@ pub async fn vtt(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
     Ok(vtt)
 }
 
-/// What the sources have for the file. An answer is kept for as long as the engine runs. No
+/// What the sources have for the file. An answer is kept for as long as the engine runs, and
+/// replaced once by a search with the file's hash when both of its ends have downloaded. No
 /// answer, as when the sources are down, is not kept, so the next request asks again.
-async fn found(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Found>, Error> {
+async fn found(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Searched>, Error> {
     let kept = ctx.web.found.lock().expect("no holder panics").get(&(id, index));
-    if let Some(found) = kept {
-        return Ok(found);
+    if let Some(kept) = kept.as_ref().filter(|kept| kept.hashed) {
+        return Ok(kept.clone());
     }
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
-    let video = Video {
-        titles: title::read(&file.inside, &file.torrent),
-        file_name: media::name(&file),
-        hash: hash(ctx, id, index, &file).await,
-    };
-    let Some(found) = ctx.web.subtitles.find(&video).await else { return Ok(Arc::new(Found::default())) };
-    let found = Arc::new(found);
-    ctx.web.found.lock().expect("no holder panics").put((id, index), found.clone());
-    Ok(found)
+    let hash = hash(ctx, id, index, &file).await;
+    if let Some(kept) = kept.as_ref().filter(|_| hash.is_none()) {
+        return Ok(kept.clone());
+    }
+    let video = Video { titles: title::read(&file.inside, &file.torrent), file_name: media::name(&file), hash };
+    let Some(found) = ctx.web.subtitles.find(&video).await else { return Ok(kept.unwrap_or_default()) };
+    let searched = Arc::new(Searched { found, hashed: hash.is_some() });
+    ctx.web.found.lock().expect("no holder panics").put((id, index), searched.clone());
+    Ok(searched)
 }
 
 /// The file's hash, if both of its ends are on disk already. Subtitles are not worth fetching

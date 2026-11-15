@@ -1093,7 +1093,7 @@ async fn a_video_without_subtitles_gets_them_from_online_sources() {
 
     // The sources are down. That is not an answer to keep.
     h.outside.subtitles.silence(true);
-    assert_eq!(get(&h, &online).await, (200, json!({ "title": null, "subtitles": [] })));
+    assert_eq!(get(&h, &online).await, (200, json!({ "title": null, "subtitles": [], "hashed": false })));
     h.outside.subtitles.silence(false);
     let (status, found) = get(&h, &online).await;
     assert_eq!(status, 200, "{found}");
@@ -1107,6 +1107,7 @@ async fn a_video_without_subtitles_gets_them_from_online_sources() {
             named("fake-spa-1", "spa", "Sintel.2010.1080p.es.srt"),
         ])
     );
+    assert_eq!(found["hashed"], json!(false));
     assert_eq!(get(&h, &online).await.1, found);
     let asked = h.outside.subtitles.asked();
     assert_eq!(asked.len(), 2, "the answer is remembered, and the silence was not");
@@ -1144,17 +1145,19 @@ async fn a_video_without_subtitles_gets_them_from_online_sources() {
     let refused: Vec<(u16, &str)> = refused.iter().map(error).map(|(status, code, _)| (status, code)).collect();
     assert_eq!(refused, [(404, "not_found"), (400, "usage"), (404, "not_found")]);
 
-    // Once the file is on disk, its hash goes with the search, for subtitles timed for this exact file.
-    let whole = Harness::new();
-    whole.swarm.set_rate(100 * GIB);
-    whole.swarm.publish(film.clone());
-    post(&whole, "/api/play", json!({ "ref": magnet_link(&film) })).await;
-    written(&whole.play_folder(&film).join("Sintel (2010) [1080p]/Sintel.2010.1080p.mkv"), size);
-    whole.until("done", |jobs| jobs[0].status.name() == "done").await;
-    let (_, found) = get(&whole, &online).await;
-    assert_eq!(found["subtitles"][0]["exact"], json!(true));
+    // Once the file's ends are on disk, the kept answer gives way to a search with its hash, for
+    // subtitles timed for this exact file. That answer is the last.
+    h.swarm.set_rate(100 * GIB);
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let (_, found) = get(&h, &online).await;
+    assert_eq!((&found["subtitles"][0]["id"], &found["subtitles"][0]["exact"]), (&json!("fake-eng-1"), &json!(true)));
+    assert_eq!(found["hashed"], json!(true));
     let (head, tail) = (&bytes[..65_536], &bytes[bytes.len() - 65_536..]);
-    assert_eq!(whole.outside.subtitles.asked()[0].hash, Some(FileHash::of(size, head, tail)));
+    let asked = h.outside.subtitles.asked();
+    let hashes: Vec<Option<FileHash>> = asked.iter().map(|video| video.hash).collect();
+    assert_eq!(hashes[1..], [None, Some(FileHash::of(size, head, tail))], "asked again once, with the hash");
+    assert_eq!(get(&h, &online).await.1, found);
+    assert_eq!(h.outside.subtitles.asked().len(), 3);
 }
 
 /// What has arrived of file 1 of a download.

@@ -388,7 +388,12 @@ export type OnlineSubtitles = {
 /**
  * What the names in the torrent say the video is.
  */
-title: OnlineTitle | null, subtitles: Array<OnlineSubtitle>, };
+title: OnlineTitle | null, subtitles: Array<OnlineSubtitle>,
+/**
+ * The search had the file's hash. Until it does, asking again once both ends of the file have
+ * downloaded can find subtitles timed for this exact file.
+ */
+hashed: boolean, };
 
 export type FilePieces = { pieces: string, };
 

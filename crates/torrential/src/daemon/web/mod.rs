@@ -51,7 +51,7 @@ const MOST_RESULTS: u16 = 200;
 pub struct State {
     pub subtitles: Arc<dyn SubtitlePort>,
     /// What the online sources have for each file asked about, with where each subtitle is.
-    found: Mutex<Kept<(TorrentId, u32), Arc<torrential_search::subtitles::Found>>>,
+    found: Mutex<Kept<(TorrentId, u32), Arc<online::Searched>>>,
     /// Online subtitles as WebVTT, by file and subtitle ID.
     converted: Mutex<Kept<(TorrentId, u32, String), Made>>,
 }
