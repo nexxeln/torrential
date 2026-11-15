@@ -556,7 +556,7 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
             (307, Some(format!("http://127.0.0.1:{port}/api/pause").as_str()))
         );
     }
-    assert_eq!(ErrorCode::LocalOnly.exit_code(), 6);
+    assert_eq!(crate::exit::code(ErrorCode::LocalOnly), 6);
 }
 
 fn mac_again(port: u16) -> Browser {

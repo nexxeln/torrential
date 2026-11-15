@@ -6,12 +6,12 @@ use torrential_core::protocol::DownloadPlan;
 use torrential_core::units::{format_limit, format_size};
 use torrential_core::{Error, ErrorCode, Selection, TorrentId};
 
-use super::engine_port::Metainfo;
 use super::files;
+use super::metainfo::Metainfo;
 use crate::disk::{Disk, Space, reserve};
 
 pub const GIB: u64 = 1024 * 1024 * 1024;
-const DEFAULT_MAX_SIZE: u64 = 50 * GIB;
+pub const DEFAULT_MAX_SIZE: u64 = 50 * GIB;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Plan {

@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Place, Progress, Selection, TitleLink, TorrentId};
 
 use super::admission::Cap;
-use super::engine_port::{Metainfo, Stats};
+use super::engine_port::Stats;
 use super::files;
+use super::metainfo::Metainfo;
 
 const ETA_AFTER: Duration = Duration::from_secs(10);
 
@@ -331,7 +332,8 @@ impl PlayName {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::engine_port::{MetaFile, Missing};
+    use crate::daemon::engine_port::Missing;
+    use crate::daemon::metainfo::MetaFile;
     use torrential_core::ErrorCode;
 
     #[test]

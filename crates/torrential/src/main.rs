@@ -5,6 +5,7 @@ mod config;
 mod daemon;
 mod disk;
 mod env;
+mod exit;
 mod ffmpeg;
 mod fsutil;
 mod log;
@@ -68,7 +69,7 @@ fn main() -> ExitCode {
             let json = args.iter().any(|a| a == "--json");
             let mode = Mode::detect(json, stdout_is_terminal, &env);
             client::print_error(mode, &usage_error(&e, &args));
-            return ExitCode::from(ErrorCode::Usage.exit_code());
+            return ExitCode::from(crate::exit::code(ErrorCode::Usage));
         }
     };
     let Some(command) = cli.command else {
@@ -99,7 +100,7 @@ fn engine(service: bool, http_port: Option<u16>, mode: Mode, env: &Env) -> u8 {
         Ok(_) => daemon::run(env, service, http_port),
         Err(error) => {
             client::print_error(mode, &error);
-            error.code.exit_code()
+            crate::exit::code(error.code)
         }
     }
 }
@@ -121,8 +122,10 @@ fn usage_error(e: &clap::Error, args: &[String]) -> Error {
 fn print_notices(mode: Mode, env: &Env) {
     let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
-    let lines =
-        [service::notice(&paths, audience), update::notice(&paths, env, audience, torrential_core::time::now())];
+    let lines = [
+        service::notice(&paths, audience),
+        client::update::notice(&paths, env, audience, torrential_core::time::now()),
+    ];
     for line in lines.into_iter().flatten() {
         match audience {
             Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),

@@ -6,7 +6,8 @@ use tokio::sync::{mpsc, oneshot};
 use torrential_core::{Error, ErrorCode, Preferences};
 
 use super::detector::Detector;
-use super::engine_port::{EngineHandle, ParseTorrent};
+use super::engine_port::EngineHandle;
+use super::metainfo::ParseTorrent;
 use super::owner::{Command, Reply};
 use super::search_port::SearchPort;
 
@@ -46,7 +47,7 @@ pub struct Ctx {
     pub media: super::media::State,
     pub titles: super::titles::Titles,
     pub playing: super::playing::Playing,
-    pub news: crate::update::Board,
+    pub news: super::switch::Board,
     /// The phones and TVs this Mac let in, and the grants casts play from.
     pub devices: Arc<super::devices::Devices>,
     /// The TVs on the home network, and the casts playing on them.

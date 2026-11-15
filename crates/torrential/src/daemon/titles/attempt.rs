@@ -17,8 +17,8 @@ use torrential_core::{
 
 use super::super::ctx::{Ctx, OwnerHandle};
 use super::super::downloads::{self, Answer};
-use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
+use super::super::metainfo::Metainfo;
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::Progress;
@@ -444,7 +444,12 @@ impl Trial<'_> {
                 }
                 Err(error) => return Err(Skip::Failed { error }.into()),
             };
-            let bytes = ctx.engine.file_progress(id).await.ok().and_then(|f| f.get(playable.video as usize).copied());
+            let bytes = ctx
+                .engine
+                .ask(move |e| e.file_progress(id))
+                .await
+                .ok()
+                .and_then(|f| f.get(playable.video as usize).copied());
             if let Some(outcome) = first_bytes(&now.status, bytes.unwrap_or(0), begun.elapsed(), within) {
                 return outcome.map(|()| (now, playable.video)).map_err(Box::new);
             }

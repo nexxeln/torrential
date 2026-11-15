@@ -114,7 +114,7 @@ async fn hash(ctx: &Ctx, id: TorrentId, index: u32, file: &StreamFile) -> Option
     }
     if !file.complete {
         for offset in ends {
-            let written = ctx.engine.written(id, index, offset, reach, 1).await.ok()?;
+            let written = ctx.engine.ask(move |e| e.written(id, index, offset, reach, 1)).await.ok()?;
             if !written.iter().all(|run| run.is_complete()) {
                 return None;
             }

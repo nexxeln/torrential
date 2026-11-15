@@ -9,8 +9,9 @@ use torrential_core::protocol::{
 use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
 use super::admission::GIB;
-use super::engine_port::{AddTorrent, EngineEvent, EnginePort, MetaFile, Metainfo, ParseTorrent};
+use super::engine_port::{Engine, EngineEvent, EnginePort};
 use super::fake::{self, Swarm};
+use super::metainfo::{MetaFile, Metainfo, ParseTorrent};
 use super::owner::deleter::TrashPause;
 use super::owner::plays::{IDLE_AFTER, Plays};
 use super::owner::trash::Trash;
@@ -123,7 +124,7 @@ impl Harness {
     fn with_outside(search: fake::Search, outside: Outside) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
-        let engine: Box<dyn EnginePort> = match &outside.gate {
+        let engine: Box<dyn Engine> = match &outside.gate {
             Some(gate) => Box::new(Gated { port: fake::Engine::new(swarm.clone()), gate: gate.clone() }),
             None => Box::new(fake::Engine::new(swarm.clone())),
         };
@@ -140,7 +141,7 @@ impl Harness {
         Self { dir, running, swarm, disk, search, outside }
     }
 
-    fn with_engine(engine: impl FnOnce(&std::path::Path) -> Box<dyn EnginePort>, parse: ParseTorrent) -> Self {
+    fn with_engine(engine: impl FnOnce(&std::path::Path) -> Box<dyn Engine>, parse: ParseTorrent) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let outside = Outside::default();
         let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), fake::Search::new(fake::isos()));
@@ -162,7 +163,7 @@ impl Harness {
 
     fn boot(
         dir: &tempfile::TempDir,
-        engine: Box<dyn EnginePort>,
+        engine: Box<dyn Engine>,
         parse: ParseTorrent,
         disk: &FakeDisk,
         search: &fake::Search,
@@ -170,6 +171,7 @@ impl Harness {
     ) -> Running {
         let ports = Ports {
             engine,
+            web_seeds: torrential_search::WebSeeds::new(&torrential_search::SearchConfig::default()).unwrap(),
             parse,
             search: outside.search.clone().unwrap_or_else(|| Arc::new(search.clone())),
             disk: Box::new(disk.clone()),
@@ -364,75 +366,14 @@ impl Gate {
     }
 }
 
-struct Gated<P> {
-    port: P,
+struct Gated<E> {
+    port: E,
     gate: Gate,
 }
 
-impl<P: EnginePort> EnginePort for Gated<P> {
-    fn add(&mut self, torrent: AddTorrent) -> Result<(), Error> {
-        self.port.add(torrent)
-    }
-
-    fn select(&mut self, id: torrential_core::TorrentId, wanted: &[bool]) -> Result<(), Error> {
-        self.port.select(id, wanted)
-    }
-
-    fn pause(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.pause(id)
-    }
-
-    fn resume(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.resume(id)
-    }
-
-    fn recheck(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.recheck(id)
-    }
-
-    fn save_resume_data(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.save_resume_data(id)
-    }
-
-    fn save_resume_data_if_progressed(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.save_resume_data_if_progressed(id)
-    }
-
-    fn remove(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.remove(id)
-    }
-
-    fn file_progress(&mut self, id: torrential_core::TorrentId) -> Result<Vec<u64>, Error> {
-        self.port.file_progress(id)
-    }
-
-    fn want_range(
-        &mut self,
-        id: torrential_core::TorrentId,
-        file: u32,
-        offset: u64,
-        length: u64,
-    ) -> Result<bool, Error> {
-        self.port.want_range(id, file, offset, length)
-    }
-
-    fn written(
-        &mut self,
-        id: torrential_core::TorrentId,
-        file: u32,
-        offset: u64,
-        length: u64,
-        runs: u32,
-    ) -> Result<Vec<torrential_core::Slice>, Error> {
-        self.port.written(id, file, offset, length, runs)
-    }
-
-    fn stream(&mut self, id: torrential_core::TorrentId) -> Result<(), Error> {
-        self.port.stream(id)
-    }
-
-    fn limit(&mut self, id: torrential_core::TorrentId, rate: Option<std::num::NonZeroU32>) -> Result<(), Error> {
-        self.port.limit(id, rate)
+impl<E: Engine> Engine for Gated<E> {
+    fn port(&mut self) -> &mut dyn EnginePort {
+        self.port.port()
     }
 
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
@@ -1482,15 +1423,13 @@ impl Seeder {
         Self { session, id, addr, torrent: torrent.into_bytes(), _files: dir }
     }
 
-    fn engine(&self, gate: &Gate) -> impl FnOnce(&std::path::Path) -> Box<dyn EnginePort> {
+    fn engine(&self, gate: &Gate) -> impl FnOnce(&std::path::Path) -> Box<dyn Engine> {
         let (peers, gate) = (vec![self.addr], gate.clone());
         move |dir| {
             let state = dir.join("state");
             std::fs::create_dir_all(&state).unwrap();
             let network = super::libtorrent::Network::Loopback { peers };
-            let search = Arc::new(fake::Search::new(Vec::new()));
-            let port = super::libtorrent::Libtorrent::start(&state, network, search, tokio::runtime::Handle::current())
-                .unwrap();
+            let port = super::libtorrent::Libtorrent::start(&state, network).unwrap();
             Box::new(Gated { port, gate })
         }
     }

@@ -13,16 +13,17 @@ use torrential_core::{
     TorrentId,
 };
 
+use super::BoxFuture;
 use super::ctx::Ctx;
-use super::engine_port::Metainfo;
 use super::files;
 use super::http;
 use super::magnet::{self, Magnet};
+use super::metainfo::Metainfo;
 use super::owner::plays::Destination;
 use super::owner::{
     Command, FileBytes, FilesInfo, Finish, GetCommand, MetaTarget, Origin, PlayCommand, Resolved, Source, Update,
 };
-use super::search_port::{BoxFuture, Progress};
+use super::search_port::Progress;
 use crate::log::log;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
@@ -31,7 +32,8 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 
 pub(super) async fn search(ctx: &Ctx, query: SearchQuery) -> Result<SearchResult, Error> {
     let (preferences, player) = ((ctx.preferences)(), query.profile.player);
-    let mut result = ctx.search.search(query, &|| ctx.machine.profile(preferences, player)).await?;
+    let rank_for = || ctx.machine.profile(preferences, player);
+    let mut result = ctx.search.search_stream(query, &rank_for, tokio::sync::mpsc::unbounded_channel().0).await?;
     record(ctx, &mut result);
     Ok(result)
 }
@@ -352,7 +354,10 @@ pub(super) async fn listed(ctx: &Ctx, info: &FilesInfo) -> Vec<TorrentFile> {
     let m = &info.metainfo;
     let verified: Vec<u64> = match info.download.as_ref().map(|d| &d.verified) {
         Some(FileBytes::Known(bytes)) => bytes.clone(),
-        Some(FileBytes::Engine { saved }) => ctx.engine.file_progress(info.id).await.unwrap_or_else(|_| saved.clone()),
+        Some(FileBytes::Engine { saved }) => {
+            let id = info.id;
+            ctx.engine.ask(move |e| e.file_progress(id)).await.unwrap_or_else(|_| saved.clone())
+        }
         None => Vec::new(),
     };
     let risks = files::risks(m);
@@ -379,7 +384,8 @@ pub async fn pieces(ctx: &Ctx, id: TorrentId, index: u32) -> Result<String, Erro
     if file.complete || file.size == 0 {
         return Ok("8".repeat(PIECE_RUNS as usize));
     }
-    let runs = match ctx.engine.written(id, index, 0, file.size, PIECE_RUNS).await {
+    let size = file.size;
+    let runs = match ctx.engine.ask(move |e| e.written(id, index, 0, size, PIECE_RUNS)).await {
         Ok(runs) => runs,
         // The engine does not hold a download that just finished, one that is stopped, or one that
         // has not started yet.

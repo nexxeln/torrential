@@ -18,7 +18,7 @@ use crate::disk::{Disk, RealDisk};
 use crate::env::Env;
 use crate::fsutil::Writes;
 use crate::paths::Paths;
-use crate::update::{self, Outcome, Releases};
+use crate::update::release::{self, Outcome, Releases};
 
 pub fn run(env: &Env) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
@@ -142,13 +142,13 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn newer_version(&self) -> Option<String> {
-        update::available(&self.paths, &self.env).map(|latest| latest.to_string())
+        super::update::available(&self.paths, &self.env).map(|latest| latest.to_string())
     }
 
     fn upgrade(&self) -> Result<Option<String>, Error> {
         let releases = Releases::required(&self.env)?;
-        let install = update::install(&releases, &self.paths, &self.env, torrential_core::time::now());
-        Ok(match update::runtime()?.block_on(install)? {
+        let install = release::install(&releases, &self.paths, &self.env, torrential_core::time::now());
+        Ok(match release::runtime()?.block_on(install)? {
             Outcome::Updated(latest) => Some(latest.to_string()),
             Outcome::Latest(_) => None,
         })

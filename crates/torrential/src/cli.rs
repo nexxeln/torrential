@@ -581,6 +581,35 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
+    fn help_and_docs_name_the_values_the_code_uses() {
+        let skill = include_str!("../../../skills/torrential/SKILL.md");
+        let readme = include_str!("../../../README.md");
+        let command = Cli::command();
+        let arg = |command_name: &str, id: &str| {
+            let sub = command.find_subcommand(command_name).unwrap();
+            sub.get_arguments().find(|arg| arg.get_id() == id).unwrap().clone()
+        };
+        let help = |command_name: &str, id: &str| arg(command_name, id).get_help().unwrap().to_string();
+        let gib = |bytes: u64| format!("{} GiB", bytes >> 30);
+
+        let cap = gib(crate::daemon::admission::DEFAULT_MAX_SIZE);
+        assert!(help("get", "max_size").ends_with(&format!("or {cap}")), "{}", help("get", "max_size"));
+        assert!(skill.contains(&format!("or {cap}, and with `disk_full`")), "SKILL.md names the {cap} cap");
+
+        let wait = crate::client::wait::DEFAULT_TIMEOUT.as_secs();
+        assert!(help("wait", "timeout").contains(&format!("Defaults to {wait}s")), "{}", help("wait", "timeout"));
+        assert!(skill.contains(&format!("`wait` returns within {wait} seconds")), "SKILL.md names {wait} s");
+
+        let plays = gib(crate::config::PlaysMax::default().0);
+        assert!(skill.contains(&format!("once they pass {plays}")), "SKILL.md names the {plays} plays cap");
+        assert!(readme.contains(&format!("capped at {plays}")), "README.md names the {plays} plays cap");
+        assert!(readme.contains(&format!("default {}", plays.replace(' ', ""))), "README.md's example says {plays}");
+
+        let search = torrential_core::SearchQuery::DEFAULT_TIMEOUT_MS / 1000;
+        assert_eq!(arg("search", "timeout").get_default_values(), [format!("{search}s").as_str()]);
+    }
+
+    #[test]
     fn definition_is_consistent() {
         Cli::command().debug_assert();
     }

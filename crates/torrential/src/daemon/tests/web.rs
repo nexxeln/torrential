@@ -16,9 +16,10 @@ use torrential_core::{
 };
 use torrential_search::catalog::Picture;
 
+use super::super::BoxFuture;
 use super::super::admission::GIB;
 use super::super::fake;
-use super::super::search_port::{self, BoxFuture, SearchPort};
+use super::super::search_port::SearchPort;
 use super::super::titles::catalog_port::{self, CatalogPort};
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
 use crate::ffmpeg::fetch::{Build, Fetch};
@@ -1268,7 +1269,8 @@ async fn gone_from_the_engine(h: &Harness, ids: &[torrential_core::TorrentId]) -
     loop {
         let mut held = Vec::new();
         for id in ids {
-            held.push(h.running.ctx.engine.file_progress(*id).await.is_ok());
+            let id = *id;
+            held.push(h.running.ctx.engine.ask(move |e| e.file_progress(id)).await.is_ok());
         }
         if !held.contains(&true) {
             return true;
@@ -2029,7 +2031,8 @@ async fn a_phone_and_a_tv_on_the_home_network_each_get_the_copy_for_their_screen
         endpoints: std::collections::BTreeMap::new(),
         disabled: builtin.map(String::from).to_vec(),
     };
-    let search: Arc<dyn SearchPort> = Arc::new(search_port::Live::new(&config).unwrap());
+    let search = torrential_search::Search::new(&config, torrential_search::ResultCache::new()).unwrap();
+    let search: Arc<dyn SearchPort> = Arc::new(search);
     let phone_screen = Preferences { screen: Some(Screen::Phone), playback: Some(Playback::H264), max_size: None };
     let outside = Outside { preferences: phone_screen, search: Some(search), ..Outside::default() };
     let h = Harness::with_outside(fake::Search::default(), outside);

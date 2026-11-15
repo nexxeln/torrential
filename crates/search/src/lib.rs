@@ -20,16 +20,17 @@ mod sources;
 mod store;
 pub mod subtitles;
 mod terms;
+mod web_seeds;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::future::{BoxFuture, Either, Shared};
+use futures_util::future::{BoxFuture, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,7 @@ use crate::http::{FetchError, Http, Retry};
 use crate::sources::{Ctx, Failure, Source, Stores, archive_org};
 pub use crate::sources::{SavedLink, lawful};
 use crate::terms::Terms;
+pub use crate::web_seeds::WebSeeds;
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -135,6 +137,17 @@ impl Search {
     pub fn new(config: &SearchConfig, cache: ResultCache) -> Result<Search, Error> {
         let http = Http::new().map_err(no_client)?;
         Inner::new(config, cache, http).map(|inner| Search { inner: Arc::new(inner) })
+    }
+
+    /// The results this search keeps for later lookups by ID.
+    pub fn cache(&self) -> &ResultCache {
+        &self.inner.cache
+    }
+
+    /// The web-seed lookup for downloads. It shares this search's lookups, so the servers of an
+    /// archive.org item asked for with its `.torrent` are not asked for again.
+    pub fn web_seeds(&self) -> WebSeeds {
+        WebSeeds(self.inner.clone())
     }
 
     /// Every enabled source, most authoritative first.
@@ -281,32 +294,6 @@ impl Search {
             Error::new(ErrorCode::FetchFailed, format!("could not fetch the .torrent file: {}", fetch_reason(e)))
                 .with_hint("check the network connection, or download by magnet link")
         })
-    }
-
-    /// Web seeds that serve every file of a torrent, to add to its own. A web seed can answer each
-    /// file with a redirect to a server that holds it, as archive.org's download URL does, and
-    /// libtorrent turns each redirect into a web seed that has only that file, so a piece that
-    /// spans two files has no source. archive.org names the servers of a torrent that downloads
-    /// from it, unless the archive.org source is disabled. For any other torrent, the seeds are the
-    /// folders its web seeds redirect `file` to, where `file` is one of its several files as a path
-    /// that starts with the torrent's name. `None` when there is nothing to ask.
-    pub fn mirrors(
-        &self,
-        name: &str,
-        file: Option<&Path>,
-        web_seeds: &[String],
-    ) -> Option<impl Future<Output = Result<Vec<String>, Error>> + Send + 'static> {
-        let inner = self.inner.clone();
-        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds)) {
-            let lookup = match self.inner.asked_servers(&item) {
-                Some(asked) => asked.boxed(),
-                None => async move { item.mirrors(&inner.http).await }.boxed(),
-            };
-            return Some(Either::Left(lookup));
-        }
-        let file = file.filter(|file| web_seeds.iter().any(|seed| redirect::request(seed, file).is_some()))?;
-        let (file, web_seeds) = (file.to_path_buf(), web_seeds.to_vec());
-        Some(Either::Right(async move { Ok(redirect::roots(&inner.seeds, &file, &web_seeds).await) }))
     }
 
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {

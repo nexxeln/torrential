@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use torrential_core::error::{Details, EXIT_PENDING};
+use torrential_core::error::Details;
 use torrential_core::protocol::{
     Change, ChangeResult, DownloadPlan, FilesReply, GetOutcome, GetReply, Kept, MetadataSource, PlayReply, Response,
     Stream, TitlePlayed,
@@ -912,8 +912,8 @@ fn every_error_class() {
     for code in ErrorCode::ALL {
         let error = sample(code);
         assert_eq!(error.code, code);
-        let exit = code.exit_code();
-        assert_ne!(exit, EXIT_PENDING);
+        let exit = crate::exit::code(code);
+        assert_ne!(exit, crate::exit::PENDING);
         let plain = crate::output::error(Mode::Plain, &error);
         let json = crate::output::error(Mode::Json, &error);
         assert!(plain.stdout.is_empty() && json.stderr.is_empty(), "plain errors use stderr, JSON errors stdout");

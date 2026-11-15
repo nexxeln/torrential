@@ -1,7 +1,6 @@
 use clap::{Arg, ArgAction, Command};
 use serde::Serialize;
 use torrential_core::ErrorCode;
-use torrential_core::error::EXIT_PENDING;
 
 use crate::output::DocKind;
 
@@ -131,7 +130,11 @@ pub fn build(cli: &Command, version: String) -> Schema {
         exit_codes: exit_codes(),
         errors: ErrorCode::ALL
             .iter()
-            .map(|c| ErrorSchema { code: c.as_str(), exit: c.exit_code(), retryable: c.retryable() })
+            .map(|c| ErrorSchema {
+                code: c.as_str(),
+                exit: crate::exit::code(*c),
+                retryable: crate::exit::retryable(*c),
+            })
             .collect(),
         fields: &FIELDS,
     }
@@ -191,27 +194,7 @@ fn repeatable(a: &Arg) -> bool {
 }
 
 fn exit_codes() -> Vec<ExitSchema> {
-    let mut codes: Vec<u8> = ErrorCode::ALL.iter().map(|c| c.exit_code()).collect();
-    codes.extend([0, EXIT_PENDING]);
-    codes.sort_unstable();
-    codes.dedup();
-    codes.into_iter().map(|code| ExitSchema { code, meaning: exit_meaning(code) }).collect()
-}
-
-fn exit_meaning(code: u8) -> &'static str {
-    match code {
-        0 => "success, including an empty search",
-        1 => "internal error",
-        2 => "usage error",
-        3 => "the reference matched nothing, matched several, or is malformed",
-        4 => "conflict with an existing download or file",
-        5 => "network or search provider failure",
-        6 => "environment, sandbox, engine, or state failure",
-        7 => "disk, size, selection, or verification failure, or a download that stopped with an error",
-        EXIT_PENDING => "still pending: the download is running or stopped without finishing",
-        130 => "interrupted",
-        _ => "unassigned",
-    }
+    crate::exit::MEANINGS.iter().map(|&(code, meaning)| ExitSchema { code, meaning }).collect()
 }
 
 #[cfg(test)]
