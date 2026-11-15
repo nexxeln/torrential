@@ -82,7 +82,7 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         .make_state()
         .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot create {}: {e}", paths.state.display())))?;
     let _ = std::fs::remove_file(paths.startup_error());
-    let exe = std::env::current_exe().map_err(|e| unavailable(format!("cannot find the torrential binary: {e}")))?;
+    let exe = env.executable().map_err(|e| unavailable(e.message))?;
     let mut launcher = Command::new(exe);
     launcher.args(["daemon", "launch"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     // SAFETY: setsid is async-signal-safe, the only kind of call allowed between fork and exec.
@@ -102,11 +102,9 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
             return Ok(Some(conn));
         }
         if !connect::alive(pid)
-            && let Ok(bytes) = std::fs::read(paths.startup_error())
+            && let Some(recorded) = paths.recorded_startup_error()
         {
-            return Err(
-                serde_json::from_slice(&bytes).unwrap_or_else(|_| unavailable("the engine failed to start".into()))
-            );
+            return Err(recorded.unwrap_or_else(|_| unavailable("the engine failed to start".into())));
         }
         Ok(None)
     })?;
@@ -137,10 +135,10 @@ pub fn launch_stage(env: &Env) -> u8 {
         let paths = Paths::from_process(env).map_err(|e| e.message)?;
         let log_path = paths.log();
         if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > MAX_LOG) {
-            let _ = std::fs::rename(&log_path, paths.state.join("engine.log.1"));
+            let _ = std::fs::rename(&log_path, paths.previous_log());
         }
         let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| e.to_string())?;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = env.executable().map_err(|e| e.message)?;
         let engine = Command::new(exe)
             .args(["daemon", "run"])
             .stdin(Stdio::null())
@@ -226,6 +224,21 @@ mod tests {
         assert_eq!(ran_out.unwrap(), None);
         assert!(started.elapsed() >= Duration::from_millis(300));
         assert!(idle_asks < 60, "asked {idle_asks} times in 300 ms");
+    }
+
+    #[test]
+    fn the_engine_starts_from_the_binary_this_process_started_from() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("torrential");
+        std::fs::write(&installed, "#!/bin/sh\necho \"asked to $*\"\nexit 1\n").unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("th");
+        let env = env(&[("TORRENTIAL_HOME", home.to_str().unwrap())]).with_executable(&installed);
+        let Err(error) = start(&Paths::from_process(&env).unwrap(), &env) else {
+            panic!("the stand-in started an engine")
+        };
+        assert_eq!(error.message, "the engine launcher failed: asked to daemon launch");
     }
 
     #[test]

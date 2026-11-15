@@ -49,9 +49,8 @@ Run torrential --help for every command, or torrential schema for JSON.
 ";
 
 fn main() -> ExitCode {
-    let _ = update::executable();
-    CompleteEnv::with_factory(Cli::command).complete();
     let env = Env::from_process();
+    CompleteEnv::with_factory(Cli::command).complete();
     let args: Vec<String> = std::env::args().collect();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let cli = match Cli::try_parse_from(&args) {

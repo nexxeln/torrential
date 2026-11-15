@@ -15,3 +15,4 @@ mod tests;
 pub use backend::Backend;
 pub use runtime::{Exit, run};
 pub use state::Edit;
+pub use theme::ColorMode;

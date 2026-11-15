@@ -163,9 +163,7 @@ enum Link {
 impl Layout {
     pub fn new(scope: Scope, env: &Env, cwd: &Path) -> Result<Self, Error> {
         let root = match scope {
-            Scope::User => {
-                PathBuf::from(env.var("HOME").ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))?)
-            }
+            Scope::User => env.home().ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))?.to_path_buf(),
             Scope::Project => cwd.to_path_buf(),
         };
         Ok(Self::under(&root))

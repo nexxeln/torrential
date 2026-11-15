@@ -6,13 +6,9 @@ use torrential_core::{Error, ErrorCode};
 use crate::env::{Env, TestHooks, hooks};
 use crate::fsutil::write_atomic;
 use crate::paths::{Paths, uid};
-use crate::update::{Audience, executable};
+use crate::update::Audience;
 
 pub const LABEL: &str = "dev.torrential.engine";
-/// Its presence records that the person removed the login service, so the engine leaves it out.
-const DECLINED: &str = "no-login-service";
-/// The engine leaves this for the next command to say it added the login service.
-const ADDED: &str = "login-service-added";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Manager {
@@ -102,8 +98,8 @@ pub struct Report {
     pub unit: PathBuf,
 }
 
-fn home(env: &Env) -> Result<PathBuf, Error> {
-    env.var("HOME").map(PathBuf::from).ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))
+fn home(env: &Env) -> Result<&Path, Error> {
+    env.home().ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))
 }
 
 /// A test names a folder of stand-ins for launchctl and systemctl in `SERVICE_BIN`, so it never
@@ -169,9 +165,9 @@ fn activate(env: &Env, manager: Manager, path: &Path) -> Result<(), Error> {
 
 pub fn install(env: &Env, paths: &Paths) -> Result<Report, Error> {
     let manager = Manager::current();
-    let path = manager.unit_path(&home(env)?);
-    let _ = std::fs::remove_file(paths.state.join(DECLINED));
-    let text = unit(manager, &executable()?, &paths.log(), env.var("TORRENTIAL_HOME"));
+    let path = manager.unit_path(home(env)?);
+    let _ = std::fs::remove_file(paths.login_service_declined());
+    let text = unit(manager, &env.installed()?, &paths.log(), env.var("TORRENTIAL_HOME"));
     let wrote = put(manager, &path, &text)?;
     activate(env, manager, &path)?;
     let result = if wrote { "installed" } else { "already_installed" };
@@ -180,9 +176,9 @@ pub fn install(env: &Env, paths: &Paths) -> Result<Report, Error> {
 
 pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
     let manager = Manager::current();
-    let path = manager.unit_path(&home(env)?);
+    let path = manager.unit_path(home(env)?);
     std::fs::create_dir_all(&paths.state)
-        .and_then(|()| std::fs::write(paths.state.join(DECLINED), b""))
+        .and_then(|()| std::fs::write(paths.login_service_declined(), b""))
         .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot write {}: {e}", paths.state.display())))?;
     if !path.exists() {
         return Ok(Report { result: "not_installed", manager, unit: path });
@@ -209,13 +205,13 @@ pub fn add_at_start(env: &Env, paths: &Paths) -> Result<Option<PathBuf>, Error> 
     let stand_ins = |test: TestHooks| test.var(hooks::SERVICE_BIN).is_some();
     if env.var("TORRENTIAL_HOME").is_some()
         || env.test().is_some_and(|test| !stand_ins(test))
-        || paths.state.join(DECLINED).exists()
+        || paths.login_service_declined().exists()
     {
         return Ok(None);
     }
     let manager = Manager::current();
-    let path = manager.unit_path(&home(env)?);
-    let text = unit(manager, &executable()?, &paths.log(), None);
+    let path = manager.unit_path(home(env)?);
+    let text = unit(manager, &env.installed()?, &paths.log(), None);
     let current = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -225,13 +221,13 @@ pub fn add_at_start(env: &Env, paths: &Paths) -> Result<Option<PathBuf>, Error> 
     if !text.as_bytes().starts_with(&current) || !put(manager, &path, &text)? {
         return Ok(None);
     }
-    let _ = std::fs::write(paths.state.join(ADDED), b"");
+    let _ = std::fs::write(paths.login_service_added(), b"");
     Ok(Some(path))
 }
 
 /// Says once, after the engine added the login service, that it did.
 pub fn notice(paths: &Paths, audience: Audience) -> Option<String> {
-    std::fs::remove_file(paths.state.join(ADDED)).ok()?;
+    std::fs::remove_file(paths.login_service_added()).ok()?;
     Some(match audience {
         Audience::Person => {
             "The engine now starts when you log in. To turn that off, run torrential engine uninstall.".to_string()
@@ -293,7 +289,7 @@ mod tests {
         let said = |audience| notice(&paths, audience);
 
         assert_eq!(said(Audience::Person), None);
-        std::fs::write(paths.state.join(ADDED), b"").unwrap();
+        std::fs::write(paths.login_service_added(), b"").unwrap();
         assert_eq!(
             [said(Audience::Person), said(Audience::Person)],
             [
@@ -303,7 +299,7 @@ mod tests {
                 None
             ]
         );
-        std::fs::write(paths.state.join(ADDED), b"").unwrap();
+        std::fs::write(paths.login_service_added(), b"").unwrap();
         assert_eq!(
             said(Audience::Agent).as_deref(),
             Some("# the engine now starts at login; torrential engine uninstall turns that off")
