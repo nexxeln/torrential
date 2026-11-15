@@ -109,7 +109,9 @@ impl Paths {
 
     /// Keeps why the engine could not start, for the client that started it to report.
     pub fn record_startup_error(&self, error: &Error) {
-        let _ = std::fs::write(self.startup_error(), serde_json::to_vec(error).expect("errors serialize"));
+        let file = self.startup_error();
+        let written = std::fs::write(&file, serde_json::to_vec(error).expect("errors serialize"));
+        crate::log::persist(&format!("write {}", file.display()), written);
     }
 
     /// Why the engine last could not start, or `None` when it left no record. A record that does not

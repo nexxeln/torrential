@@ -8,7 +8,6 @@ use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Place, Progress
 use super::admission::Cap;
 use super::engine_port::{Metainfo, Stats};
 use super::files;
-use super::owner::deleter::Identity;
 
 const ETA_AFTER: Duration = Duration::from_secs(10);
 
@@ -283,6 +282,50 @@ pub fn to_start<'a>(
     waiting.sort();
     now.extend(waiting.into_iter().take(max_active.saturating_sub(active)).map(|(_, id)| id));
     now
+}
+
+/// Which file or folder something is, whatever path reaches it. A folder moved away keeps its
+/// identity. A link, or another folder, put in its place has another.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Identity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl Identity {
+    // A device number is signed on macOS.
+    #[allow(clippy::unnecessary_cast)]
+    pub fn of(stat: &rustix::fs::Stat) -> Self {
+        Self { device: stat.st_dev as u64, inode: stat.st_ino }
+    }
+}
+
+const STEM: usize = 16;
+
+/// The name of a play's folder: the first 16 hex digits of its torrent's ID, a dash, and a
+/// number. Always one part of a path.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PlayName(String);
+
+impl PlayName {
+    /// The `n`th name for a play of `id`.
+    pub fn new(id: TorrentId, n: u32) -> Self {
+        Self(format!("{}-{n}", &id.to_hex()[..STEM]))
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        let (stem, n) = name.split_once('-')?;
+        let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+        let ok = stem.len() == STEM
+            && stem.bytes().all(hex)
+            && (1..=10).contains(&n.len())
+            && n.bytes().all(|b| b.is_ascii_digit());
+        ok.then(|| Self(name.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[cfg(test)]

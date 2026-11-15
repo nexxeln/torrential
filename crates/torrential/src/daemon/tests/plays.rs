@@ -9,10 +9,12 @@ use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, 
 use torrential_core::{ErrorCode, JobStatus, Place, Selection, Target, TorrentId};
 
 use super::super::admission::GIB;
+use super::super::book::{Identity, PlayName};
+use super::super::db;
 use super::super::engine_port::EngineEvent;
 use super::super::fake;
 use super::super::owner::Command;
-use super::super::owner::deleter::{Identity, PlayName, TrashPause};
+use super::super::owner::deleter::TrashPause;
 use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
@@ -125,7 +127,7 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
     let database = h.dir.path().join("state.db");
     let h = h
         .restart_after(|| {
-            let mut store = Store::open(&database).unwrap();
+            let mut store = Store::open(&db::connect(&database).unwrap()).unwrap();
             let tomb = Tombstone { id: film.info_hash.id(), name: None, path: None, removed_at: 1 };
             let name = PlayName::parse(folder.file_name().unwrap().to_str().unwrap()).unwrap();
             let made = std::fs::metadata(&folder).unwrap();
@@ -134,7 +136,7 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
         })
         .await;
     assert_eq!((h.status().await.len(), folder.exists()), (0, false));
-    let store = Store::open(&database).unwrap();
+    let store = Store::open(&db::connect(&database).unwrap()).unwrap();
     assert_eq!(store.deletions().unwrap(), [], "it is done, so a later start has nothing to delete");
 }
 

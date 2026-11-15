@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
-use crate::daemon::store::Store;
+use crate::daemon::db;
 
 const PORT: u16 = 47919;
 const NOW: i64 = 1_800_000_000;
@@ -18,13 +18,12 @@ struct Home {
 impl Home {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        drop(Store::open(&dir.path().join("state.db")).unwrap());
-        let devices = Arc::new(Devices::open(&dir.path().join("state.db")).unwrap());
+        let devices = Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap()).unwrap());
         Self { dir, devices }
     }
 
     fn reopened(&self) -> Devices {
-        Devices::open(&self.dir.path().join("state.db")).unwrap()
+        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap()).unwrap()
     }
 
     fn code(&self) -> String {

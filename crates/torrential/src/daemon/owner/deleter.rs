@@ -17,6 +17,7 @@ use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use torrential_core::{Error, ErrorCode, TorrentId};
 
+use super::super::book::{Identity, PlayName};
 use super::super::store::{Store, Tombstone};
 use super::trash::Trash;
 use crate::fsutil::open_folder;
@@ -49,45 +50,6 @@ impl Default for TrashPause {
 impl std::fmt::Debug for TrashPause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("TrashPause")
-    }
-}
-
-/// Which file or folder something is, whatever path reaches it. A folder moved away keeps its
-/// identity. A link, or another folder, put in its place has another.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Identity {
-    pub device: u64,
-    pub inode: u64,
-}
-
-impl Identity {
-    // A device number is signed on macOS.
-    #[allow(clippy::unnecessary_cast)]
-    pub(super) fn of(stat: &rustix::fs::Stat) -> Self {
-        Self { device: stat.st_dev as u64, inode: stat.st_ino }
-    }
-}
-
-const STEM: usize = 16;
-
-/// The name of a play's folder: the first 16 hex digits of its torrent's ID, a dash, and a
-/// number. Always one part of a path.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct PlayName(String);
-
-impl PlayName {
-    pub fn parse(name: &str) -> Option<Self> {
-        let (stem, n) = name.split_once('-')?;
-        let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
-        let ok = stem.len() == STEM
-            && stem.bytes().all(hex)
-            && (1..=10).contains(&n.len())
-            && n.bytes().all(|b| b.is_ascii_digit());
-        ok.then(|| Self(name.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -325,7 +287,7 @@ impl Deleter {
             refused(why).with_hint("put the folder back, or stop the engine and play again to use the folder there now")
         })?;
         for n in 0u32.. {
-            let name = format!("{}-{n}", &id.to_hex()[..STEM]);
+            let name = PlayName::new(id, n).as_str().to_owned();
             let unmade = |e: Errno| {
                 let message = format!("cannot make a folder in {}: {}", root.path.display(), io::Error::from(e));
                 Error::new(ErrorCode::StorageError, message)
@@ -763,7 +725,7 @@ mod tests {
     fn place() -> Place {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let store = Store::open(&root.join("state.db")).unwrap();
+        let store = Store::open(&crate::daemon::db::connect(&root.join("state.db")).unwrap()).unwrap();
         Place { _tmp: tmp, root, store }
     }
 

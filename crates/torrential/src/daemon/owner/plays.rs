@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, ChangeResult, Kept};
-use torrential_core::{Error, TitleId, TorrentId};
+use torrential_core::{Error, TorrentId};
 
 use super::super::admission;
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
@@ -306,18 +306,11 @@ impl Owner {
         }
         self.tending.tended_at = Some(at);
         self.closed_streams();
-        let saved = match self.store.saved_titles() {
-            Ok(saved) => saved,
-            Err(error) => {
-                log(&format!("cannot read the library, so no play leaves or pauses: {}", error.message));
-                return;
-            }
-        };
         let (clock, idle_after) = (now(), self.config.plays.idle_after);
         let idle: Vec<TorrentId> = self
             .jobs
             .values()
-            .filter(|job| self.tended(job, &saved))
+            .filter(|job| self.tended(job))
             .filter(|job| job.record.intent == Intent::Running && !self.playing(job.id()))
             .filter(|job| {
                 let Home::Plays(play) = job.record.home else { return false };
@@ -330,17 +323,14 @@ impl Owner {
             log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
             self.pause(vec![id.to_hex()], oneshot::channel().0);
         }
-        self.make_room(&saved, None);
+        self.make_room(None);
     }
 
     /// Makes room in the plays folder for a new play of `id` that takes `bytes`, after every check
     /// but the one for room on the disk, so a full plays folder does not stop the play from
     /// starting, and a play refused for another reason sends no play away.
     pub(super) fn make_room_for(&mut self, id: TorrentId, bytes: u64) {
-        match self.store.saved_titles() {
-            Ok(saved) => self.make_room(&saved, Some(Share { id, bytes, watched_at: now(), busy: true })),
-            Err(error) => log(&format!("cannot read the library, so no play leaves: {}", error.message)),
-        }
+        self.make_room(Some(Share { id, bytes, watched_at: now(), busy: true }));
     }
 
     /// Whether `id` is leaving the plays folder.
@@ -367,9 +357,9 @@ impl Owner {
 
     /// Whether `job` is a play that may pause and leave by itself: not one the person got by
     /// hand, not one whose title they saved, and not one leaving already.
-    fn tended(&self, job: &JobEntry, saved: &BTreeSet<TitleId>) -> bool {
+    fn tended(&self, job: &JobEntry) -> bool {
         let Home::Plays(play) = job.record.home else { return false };
-        let in_library = job.record.title.as_ref().is_some_and(|linked| saved.contains(&linked.link.title));
+        let in_library = job.record.title.as_ref().is_some_and(|linked| self.saved.contains(&linked.link.title));
         !play.by_hand && !in_library && !self.leaving(job.id())
     }
 
@@ -380,7 +370,7 @@ impl Owner {
 
     /// Starts taking the plays watched longest ago out of the plays folder until the rest, and
     /// `incoming`, fit in its limit.
-    fn make_room(&mut self, saved: &BTreeSet<TitleId>, incoming: Option<Share>) {
+    fn make_room(&mut self, incoming: Option<Share>) {
         // What is still to be deleted, or is leaving, takes up room too.
         let mut going = self.tending.deleter.play_bytes();
         let mut shares: Vec<Share> = incoming.into_iter().collect();
@@ -388,7 +378,7 @@ impl Owner {
             let Home::Plays(play) = job.record.home else { continue };
             if self.leaving(job.id()) {
                 going += self.play_bytes(job);
-            } else if self.tended(job, saved) {
+            } else if self.tended(job) {
                 let id = job.id();
                 shares.push(Share {
                     id,
@@ -437,9 +427,8 @@ impl Owner {
         self.leave();
     }
 
-    /// Takes out of the plays folder each leaving play the engine has let go of. The library is
-    /// read in this same step, and every save goes through the owner, so a play whose title was
-    /// saved at any point before now stays. So does one someone streams, or one the person got
+    /// Takes out of the plays folder each leaving play the engine has let go of. Every save goes
+    /// through the owner, so a play whose title was saved at any point before now stays. So does one someone streams, or one the person got
     /// by hand, since it started leaving.
     pub(super) fn leave(&mut self) {
         let now = Instant::now();
@@ -453,15 +442,15 @@ impl Owner {
         if ready.is_empty() {
             return;
         }
-        let saved = self.store.saved_titles();
         for id in ready {
             self.tending.leaving.remove(&id);
             let Some(job) = self.jobs.get(&id) else { continue };
-            let why = match &saved {
-                Err(_) => Some("the library cannot be read"),
-                Ok(saved) if !self.tended(job, saved) => Some("it became yours"),
-                Ok(_) if self.playing(id) => Some("someone streams it"),
-                Ok(_) => None,
+            let why = if !self.tended(job) {
+                Some("it became yours")
+            } else if self.playing(id) {
+                Some("someone streams it")
+            } else {
+                None
             };
             if let Some(why) = why {
                 log(&format!("{} stays in the plays folder, for {why}", self.named(id)));
@@ -480,10 +469,15 @@ impl Owner {
     /// plays folder stays.
     pub(super) fn library(&mut self, shelving: Shelving) -> Result<(), Error> {
         let card = match shelving {
-            Shelving::Unsave(title) => return self.store.unsave_title(&title),
+            Shelving::Unsave(title) => {
+                self.shelf.unsave_title(&title)?;
+                self.saved.remove(&title);
+                return Ok(());
+            }
             Shelving::Save(card) => card,
         };
-        self.store.save_title(&card, now())?;
+        self.shelf.save_title(&card, now())?;
+        self.saved.insert(card.id.clone());
         let kept: Vec<TorrentId> = self
             .tending
             .leaving

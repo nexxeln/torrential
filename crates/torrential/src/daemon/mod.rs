@@ -2,6 +2,7 @@ pub mod admission;
 pub mod book;
 pub mod cast;
 pub mod ctx;
+pub mod db;
 mod detector;
 pub mod devices;
 pub mod downloads;
@@ -16,6 +17,7 @@ pub mod playing;
 pub mod resolve;
 pub mod search_port;
 pub mod server;
+pub mod shelf;
 pub mod store;
 pub mod subtitle_port;
 pub mod titles;
@@ -38,11 +40,13 @@ use torrential_core::{Error, ErrorCode, Preferences};
 use crate::config::Config;
 use crate::disk::Disk;
 use crate::env::{Env, TestHooks, hooks};
-use crate::log::log;
+use crate::fsutil;
+use crate::log::{log, persist};
 use crate::paths::{self, Paths};
 use crate::service;
 use crate::update;
 use ctx::{Ctx, OwnerHandle};
+use db::Db;
 use detector::Detector;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
@@ -75,8 +79,10 @@ pub struct Ports {
 impl Ports {
     fn from_env(env: &Env, paths: &Paths, settings: &Config, runtime: &tokio::runtime::Handle) -> Result<Self, Error> {
         let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
-        let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
-            Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
+        let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> = Arc::new(move || {
+            let read = crate::config::preferences(&config);
+            read.inspect_err(|e| log(&format!("using the default preferences, for {}", e.message))).unwrap_or_default()
+        });
         let installed = Arc::new(move || crate::ffmpeg::Tools::find(path.as_deref()));
         let fetch = crate::ffmpeg::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
         let ffmpeg = crate::ffmpeg::fetch::Ffmpeg::new(installed, crate::ffmpeg::fetch::root(&paths.state), fetch);
@@ -171,15 +177,16 @@ pub struct Running {
 
 pub fn start(
     runtime: &tokio::runtime::Handle,
-    store: Store,
+    db: &Db,
     ports: Ports,
     config: OwnerConfig,
     timing: titles::Timing,
     version: String,
     http_ports: &[u16],
 ) -> Result<Running, Error> {
+    let store = Store::open(db)?;
     ports.search.restore(store.results(torrential_core::time::now())?);
-    let devices = Arc::new(devices::Devices::open(store.path())?);
+    let devices = Arc::new(devices::Devices::open(db)?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
     let players = http::bind(http_ports, *reach.borrow_and_update())
@@ -191,11 +198,11 @@ pub fn start(
         .map_err(|e| Error::internal(format!("cannot listen for players and the web app: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
-    let shelf = titles::shelf::Shelf::open(store.path())?;
+    let shelf = Arc::new(shelf::Shelf::open(db)?);
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
     let playing = playing::Playing::new();
-    let owner = Owner::new(store, engine.clone(), ports.parse, ports.disk, playing.clone(), config)?;
+    let owner = Owner::new(store, shelf.clone(), engine.clone(), ports.parse, ports.disk, playing.clone(), config)?;
     let (commands_tx, commands) = mpsc::unbounded_channel();
     let task = runtime.spawn(owner.run(commands, events));
     let ctx = Arc::new_cyclic(|ctx| Ctx {
@@ -299,7 +306,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         Some(lock) => lock,
         None => return Err(Startup::AlreadyRunning(format!("another engine owns {}", paths.state.display()))),
     };
-    let _ = std::fs::remove_file(paths.startup_error());
+    persist(&format!("remove {}", paths.startup_error().display()), fsutil::remove(&paths.startup_error()));
     prepare_runtime_dir(&paths.runtime)?;
     match service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
@@ -308,10 +315,10 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
     }
     let test = env.test();
     let seed = test.is_some_and(|test| test.fake_engine()) && !paths.database().exists();
-    let mut store = Store::open(&paths.database())?;
+    let db = db::connect(&paths.database())?;
     let default_dir = settings.downloads_dir(paths);
     if seed {
-        fake::fixture::seed(&mut store, &default_dir, torrential_core::time::now())?;
+        fake::fixture::seed(&mut Store::open(&db)?, &default_dir, torrential_core::time::now())?;
     }
     let asked = |hook| test.and_then(|test| test.duration(hook));
     let timing = match asked(hooks::TITLE_WAIT) {
@@ -350,18 +357,19 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let running =
-            start(&tokio::runtime::Handle::current(), store, ports, config, timing, version.clone(), &http_ports)?;
+            start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), &http_ports)?;
         // Before the socket answers, so a page that reconnects the moment this engine is up says what was updated.
         running.ctx.news.post(update::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
-            let _ = crate::fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
+            let written = fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
+            persist(&format!("write {}", paths.http_port().display()), written);
         }
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
             socket.display()
         ));
-        let _ = std::fs::remove_file(paths.switching());
+        persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
         let accept = tokio::spawn(server::accept(listener, running.ctx.clone()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
@@ -377,7 +385,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         // An engine that stops for a newer version leaves its socket, so a client following it
         // finds one that refuses for a moment instead of none, and waits for the next engine.
         if ended == Ended::Stopped {
-            let _ = std::fs::remove_file(&socket);
+            persist(&format!("remove {}", socket.display()), fsutil::remove(&socket));
         }
         Ok::<_, Error>((running.engine, ended))
     })?;

@@ -1,30 +1,26 @@
 //! Where a person stopped each film and episode, and the titles they saved.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use torrential_core::{Error, ErrorCode, Kind, ReleaseId, TitleCard, TitleId, VideoRef, Watched};
 
-use super::super::store::sql_error;
+use super::db::{Db, sql_error};
 
 const WATCHED: &str = "SELECT video, position, duration, release, updated_at FROM watched";
 
-/// Watch positions and the library, on a connection of its own to the engine's database, which
-/// `Store::open` has migrated. It writes only `watched`, so it never contends with the owner for
-/// a row. The owner saves titles, so a save is ordered with what the owner does to their plays.
+/// Watch positions and the library, on a connection of its own to the engine's database. The
+/// owner saves and unsaves titles through it, so a save is ordered with what the owner does to
+/// their plays.
 pub struct Shelf {
     conn: Mutex<Connection>,
     path: PathBuf,
 }
 
 impl Shelf {
-    pub fn open(path: &Path) -> Result<Shelf, Error> {
-        let conn = Connection::open(path).map_err(|e| sql_error(path, e))?;
-        conn.execute_batch("PRAGMA synchronous = FULL;").map_err(|e| sql_error(path, e))?;
-        conn.busy_timeout(Duration::from_secs(1)).map_err(|e| sql_error(path, e))?;
-        Ok(Shelf { conn: Mutex::new(conn), path: path.to_path_buf() })
+    pub fn open(db: &Db) -> Result<Shelf, Error> {
+        Ok(Shelf { conn: Mutex::new(db.open()?), path: db.path().to_path_buf() })
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -113,12 +109,38 @@ impl Shelf {
             let (id, kind, name, year, rating) = row.map_err(|e| self.fail(e))?;
             let kind = match kind.as_str() {
                 "film" => Kind::Film,
-                _ => Kind::Series,
+                "series" => Kind::Series,
+                _ => return Err(self.unreadable(&format!("kind {kind}"))),
             };
             let id = id.parse().map_err(|_| self.unreadable("saved title"))?;
             cards.push(TitleCard { id, kind, name, year, rating });
         }
         Ok(cards)
+    }
+
+    /// Saves `card` in the library, keeping when it was first saved, so the library lists the
+    /// title even when the catalog cannot be reached.
+    pub fn save_title(&self, card: &TitleCard, now: i64) -> Result<(), Error> {
+        let kind = match card.kind {
+            Kind::Film => "film",
+            Kind::Series => "series",
+        };
+        self.conn()
+            .execute(
+                "INSERT INTO library (title, kind, name, year, rating, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT (title) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
+                 year = excluded.year, rating = excluded.rating",
+                params![card.id.as_str(), kind, card.name, card.year, card.rating, now],
+            )
+            .map(drop)
+            .map_err(|e| self.fail(e))
+    }
+
+    pub fn unsave_title(&self, title: &TitleId) -> Result<(), Error> {
+        self.conn()
+            .execute("DELETE FROM library WHERE title = ?1", [title.as_str()])
+            .map(drop)
+            .map_err(|e| self.fail(e))
     }
 }
 
@@ -140,12 +162,10 @@ fn watched(r: &Row) -> rusqlite::Result<Result<Watched, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::store::Store;
+    use crate::daemon::db;
 
     fn shelf(dir: &tempfile::TempDir) -> Shelf {
-        let path = dir.path().join("state.db");
-        drop(Store::open(&path).unwrap());
-        Shelf::open(&path).unwrap()
+        Shelf::open(&db::connect(&dir.path().join("state.db")).unwrap()).unwrap()
     }
 
     fn at(video: &str, position: f64, duration: Option<f64>, at: i64) -> Watched {
@@ -215,19 +235,23 @@ mod tests {
         };
         let night = card("tt0063350", Kind::Film, "Night of the Living Dead", Some(1968), Some(7.8));
         let harbor = card("tt9999901", Kind::Series, "Harbor Lights", Some(2019), None);
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
-        store.save_title(&night, 10).unwrap();
-        store.save_title(&harbor, 20).unwrap();
-        store.save_title(&night, 30).unwrap();
+        shelf.save_title(&night, 10).unwrap();
+        shelf.save_title(&harbor, 20).unwrap();
+        shelf.save_title(&night, 30).unwrap();
         assert_eq!(shelf.saved().unwrap(), [harbor.clone(), night.clone()]);
         assert_eq!(shelf.is_saved(&night.id), Ok(true));
-        store.unsave_title(&night.id).unwrap();
-        store.unsave_title(&night.id).unwrap();
+        shelf.unsave_title(&night.id).unwrap();
+        shelf.unsave_title(&night.id).unwrap();
         assert_eq!((shelf.saved().unwrap(), shelf.is_saved(&night.id)), (vec![harbor], Ok(false)));
 
-        drop((shelf, store));
-        drop(Store::open(&dir.path().join("state.db")).unwrap());
-        let reopened = Shelf::open(&dir.path().join("state.db")).unwrap();
+        drop(shelf);
+        let reopened = self::shelf(&dir);
         assert_eq!(reopened.saved().unwrap().len(), 1, "the library outlives the engine");
+
+        reopened
+            .conn()
+            .execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE library SET kind = 'opera'")
+            .unwrap();
+        assert_eq!(reopened.saved().unwrap_err().code, ErrorCode::StateCorrupt, "an unknown kind is not a series");
     }
 }
