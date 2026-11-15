@@ -26,6 +26,8 @@ struct Home {
     peers: String,
     save_resume_every: Option<&'static str>,
     stall_after: Option<&'static str>,
+    /// The engine's `LANG`, which decides how libtorrent spells file names on disk on Linux.
+    lang: Option<&'static str>,
 }
 
 struct Run {
@@ -41,7 +43,7 @@ impl Home {
 
     fn seeded_by(seeders: &[&Seeder]) -> Self {
         let peers = seeders.iter().map(|s| s.addr.to_string()).collect::<Vec<_>>().join(",");
-        Self { dir: tempfile::tempdir().unwrap(), peers, save_resume_every: None, stall_after: None }
+        Self { dir: tempfile::tempdir().unwrap(), peers, save_resume_every: None, stall_after: None, lang: None }
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -62,6 +64,9 @@ impl Home {
         }
         if let Some(after) = self.stall_after {
             cmd.env("TORRENTIAL_TEST_STALL_AFTER", after);
+        }
+        if let Some(lang) = self.lang {
+            cmd.env("LANG", lang);
         }
         cmd
     }
@@ -827,4 +832,37 @@ fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
     assert!(body == fixture.files["film.mkv"][10_000_000..10_100_000], "the 100 KB from the middle match the source");
     let job = home.job(&fixture.id());
     assert!(verified(&job) < fixture.total() / 2, "{} of {} bytes verified", verified(&job), fixture.total());
+}
+
+#[test]
+fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
+    let kept = lt::on_disk(Path::new("ç")) == Path::new("ç");
+    assert!(kept, "the seeder needs a LANG ending in .UTF-8 to keep the torrent's names as they are");
+    let fixture = Fixture::new("Sintel - Français", &[("Sintel - Français.mkv", 300_000)], 29);
+    let seeder = Seeder::start(&fixture, None);
+    let mut home = Home::new(&seeder);
+    home.lang = Some("C");
+    home.ok(&["status"]);
+    let mut socket = std::os::unix::net::UnixStream::connect(home.dir.path().join("th/run/engine.sock")).unwrap();
+    ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
+    let play = PlayRequest {
+        target: Target::TorrentFile(fixture.torrent_file().into()),
+        dir: Some(home.dir.path().join("Téléchargements")),
+        files: vec![0],
+        setup_max_size: None,
+    };
+    let reply = ask(&mut socket, &Request::Play(play));
+    let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
+
+    let (head, body) = get_range(&url, "bytes=0-299999");
+    assert!(head.starts_with("HTTP/1.1 206 Partial Content\r\n"), "{head}");
+    assert!(body == fixture.files["Sintel - Français.mkv"], "{} of 300000 bytes match the source", body.len());
+    let written = if cfg!(target_os = "linux") {
+        "T.l.chargements/Sintel - Fran.ais/Sintel - Fran.ais.mkv"
+    } else {
+        "Téléchargements/Sintel - Français/Sintel - Français.mkv"
+    };
+    let written = home.dir.path().join(written);
+    assert!(written.is_file(), "libtorrent wrote {}", written.display());
+    assert_eq!(home.job(&fixture.id())["path"], written.display().to_string());
 }

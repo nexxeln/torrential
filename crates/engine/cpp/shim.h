@@ -101,5 +101,6 @@ ParsedTorrent parse_metainfo(rust::Slice<const std::uint8_t> bytes);
 ParsedTorrent parse_resume_data(rust::Slice<const std::uint8_t> bytes);
 rust::Vec<std::uint8_t> create_torrent(rust::Str path, std::uint32_t piece_size, bool hybrid);
 rust::String libtorrent_version();
+rust::Vec<std::uint8_t> native_path(rust::Slice<const std::uint8_t> path);
 
 }

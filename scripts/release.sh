@@ -53,7 +53,8 @@ case "$target" in
       exit 1
     fi
     (cd web && bun install --frozen-lockfile && bun run build --outDir ../target/linux/web --emptyOutDir)
-    docker run --rm --init -v "$PWD:/src" -w /src -e OWNER="$(id -u):$(id -g)" -e CARGO="$cargo" \
+    # A UTF-8 LANG, as on the host, so libtorrent in the tests keeps names outside ASCII as they are.
+    docker run --rm --init -v "$PWD:/src" -w /src -e OWNER="$(id -u):$(id -g)" -e CARGO="$cargo" -e LANG=C.UTF-8 \
       -e TORRENTIAL_WEB_DIST=/src/target/linux/web \
       -e RUSTUP_HOME=/src/target/linux/rustup -e CARGO_HOME=/src/target/linux/cargo alpine:3.24 sh -euc '
       apk add --no-cache build-base cmake samurai boost-dev openssl-dev openssl-libs-static linux-headers curl file >/dev/null
