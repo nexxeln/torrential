@@ -24,7 +24,7 @@ use crate::env::Env;
 use crate::output::format::{self, shell_word};
 use crate::output::theme::{Token, paint};
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::paths::Paths;
+use crate::paths::{MAX_SOCKET_PATH, Paths};
 use crate::player::{self, Launch, Player};
 
 const TICK: Duration = Duration::from_millis(500);
@@ -133,7 +133,7 @@ fn present(
     let player = player(config, paths, env, &playing.reply.streams[0].url)?;
     if mode == Mode::Plain {
         say_resuming(&playing);
-        open(&player, &playing, env)?;
+        open(&mut conn, &player, &playing, env, paths)?;
         let summary = vec![format!("playing in {} · the download continues", player.name())];
         return Ok(emit(mode, &Doc { summary, ..doc }, &Typed { kind: DocKind::Play, body: &playing }));
     }
@@ -150,7 +150,7 @@ fn present(
         title.resume_at = at;
     }
     say_resuming(&playing);
-    open(&player, &playing, env)?;
+    open(&mut conn, &player, &playing, env, paths)?;
     let mut out = Doc { next: None, ..play(&playing, known(runtime)) }.human();
     if runtime == Runtime::Unknown {
         out.push_str(&paint(Token::Muted, UNKNOWN_RUNTIME));
@@ -189,19 +189,29 @@ pub fn start_at(conn: &mut Conn, video: &VideoRef) -> Result<Option<f64>, Error>
 }
 
 /// Opens the video and its subtitles in `player`, titled with the release name, showing subtitles in
-/// the system language first, and starting where a title play resumes.
-pub fn open(player: &Player, playing: &Playing, env: &Env) -> Result<(), Error> {
+/// the system language first, and starting where a title play resumes. The engine follows a film or
+/// an episode in a player that says where it is, and keeps its place as it keeps a browser's.
+pub fn open(conn: &mut Conn, player: &Player, playing: &Playing, env: &Env, paths: &Paths) -> Result<(), Error> {
     let [video, subtitles @ ..] = playing.reply.streams.as_slice() else {
         return Err(Error::internal("the engine streams no file to play"));
     };
     let language = crate::machine::system_language(env);
+    let followed = playing.title.as_ref().filter(|_| player.says_where());
+    let socket = followed.map(|_| paths.player_socket()).filter(|path| path.as_os_str().len() <= MAX_SOCKET_PATH);
     player.launch(&Launch {
         video: &video.url,
         subtitles: subtitles.iter().map(|s| s.url.as_str()).collect(),
         language: language.as_ref().map(|l| l.code()),
         title: &sanitize(&playing.name),
         start: resume_at(playing),
-    })
+        socket: socket.as_deref(),
+    })?;
+    if let (Some(title), Some(socket)) = (followed, socket) {
+        // An engine that cannot follow the player leaves the place to the browser and the TV.
+        let follow = Request::Follow { video: title.video.clone(), release: Some(title.release.id), socket };
+        let _ = conn.ask::<()>(&follow);
+    }
+    Ok(())
 }
 
 /// Picks the video and its subtitles from `listing` and asks the engine to stream them.

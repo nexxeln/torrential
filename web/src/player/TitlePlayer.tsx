@@ -1,5 +1,5 @@
 import { type Dispatch, type RefObject, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { artUrl, asApiError, type MediaInfo, type PlayInfo, saveWatched, type TitlePage } from "../api";
+import { artUrl, asApiError, forgetWatched, type MediaInfo, type PlayInfo, saveWatched, type TitlePage } from "../api";
 import { useJob } from "../lib/jobs";
 import { episodeOf, titleOf, videoOf } from "../lib/video";
 import { goBack, navigate, playPath, titlePath } from "../router";
@@ -162,6 +162,8 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
   const [recovery, dispatch] = useReducer(recover, WATCHING);
   const [swapped, setSwapped] = useState<Current | null>(null);
   const [switched, setSwitched] = useState(false);
+  /** This tab, to the engine, which keeps a video's place for the screen that started or resumed it last. */
+  const [tab] = useState(() => Math.random().toString(36).slice(2, 10));
   const element = useRef<HTMLVideoElement | null>(null);
   const first = useMemo<Current | null>(
     () =>
@@ -202,12 +204,13 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     if (!current) return null;
     const { started } = current;
     const heading: Heading = { title: naming.title ?? "", detail: naming.detail };
-    const duration = current.media.duration;
+    const { video, release } = started;
     const memory: Memory = {
       start: current.start,
       resumed: current.resumed,
-      save: (time, length) => void saveWatched({ video: started.video, position: time, duration: length, release: started.release.id }).catch(() => {}),
-      forget: () => void saveWatched({ video: started.video, position: 0, duration, release: started.release.id }).catch(() => {}),
+      save: (time, length, starts) =>
+        void saveWatched({ video, position: time, duration: length, release: release.id, tab, starts }).catch(() => {}),
+      forget: () => void forgetWatched(video).catch(() => {}),
     };
     return {
       kind,
@@ -222,7 +225,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
       overlay: <StallWatch play={started.play} element={element} dispatch={dispatch} />,
       replacing: switching,
     };
-  }, [current, naming, kind, page, heard, backdrop, switching]);
+  }, [current, naming, kind, page, heard, backdrop, switching, tab]);
 
   const ready = titled !== null;
   useEffect(() => {

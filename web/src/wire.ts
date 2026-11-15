@@ -442,11 +442,27 @@ replace?: string, };
 
 export type PlayingLine = { "type": "playing", video: string, release: Release, play: PlayInfo, resume_at: number | null, };
 
+export type Position = { video: string,
+/**
+ * Seconds.
+ */
+position: number, duration: number | null, release: string | null,
+/**
+ * A word the tab made up for the video it plays. A tab that sends none is one tab.
+ */
+tab: string,
+/**
+ * The tab started or resumed the video since its last save, so it keeps the place.
+ */
+starts: boolean, };
+
 export type Saved = { watched: Watched,
 /**
- * False while a TV plays the video.
+ * False while another screen keeps the place.
  */
 kept: boolean, };
+
+export type Forget = { video: string, };
 
 export type PairingOffer = {
 /**
@@ -526,4 +542,10 @@ export const FINISHED_SHARE = 0.03;
 
 /** Seconds at the end of a video that count as credits. */
 export const FINISHED_WITHIN = 20;
+
+/** Seconds at the start of a video too few to keep a place at. */
+export const WORTH_SAVING = 5;
+
+/** How often a player saves where it is. */
+export const SAVE_EVERY_MS = 5000;
 

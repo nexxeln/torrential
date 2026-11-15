@@ -52,6 +52,15 @@ impl Shelf {
             .map_err(|e| self.fail(e))
     }
 
+    /// Forgets where `video` stopped, so it plays from the beginning and leaves the lists of
+    /// what was watched.
+    pub fn forget(&self, video: &VideoRef) -> Result<(), Error> {
+        self.conn()
+            .execute("DELETE FROM watched WHERE video = ?1", params![video.to_string()])
+            .map(drop)
+            .map_err(|e| self.fail(e))
+    }
+
     /// Every film or episode of `title` with a position, the most recently watched last. Of two
     /// saved in the same second, the one saved last counts as the latest.
     pub fn watched(&self, title: &TitleId) -> Result<Vec<Watched>, Error> {
@@ -220,6 +229,18 @@ mod tests {
             [("tt9999901:1:2".into(), 30.0, 30), ("tt0063350".into(), 5.0, 20), ("tt0100258".into(), 1.0, 5)]
         );
         assert_eq!(rows(shelf.recent(1).unwrap()), [("tt9999901:1:2".into(), 30.0, 30)]);
+    }
+
+    #[test]
+    fn a_forgotten_video_leaves_its_title_and_the_recent_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = shelf(&dir);
+        shelf.watch(&at("tt9999901:1:1", 60.0, None, 10)).unwrap();
+        shelf.watch(&at("tt9999901:1:2", 30.0, None, 20)).unwrap();
+        shelf.forget(&"tt9999901:1:2".parse().unwrap()).unwrap();
+        shelf.forget(&"tt0063350".parse().unwrap()).unwrap();
+        assert_eq!(rows(shelf.watched(&"tt9999901".parse().unwrap()).unwrap()), [("tt9999901:1:1".into(), 60.0, 10)]);
+        assert_eq!(rows(shelf.recent(10).unwrap()), [("tt9999901:1:1".into(), 60.0, 10)]);
     }
 
     #[test]

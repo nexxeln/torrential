@@ -80,6 +80,13 @@ impl Paths {
         self.runtime.join("engine.sock")
     }
 
+    /// A new path for a player's socket that says where it is, beside the engine's.
+    pub fn player_socket(&self) -> PathBuf {
+        static PLAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = PLAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.runtime.join(format!("player-{}-{n}.sock", std::process::id()))
+    }
+
     pub fn lock(&self) -> PathBuf {
         self.state.join("engine.lock")
     }
