@@ -36,10 +36,10 @@ enum On {
 }
 
 impl On {
-    /// Pairs another device, or `None` on a machine with no home network to test over.
-    async fn pair(h: &Harness) -> Option<Self> {
+    /// Pairs another device.
+    async fn pair(h: &Harness) -> Self {
         use torrential_core::protocol::{Request, Response};
-        let ip = super::devices::lan()?;
+        let ip = super::devices::lan();
         let Response::Devices { list } = h.ask(Request::AddDevice).await else {
             panic!("adding a device answers the devices")
         };
@@ -50,7 +50,7 @@ impl On {
         let (status, headers) = page.head().await;
         assert_eq!(status, 200, "{headers}");
         let cookie = headers.lines().find_map(|h| h.strip_prefix("set-cookie: ")).expect("pairing sets a cookie");
-        Some(Self::Device { ip, cookie: cookie.split(';').next().unwrap().to_string() })
+        Self::Device { ip, cookie: cookie.split(';').next().unwrap().to_string() }
     }
 
     /// The address the browser reaches the engine by.
@@ -754,7 +754,7 @@ async fn a_paired_device_may_fetch_ffmpeg_and_a_stranger_may_not() {
         fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
     );
-    let Some(phone) = On::pair(&h).await else { return };
+    let phone = On::pair(&h).await;
     let (status, _, body) = exchange(Page::to(&h, phone.ip()).await, "POST", "/api/ffmpeg", &FETCH, "{}").await;
     let code = serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"].clone();
     assert_eq!((status, code), (401, json!("not_paired")));
@@ -992,13 +992,11 @@ fn film(dir: &Path, tools: &Tools) -> Option<Vec<u8>> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an ffmpeg on the PATH that encodes H.264 and AC-3; run it with --ignored"]
 async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
     let h = Harness::new();
     let tools = Tools::find(std::env::var("PATH").ok().as_deref());
-    let Some(made) = tools.both().and_then(|_| film(h.dir.path(), &tools)) else {
-        eprintln!("skipped: this machine has no ffmpeg that can make the test film");
-        return;
-    };
+    let made = tools.both().and_then(|_| film(h.dir.path(), &tools)).expect("this machine's ffmpeg makes the test film");
     *h.outside.tools.lock().unwrap() = tools;
     h.swarm.set_rate(100 * GIB);
     // "déjà vu" in Windows-1252, as old subtitle files are.
@@ -1906,7 +1904,7 @@ async fn this_mac_ranks_for_its_own_panel_and_its_browser_for_what_it_decodes_wh
 async fn a_paired_device_ranks_for_the_screen_it_reports_and_config_yaml_only_for_this_mac() {
     let tv = Preferences { screen: Some(Screen::Tv4k), playback: Some(Playback::H264), ..Preferences::default() };
     let (h, _) = titles::night_with(Outside { display: Some(PANEL), preferences: tv, ..Outside::default() });
-    let Some(phone) = On::pair(&h).await else { return };
+    let phone = On::pair(&h).await;
     let listing = format!("/api/title/sources?video=tt0063350&{PHONE}");
     let on_phone = (json!({ "value": "720p", "source": "viewer" }), json!({ "value": "hevc", "source": "viewer" }));
     assert_eq!(listed_for(&h, &phone, &listing).await, on_phone);

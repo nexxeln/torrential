@@ -198,7 +198,7 @@ async fn retries_once_after_a_5xx_but_not_after_a_4xx() {
     assert_eq!((server.hits("/apibay/"), server.hits("/knaben/")), (2, 1));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slow_answer_that_has_started_keeps_the_whole_deadline() {
     let slow = Reply { stall: Duration::from_millis(2200), ..ok(fixture("apibay/q.php-ubuntu.json")) };
     let server = Server::start(vec![("/apibay/", vec![slow])]).await;
@@ -222,7 +222,7 @@ async fn a_response_that_never_starts_is_retried_once() {
     assert_eq!(server.hits("/apibay/"), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slow_first_byte_is_raced_rather_than_abandoned() {
     let slow = Reply { delay: Duration::from_millis(2000), ..ok(fixture("apibay/q.php-ubuntu.json")) };
     let server = Server::start(vec![("/apibay/", vec![slow])]).await;
@@ -288,7 +288,7 @@ async fn an_oversized_answer_is_an_error_not_a_truncated_list() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slow_source_times_out_by_the_deadline() {
     let slow = Reply { delay: Duration::from_secs(10), ..ok(fixture("knaben/v2-search-ubuntu.json")) };
     let server =
@@ -298,7 +298,7 @@ async fn a_slow_source_times_out_by_the_deadline() {
     let mut q = query("ubuntu", &["knaben", "apibay"]);
     q.timeout_ms = 1500;
 
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let result = search.search(&q).await.unwrap();
     let wall = started.elapsed();
 

@@ -1,9 +1,11 @@
+//! Searches the live sources for "ubuntu" over the network and prints what each answered.
+//! Run with `cargo run -p torrential-search --example live`.
+
 use torrential_core::{SearchQuery, SourceOutcome};
 use torrential_search::{ResultCache, Search, SearchConfig};
 
-#[tokio::test]
-#[ignore = "searches the live sources over the network"]
-async fn ubuntu_across_the_default_sources() {
+#[tokio::main]
+async fn main() {
     let search = Search::new(&SearchConfig::default(), ResultCache::new()).unwrap();
     let result = search.search(&SearchQuery::new("ubuntu")).await.unwrap();
 

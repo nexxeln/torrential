@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(error.as_deref(), Some("localhost has no address on the public internet"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_fetch_with_no_answer_says_how_long_it_waited() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!("http://{}/a.torrent", listener.local_addr().unwrap())).unwrap();

@@ -2,91 +2,32 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Duration;
 
-use assert_cmd::Command;
 use serde_json::{Value, json};
-use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame, read_frame};
+use torrential_core::protocol::{Request, WIRE_VERSION};
 
-#[allow(dead_code)]
-#[path = "../src/env/hooks.rs"]
-mod hooks;
+mod common;
+use common::{Home, eventually, hooks, portless, receive, send};
 
 /// The archive.org release of Night of the Living Dead, which a play tries first.
 const ARCHIVE: &str = "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c";
 /// Its DVD release on archive.org, which a play tries next.
 const DVD: &str = "b7f20d5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c";
 
-const MAC: &str =
-    r#"{"os": "macos", "display": {"width": 3024, "height": 1964, "hdr": true}, "arch": "arm64", "language": "en"}"#;
-
-struct Home {
-    dir: tempfile::TempDir,
-    vars: Vec<(&'static str, String)>,
-}
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
 impl Home {
     /// A fake engine whose only player is a stub `mpv` that writes its arguments to `argv`, so no
     /// real player ever starts. ffmpeg is not on the path.
-    fn new(vars: &[(&'static str, &str)]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let mpv = bin.join("mpv");
-        let argv = dir.path().join("argv");
-        std::fs::write(&mpv, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}.part\nmv {0}.part {0}\n", argv.display()))
-            .unwrap();
-        std::fs::set_permissions(&mpv, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        std::fs::create_dir_all(dir.path().join("th/config")).unwrap();
-        std::fs::write(dir.path().join("th/config/config.yaml"), "player: mpv\n").unwrap();
-        let mut all = vec![
-            ("HOME", dir.path().display().to_string()),
-            ("TORRENTIAL_HOME", dir.path().join("th").display().to_string()),
-            (hooks::ENGINE, "fake".to_string()),
-            (hooks::FAKE_RATE, "1MiB".to_string()),
-            (hooks::NETWORK, "loopback".to_string()),
-            (hooks::MACHINE, MAC.to_string()),
-            (hooks::HTTP_PORT, "0".to_string()),
-            ("PATH", format!("{}:/usr/bin:/bin", bin.display())),
-        ];
-        all.extend(vars.iter().map(|(k, v)| (*k, v.to_string())));
-        Self { dir, vars: all }
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_torrential"));
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::VERSION] {
-            cmd.env_remove(key);
-        }
-        cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str())));
-        cmd.timeout(Duration::from_secs(60));
-        cmd
-    }
-
-    fn run(&self, args: &[&str]) -> Run {
-        let out = self.command(args).output().unwrap();
-        Run {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8(out.stdout).unwrap(),
-            stderr: String::from_utf8(out.stderr).unwrap(),
-        }
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let run = self.run(args);
-        assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
-        serde_json::from_str(&run.stdout).unwrap()
-    }
-
-    fn path(&self, rest: &str) -> PathBuf {
-        self.dir.path().join(rest)
+    fn playing() -> Self {
+        let home = Home::new();
+        let argv = home.path("argv");
+        let bin = home.stub("mpv", &format!("printf '%s\\n' \"$@\" > {}.part\nmv {0}.part {0}", argv.display()));
+        home.write_config("player: mpv\n");
+        home.with(hooks::ENGINE, "fake")
+            .with(hooks::FAKE_RATE, "1MiB")
+            .with(hooks::HTTP_PORT, "0")
+            .with("PATH", &format!("{}:/usr/bin:/bin", bin.display()))
     }
 
     fn downloads(&self) -> Vec<String> {
@@ -95,36 +36,9 @@ impl Home {
     }
 }
 
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]).output();
-    }
-}
-
-/// Puts `PORT` in place of the player port.
-fn portless(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(at) = rest.find("127.0.0.1:") {
-        let (before, after) = rest.split_at(at + "127.0.0.1:".len());
-        out.push_str(before);
-        out.push_str("PORT");
-        rest = after.trim_start_matches(|c: char| c.is_ascii_digit());
-    }
-    out + rest
-}
-
-fn eventually(what: &str, within: Duration, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + within;
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting until {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 #[test]
 fn titles_lists_the_1968_film_before_its_remake() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let run = home.run(&["titles", "night", "of", "the", "living", "dead"]);
     assert_eq!(
         (run.code, run.stdout.as_str()),
@@ -155,7 +69,7 @@ fn titles_lists_the_1968_film_before_its_remake() {
 
 #[test]
 fn title_shows_a_film_or_a_series_and_what_plays_next() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let film = home.run(&["title", "tt0063350"]);
     assert_eq!(
         (film.code, film.stdout.as_str()),
@@ -205,7 +119,7 @@ fn title_shows_a_film_or_a_series_and_what_plays_next() {
 
 #[test]
 fn sources_lists_a_films_releases_in_the_order_play_tries_them() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let doc = home.json(&["sources", "tt0063350", "--json"]);
     let releases: Vec<String> = doc["result"]["releases"]
         .as_array()
@@ -232,7 +146,7 @@ fn sources_lists_a_films_releases_in_the_order_play_tries_them() {
 
 #[test]
 fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
-    let home = Home::new(&[(hooks::DEAD, ARCHIVE), (hooks::TITLE_WAIT, "1s"), (hooks::FAKE_RATE, "100MiB")]);
+    let home = Home::playing().with(hooks::DEAD, ARCHIVE).with(hooks::TITLE_WAIT, "1s").with(hooks::FAKE_RATE, "100MiB");
     let doc = home.json(&["get", "tt0063350", "--json"]);
     let title = &doc["title"];
     assert_eq!(
@@ -256,7 +170,7 @@ fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
 
 #[test]
 fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
-    let home = Home::new(&[(hooks::DEAD, ARCHIVE), (hooks::TITLE_WAIT, "1s")]);
+    let home = Home::playing().with(hooks::DEAD, ARCHIVE).with(hooks::TITLE_WAIT, "1s");
     let run = home.run(&["play", "tt0063350", "--source", "4c1e9a", "--json"]);
     let doc: Value = serde_json::from_str(&run.stdout).unwrap();
     assert_eq!(
@@ -282,7 +196,7 @@ fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
 
 #[test]
 fn sources_lists_a_release_that_failed_lately_last_and_says_why() {
-    let home = Home::new(&[(hooks::DEAD, ARCHIVE), (hooks::TITLE_WAIT, "1s")]);
+    let home = Home::playing().with(hooks::DEAD, ARCHIVE).with(hooks::TITLE_WAIT, "1s");
     assert_eq!(home.run(&["play", "tt0063350", "--source", "4c1e9a", "--json"]).code, 7);
     let doc = home.json(&["sources", "tt0063350", "--json"]);
     let releases: Vec<String> = doc["result"]["releases"]
@@ -302,7 +216,7 @@ fn sources_lists_a_release_that_failed_lately_last_and_says_why() {
 
 #[test]
 fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let run = home.run(&["play", "tt0063350"]);
     assert_eq!(
         (run.code, run.stdout.as_str()),
@@ -336,7 +250,7 @@ fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
 
 #[test]
 fn play_json_is_todays_play_document_with_the_title_and_opens_nothing() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let doc = home.json(&["play", "tt0063350", "--json"]);
     let streams: Vec<String> =
         doc["streams"].as_array().unwrap().iter().map(|s| portless(s["url"].as_str().unwrap())).collect();
@@ -382,7 +296,7 @@ fn post_to_web(port: u16, path: &str, body: &str) -> String {
 
 #[test]
 fn play_starts_the_player_where_the_person_stopped() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let first = home.json(&["play", "tt0063350", "--json"]);
     assert_eq!(first["title"]["resume_at"], Value::Null);
     let saved = r#"{"video": "tt0063350", "position": 200.5, "duration": 5760.0}"#;
@@ -406,7 +320,7 @@ fn play_starts_the_player_where_the_person_stopped() {
 
 #[test]
 fn a_player_set_as_a_path_named_mpv_starts_where_the_person_stopped() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let stub = home.dir.path().join("bin/mpv");
     std::fs::write(home.dir.path().join("th/config/config.yaml"), format!("player: {}\n", stub.display())).unwrap();
     let first = home.json(&["play", "tt0063350", "--json"]);
@@ -425,7 +339,7 @@ fn a_player_set_as_a_path_named_mpv_starts_where_the_person_stopped() {
 
 #[test]
 fn source_plays_only_the_release_it_names() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let doc = home.json(&["play", "tt0063350", "--source", "b7f2", "--json"]);
     assert_eq!((doc["job"]["id"].as_str(), &doc["title"]["tried"]), (Some(DVD), &json!([])));
     let missing = home.run(&["play", "tt0063350", "--source", "ffff"]);
@@ -441,7 +355,7 @@ fn source_plays_only_the_release_it_names() {
 
 #[test]
 fn an_episode_reads_the_same_as_two_words_or_one() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let expected = "Finding sources of Harbor Lights S01E02\nFound 0 sources\nerror[no_source]: no source of Harbor \
                     Lights S01E02 was found\nhint: search the torrents for it by name\nnext: torrential search Harbor \
                     Lights S01E02\n";
@@ -453,7 +367,7 @@ fn an_episode_reads_the_same_as_two_words_or_one() {
 
 #[test]
 fn a_bad_or_unknown_title_or_episode_says_how_to_find_one() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     let errors = [
         (
             &["title", "tt12"][..],
@@ -496,19 +410,11 @@ fn a_bad_or_unknown_title_or_episode_says_how_to_find_one() {
     assert_eq!(doc["next"], "torrential sources tt0063350");
 }
 
-fn send(socket: &mut UnixStream, message: &impl serde::Serialize) {
-    socket.write_all(&encode_frame(message).unwrap()).unwrap();
-}
-
-fn receive(socket: &mut UnixStream) -> Option<Value> {
-    read_frame(socket).ok().flatten()
-}
-
 #[test]
 fn a_client_one_version_older_gets_the_version_error_from_the_engine() {
-    let home = Home::new(&[]);
+    let home = Home::playing();
     assert_eq!(home.run(&["status"]).code, 0);
-    let mut socket = UnixStream::connect(home.path("th/run/engine.sock")).unwrap();
+    let mut socket = UnixStream::connect(home.socket()).unwrap();
     send(&mut socket, &Request::Hello { client_version: "old".into(), wire: WIRE_VERSION - 1 });
     assert_eq!(receive(&mut socket).unwrap()["wire"], WIRE_VERSION);
     send(&mut socket, &json!({"op": "status", "refs": []}));
@@ -559,8 +465,8 @@ fn older_engine(socket: &Path) -> std::thread::JoinHandle<Vec<String>> {
 
 #[test]
 fn a_client_one_version_newer_stops_the_older_engine_rather_than_ask_it_for_titles() {
-    let home = Home::new(&[]);
-    let old = older_engine(&home.path("th/run/engine.sock"));
+    let home = Home::playing();
+    let old = older_engine(&home.socket());
     let run = home.run(&["titles", "harbor", "lights", "--json"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(old.join().unwrap(), ["hello", "shutdown"], "only hello and shutdown reached the older engine");

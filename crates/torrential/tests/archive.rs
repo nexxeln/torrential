@@ -1,94 +1,15 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
 use serde_json::Value;
 use sha2::Digest;
 use torrential_engine as lt;
 
-#[allow(dead_code)]
-#[path = "../src/env/hooks.rs"]
-mod hooks;
+mod common;
+use common::{Home, Reply, Server, hooks, ok};
 
 const ITEM: &str = "LlamaDrama";
 const FILES: [(&str, usize); 2] = [("a.bin", 100_000), ("b.bin", 60_000)];
-const OTHERS: [&str; 7] = ["archlinux", "ubuntu", "debian", "academictorrents", "knaben", "apibay", "nyaa"];
-
-#[derive(Clone)]
-enum Answer {
-    Bytes { body: Vec<u8>, delay: Duration },
-    Status(u16),
-    Redirect(String),
-}
-
-fn bytes(body: Vec<u8>) -> Answer {
-    Answer::Bytes { body, delay: Duration::ZERO }
-}
-
-struct Server {
-    base: String,
-}
-
-impl Server {
-    fn start(routes: impl FnOnce(&str) -> Vec<(String, Answer)>) -> Server {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes = Arc::new(routes(&base));
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let routes = routes.clone();
-                std::thread::spawn(move || serve(stream, &routes));
-            }
-        });
-        Server { base }
-    }
-}
-
-fn serve(mut stream: TcpStream, routes: &[(String, Answer)]) {
-    let mut pending = Vec::new();
-    loop {
-        let end = loop {
-            if let Some(i) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
-                break i + 4;
-            }
-            let mut chunk = [0u8; 4096];
-            match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => pending.extend_from_slice(&chunk[..n]),
-            }
-        };
-        let head = String::from_utf8_lossy(&pending[..end]).to_lowercase();
-        pending.drain(..end);
-        let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-        let range = head.lines().find_map(|l| {
-            let (first, last) = l.strip_prefix("range: bytes=")?.trim().split_once('-')?;
-            Some((first.parse::<usize>().ok()?, last.parse::<usize>().ok()?))
-        });
-        let answer = routes.iter().find(|(prefix, _)| path.starts_with(&prefix.to_lowercase())).map(|(_, a)| a);
-        let (head, body): (String, &[u8]) = match answer {
-            Some(Answer::Bytes { body, delay }) => {
-                std::thread::sleep(*delay);
-                match range {
-                    Some((first, last)) => (
-                        format!("206 Partial\r\nContent-Range: bytes {first}-{last}/{}", body.len()),
-                        &body[first..=last],
-                    ),
-                    None => ("200 OK".into(), body),
-                }
-            }
-            Some(Answer::Redirect(to)) => (format!("302 Found\r\nLocation: {to}"), b""),
-            Some(Answer::Status(code)) => (format!("{code} No"), b""),
-            None => ("404 No".into(), b""),
-        };
-        let head = format!("HTTP/1.1 {head}\r\nContent-Length: {}\r\n\r\n", body.len());
-        if stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(body)).is_err() {
-            return;
-        }
-    }
-}
 
 struct Item {
     _dir: tempfile::TempDir,
@@ -141,19 +62,19 @@ impl Item {
     fn mirror(&self) -> Server {
         let files = self.files.clone();
         Server::start(|_| {
-            files.into_iter().map(|(name, body)| (format!("/items/{ITEM}/{name}"), bytes(body))).collect()
+            files.into_iter().map(|(name, body)| (format!("/items/{ITEM}/{name}"), vec![ok(body)])).collect()
         })
     }
 
-    fn archive(&self, metadata: Answer, download: impl Fn(&str, &[u8]) -> Answer) -> Server {
+    fn archive(&self, metadata: Reply, download: impl Fn(&str, &[u8]) -> Reply) -> Server {
         Server::start(|base| {
             let mut routes = vec![
-                ("/archive.org/advancedsearch.php".into(), bytes(self.search_answer())),
-                (format!("/archive.org/download/{ITEM}/{ITEM}_archive.torrent"), bytes(self.torrent_file(base))),
-                (format!("/archive.org/metadata/{ITEM}"), metadata),
+                ("/archive.org/advancedsearch.php".into(), vec![ok(self.search_answer())]),
+                (format!("/archive.org/download/{ITEM}/{ITEM}_archive.torrent"), vec![ok(self.torrent_file(base))]),
+                (format!("/archive.org/metadata/{ITEM}"), vec![metadata]),
             ];
             for (name, body) in &self.files {
-                routes.push((format!("/archive.org/download/{ITEM}/{name}"), download(name, body)));
+                routes.push((format!("/archive.org/download/{ITEM}/{name}"), vec![download(name, body)]));
             }
             routes
         })
@@ -167,48 +88,15 @@ impl Item {
     }
 }
 
-struct Home {
-    dir: tempfile::TempDir,
-    archive: String,
-}
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
 impl Home {
-    fn new(archive: &Server) -> Self {
-        let home = Self { dir: tempfile::tempdir().unwrap(), archive: archive.base.clone() };
-        let config = home.dir.path().join("th/config");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.yaml"), format!("sources:\n  disabled: {OTHERS:?}\n")).unwrap();
+    /// A home whose only source is archive.org, answered by `archive`.
+    fn archived(archive: &Server) -> Self {
+        let home = Home::new()
+            .with(hooks::DISK, "roomy")
+            .with(hooks::ENDPOINTS, &format!("archive.org={}/archive.org/", archive.base));
+        let others = ["archlinux", "ubuntu", "debian", "academictorrents", "knaben", "apibay", "nyaa"];
+        home.write_config(&format!("sources:\n  disabled: {others:?}\n"));
         home
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::cargo_bin("torrential").unwrap();
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::ENGINE] {
-            cmd.env_remove(key);
-        }
-        cmd.args(args)
-            .env("HOME", self.dir.path())
-            .env("TORRENTIAL_HOME", self.dir.path().join("th"))
-            .env(hooks::NETWORK, "loopback")
-            .env(hooks::DISK, "roomy")
-            .env(hooks::ENDPOINTS, format!("archive.org={}/archive.org/", self.archive))
-            .timeout(Duration::from_secs(120));
-        cmd
-    }
-
-    fn run(&self, args: &[&str]) -> Run {
-        let out = self.command(args).output().unwrap();
-        Run {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8(out.stdout).unwrap(),
-            stderr: String::from_utf8(out.stderr).unwrap(),
-        }
     }
 
     fn downloads(&self) -> PathBuf {
@@ -227,10 +115,6 @@ impl Home {
         took
     }
 
-    fn log(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("th/state/engine.log")).unwrap_or_default()
-    }
-
     fn logs(&self, line: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !self.log().contains(line) {
@@ -243,24 +127,18 @@ impl Home {
     }
 }
 
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]).output();
-    }
-}
-
 #[test]
 fn an_item_whose_files_redirect_to_different_servers_downloads_from_the_servers_its_metadata_names() {
     let item = Item::new();
     let (first, second) = (item.mirror(), item.mirror());
     let metadata =
         serde_json::json!({ "d1": first.base[7..], "d2": second.base[7..], "dir": format!("/items/{ITEM}") });
-    let late = Answer::Bytes { body: metadata.to_string().into_bytes(), delay: Duration::from_secs(5) };
+    let late = Reply::Bytes { body: metadata.to_string().into_bytes(), delay: Duration::from_secs(5) };
     let archive = item.archive(late, |name, _| {
         let server = if name == "a.bin" { &first } else { &second };
-        Answer::Redirect(format!("{}/items/{ITEM}/{name}", server.base))
+        Reply::Redirect(format!("{}/items/{ITEM}/{name}", server.base))
     });
-    let home = Home::new(&archive);
+    let home = Home::archived(&archive);
 
     let took = home.get(&item);
     let wait = home.run(&["wait", &item.id()[..6], "--timeout", "60s"]);
@@ -275,8 +153,8 @@ fn an_item_whose_files_redirect_to_different_servers_downloads_from_the_servers_
 #[test]
 fn without_an_answer_from_the_metadata_api_an_item_downloads_from_the_torrents_own_web_seed() {
     let item = Item::new();
-    let archive = item.archive(Answer::Status(503), |_, body| bytes(body.to_vec()));
-    let home = Home::new(&archive);
+    let archive = item.archive(Reply::Status(503), |_, body| ok(body.to_vec()));
+    let home = Home::archived(&archive);
 
     home.get(&item);
     let wait = home.run(&["wait", &item.id()[..6], "--timeout", "60s"]);

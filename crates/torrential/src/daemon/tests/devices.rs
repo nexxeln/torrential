@@ -16,13 +16,9 @@ use super::{GIB, Harness, MIB, torrent, written};
 
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
 
-/// The machine's address on the home network, or `None` on one with no network to test over.
-pub(super) fn lan() -> Option<Ipv4Addr> {
-    let found = Names::read().lan.first().copied();
-    if found.is_none() {
-        eprintln!("skipped: this machine has no address on a home network");
-    }
-    found
+/// The machine's address on the home network, which these tests reach the engine by.
+pub(super) fn lan() -> Ipv4Addr {
+    Names::read().lan.first().copied().expect("these tests need an address on a home network, and this machine has none")
 }
 
 struct Answer {
@@ -135,7 +131,7 @@ pub(super) async fn listening(h: &Harness, ip: Ipv4Addr, on: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let film = torrent(70, "film", &[("film.mp4", 2 * MIB)]);
     written(&h.downloads().join("film/film.mp4"), 2 * MIB);
@@ -229,7 +225,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_from_the_network_must_name_this_mac_and_come_from_its_own_page() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
     listening(&h, ip, true).await;
@@ -269,7 +265,7 @@ async fn a_request_from_the_network_must_name_this_mac_and_come_from_its_own_pag
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cast_grant_serves_its_one_file_to_a_tv_until_it_is_dropped() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let film = torrent(71, "film", &[("film.mp4", 4 * MIB), ("other.mp4", MIB)]);
     let bytes = written(&h.downloads().join("film/film.mp4"), 4 * MIB);
@@ -335,7 +331,7 @@ async fn a_cast_grant_serves_its_one_file_to_a_tv_until_it_is_dropped() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_code_opened_while_the_engine_starts_listening_still_opens_it_to_the_network() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let mut h = Harness::new();
     h.running.http.abort();
     let _ = (&mut h.running.http).await;
@@ -350,7 +346,7 @@ async fn a_code_opened_while_the_engine_starts_listening_still_opens_it_to_the_n
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connection_from_the_network_that_sends_no_whole_request_closes_within_ten_seconds() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     devices(&h, Request::AddDevice).await;
     listening(&h, ip, true).await;
@@ -377,7 +373,7 @@ async fn a_connection_from_the_network_that_sends_no_whole_request_closes_within
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paired_phone_gets_in_while_strangers_hold_every_connection_they_may() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
     listening(&h, ip, true).await;
@@ -400,7 +396,7 @@ async fn a_paired_phone_gets_in_while_strangers_hold_every_connection_they_may()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paired_phone_whose_first_request_is_slow_stays_open_while_strangers_come() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
     listening(&h, ip, true).await;
@@ -435,7 +431,7 @@ async fn a_paired_phone_whose_first_request_is_slow_stays_open_while_strangers_c
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_whose_body_arrives_after_its_device_is_removed_is_refused_and_changes_nothing() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let film = torrent(71, "film", &[("film.mp4", MIB)]);
     h.get(h.torrent_file(&film), &[]).await.unwrap();
@@ -478,7 +474,7 @@ pub(super) fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_engine_keeps_trying_the_home_network_while_another_program_holds_its_port() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let h = Harness::new();
     let port = h.running.ctx.http_port;
     let squatter = squatter(ip, port);
