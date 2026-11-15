@@ -836,6 +836,8 @@ fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
 
 #[test]
 fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
+    let kept = lt::on_disk(Path::new("ç")) == Path::new("ç");
+    assert!(kept, "the seeder needs a LANG ending in .UTF-8 to keep the torrent's names as they are");
     let fixture = Fixture::new("Sintel - Français", &[("Sintel - Français.mkv", 300_000)], 29);
     let seeder = Seeder::start(&fixture, None);
     let mut home = Home::new(&seeder);
