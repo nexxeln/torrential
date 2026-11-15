@@ -469,7 +469,7 @@ impl Owner {
                 );
             }
             Command::Cached { id, reply } => {
-                let _ = reply.send(Ok(self.cached(id)));
+                let _ = reply.send(self.cached(id));
             }
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
