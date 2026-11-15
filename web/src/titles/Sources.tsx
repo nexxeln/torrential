@@ -9,7 +9,7 @@ import { viewer } from "../player/plan";
 import { playPath } from "../router";
 import { ResultRow } from "../search/ResultRow";
 import { type SearchState, useSearchStream } from "../search/useSearch";
-import { skipReason } from "./words";
+import { skipText } from "./words";
 
 function describe(state: SearchState, what: string): string {
   switch (state.kind) {
@@ -87,7 +87,7 @@ export function Sources({ video, label, kind, open: opened }: Props) {
                   release={release}
                   href={playPath(video, release.id)}
                   pick={at === 0}
-                  failed={release.failed && skipReason(release.failed, kind === "film" ? "film" : "series")}
+                  failed={release.failed && skipText(release.failed)}
                   action={
                     tvs.length > 0 && isVideo(release) ? (
                       <CastButton look="row" label={`Play ${readable(release.name).title} on TV`} start={{ video, source: release.id }} />

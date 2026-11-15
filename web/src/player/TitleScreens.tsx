@@ -6,7 +6,7 @@ import { readable } from "../lib/release";
 import { Link } from "../router";
 import { CODECS, RESOLUTIONS } from "../search/ResultRow";
 import { Picture } from "../titles/Picture";
-import { CHECKS, skipReason } from "../titles/words";
+import { CHECKS, skipText } from "../titles/words";
 import { isTv } from "../lib/tv";
 import { Button, buttonClass } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -57,7 +57,7 @@ function about(release: Release): string {
     .join(" · ");
 }
 
-function PassedList({ title, passed, kind }: { title: string; passed: Passed[]; kind: "film" | "series" }) {
+function PassedList({ title, passed }: { title: string; passed: Passed[] }) {
   if (passed.length === 0) return null;
   return (
     <section aria-label={title} className="flex flex-col gap-2">
@@ -76,7 +76,7 @@ function PassedList({ title, passed, kind }: { title: string; passed: Passed[]; 
                   `Source ${source.release.slice(0, SHORT_ID)}`
                 )}
               </p>
-              <p className="text-pretty text-pencil">{skipReason(source.reason, kind)}</p>
+              <p className="text-pretty text-pencil">{skipText(source.reason)}</p>
             </li>
           );
         })}
@@ -151,7 +151,7 @@ export function TitleStarting({ attempt, naming, backdrop, step, readout }: Star
             ))}
           </ol>
           {readout && <div className="min-h-5 text-sm text-soft">{readout}</div>}
-          <PassedList title="Passed over" passed={attempt.passed} kind={attempt.episode ? "series" : "film"} />
+          <PassedList title="Passed over" passed={attempt.passed} />
         </div>
       </div>
     </div>
@@ -185,7 +185,7 @@ export function TitleFailed({ naming, backdrop, kind, error, tried, sources, unp
             <p className="text-base text-pretty text-soft sm:text-sm">{sentence(error.message)}</p>
             {error.hint && <p className="text-base text-pretty text-pencil sm:text-sm">{sentence(error.hint)}</p>}
           </div>
-          <PassedList title="Tried" passed={tried} kind={kind === "film" ? "film" : "series"} />
+          <PassedList title="Tried" passed={tried} />
           <div className="flex flex-wrap gap-2">
             <Button variant="primary" autoFocus={isTv()} onClick={onRetry}>
               Try again

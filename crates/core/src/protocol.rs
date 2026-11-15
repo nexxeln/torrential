@@ -267,6 +267,9 @@ pub struct TitlePage {
     pub watched: Vec<Watched>,
     /// `None` when the film is finished or the series is caught up.
     pub next: Option<Next>,
+    /// What Play plays: `next`, or else the film or the first aired episode from the start. `None`
+    /// while no episode of a series has aired.
+    pub play_target: Option<Next>,
     /// The downloads made by playing this title.
     pub downloads: Vec<Job>,
 }

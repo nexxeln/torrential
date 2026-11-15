@@ -1319,15 +1319,15 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
             "searched 4",
             "trying 1 of 4 Night.of.the.Living.Dead.1968.720p.BluRay.x264",
             "check file_list",
-            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1}"#,
+            r#"skipped a1a1a1 {"reason":"no_file_list","waited_s":1,"text":"no peer sent its file list in 1s"}"#,
             "trying 2 of 4 Night.of.the.Living.Dead.1968.DVD9",
             "check file_list",
-            r#"skipped a2a2a2 {"reason":"no_video"}"#,
+            r#"skipped a2a2a2 {"reason":"no_video","text":"none of its files is the video"}"#,
             "trying 3 of 4 Night.of.the.Living.Dead.1968.1080p.WEB.x264",
             "check file_list",
             "check start",
             "check first_bytes",
-            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1}"#,
+            r#"skipped a3a3a3 {"reason":"no_data","waited_s":1,"text":"no data arrived in 1s"}"#,
             "trying 4 of 4 night_of_the_living_dead",
             "check file_list",
             "check start",
@@ -1419,7 +1419,7 @@ async fn where_a_person_stopped_shows_on_every_connection_and_decides_what_comes
     );
     post(&h, "/api/watched", watch("tt0063350", 1834.2, 5760.0)).await;
 
-    let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "overview": null, "thumbnail": true });
+    let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "has_aired": true, "overview": null, "thumbnail": true });
     let harbor = json!({ "id": "tt9999901", "kind": "series", "name": "Harbor Lights", "year": 2019, "rating": 8.1 });
     let night =
         json!({ "id": "tt0063350", "kind": "film", "name": "Night of the Living Dead", "year": 1968, "rating": 7.8 });
@@ -1552,7 +1552,7 @@ async fn home_answers_at_once_from_the_details_kept_here_when_the_catalog_never_
     let harbor = json!({ "id": "tt9999901", "kind": "series", "name": "Harbor Lights", "year": 2019, "rating": 8.1 });
     let night =
         json!({ "id": "tt0063350", "kind": "film", "name": "Night of the Living Dead", "year": 1968, "rating": 7.8 });
-    let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "overview": null, "thumbnail": true });
+    let undertow = json!({ "season": 1, "episode": 2, "name": "Undertow", "aired": 1_557_273_600, "has_aired": true, "overview": null, "thumbnail": true });
     assert_eq!(
         home,
         (
@@ -1626,15 +1626,17 @@ async fn a_position_is_saved_only_for_a_film_or_an_aired_episode_the_catalog_lis
         answers.push((status, code.to_string(), message.to_string()));
     }
     let usage = |message: &str| (400, "usage".to_string(), message.to_string());
+    let not_found = |message: &str| (404, "not_found".to_string(), message.to_string());
     assert_eq!(
         answers,
         [
-            usage("Harbor Lights S02E02 has not aired yet"),
-            usage("Harbor Lights S02E03 has not aired yet"),
-            usage("S09E01 is not an episode of Harbor Lights"),
+            usage("Harbor Lights S02E02 has not aired: it airs on 2100-01-01"),
+            usage("Harbor Lights S02E03 has not aired, and has no air date yet"),
+            not_found("S09E01 is not an episode of Harbor Lights"),
             usage("Harbor Lights is a series, so name one of its episodes"),
-            usage("Night of the Living Dead is a film, so it has no S01E01"),
-        ]
+            not_found("Night of the Living Dead is a film, so it has no S01E01"),
+        ],
+        "a title play and a saved place check a video the same way"
     );
     let (_, page) = get(&h, "/api/title?id=tt9999901").await;
     assert_eq!(
@@ -1720,7 +1722,7 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
     let ask = r#"{"video":"tt0063350"}"#;
     let (status, _, body) = fetch(&h, "POST", "/api/title/play", &["Content-Type: application/json"], ask).await;
     let steps: Vec<String> = lines(&body).iter().map(titles::step).collect();
-    let skipped = r#"b1b1b1 {"reason":"unplayable","container":"mkv"}"#;
+    let skipped = r#"b1b1b1 {"reason":"unplayable","container":"mkv","text":"its .mkv file needs ffmpeg, which is not installed"}"#;
     assert_eq!(
         (status, steps),
         (
@@ -1797,9 +1799,9 @@ async fn a_play_tries_a_titles_sources_in_the_order_listed_and_the_list_then_put
 
     let after = vec![
         (name(3), Value::Null),
-        (name(0), json!({ "reason": "no_file_list", "waited_s": 1 })),
-        (name(1), json!({ "reason": "no_video" })),
-        (name(2), json!({ "reason": "no_data", "waited_s": 1 })),
+        (name(0), json!({ "reason": "no_file_list", "waited_s": 1, "text": "no peer sent its file list in 1s" })),
+        (name(1), json!({ "reason": "no_video", "text": "none of its files is the video" })),
+        (name(2), json!({ "reason": "no_data", "waited_s": 1, "text": "no data arrived in 1s" })),
     ];
     assert_eq!(listed_sources(&h, "tt0063350").await, after);
     let video = "tt0063350".parse().unwrap();
@@ -1842,6 +1844,7 @@ async fn the_web_app_and_the_socket_read_the_same_title_page() {
             "saved": false,
             "watched": [{ "video": "tt0063350", "position": 60.0, "duration": 5760.0, "finished": false }],
             "next": { "video": "tt0063350", "resume_at": 60.0 },
+            "play_target": { "video": "tt0063350", "resume_at": 60.0 },
             "downloads": []
         })
     );

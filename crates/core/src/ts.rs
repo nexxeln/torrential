@@ -3,9 +3,9 @@
 
 use ts_rs::{Config, TS};
 
-use crate::catalog::Country;
+use crate::catalog::{Country, EpisodeInfoWire};
 use crate::release::ReleaseWire;
-use crate::watching::WatchedWire;
+use crate::watching::{SkipWire, WatchedWire};
 
 /// Implements `TS` for types that serialize as `$ts` by hand.
 macro_rules! written_as {
@@ -39,6 +39,8 @@ written_as! {
     crate::Container => "Container",
     crate::Release => "Release",
     crate::Watched => "Watched",
+    crate::EpisodeInfo => "EpisodeInfo",
+    crate::Skip => "Skip",
 }
 
 /// A union of string literals, declared as `name`.
@@ -84,7 +86,7 @@ pub fn declarations(cfg: &Config) -> Vec<String> {
         words("Country", Country::ALL.map(Country::code)),
         TitleCard::decl(cfg),
         Art::decl(cfg),
-        EpisodeInfo::decl(cfg),
+        EpisodeInfoWire::decl(cfg),
         Season::decl(cfg),
         TitleDetails::decl(cfg),
         WatchedWire::decl(cfg),
@@ -93,7 +95,7 @@ pub fn declarations(cfg: &Config) -> Vec<String> {
         protocol::Continue::decl(cfg),
         protocol::Home::decl(cfg),
         Check::decl(cfg),
-        Skip::decl(cfg),
+        SkipWire::decl(cfg),
         Tried::decl(cfg),
         AttemptEvent::decl(cfg),
         Playback::decl(cfg),

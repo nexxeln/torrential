@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use torrential_core::time::now;
 use torrential_core::title::Episode;
 use torrential_core::{
-    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, Plays, Release, ReleaseId, TitleCard,
-    TitleDetails, TitleId, TorrentId, VideoRef, Viewer, Watched,
+    ArtKind, AttemptEvent, Error, ErrorCode, Playback, Player, Plays, Release, ReleaseId, TitleCard, TitleId,
+    TorrentId, VideoRef, Viewer, Watched,
 };
 
 use super::super::ctx::Ctx;
@@ -22,7 +22,6 @@ use super::super::titles;
 use super::super::titles::attempt::{self, Outcome, PlayTitle, Played};
 use super::super::titles::watching::Screen;
 use super::{NDJSON, fail, line, number, required, value};
-use torrential_core::title::title_name;
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
 const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
@@ -287,7 +286,7 @@ pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
     let Position { video, position, duration, release, tab, starts } = request;
     check_times(position, duration)?;
     let now = now();
-    watchable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
+    titles::playable(&ctx.titles.catalog.title(&video.title).await?, video.episode, now)?;
     let screen = Screen::Tab(tab);
     if starts {
         ctx.titles.watching.start(&screen, &video);
@@ -338,24 +337,6 @@ fn check_times(position: f64, duration: Option<f64>) -> Result<(), Error> {
             usage(format!("position {position} is past the end of a video {length} seconds long"))
         }
         _ => Ok(()),
-    }
-}
-
-/// Fails with `usage` unless `episode` names the film `details` describes, or an aired episode it
-/// lists.
-fn watchable(details: &TitleDetails, episode: Option<Episode>, now: i64) -> Result<(), Error> {
-    let card = &details.card;
-    let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
-    let e = match (card.kind, episode) {
-        (Kind::Film, None) => return Ok(()),
-        (Kind::Film, Some(e)) => return usage(format!("{} is a film, so it has no {e}", card.name)),
-        (Kind::Series, None) => return usage(format!("{} is a series, so name one of its episodes", card.name)),
-        (Kind::Series, Some(e)) => e,
-    };
-    match details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e) {
-        None => usage(format!("{e} is not an episode of {}", card.name)),
-        Some(info) if info.aired.is_some_and(|aired| aired <= now) => Ok(()),
-        Some(_) => usage(format!("{} has not aired yet", title_name(card, Some(e)))),
     }
 }
 

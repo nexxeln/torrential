@@ -39,6 +39,10 @@ expression: value
         "video": "tt0063350",
         "resume_at": null
       },
+      "play_target": {
+        "video": "tt0063350",
+        "resume_at": null
+      },
       "downloads": []
     },
     "next": "torrential play tt0063350"

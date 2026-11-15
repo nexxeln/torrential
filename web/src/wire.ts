@@ -157,7 +157,11 @@ export type EpisodeInfo = { name: string | null,
 /**
  * Unix seconds. `None` when no date is announced.
  */
-aired: number | null, overview: string | null, thumbnail: boolean, season: number, episode: number, };
+aired: number | null,
+/**
+ * The air date has passed, so the episode plays.
+ */
+has_aired: boolean, overview: string | null, thumbnail: boolean, season: number, episode: number, };
 
 export type Season = { number: number, episodes: Array<EpisodeInfo>, };
 
@@ -198,6 +202,11 @@ watched: Array<Watched>,
  */
 next: Next | null,
 /**
+ * What Play plays: `next`, or else the film or the first aired episode from the start. `None`
+ * while no episode of a series has aired.
+ */
+play_target: Next | null,
+/**
  * The downloads made by playing this title.
  */
 downloads: Array<Job>, synopsis: string | null, genres: Array<string>, runtime_min: number | null, cast: Array<string>,
@@ -233,7 +242,7 @@ continue: Array<Continue>, saved: Array<TitleCard>, };
 
 export type Check = "file_list" | "start" | "first_bytes";
 
-export type Skip = { "reason": "no_file_list", waited_s: number, } | { "reason": "no_video" } | { "reason": "unplayable", container: string, } | { "reason": "not_on_tv", container: string, } | { "reason": "too_large", error: Error, } | { "reason": "no_data", waited_s: number, } | { "reason": "stalled" } | { "reason": "failed", error: Error, };
+export type Skip = { "reason": "no_file_list", waited_s: number, text: string, } | { "reason": "no_video", text: string, } | { "reason": "unplayable", container: string, text: string, } | { "reason": "not_on_tv", container: string, text: string, } | { "reason": "too_large", error: Error, text: string, } | { "reason": "no_data", waited_s: number, text: string, } | { "reason": "stalled", text: string, } | { "reason": "failed", error: Error, text: string, };
 
 export type Tried = { release: string, reason: Skip, };
 

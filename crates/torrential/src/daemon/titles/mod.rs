@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use torrential_core::protocol::{Continue, Home, TitlePage, TitleSources};
-use torrential_core::title::title_name;
-use torrential_core::watching::next;
+use torrential_core::title::{Episode, title_name};
+use torrential_core::watching::{next, play_target};
 use torrential_core::{
     Category, EpisodeInfo, Error, ErrorCode, HexPrefix, Job, Kind, Next, Player, Preferences, Profile, Quality,
     Release, ReleaseId, SearchQuery, Skip, TitleDetails, TitleId, TorrentId, VideoRef,
@@ -133,12 +133,7 @@ impl Titles {
             (Kind::Series, None) => next_episode(&details, &self.shelf.watched(&video.title)?, now)?,
             _ => video.clone(),
         };
-        season_episodes(&details, video.episode)?;
-        let mut episodes = details.seasons.iter().flat_map(|season| &season.episodes);
-        let episode = episodes.find(|info| Some(info.episode) == video.episode).cloned();
-        if let Some(info) = &episode {
-            aired(&details, info, now)?;
-        }
+        let episode = playable(&details, video.episode, now)?.cloned();
         Ok(Resolved { video, details, episode })
     }
 
@@ -210,42 +205,43 @@ fn holding(job: &Job, video: &VideoRef, ranked: &[Release]) -> Option<(Release, 
 
 /// The episode a series plays next, or its first aired one when the person has caught up.
 fn next_episode(details: &TitleDetails, watched: &[torrential_core::Watched], now: i64) -> Result<VideoRef, Error> {
-    if let Some(next) = next(details, watched, now) {
-        return Ok(next.video);
-    }
-    let first = details
-        .seasons
-        .iter()
-        .filter(|season| season.number > 0)
-        .flat_map(|season| &season.episodes)
-        .filter(|e| e.aired.is_some_and(|aired| aired <= now))
-        .map(|e| e.episode)
-        .min();
-    let first = first
-        .ok_or_else(|| Error::new(ErrorCode::NotFound, format!("no episode of {} has aired yet", details.card.name)))?;
-    Ok(VideoRef { title: details.card.id.clone(), episode: Some(first) })
+    play_target(details, watched, now)
+        .map(|target| target.video)
+        .ok_or_else(|| Error::new(ErrorCode::NotFound, format!("no episode of {} has aired yet", details.card.name)))
 }
 
-fn aired(details: &TitleDetails, info: &EpisodeInfo, now: i64) -> Result<(), Error> {
-    let episode = format!("{} {}", details.card.name, info.episode);
-    match info.aired {
-        Some(aired) if aired <= now => Ok(()),
+/// The film, or the aired episode, that `episode` names of the title `details` describes: `None`
+/// for the film. Refuses an episode of a film, a series without an episode, an episode the series
+/// does not have, and one that has not aired. A title play, its sources and a saved place all ask
+/// here.
+pub fn playable(details: &TitleDetails, episode: Option<Episode>, now: i64) -> Result<Option<&EpisodeInfo>, Error> {
+    season_episodes(details, episode)?;
+    let Some(e) = episode else { return Ok(None) };
+    let info = details.seasons.iter().flat_map(|season| &season.episodes).find(|info| info.episode == e);
+    let info = info.ok_or_else(|| Error::internal("season_episodes found the episode"))?;
+    if info.aired_by(now) {
+        return Ok(Some(info));
+    }
+    let named = format!("{} {e}", details.card.name);
+    Err(match info.aired {
         Some(aired) => {
             let day = &torrential_core::units::timestamp(aired)[..10];
-            Err(Error::new(ErrorCode::Usage, format!("{episode} airs on {day}, so it has no sources yet")))
+            Error::new(ErrorCode::Usage, format!("{named} has not aired: it airs on {day}"))
         }
-        None => Err(Error::new(ErrorCode::Usage, format!("{episode} has no air date yet, so it has no sources"))),
-    }
+        None => Error::new(ErrorCode::Usage, format!("{named} has not aired, and has no air date yet")),
+    })
 }
 
 /// One title as the catalog describes it, with where the person stopped, what plays next, and
 /// the downloads made by playing it. The socket's `title` and `GET /api/title` both answer with it.
 pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Error> {
+    let now = torrential_core::time::now();
     let details = ctx.titles.catalog.title(&id).await?;
     let watched = ctx.titles.shelf.watched(&id)?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     Ok(TitlePage {
-        next: next(&details, &watched, torrential_core::time::now()),
+        next: next(&details, &watched, now),
+        play_target: play_target(&details, &watched, now),
         saved: ctx.titles.shelf.is_saved(&id)?,
         downloads: jobs.into_iter().filter(|job| job.title.as_ref().is_some_and(|link| link.title == id)).collect(),
         watched,
@@ -499,11 +495,11 @@ mod tests {
         );
         assert_eq!(
             resolve(&titles, "tt9999901:2:2").await,
-            Err((ErrorCode::Usage, "Harbor Lights S02E02 airs on 2100-01-01, so it has no sources yet".into()))
+            Err((ErrorCode::Usage, "Harbor Lights S02E02 has not aired: it airs on 2100-01-01".into()))
         );
         assert_eq!(
             resolve(&titles, "tt9999901:2:3").await,
-            Err((ErrorCode::Usage, "Harbor Lights S02E03 has no air date yet, so it has no sources".into()))
+            Err((ErrorCode::Usage, "Harbor Lights S02E03 has not aired, and has no air date yet".into()))
         );
         assert_eq!(
             resolve(&titles, "tt9999901:4:1").await,

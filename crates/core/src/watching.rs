@@ -100,6 +100,25 @@ pub fn resume_at(watched: &[Watched], video: &VideoRef) -> Option<f64> {
     watched.iter().find(|w| w.video == *video)?.resume_at()
 }
 
+/// What Play on a title page plays: what comes `next`, or else the film or the first aired
+/// episode from the start. `None` while no episode of a series has aired.
+pub fn play_target(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Next> {
+    if let Some(next) = next(details, watched, now) {
+        return Some(next);
+    }
+    let episode = match details.card.kind {
+        Kind::Film => None,
+        Kind::Series => Some(first_aired(details, now)?),
+    };
+    Some(Next { video: VideoRef { title: details.card.id.clone(), episode }, resume_at: None })
+}
+
+/// A series' first aired episode outside the specials.
+pub fn first_aired(details: &TitleDetails, now: i64) -> Option<Episode> {
+    let regular = details.seasons.iter().filter(|season| season.number > 0);
+    regular.flat_map(|season| &season.episodes).filter(|e| e.aired_by(now)).map(|e| e.episode).min()
+}
+
 /// What of a title to play: an unfinished film or episode to resume, or else the first aired
 /// episode after the one finished last that is not finished too. `None` when the film is
 /// finished or the series is caught up. Specials, in season 0, never come next. An episode the
@@ -121,7 +140,7 @@ pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Nex
         .seasons
         .iter()
         .flat_map(|season| &season.episodes)
-        .filter(|e| e.aired.is_some_and(|aired| aired <= now))
+        .filter(|e| e.aired_by(now))
         .map(|e| e.episode)
         .collect();
     aired.sort();
@@ -203,9 +222,8 @@ pub enum Check {
 }
 
 /// Why a play moved past a source.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reason")]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Skip {
     NoFileList {
         waited_s: u32,
@@ -230,6 +248,39 @@ pub enum Skip {
     Failed {
         error: Error,
     },
+}
+
+/// Why a play moved past a source, as it goes on the wire: with `text`, which says it in plain
+/// words. A read leaves the text out.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Skip"))]
+pub(crate) enum SkipWire<'a> {
+    NoFileList { waited_s: u32, text: String },
+    NoVideo { text: String },
+    Unplayable { container: &'a str, text: String },
+    NotOnTv { container: &'a str, text: String },
+    TooLarge { error: &'a Error, text: String },
+    NoData { waited_s: u32, text: String },
+    Stalled { text: String },
+    Failed { error: &'a Error, text: String },
+}
+
+impl Serialize for Skip {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = self.to_string();
+        let wire = match self {
+            Skip::NoFileList { waited_s } => SkipWire::NoFileList { waited_s: *waited_s, text },
+            Skip::NoVideo => SkipWire::NoVideo { text },
+            Skip::Unplayable { container } => SkipWire::Unplayable { container, text },
+            Skip::NotOnTv { container } => SkipWire::NotOnTv { container, text },
+            Skip::TooLarge { error } => SkipWire::TooLarge { error, text },
+            Skip::NoData { waited_s } => SkipWire::NoData { waited_s: *waited_s, text },
+            Skip::Stalled => SkipWire::Stalled { text },
+            Skip::Failed { error } => SkipWire::Failed { error, text },
+        };
+        wire.serialize(serializer)
+    }
 }
 
 /// Why a play moved past a source, in plain words.
@@ -403,6 +454,25 @@ mod tests {
     }
 
     #[test]
+    fn play_starts_a_finished_film_or_a_caught_up_series_over_from_its_first_aired_episode() {
+        let film = details(card("tt0063350", Kind::Film, "Night of the Living Dead", 1968), Vec::new());
+        let finished = [watched("tt0063350", 5750.0, Some(5760.0), 10)];
+        assert_eq!(play_target(&film, &finished, NOW), Some(Next { video: video("tt0063350"), resume_at: None }));
+        let series = breaking_bad();
+        let caught_up = [watched("tt0903747:2:1", 2810.0, Some(2820.0), 30)];
+        assert_eq!(
+            play_target(&series, &caught_up, NOW),
+            Some(Next { video: video("tt0903747:1:1"), resume_at: None }),
+            "the first episode, not the special"
+        );
+        let halfway = [watched("tt0903747:1:2", 600.0, Some(2820.0), 20)];
+        assert_eq!(play_target(&series, &halfway, NOW), next(&series, &halfway, NOW));
+        let upcoming =
+            details(card("tt9999902", Kind::Series, "Upcoming", 2027), vec![season(1, &[Some(NOW + 86_400)])]);
+        assert_eq!(play_target(&upcoming, &[], NOW), None);
+    }
+
+    #[test]
     fn an_episode_the_catalog_does_not_list_or_that_has_not_aired_is_never_resumed() {
         let series = breaking_bad();
         let next = |watched: &[Watched]| next(&series, watched, NOW).map(|n| (n.video.to_string(), n.resume_at));
@@ -495,9 +565,9 @@ mod tests {
                 r#"{"type":"searched","found":5,"sources":[{"source":"archive.org","outcome":"ok","results":2,"elapsed_ms":812}]}"#.to_string(),
                 format!(r#"{{"type":"trying","rank":1,"of":5,"release":{RELEASE}}}"#),
                 r#"{"type":"check","check":"file_list"}"#.to_string(),
-                format!(r#"{{"type":"skipped","release":"{HASH}","reason":{{"reason":"no_file_list","waited_s":20}}}}"#),
+                format!(r#"{{"type":"skipped","release":"{HASH}","reason":{{"reason":"no_file_list","waited_s":20,"text":"no peer sent its file list in 20s"}}}}"#),
                 format!(r#"{{"type":"playing","video":"tt0903747:3:5","release":{RELEASE},"job":"{HASH}","file":4,"resume_at":1834.2}}"#),
-                format!(r#"{{"type":"failed","error":{{"code":"no_source","message":"No source of Night of the Living Dead (1968) plays now"}},"tried":[{{"release":"{HASH}","reason":{{"reason":"no_data","waited_s":30}}}}]}}"#),
+                format!(r#"{{"type":"failed","error":{{"code":"no_source","message":"No source of Night of the Living Dead (1968) plays now"}},"tried":[{{"release":"{HASH}","reason":{{"reason":"no_data","waited_s":30,"text":"no data arrived in 30s"}}}}]}}"#),
             ]
         );
         let read: Vec<AttemptEvent> = written.iter().map(|line| serde_json::from_str(line).unwrap()).collect();
@@ -507,7 +577,7 @@ mod tests {
         assert_eq!(checks, [r#""file_list""#, r#""start""#, r#""first_bytes""#]);
 
         let full = error(ErrorCode::DiskFull, "not enough space");
-        let skips = [
+        let reasons = [
             Skip::NoFileList { waited_s: 20 },
             Skip::NoVideo,
             Skip::Unplayable { container: "avi".into() },
@@ -515,20 +585,22 @@ mod tests {
             Skip::NoData { waited_s: 30 },
             Skip::Stalled,
             Skip::Failed { error: error(ErrorCode::StorageError, "cannot write") },
-        ]
-        .map(|skip| serde_json::to_string(&skip).unwrap());
+        ];
+        let skips = reasons.clone().map(|skip| serde_json::to_string(&skip).unwrap());
         assert_eq!(
             skips,
             [
-                r#"{"reason":"no_file_list","waited_s":20}"#,
-                r#"{"reason":"no_video"}"#,
-                r#"{"reason":"unplayable","container":"avi"}"#,
-                r#"{"reason":"too_large","error":{"code":"disk_full","message":"not enough space"}}"#,
-                r#"{"reason":"no_data","waited_s":30}"#,
-                r#"{"reason":"stalled"}"#,
-                r#"{"reason":"failed","error":{"code":"storage_error","message":"cannot write"}}"#,
+                r#"{"reason":"no_file_list","waited_s":20,"text":"no peer sent its file list in 20s"}"#,
+                r#"{"reason":"no_video","text":"none of its files is the video"}"#,
+                r#"{"reason":"unplayable","container":"avi","text":"its .avi file needs ffmpeg, which is not installed"}"#,
+                r#"{"reason":"too_large","error":{"code":"disk_full","message":"not enough space"},"text":"not enough space"}"#,
+                r#"{"reason":"no_data","waited_s":30,"text":"no data arrived in 30s"}"#,
+                r#"{"reason":"stalled","text":"it stalled"}"#,
+                r#"{"reason":"failed","error":{"code":"storage_error","message":"cannot write"},"text":"cannot write"}"#,
             ]
         );
+        let read: Vec<Skip> = skips.iter().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(read, reasons, "a read leaves the text out");
     }
 
     #[test]
