@@ -1,5 +1,6 @@
 import { ArrowPathIcon, TvIcon } from "@heroicons/react/20/solid";
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type Ref, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { type ApiError, asApiError, type Cast, type CastStart, findTvs, startCast, type Tv } from "../api";
 import { sentence } from "../lib/format";
 import { isBack } from "../lib/tv";
@@ -19,23 +20,50 @@ interface Props {
   onCast?: (cast: Cast) => void;
   /** Called as the list opens and closes, so a player keeps its controls up while it is open. */
   onOpen?: (open: boolean) => void;
-  /** A large button on a page, or a round one in the player's controls. */
-  look: "page" | "player";
+  /** A large button on a page, a round one in the player's controls, or a round one at the end of a list's row. */
+  look: Look;
+  /** What a screen reader calls the button, where a page has one for each of several videos. */
+  label?: string;
 }
+
+type Look = "page" | "player" | "row";
+
+/** On a phone, the list from a page or a row rises from the bottom of the screen. */
+const SHEET = "max-sm:fixed max-sm:inset-x-4 max-sm:top-auto max-sm:bottom-[max(1rem,env(safe-area-inset-bottom))] max-sm:w-auto";
+
+/** Tailwind's `max-sm`, where the list from a page or a row is a sheet. */
+const NARROW = "(width < 40rem)";
+
+function subscribeNarrow(changed: () => void): () => void {
+  const query = matchMedia(NARROW);
+  query.addEventListener("change", changed);
+  return () => query.removeEventListener("change", changed);
+}
+
+/** Where the list opens from each look of the button. */
+const PLACES: Record<Look, string> = {
+  page: `top-full left-0 mt-2 ${SHEET}`,
+  row: `top-full right-0 mt-2 ${SHEET}`,
+  // In the player on a phone, the list hangs from the whole bar of controls, as the button is too near the left edge for its width.
+  player: "right-(--edge-right) bottom-full mb-2 sm:right-0",
+};
 
 function plays(tv: Tv): string {
   return tv.plays.map((container) => container.toUpperCase()).join(", ");
 }
 
 /** "Play on TV": opens a list of the TVs on the home network, and plays on the one chosen. */
-export function CastButton({ start, at, onCast, onOpen, look }: Props) {
+export function CastButton({ start, at, onCast, onOpen, look, label = "Play on TV" }: Props) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  // The page is a stacking context of its own, so a sheet inside it would sit under the cast bar.
+  const sheet = useSyncExternalStore(subscribeNarrow, () => matchMedia(NARROW).matches) && look !== "player";
   const toggle = () => setOpen((was) => !was);
   /** Closes the list. Focus in it goes back to the button, so a remote keeps its place. */
   const close = () => {
-    if (root.current?.querySelector("[role=dialog]")?.contains(document.activeElement)) {
-      root.current.querySelector<HTMLElement>("[aria-haspopup]")?.focus();
+    if (list.current?.contains(document.activeElement)) {
+      root.current?.querySelector<HTMLElement>("[aria-haspopup]")?.focus();
     }
     setOpen(false);
   };
@@ -51,42 +79,69 @@ export function CastButton({ start, at, onCast, onOpen, look }: Props) {
   useEffect(() => {
     if (!open) return;
     const outside = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!root.current?.contains(target) && !list.current?.contains(target)) setOpen(false);
     };
     addEventListener("click", outside, true);
     return () => removeEventListener("click", outside, true);
   }, [open]);
 
-  // In the player on a phone, the list hangs from the whole bar of controls, as the button is too
-  // near the left edge for its width.
+  const picker = open && (
+    <Picker
+      ref={list}
+      start={start}
+      at={at}
+      place={PLACES[look]}
+      onCast={(cast) => {
+        setOpen(false);
+        onCast?.(cast);
+      }}
+    />
+  );
   return (
     <div ref={root} className={look === "player" ? "sm:relative" : "relative"} data-menu-root onKeyDown={keys}>
-      {look === "page" ? (
+      {look === "page" && (
         <Button size="large" aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
           <TvIcon aria-hidden="true" className="size-4 fill-soft" />
-          Play on TV
+          {label}
         </Button>
-      ) : (
-        <ControlButton label="Play on TV" aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
+      )}
+      {look === "player" && (
+        <ControlButton label={label} aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
           <TvIcon />
         </ControlButton>
       )}
-      {open && (
-        <Picker
-          start={start}
-          at={at}
-          above={look === "player"}
-          onCast={(cast) => {
-            setOpen(false);
-            onCast?.(cast);
-          }}
-        />
+      {look === "row" && (
+        <button
+          type="button"
+          aria-label={label}
+          title="Play on TV"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          onClick={toggle}
+          className="flex size-10 shrink-0 items-center justify-center rounded-full text-pencil hover:bg-white/10 hover:text-ink aria-expanded:bg-white/10 aria-expanded:text-ink pointer-coarse:size-11"
+        >
+          <TvIcon aria-hidden="true" className="size-5 fill-current" />
+        </button>
       )}
+      {picker && (sheet ? createPortal(picker, document.body) : picker)}
     </div>
   );
 }
 
-function Picker({ start, at, above, onCast }: { start: Omit<CastStart, "tv">; at?: () => number | null; above: boolean; onCast: (cast: Cast) => void }) {
+function Picker({
+  ref,
+  start,
+  at,
+  place,
+  onCast,
+}: {
+  ref: Ref<HTMLDivElement>;
+  start: Omit<CastStart, "tv">;
+  at?: () => number | null;
+  place: string;
+  onCast: (cast: Cast) => void;
+}) {
   const { tvs } = useTvList();
   const [search, setSearch] = useState<Search>({ kind: "looking" });
   const [sending, setSending] = useState<string | null>(null);
@@ -124,10 +179,11 @@ function Picker({ start, at, above, onCast }: { start: Omit<CastStart, "tv">; at
   const looking = search.kind === "looking";
   return (
     <div
+      ref={ref}
       role="dialog"
       aria-label="Play on TV"
       data-overlay=""
-      className={`absolute z-30 flex w-72 max-w-[calc(100vw-2rem)] animate-pop flex-col gap-1 rounded-xl bg-raised p-1.5 shadow-xl inset-ring inset-ring-white/10 motion-reduce:animate-none ${above ? "right-(--edge-right) bottom-full mb-2 sm:right-0" : "top-full left-0 mt-2 max-sm:fixed max-sm:inset-x-4 max-sm:top-auto max-sm:bottom-[max(1rem,env(safe-area-inset-bottom))] max-sm:w-auto"}`}
+      className={`absolute z-30 flex w-72 max-w-[calc(100vw-2rem)] animate-pop flex-col gap-1 rounded-xl bg-raised p-1.5 shadow-xl inset-ring inset-ring-white/10 motion-reduce:animate-none ${place}`}
     >
       <div className="flex items-center justify-between gap-2 px-2.5 pt-1.5 pb-1">
         <h2 className="text-sm font-medium text-ink">Play on TV</h2>
