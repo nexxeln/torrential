@@ -309,7 +309,7 @@ fn play_hands_a_title_to_the_player_as_play_does_a_torrent() {
         (
             0,
             "4c1e9a Night of the Living Dead (1968)\nsource:    Night of the Living Dead (1968)\nvideo:     \
-             night_of_the_living_dead.mp4 (747.0 MiB)\nsubtitles: night_of_the_living_dead.srt\n# playing in mpv · the \
+             night_of_the_living_dead.mp4 (747 MiB)\nsubtitles: night_of_the_living_dead.srt\n# playing in mpv · the \
              download continues\nnext:      torrential status 4c1e9a\n"
         ),
         "{}",

@@ -38,13 +38,7 @@ pub fn seconds_tenths(ms: u32) -> String {
 
 pub fn age(published: Option<i64>, now: i64) -> String {
     let Some(published) = published else { return UNKNOWN.to_string() };
-    let secs = now.saturating_sub(published).max(0) as u64;
-    match secs {
-        0..3_600 => format!("{}m", secs / 60),
-        3_600..86_400 => format!("{}h", secs / 3_600),
-        86_400..63_072_000 => format!("{}d", secs / 86_400),
-        _ => format!("{}y", secs / 31_536_000),
-    }
+    torrential_core::units::age(now.saturating_sub(published).max(0) as u64)
 }
 
 pub fn shell_word(word: &str) -> String {
@@ -73,7 +67,7 @@ mod tests {
         let vectors: serde_json::Value = serde_json::from_str(include_str!("../../../core/tests/fixtures/format.json"))
             .expect("the vectors are JSON");
         for case in vectors["age"].as_array().unwrap() {
-            assert_eq!(age(Some(0), case["seconds"].as_i64().unwrap()), case["cli"], "{case}");
+            assert_eq!(age(Some(0), case["seconds"].as_i64().unwrap()), case["text"], "{case}");
         }
         for case in vectors["percent"].as_array().unwrap() {
             let progress = Progress {

@@ -785,7 +785,7 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
         (run.code, run.stdout.as_str()),
         (
             0,
-            "4c1e9a night_of_the_living_dead\nvideo:     night_of_the_living_dead.mp4 (747.0 MiB)\nsubtitles: \
+            "4c1e9a night_of_the_living_dead\nvideo:     night_of_the_living_dead.mp4 (747 MiB)\nsubtitles: \
              night_of_the_living_dead.srt\n# playing in mpv · the download continues\nnext:      torrential \
              status 4c1e9a\n"
         ),

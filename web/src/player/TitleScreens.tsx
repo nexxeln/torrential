@@ -11,6 +11,7 @@ import { isTv } from "../lib/tv";
 import { Button, buttonClass } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import type { Attempt, Passed } from "./titleSession";
+import { SHORT_ID } from "../wire";
 
 /** The title's picture behind the screens before playback, dark enough for text at any point of it. */
 function Backdrop({ src }: { src: string | null }) {
@@ -72,7 +73,7 @@ function PassedList({ title, passed, kind }: { title: string; passed: Passed[]; 
                     {name.title} <span className="text-pencil">{name.tags}</span>
                   </>
                 ) : (
-                  `Source ${source.release.slice(0, 8)}`
+                  `Source ${source.release.slice(0, SHORT_ID)}`
                 )}
               </p>
               <p className="text-pretty text-pencil">{skipReason(source.reason, kind)}</p>

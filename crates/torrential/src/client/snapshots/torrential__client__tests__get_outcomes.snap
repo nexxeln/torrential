@@ -46,7 +46,7 @@ next:  torrential wait 9b5212
 === queued
 queued 6bc1af night_of_the_living_dead_dvd
 state: queued
-files: Night.mp4 *.srt (2 of 255, 568.8 MiB)
+files: Night.mp4 *.srt (2 of 255, 569 MiB)
 path:  /Users/ada/Movies/night_of_the_living_dead_dvd
 next:  torrential wait 6bc1af
 
@@ -181,7 +181,7 @@ path:  /Users/ada/Downloads/torrential/archlinux-2026.10.01-x86_64.iso
 === updated
 updated 6bc1af night_of_the_living_dead_dvd
 state: checking
-files: Night.mp4 *.srt (2 of 255, 568.8 MiB)
+files: Night.mp4 *.srt (2 of 255, 569 MiB)
 was:   all
 path:  /Users/ada/Movies/night_of_the_living_dead_dvd
 next:  torrential wait 6bc1af
@@ -237,9 +237,9 @@ next:  torrential wait 6bc1af
 }
 === planned in the default folder
 planned 6bc1af night_of_the_living_dead_dvd
-files:     Night.mp4 *.srt (2 of 255, 568.8 MiB)
+files:     Night.mp4 *.srt (2 of 255, 569 MiB)
 path:      /Users/ada/Movies/night_of_the_living_dead_dvd
-free:      410.0 GiB
+free:      410 GiB
 cap:       50 GiB
 conflicts: none
 next:      torrential get 6bc1af --files Night.mp4 --files '*.srt'
@@ -292,9 +292,9 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt'
 }
 === planned with conflicts
 planned 6bc1af night_of_the_living_dead_dvd
-files:     Night.mp4 *.srt (2 of 255, 568.8 MiB)
+files:     Night.mp4 *.srt (2 of 255, 569 MiB)
 path:      /Users/ada/Movies/night_of_the_living_dead_dvd
-free:      410.0 GiB
+free:      410 GiB
 cap:       50 GiB
 conflicts: 1
 # exists: /Users/ada/Movies/night_of_the_living_dead_dvd/Night.mp4
@@ -350,9 +350,9 @@ next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir <EMPTY 
 }
 === planned with --dir
 planned 6bc1af night_of_the_living_dead_dvd
-files:     Night.mp4 *.srt (2 of 255, 568.8 MiB)
+files:     Night.mp4 *.srt (2 of 255, 569 MiB)
 path:      /Users/ada/Movies/night_of_the_living_dead_dvd
-free:      410.0 GiB
+free:      410 GiB
 cap:       50 GiB
 conflicts: none
 next:      torrential get 6bc1af --files Night.mp4 --files '*.srt' --dir /Users/ada/Movies
