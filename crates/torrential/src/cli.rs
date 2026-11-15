@@ -211,7 +211,7 @@ pub struct SetupArgs {
     pub playback: Option<PlaybackArg>,
     /// How to handle new versions: show a notice, install in the background, or never check
     #[arg(long, value_enum)]
-    pub updates: Option<crate::config::Policy>,
+    pub updates: Option<torrential_daemon::config::Policy>,
 }
 
 pub const SETUP_FLAGS: &str = "torrential setup --screen phone|laptop|tv|tv-4k|auto --max-size 8GB|none --playback \
@@ -592,7 +592,7 @@ mod tests {
         let help = |command_name: &str, id: &str| arg(command_name, id).get_help().unwrap().to_string();
         let gib = |bytes: u64| format!("{} GiB", bytes >> 30);
 
-        let cap = gib(crate::daemon::admission::DEFAULT_MAX_SIZE);
+        let cap = gib(torrential_daemon::daemon::admission::DEFAULT_MAX_SIZE);
         assert!(help("get", "max_size").ends_with(&format!("or {cap}")), "{}", help("get", "max_size"));
         assert!(skill.contains(&format!("or {cap}, and with `disk_full`")), "SKILL.md names the {cap} cap");
 
@@ -600,7 +600,7 @@ mod tests {
         assert!(help("wait", "timeout").contains(&format!("Defaults to {wait}s")), "{}", help("wait", "timeout"));
         assert!(skill.contains(&format!("`wait` returns within {wait} seconds")), "SKILL.md names {wait} s");
 
-        let plays = gib(crate::config::PlaysMax::default().0);
+        let plays = gib(torrential_daemon::config::PlaysMax::default().0);
         assert!(skill.contains(&format!("once they pass {plays}")), "SKILL.md names the {plays} plays cap");
         assert!(readme.contains(&format!("capped at {plays}")), "README.md names the {plays} plays cap");
         assert!(readme.contains(&format!("default {}", plays.replace(' ', ""))), "README.md's example says {plays}");

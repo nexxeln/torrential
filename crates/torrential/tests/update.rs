@@ -8,7 +8,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 #[allow(dead_code)]
-#[path = "../src/env/hooks.rs"]
+#[path = "../../daemon/src/env/hooks.rs"]
 mod hooks;
 
 const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");

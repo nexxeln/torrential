@@ -1,26 +1,9 @@
 mod cli;
 mod client;
 mod completions;
-mod config;
-mod daemon;
-mod disk;
-mod env;
-mod exit;
-mod ffmpeg;
-mod fsutil;
-mod log;
-mod machine;
 mod output;
-mod paths;
-mod playback;
-mod player;
-mod qr;
 mod schema;
-mod selection;
-mod service;
 mod skill;
-mod update;
-mod wire;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -30,11 +13,12 @@ use clap_complete::CompleteEnv;
 use torrential_core::{Error, ErrorCode};
 
 use cli::{Cli, Command, DaemonCommand};
-use env::Env;
 use output::Mode;
 use output::theme::{Token, paint};
-use paths::Paths;
-use update::Audience;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
+use torrential_daemon::update::Audience;
+use torrential_daemon::{daemon, service};
 
 const SHORT_HELP: &str = "torrential searches torrent indexes and downloads torrents.
 
@@ -70,7 +54,7 @@ fn main() -> ExitCode {
             let json = args.iter().any(|a| a == "--json");
             let mode = Mode::detect(json, stdout_is_terminal, &env);
             client::print_error(mode, &usage_error(&e, &args));
-            return ExitCode::from(crate::exit::code(ErrorCode::Usage));
+            return ExitCode::from(torrential_daemon::exit::code(ErrorCode::Usage));
         }
     };
     let Some(command) = cli.command else {
@@ -101,7 +85,7 @@ fn engine(service: bool, http_port: Option<u16>, mode: Mode, env: &Env) -> u8 {
         Ok(_) => daemon::run(env, service, http_port),
         Err(error) => {
             client::print_error(mode, &error);
-            crate::exit::code(error.code)
+            torrential_daemon::exit::code(error.code)
         }
     }
 }

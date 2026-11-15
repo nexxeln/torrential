@@ -19,9 +19,14 @@ pub struct Files {
 }
 
 pub fn keep_matching(reply: &mut FilesReply, patterns: &[String]) -> Result<FileMatch, Error> {
-    let set = crate::selection::compile(patterns)?;
+    let set = torrential_daemon::selection::compile(patterns)?;
     let wanted = reply.files.iter().map(|f| set.is_match(&f.path)).collect();
-    let wanted = crate::selection::some_match(wanted, patterns, reply.name.as_deref().unwrap_or(&reply.id), &reply.id)?;
+    let wanted = torrential_daemon::selection::some_match(
+        wanted,
+        patterns,
+        reply.name.as_deref().unwrap_or(&reply.id),
+        &reply.id,
+    )?;
     let total_files = reply.files.len();
     let mut wanted = wanted.into_iter();
     reply.files.retain(|_| wanted.next().unwrap_or(false));

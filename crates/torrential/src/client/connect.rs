@@ -7,10 +7,10 @@ use torrential_core::protocol::{Frame, Reply, Request, Response, WIRE_VERSION, r
 use torrential_core::{Error, ErrorCode};
 
 use super::launch::{self, Blocked};
-use crate::env::Env;
-use crate::paths::Paths;
-use crate::update::Version;
-use crate::wire;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
+use torrential_daemon::update::Version;
+use torrential_daemon::wire;
 
 /// How long an engine that refuses connections, as one does while it restarts, has to answer again.
 pub const BACK_WITHIN: Duration = Duration::from_secs(30);
@@ -180,7 +180,7 @@ pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
                 if let Some(conn) = found {
                     stopped = Some(stop(conn, Stop::Asked)?);
                 }
-                if !crate::service::switching(paths, torrential_core::time::now()) {
+                if !torrential_daemon::service::switching(paths, torrential_core::time::now()) {
                     return Ok(stopped);
                 }
                 None

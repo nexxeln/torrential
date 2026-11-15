@@ -3,13 +3,13 @@ use torrential_core::Error;
 use torrential_core::time::now;
 
 use crate::cli::UpdateArgs;
-use crate::config::Policy;
-use crate::env::Env;
-use crate::fsutil::write_atomic;
 use crate::output::{self, Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::paths::Paths;
-use crate::update::release::{self, Outcome, Releases};
-use crate::update::{Audience, Checked, UPDATED, Updated, Version, due, read_json};
+use torrential_daemon::config::Policy;
+use torrential_daemon::env::Env;
+use torrential_daemon::fsutil::write_atomic;
+use torrential_daemon::paths::Paths;
+use torrential_daemon::update::release::{self, Outcome, Releases};
+use torrential_daemon::update::{Audience, Checked, UPDATED, Updated, Version, due, read_json};
 
 #[derive(Serialize)]
 struct CheckReport<'a> {
@@ -40,7 +40,7 @@ pub fn run(args: UpdateArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
     let runtime = release::runtime()?;
     let current = env.version();
     if args.check {
-        let policy = crate::config::updates(&paths)?;
+        let policy = torrential_daemon::config::updates(&paths)?;
         let latest = runtime.block_on(release::check(&releases, &paths, now()))?;
         let update_available = latest.newer_than(&current);
         let fields = vec![
@@ -72,7 +72,7 @@ pub fn run(args: UpdateArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
 }
 
 pub fn available(paths: &Paths, env: &Env) -> Option<Version> {
-    if crate::config::updates(paths).ok()? == Policy::Off {
+    if torrential_daemon::config::updates(paths).ok()? == Policy::Off {
         return None;
     }
     Checked::read(paths).newer(&env.version())
@@ -98,7 +98,7 @@ pub fn notice(paths: &Paths, env: &Env, audience: Audience, now: i64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::{DAY, HOUR};
+    use torrential_daemon::update::{DAY, HOUR};
 
     #[test]
     fn each_audience_hears_once_a_day_and_off_silences_both() {

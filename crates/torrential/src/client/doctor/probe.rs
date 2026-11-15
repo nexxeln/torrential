@@ -4,9 +4,9 @@ use torrential_search::{ResultCache, Search, SearchConfig};
 
 use super::Checked;
 use super::{Check, CheckStatus};
-use crate::config::{self, Config};
 use crate::output::format::source_outcome;
-use crate::paths::Paths;
+use torrential_daemon::config::{self, Config};
+use torrential_daemon::paths::Paths;
 
 const PROBE: &str = "linux";
 

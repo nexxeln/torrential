@@ -11,8 +11,8 @@ use torrential_core::error::Details;
 use torrential_core::{Error, ErrorCode};
 
 use super::connect::{self, Conn};
-use crate::env::{Agent, Env};
-use crate::paths::Paths;
+use torrential_daemon::env::{Agent, Env};
+use torrential_daemon::paths::Paths;
 
 const START_WITHIN: Duration = Duration::from_secs(10);
 const MAX_LOG: u64 = 10 * 1024 * 1024;
@@ -137,7 +137,7 @@ pub fn launch_stage(env: &Env) -> u8 {
         }
         Err(e) => {
             println!("{e}");
-            crate::exit::code(ErrorCode::DaemonUnavailable)
+            torrential_daemon::exit::code(ErrorCode::DaemonUnavailable)
         }
     }
 }

@@ -1728,7 +1728,6 @@ mod cast;
 mod devices;
 mod plays;
 mod titles;
-mod tui;
 mod web;
 
 #[test]

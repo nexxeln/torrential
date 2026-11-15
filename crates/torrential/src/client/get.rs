@@ -13,11 +13,11 @@ use super::emit;
 use super::rows::{next_for_stopped, rerun_get, selection, short_ids, state_cell};
 use super::{absolute, titles, wait};
 use crate::cli::{GetArgs, Until};
-use crate::env::Env;
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::paths::Paths;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
 
 pub fn run(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Result<u8, Error> {
     if args.episode.is_some() {
@@ -27,7 +27,7 @@ pub fn run(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path
         return Err(titles::for_a_title("--source"));
     }
     if !args.files.is_empty() {
-        crate::selection::compile(&args.files)?;
+        torrential_daemon::selection::compile(&args.files)?;
     }
     let dir = args.dir.map(|d| absolute(&d, cwd, env));
     let dry_run = args.dry_run;

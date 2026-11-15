@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use crate::playback::stream::{self, Start};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
 use torrential_core::Job;
@@ -13,21 +12,22 @@ use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, Tit
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
 use torrential_core::{Category, Error, ErrorCode, SearchQuery, SearchResult, Target, VideoRef};
+use torrential_daemon::playback::stream::{self, Start};
 
-use crate::playback::media;
+use torrential_daemon::playback::media;
 
 use super::connect::{self, Conn};
 use super::rows::{short_ids, short_ref};
 use super::titles::view::resuming;
 use super::{absolute, emit, file_list, titles};
 use crate::cli::PlayArgs;
-use crate::config::{self, Config};
-use crate::env::Env;
 use crate::output::format::{self, shell_word};
 use crate::output::theme::{Token, paint};
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::paths::{MAX_SOCKET_PATH, Paths};
-use crate::player::{self, Launch, Player};
+use torrential_daemon::config::{self, Config};
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::{MAX_SOCKET_PATH, Paths};
+use torrential_daemon::player::{self, Launch, Player};
 
 const TICK: Duration = Duration::from_millis(500);
 /// The countdown plans with the mean rate over this long, since the rate a moment reports swings as
@@ -197,7 +197,7 @@ pub fn open(conn: &mut Conn, player: &Player, playing: &Playing, env: &Env, path
     let [video, subtitles @ ..] = playing.reply.streams.as_slice() else {
         return Err(Error::internal("the engine streams no file to play"));
     };
-    let language = crate::machine::system_language(env);
+    let language = torrential_daemon::machine::system_language(env);
     let followed = playing.title.as_ref().filter(|_| player.says_where());
     let socket = followed.map(|_| paths.player_socket()).filter(|path| path.as_os_str().len() <= MAX_SOCKET_PATH);
     player.launch(&Launch {

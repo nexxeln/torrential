@@ -11,18 +11,18 @@ use torrential_core::Profile;
 
 use super::rows::ranked_for;
 use super::{connect, emit, launch};
-use crate::env::Env;
-use crate::ffmpeg::Tools;
-use crate::ffmpeg::fetch::{self, Fetch, Ffmpeg, Found};
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::paths::Paths;
 use crate::skill::{self, Installed, State};
+use torrential_daemon::env::Env;
+use torrential_daemon::ffmpeg::Tools;
+use torrential_daemon::ffmpeg::fetch::{self, Fetch, Ffmpeg, Found};
+use torrential_daemon::paths::Paths;
 
 pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
-    use crate::disk::{Disk, RealDisk, reserve};
     use torrential_core::units::format_size;
+    use torrential_daemon::disk::{Disk, RealDisk, reserve};
     let check = |check: Checked, status, detail: String| Check { check, status, detail };
     let mut checks = Vec::new();
     let mut fix = None;
@@ -45,8 +45,8 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
             );
         }
     };
-    let settings = crate::config::Config::load(&paths, env);
-    let downloads = crate::config::downloads_dir(settings.as_ref(), &paths);
+    let settings = torrential_daemon::config::Config::load(&paths, env);
+    let downloads = torrential_daemon::config::downloads_dir(settings.as_ref(), &paths);
     match RealDisk.space(&downloads) {
         Ok(space) => {
             let low = space.free < reserve(space.total);
@@ -55,7 +55,8 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
         }
         Err(e) => checks.push(check(Checked::Disk, CheckStatus::Fail, format!("{}: {e}", downloads.display()))),
     }
-    let state = if paths.state.exists() { crate::paths::check_state_filesystem(&paths.state) } else { Ok(()) };
+    let state =
+        if paths.state.exists() { torrential_daemon::paths::check_state_filesystem(&paths.state) } else { Ok(()) };
     match state {
         Ok(()) => checks.push(check(Checked::State, CheckStatus::Ok, paths.state.display().to_string())),
         Err(error) => checks.push(check(Checked::State, CheckStatus::Fail, error.message)),
@@ -81,7 +82,7 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
         }
         Err(error) => checks.push(check(Checked::Skill, CheckStatus::Fail, error.message)),
     }
-    let profile = match (&settings, crate::machine::detect(env)) {
+    let profile = match (&settings, torrential_daemon::machine::detect(env)) {
         (Ok(settings), Ok(machine)) => {
             profile_check(&Profile { detected: Some(machine), preferences: settings.preferences, ..Profile::default() })
         }

@@ -132,8 +132,8 @@ pub fn build(cli: &Command, version: String) -> Schema {
             .iter()
             .map(|c| ErrorSchema {
                 code: c.as_str(),
-                exit: crate::exit::code(*c),
-                retryable: crate::exit::retryable(*c),
+                exit: torrential_daemon::exit::code(*c),
+                retryable: torrential_daemon::exit::retryable(*c),
             })
             .collect(),
         fields: &FIELDS,
@@ -194,7 +194,7 @@ fn repeatable(a: &Arg) -> bool {
 }
 
 fn exit_codes() -> Vec<ExitSchema> {
-    crate::exit::MEANINGS.iter().map(|&(code, meaning)| ExitSchema { code, meaning }).collect()
+    torrential_daemon::exit::MEANINGS.iter().map(|&(code, meaning)| ExitSchema { code, meaning }).collect()
 }
 
 #[cfg(test)]

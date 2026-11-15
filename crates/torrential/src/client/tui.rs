@@ -13,12 +13,12 @@ use torrential_tui::{ColorMode, Edit, Exit};
 use super::connect::{self, Conn};
 use super::play::{self, Playing};
 use super::titles;
-use crate::config::{self, Config};
-use crate::disk::{Disk, RealDisk};
-use crate::env::Env;
-use crate::fsutil::Writes;
-use crate::paths::Paths;
-use crate::update::release::{self, Outcome, Releases};
+use torrential_daemon::config::{self, Config};
+use torrential_daemon::disk::{Disk, RealDisk};
+use torrential_daemon::env::Env;
+use torrential_daemon::fsutil::Writes;
+use torrential_daemon::paths::Paths;
+use torrential_daemon::update::release::{self, Outcome, Releases};
 
 pub fn run(env: &Env) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
@@ -131,7 +131,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn machine(&self) -> Option<Machine> {
-        crate::machine::detect(&self.env).ok()
+        torrential_daemon::machine::detect(&self.env).ok()
     }
 
     fn save_preferences(&self, edit: Edit) -> Result<Preferences, Error> {
@@ -155,7 +155,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn open(&self, folder: &Path) -> Result<(), Error> {
-        crate::player::open_url(&folder.display().to_string(), &self.env)
+        torrential_daemon::player::open_url(&folder.display().to_string(), &self.env)
     }
 
     fn home(&self) -> Result<Home, Error> {

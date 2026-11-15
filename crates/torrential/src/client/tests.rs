@@ -458,8 +458,8 @@ fn fleet() -> Vec<Job> {
             "e3a1f0",
             Some("ubuntu-24.04.5-desktop-amd64.iso"),
             JobStatus::Error {
-                error: crate::daemon::admission::check_disk(
-                    crate::disk::Space { device: 1, total: 250 * GIB, free: 3 * GIB },
+                error: torrential_daemon::daemon::admission::check_disk(
+                    torrential_daemon::disk::Space { device: 1, total: 250 * GIB, free: 3 * GIB },
                     6_345_887_744,
                     0,
                 )
@@ -756,9 +756,9 @@ fn schema_document() {
 }
 
 fn sample(code: ErrorCode) -> Error {
-    use crate::daemon::admission::{self, Plan};
-    use crate::daemon::fake;
-    use crate::disk::Space;
+    use torrential_daemon::daemon::admission::{self, Plan};
+    use torrential_daemon::daemon::fake;
+    use torrential_daemon::disk::Space;
     let film = || {
         fake::TorrentFile {
             info_hash: InfoHash::V1([0x6b; 20]),
@@ -794,18 +794,24 @@ fn sample(code: ErrorCode) -> Error {
         ErrorCode::InvalidTorrent => fake::parse(b"<html>").unwrap_err(),
         ErrorCode::NotFound => {
             let prefix = "9b52".parse().unwrap();
-            crate::daemon::resolve::prefix(&prefix, &[], &[], crate::daemon::resolve::Scope::Downloads, "pause")
-                .unwrap_err()
+            torrential_daemon::daemon::resolve::prefix(
+                &prefix,
+                &[],
+                &[],
+                torrential_daemon::daemon::resolve::Scope::Downloads,
+                "pause",
+            )
+            .unwrap_err()
         }
         ErrorCode::AmbiguousRef => {
             let results =
                 [ubuntu("e3a1f0"), Release { name: "Ubuntu 24.04.5 LTS Desktop (repack)".into(), ..ubuntu("e3a1c4") }];
             let prefix = "e3a1".parse().unwrap();
-            crate::daemon::resolve::prefix(
+            torrential_daemon::daemon::resolve::prefix(
                 &prefix,
                 &[],
                 &results,
-                crate::daemon::resolve::Scope::DownloadsAndResults,
+                torrential_daemon::daemon::resolve::Scope::DownloadsAndResults,
                 "get",
             )
             .unwrap_err()
@@ -843,7 +849,7 @@ fn sample(code: ErrorCode) -> Error {
         ),
         ErrorCode::SandboxNetworkBlocked => crate::client::launch::sandbox_error(
             crate::client::launch::Blocked::Network { signal: "CODEX_SANDBOX_NETWORK_DISABLED=1".into() },
-            &crate::env::Env::from_pairs([("CODEX_THREAD_ID", "t-1")]),
+            &torrential_daemon::env::Env::from_pairs([("CODEX_THREAD_ID", "t-1")]),
         ),
         ErrorCode::SandboxWriteBlocked => given(
             code,
@@ -852,8 +858,8 @@ fn sample(code: ErrorCode) -> Error {
         ),
         ErrorCode::DaemonUnavailable => {
             let deep = format!("/tmp/{}", "d".repeat(120));
-            crate::paths::Paths::resolve(
-                &crate::env::Env::from_pairs([("HOME", "/Users/ada"), ("TORRENTIAL_HOME", deep.as_str())]),
+            torrential_daemon::paths::Paths::resolve(
+                &torrential_daemon::env::Env::from_pairs([("HOME", "/Users/ada"), ("TORRENTIAL_HOME", deep.as_str())]),
                 501,
                 None,
             )
@@ -876,7 +882,7 @@ fn sample(code: ErrorCode) -> Error {
             admission::check_size(plan(vec![]).selected_size, admission::Cap::new(None, None), None).unwrap_err()
         }
         ErrorCode::NoSelection => {
-            crate::daemon::files::wanted(&film(), &Selection::Patterns(vec!["*.mkv".into()])).unwrap_err()
+            torrential_daemon::daemon::files::wanted(&film(), &Selection::Patterns(vec!["*.mkv".into()])).unwrap_err()
         }
         ErrorCode::StorageError => given(
             code,
@@ -896,7 +902,7 @@ fn sample(code: ErrorCode) -> Error {
         )
         .with_next("torrential resume 770e77"),
         ErrorCode::Interrupted => given(code, "interrupted", "run the command again"),
-        ErrorCode::NotPaired => crate::daemon::devices::Refused::WrongCode.error(),
+        ErrorCode::NotPaired => torrential_daemon::daemon::devices::Refused::WrongCode.error(),
         ErrorCode::LocalOnly => given(
             code,
             "only the Mac running torrential can add or remove devices",
@@ -912,8 +918,8 @@ fn every_error_class() {
     for code in ErrorCode::ALL {
         let error = sample(code);
         assert_eq!(error.code, code);
-        let exit = crate::exit::code(code);
-        assert_ne!(exit, crate::exit::PENDING);
+        let exit = torrential_daemon::exit::code(code);
+        assert_ne!(exit, torrential_daemon::exit::PENDING);
         let plain = crate::output::error(Mode::Plain, &error);
         let json = crate::output::error(Mode::Json, &error);
         assert!(plain.stdout.is_empty() && json.stderr.is_empty(), "plain errors use stderr, JSON errors stdout");
@@ -924,7 +930,7 @@ fn every_error_class() {
             serde_json::to_string_pretty(&value).unwrap()
         ));
     }
-    let limit = format!("over the {}-byte limit", crate::paths::MAX_SOCKET_PATH);
+    let limit = format!("over the {}-byte limit", torrential_daemon::paths::MAX_SOCKET_PATH);
     insta::assert_snapshot!(out.replace(&limit, "over the <max>-byte limit"));
 }
 

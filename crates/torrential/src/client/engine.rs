@@ -7,11 +7,11 @@ use torrential_core::protocol::Request;
 
 use super::{connect, emit, launch};
 use crate::cli::DaemonCommand;
-use crate::env::Env;
 use crate::output::theme::Token;
 use crate::output::{self, Body, Cell, Doc, DocKind, Mode, Typed};
-use crate::paths::Paths;
-use crate::service;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
+use torrential_daemon::service;
 
 pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
