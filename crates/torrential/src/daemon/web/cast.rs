@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use torrential_core::{CastAction, CastRequest, Error, ErrorCode, Target, VideoRef};
 
-use super::super::server::Ctx;
+use super::super::ctx::Ctx;
 
 #[derive(Deserialize)]
 pub struct Search {

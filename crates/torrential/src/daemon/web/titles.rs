@@ -13,10 +13,11 @@ use torrential_core::{
     VideoRef, Viewer, Watched,
 };
 
+use super::super::ctx::Ctx;
 use super::super::devices::Asker;
 use super::super::http::{Connection, Request};
 use super::super::owner::{Command, Finish, Shelving};
-use super::super::server::{self, Ctx};
+use super::super::titles;
 use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::{NDJSON, fail, line, number, required};
 use torrential_core::title::title_name;
@@ -37,7 +38,7 @@ pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
 /// `GET /api/title?id=`.
 pub async fn page(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     let id: TitleId = required(request, "id")?.parse()?;
-    super::value(server::title_page(ctx, id).await?)
+    super::value(titles::title_page(ctx, id).await?)
 }
 
 /// `GET /api/title/art?id=&kind=[&season=&episode=]`: a picture, which the browser keeps.
@@ -305,5 +306,5 @@ pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
 
 /// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.
 pub async fn home(ctx: &Ctx) -> Result<Value, Error> {
-    super::value(server::home(ctx).await?)
+    super::value(titles::home(ctx).await?)
 }
