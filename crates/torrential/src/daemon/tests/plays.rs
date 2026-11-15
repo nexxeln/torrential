@@ -9,7 +9,8 @@ use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, 
 use torrential_core::{ErrorCode, JobStatus, Place, Selection, Target, TorrentId};
 
 use super::super::admission::GIB;
-use super::super::engine_port::{EngineEvent, FakeTorrentFile};
+use super::super::engine_port::EngineEvent;
+use super::super::fake;
 use super::super::owner::Command;
 use super::super::owner::deleter::{Identity, PlayName, TrashPause};
 use super::super::store::{Store, Tombstone};
@@ -32,14 +33,14 @@ impl Harness {
     }
 
     /// Plays `t` from the web app's search, into a folder of its own in the plays folder.
-    async fn play_web(&self, t: &FakeTorrentFile) {
+    async fn play_web(&self, t: &fake::TorrentFile) {
         self.swarm.publish(t.clone());
         let (status, body) = post(self, "/api/play", json!({ "ref": magnet_link(t) })).await;
         assert_eq!(status, 200, "{body}");
     }
 
     /// Gets `t` into `dir`, as `torrential get --dir` does.
-    async fn get_into(&self, t: &FakeTorrentFile, dir: PathBuf) -> Result<(), torrential_core::Error> {
+    async fn get_into(&self, t: &fake::TorrentFile, dir: PathBuf) -> Result<(), torrential_core::Error> {
         let target = self.torrent_file(t);
         let request =
             GetRequest { target, dir: Some(dir), files: vec![], max_size: None, setup_max_size: None, dry_run: false };
@@ -263,10 +264,8 @@ async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder(
 async fn rm_delete_keeps_a_file_a_download_the_engine_has_not_let_go_of_writes() {
     let gate =
         Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0x34; 20])));
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { gate: Some(gate.clone()), ..Outside::default() },
-    );
+    let h =
+        Harness::with_outside(fake::Search::new(vec![]), Outside { gate: Some(gate.clone()), ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let (ours, theirs) = (torrent(0x33, "set", &[("a.bin", MIB)]), torrent(0x34, "set", &[("a.bin", 4 * GIB)]));
     let alias = h.dir.path().join("alias");
@@ -294,10 +293,8 @@ async fn rm_delete_keeps_a_file_a_download_the_engine_has_not_let_go_of_writes()
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names_after() {
     let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { gate: Some(gate.clone()), ..Outside::default() },
-    );
+    let h =
+        Harness::with_outside(fake::Search::new(vec![]), Outside { gate: Some(gate.clone()), ..Outside::default() });
     let iso = torrent(0x41, "iso", &[("disc.iso", 4 * GIB)]);
     h.swarm.publish(iso.clone());
     h.get_into(&iso, h.downloads()).await.unwrap();
@@ -336,10 +333,7 @@ async fn saving_a_title_while_its_play_leaves_the_plays_folder_keeps_the_play_an
 
 #[tokio::test(flavor = "multi_thread")]
 async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_and_still_keeps_it() {
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { plays_max: 3 * GIB, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { plays_max: 3 * GIB, ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let mine = torrent(0x61, "mine", &[("mine.mp4", 2 * GIB)]);
     h.play_web(&mine).await;
@@ -362,10 +356,7 @@ async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_an
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_whose_file_is_handed_to_a_stream_stays_until_the_stream_ends() {
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { plays_max: 3 * GIB, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { plays_max: 3 * GIB, ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let older = torrent(0x71, "older", &[("older.mp4", 2 * GIB)]);
     h.play_web(&older).await;
@@ -386,7 +377,7 @@ async fn a_play_whose_file_is_handed_to_a_stream_stays_until_the_stream_ends() {
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_all_starts_the_idle_clock_again_for_the_plays_it_resumes() {
     let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
+        fake::Search::new(vec![]),
         Outside { idle_after: Duration::from_secs(3), ..Outside::default() },
     );
     h.swarm.set_rate(20 * MIB);
@@ -407,10 +398,7 @@ async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_go
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { plays_max: 4 * MIB, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { plays_max: 4 * MIB, ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let stuck = torrent(0x91, "stuck", &[("stuck.mp4", 3 * MIB)]);
     h.play_web(&stuck).await;
@@ -440,10 +428,7 @@ async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_go
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_play_on_a_full_disk_starts_once_older_plays_make_room() {
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { plays_max: 3 * GIB, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { plays_max: 3 * GIB, ..Outside::default() });
     h.swarm.set_rate(2 * GIB);
     let older = torrent(0xb1, "older", &[("older.mp4", 8 * GIB)]);
     h.play_web(&older).await;
@@ -484,10 +469,8 @@ async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_tr
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_put_in_place_of_one_rm_delete_was_asked_for_stays_and_does_not_go_to_the_trash() {
     let gate = Gate::holding(|event| matches!(event, EngineEvent::Removed { .. }));
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { gate: Some(gate.clone()), ..Outside::default() },
-    );
+    let h =
+        Harness::with_outside(fake::Search::new(vec![]), Outside { gate: Some(gate.clone()), ..Outside::default() });
     let iso = torrent(0x42, "iso", &[("disc.iso", 4 * GIB), ("notes.txt", 2)]);
     h.swarm.publish(iso.clone());
     h.get_into(&iso, h.downloads()).await.unwrap();
@@ -571,10 +554,8 @@ async fn plays_in_a_plays_folder_replaced_while_the_engine_was_stopped_stop_and_
 async fn rm_delete_keeps_a_file_that_a_finished_download_the_engine_has_not_let_go_of_writes() {
     let gate =
         Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0x38; 20])));
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { gate: Some(gate.clone()), ..Outside::default() },
-    );
+    let h =
+        Harness::with_outside(fake::Search::new(vec![]), Outside { gate: Some(gate.clone()), ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let (ours, theirs) = (torrent(0x37, "set", &[("a.bin", MIB)]), torrent(0x38, "set", &[("a.bin", MIB)]));
     let alias = h.dir.path().join("alias");
@@ -618,10 +599,7 @@ async fn get_on_a_play_again_notes_that_it_is_the_persons_when_the_first_get_cou
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_too_large_to_get_is_refused_before_any_play_leaves_for_it() {
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { plays_max: 3 * GIB, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { plays_max: 3 * GIB, ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let older = torrent(0xb5, "older", &[("older.mp4", 2 * GIB)]);
     h.play_web(&older).await;
@@ -641,10 +619,7 @@ async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_ca
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { plays_max: 3 * GIB, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { plays_max: 3 * GIB, ..Outside::default() });
     h.swarm.set_rate(2 * GIB);
     let older = torrent(0xb7, "older", &[("older.mp4", 8 * GIB)]);
     h.play_web(&older).await;
@@ -672,10 +647,7 @@ async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to
         std::fs::write(&draft, "the person's own notes").unwrap();
         std::fs::rename(&draft, file).unwrap();
     });
-    let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
-        Outside { trash_pause: save, ..Outside::default() },
-    );
+    let h = Harness::with_outside(fake::Search::new(vec![]), Outside { trash_pause: save, ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     let set = torrent(0xc7, "set", &[("notes.txt", MIB)]);
     h.get(h.torrent_file(&set), &[]).await.unwrap();
@@ -726,7 +698,7 @@ async fn older_play_leaving() -> Harness {
     let gate =
         Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0xe7; 20])));
     let h = Harness::with_outside(
-        super::search_port::Fake::new(vec![]),
+        fake::Search::new(vec![]),
         Outside { plays_max: 3 * GIB, gate: Some(gate.clone()), ..Outside::default() },
     );
     h.swarm.set_rate(2 * GIB);

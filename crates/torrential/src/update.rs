@@ -14,7 +14,7 @@ use torrential_core::time::now;
 use torrential_core::{Error, ErrorCode};
 
 use crate::config::Policy;
-use crate::env::Env;
+use crate::env::{Env, hooks};
 use crate::fsutil::{Writes, sha256, write_atomic};
 use crate::log::log;
 use crate::output::Mode;
@@ -133,15 +133,10 @@ pub struct Releases {
 }
 
 impl Releases {
-    /// `TORRENTIAL_TEST_RELEASES` replaces the GitHub releases URL, so a test can serve releases
-    /// from its own server. A test engine, which has `TORRENTIAL_TEST_NETWORK` or
-    /// `TORRENTIAL_TEST_ENGINE` set, never looks for releases without it.
+    /// The GitHub releases. A test reads releases only from the server it names in `RELEASES`.
     pub fn from_env(env: &Env) -> Option<Releases> {
-        let base = match env.var("TORRENTIAL_TEST_RELEASES") {
-            Some(url) => url,
-            None if env.var("TORRENTIAL_TEST_NETWORK").is_some() || env.var("TORRENTIAL_TEST_ENGINE").is_some() => {
-                return None;
-            }
+        let base = match env.test() {
+            Some(test) => test.var(hooks::RELEASES)?,
             None => RELEASES,
         };
         Some(Releases { base: base.trim_end_matches('/').to_string() })
@@ -150,7 +145,7 @@ impl Releases {
     pub fn required(env: &Env) -> Result<Releases, Error> {
         Releases::from_env(env).ok_or_else(|| {
             Error::new(ErrorCode::NetworkUnavailable, "this test environment does not look for releases")
-                .with_hint("set TORRENTIAL_TEST_RELEASES to a release server")
+                .with_hint(format!("set {} to a release server", hooks::RELEASES))
         })
     }
 
@@ -431,10 +426,9 @@ async fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> 
         Paths::resolve(&env.clone().with("TORRENTIAL_HOME", &home.0.display().to_string()), crate::paths::uid(), None)?;
     let mut engine = Reaped(
         Command::new(binary)
-            .args(["daemon", "run"])
+            .args(["daemon", "run", "--http-port", "0"])
             .env("HOME", &home.0)
             .env("TORRENTIAL_HOME", &home.0)
-            .env("TORRENTIAL_TEST_HTTP_PORT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -838,11 +832,13 @@ mod tests {
     #[test]
     fn a_test_engine_looks_for_releases_only_where_the_test_points_it() {
         let base = |pairs: &[(&str, &str)]| Releases::from_env(&Env::from_pairs(pairs.iter().copied())).map(|r| r.base);
-        let local = ("TORRENTIAL_TEST_RELEASES", "http://127.0.0.1:8080/");
-        assert_eq!(base(&[]).as_deref(), Some("https://github.com/nexxeln/torrential/releases"));
-        assert_eq!(base(&[("TORRENTIAL_TEST_NETWORK", "loopback")]), None);
-        assert_eq!(base(&[("TORRENTIAL_TEST_ENGINE", "fake")]), None);
-        assert_eq!(base(&[("TORRENTIAL_TEST_NETWORK", "loopback"), local]).as_deref(), Some("http://127.0.0.1:8080"));
+        let local = (hooks::RELEASES, "http://127.0.0.1:8080/");
+        let github = Some("https://github.com/nexxeln/torrential/releases");
+        assert_eq!(base(&[]).as_deref(), github);
+        assert_eq!(base(&[local]).as_deref(), github, "only a test process reads it");
+        assert_eq!(base(&[(hooks::NETWORK, "loopback")]), None);
+        assert_eq!(base(&[(hooks::ENGINE, "fake")]), None);
+        assert_eq!(base(&[(hooks::NETWORK, "loopback"), local]).as_deref(), Some("http://127.0.0.1:8080"));
     }
 
     #[test]

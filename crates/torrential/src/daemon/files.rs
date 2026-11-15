@@ -65,11 +65,11 @@ pub fn risks(metainfo: &Metainfo) -> Vec<Option<FileRisk>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::engine_port::FakeTorrentFile;
+    use crate::daemon::fake;
     use torrential_core::ErrorCode;
 
     fn film() -> Metainfo {
-        FakeTorrentFile {
+        fake::TorrentFile {
             info_hash: InfoHash::V1([0x6b; 20]),
             name: "night_of_the_living_dead_dvd".into(),
             files: vec![
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn a_path_as_the_file_list_shows_it_picks_the_file() {
-        let odd = FakeTorrentFile {
+        let odd = fake::TorrentFile {
             info_hash: InfoHash::V1([0x6c; 20]),
             name: "show".into(),
             files: vec![("Ep  01\u{202e}.mkv".into(), 10), ("Ep 02.mkv".into(), 10)],
@@ -127,7 +127,7 @@ mod tests {
     fn a_download_writes_at_its_folder_or_single_file_and_to_the_parts_file_named_by_its_best_hash() {
         let torrent = |info_hash, name: &str, files: &[&str]| {
             let files = files.iter().map(|path| (path.to_string(), 1_000)).collect();
-            FakeTorrentFile { info_hash, name: name.into(), files }.metainfo().unwrap()
+            fake::TorrentFile { info_hash, name: name.into(), files }.metainfo().unwrap()
         };
         let dir = Path::new("/d");
         let pack = torrent(InfoHash::V1([0xab; 20]), "Pack", &["a.mkv", "extras/b.mkv", "c.nfo"]);
@@ -152,7 +152,7 @@ mod tests {
                 PathBuf::from("/d/night_of_the_living_dead_dvd/extras/VTS_01_1.MP4")
             ]
         );
-        let iso = FakeTorrentFile {
+        let iso = fake::TorrentFile {
             info_hash: InfoHash::V1([1; 20]),
             name: "a.iso".into(),
             files: vec![("a.iso".into(), 5)],

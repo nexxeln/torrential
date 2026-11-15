@@ -164,7 +164,6 @@ fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: 
     };
     let ctx = ctx.clone();
     tokio::spawn(async move {
-        ctx.owner.tell(Command::Connected);
         let _ = stream.set_nodelay(true);
         let (rd, wr) = stream.into_split();
         let connection =
@@ -178,7 +177,6 @@ fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: 
                 Ok(()) = closed => {}
             },
         }
-        ctx.owner.tell(Command::Disconnected { keep_until: None });
     });
 }
 

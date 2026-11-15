@@ -17,7 +17,7 @@ use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode
 
 use super::super::cast::Find;
 use super::super::devices::names::Names;
-use super::super::search_port::{self, FakeSource};
+use super::super::fake;
 use super::devices::listening;
 use super::titles::listed;
 use super::web::{magnet_link, post};
@@ -466,7 +466,7 @@ async fn lie(mut stream: TcpStream, count: Arc<Count>, elsewhere: SocketAddr) {
     count.open.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn harness(tv: &FakeTv, search: search_port::Fake) -> Harness {
+fn harness(tv: &FakeTv, search: fake::Search) -> Harness {
     Harness::with_outside(search, Outside { tvs: Find::At(tv.ssdp), ..Outside::default() })
 }
 
@@ -528,7 +528,7 @@ fn kept(h: &Harness) -> Option<(f64, Option<f64>)> {
 async fn a_cast_plays_a_download_on_the_tv_through_its_grant_and_the_grant_ends_with_it() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(80, "Night", &[("Night.mkv", 4 * MIB), ("Night.srt", 1_000)]);
     let bytes = written(&h.downloads().join("Night/Night.mkv"), 4 * MIB);
     written(&h.downloads().join("Night/Night.srt"), 1_000);
@@ -621,7 +621,7 @@ async fn a_cast_plays_a_download_on_the_tv_through_its_grant_and_the_grant_ends_
 async fn a_cast_stopped_on_the_tv_ends_and_keeps_where_it_stopped() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(81, "Night", &[("Night.mp4", 2 * MIB)]);
     written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
     h.swarm.set_rate(100 * GIB);
@@ -645,7 +645,7 @@ async fn a_cast_stopped_on_the_tv_ends_and_keeps_where_it_stopped() {
 async fn a_cast_that_resumes_shows_where_it_resumes_while_the_tv_seeks_there() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(89, "Night", &[("Night.mp4", 2 * MIB)]);
     written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
     h.swarm.set_rate(100 * GIB);
@@ -684,7 +684,7 @@ async fn a_title_play_while_a_cast_plays_resumes_where_the_tv_last_was() {
     let tv = FakeTv::start(ip, SINK).await;
     let film = torrent(0xb8, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
     let catalog = vec![listed(&film, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let h = harness(&tv, search);
     h.swarm.publish(film.clone());
     h.swarm.set_rate(100 * GIB);
@@ -709,7 +709,7 @@ async fn a_title_play_while_a_cast_plays_resumes_where_the_tv_last_was() {
 async fn a_video_in_a_container_the_tv_does_not_take_is_refused_before_it_downloads() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, "http-get:*:video/mp4:*").await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(82, "Night", &[("Night.avi", 2 * MIB)]);
     let error = cast(&h, by_hand(h.torrent_file(&film))).await.unwrap_err();
     assert_eq!(
@@ -731,7 +731,7 @@ async fn a_title_cast_passes_over_a_source_the_tv_cannot_play_and_plays_the_next
     let avi = torrent(0xb1, "Night.of.the.Living.Dead.1968.DVDRip.XviD", &[("Night.1968.avi", 700 * MIB)]);
     let mkv = torrent(0xb2, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
     let catalog = vec![listed(&avi, "knaben", Some(90)), listed(&mkv, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let h = harness(&tv, search);
     for t in [&avi, &mkv] {
         h.swarm.publish(t.clone());
@@ -755,7 +755,7 @@ async fn a_cast_holds_off_an_update_while_it_finds_its_source_and_none_starts_wh
     // Nothing seeds the only source, so the cast goes on finding it.
     let mkv = torrent(0xb5, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
     let catalog = vec![listed(&mkv, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let h = harness(&tv, search);
     let playing = &h.running.ctx.playing;
 
@@ -783,7 +783,7 @@ async fn a_title_cast_passes_over_a_download_here_the_tv_cannot_decode_though_ff
     let hevc = torrent(0xb3, "Night.of.the.Living.Dead.1968.2160p.UHD.HEVC", &[("Night.1968.2160p.mkv", 2 * MIB)]);
     let avc = torrent(0xb4, "Night.of.the.Living.Dead.1968.1080p.x264", &[("Night.1968.1080p.mkv", 2 * MIB)]);
     let catalog = vec![listed(&avc, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let h = harness(&tv, search);
     for t in [&hevc, &avc] {
         h.swarm.publish(t.clone());
@@ -823,7 +823,7 @@ async fn a_device_that_sends_the_engine_to_loopback_or_another_host_is_never_fol
     })
     .await;
     let h = Harness::with_outside(
-        search_port::Fake::new(Vec::new()),
+        fake::Search::new(Vec::new()),
         Outside { tvs: Find::At(liar.ssdp), ..Outside::default() },
     );
 
@@ -852,7 +852,7 @@ async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_
     })
     .await;
     let h = Harness::with_outside(
-        search_port::Fake::new(Vec::new()),
+        fake::Search::new(Vec::new()),
         Outside { tvs: Find::At(liar.ssdp), ..Outside::default() },
     );
 
@@ -875,7 +875,7 @@ async fn a_flood_of_answers_and_huge_descriptions_cannot_crowd_out_a_tv_or_fill_
 async fn a_tv_that_stops_while_it_fails_to_say_where_it_is_ends_the_cast_and_its_grant() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(83, "Night", &[("Night.mp4", 2 * MIB)]);
     written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
     h.swarm.set_rate(100 * GIB);
@@ -904,7 +904,7 @@ async fn a_tv_that_stops_while_it_fails_to_say_where_it_is_ends_the_cast_and_its
 async fn a_cast_that_takes_the_tv_waits_until_the_one_before_lets_go() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(84, "Night", &[("Night.mkv", 2 * MIB), ("Extra.mkv", 2 * MIB)]);
     written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
     written(&h.downloads().join("Night/Extra.mkv"), 2 * MIB);
@@ -941,7 +941,7 @@ async fn a_cast_that_takes_the_tv_waits_until_the_one_before_lets_go() {
 async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(85, "Night", &[("Night.mp4", 2 * MIB)]);
     written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
     h.swarm.set_rate(100 * GIB);
@@ -959,7 +959,7 @@ async fn a_tv_that_hangs_up_on_the_new_video_is_never_told_to_play() {
 async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
-    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(86, "Night", &[("Night.mkv", 2 * MIB)]);
     written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
     h.swarm.set_rate(100 * GIB);
@@ -996,7 +996,7 @@ async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
     let Some(ip) = lan() else { return };
     let tv = FakeTv::start(ip, SINK).await;
     let h = Harness::with_outside(
-        search_port::Fake::new(Vec::new()),
+        fake::Search::new(Vec::new()),
         Outside { tvs: Find::At(tv.ssdp), plays_max: 3 * GIB, ..Outside::default() },
     );
     h.swarm.set_rate(100 * GIB);
@@ -1035,7 +1035,7 @@ async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest
     let x265 = torrent(0xb6, "Night.of.the.Living.Dead.1968.1080p.x265", &[("Night.1968.1080p.mkv", 2 * MIB)]);
     let dead = torrent(0xb7, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
     let catalog = vec![listed(&x265, "knaben", Some(90)), listed(&dead, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let h = harness(&tv, search);
     // No peer has the H.264 source, so it never sends its file list.
     for t in [&here, &x265] {

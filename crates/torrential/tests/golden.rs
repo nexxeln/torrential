@@ -10,6 +10,10 @@ use std::time::Duration;
 use assert_cmd::Command;
 use serde_json::{Map, Value, json};
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 const MAC: &str =
     r#"{"os": "macos", "display": {"width": 3024, "height": 1964, "hdr": true}, "arch": "arm64", "language": "en"}"#;
 
@@ -73,15 +77,14 @@ impl Home {
         let vars = vec![
             ("HOME", dir.path().display().to_string()),
             ("TORRENTIAL_HOME", dir.path().join("th").display().to_string()),
-            ("TORRENTIAL_TEST_ENGINE", "fake".to_string()),
-            ("TORRENTIAL_TEST_FAKE_RATE", "0".to_string()),
-            ("TORRENTIAL_TEST_TITLE_WAIT", "1s".to_string()),
-            ("TORRENTIAL_TEST_IDLE_TIMEOUT", "60s".to_string()),
-            ("TORRENTIAL_TEST_NETWORK", "loopback".to_string()),
-            ("TORRENTIAL_TEST_MACHINE", MAC.to_string()),
-            ("TORRENTIAL_TEST_HTTP_PORT", "0".to_string()),
-            ("TORRENTIAL_TEST_SSDP", "127.0.0.1:9".to_string()),
-            ("TORRENTIAL_TEST_OPENER", "/usr/bin/true".to_string()),
+            (hooks::ENGINE, "fake".to_string()),
+            (hooks::FAKE_RATE, "0".to_string()),
+            (hooks::TITLE_WAIT, "1s".to_string()),
+            (hooks::NETWORK, "loopback".to_string()),
+            (hooks::MACHINE, MAC.to_string()),
+            (hooks::HTTP_PORT, "0".to_string()),
+            (hooks::SSDP, "127.0.0.1:9".to_string()),
+            (hooks::OPENER, "/usr/bin/true".to_string()),
             ("NO_COLOR", "1".to_string()),
             ("PATH", bin.display().to_string()),
         ];
@@ -90,7 +93,7 @@ impl Home {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_torrential"));
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "TORRENTIAL_TEST_VERSION"] {
+        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::VERSION] {
             cmd.env_remove(key);
         }
         cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str())));

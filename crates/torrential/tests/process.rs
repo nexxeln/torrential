@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use torrential_core::protocol::WIRE_VERSION;
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 const ARCH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 
 struct Home {
@@ -30,9 +34,8 @@ impl Home {
         let mut all = vec![
             ("HOME", dir.path().display().to_string()),
             ("TORRENTIAL_HOME", dir.path().join("th").display().to_string()),
-            ("TORRENTIAL_TEST_IDLE_TIMEOUT", "30s".to_string()),
-            ("TORRENTIAL_TEST_NETWORK", "loopback".to_string()),
-            ("TORRENTIAL_TEST_MACHINE", MAC.to_string()),
+            (hooks::NETWORK, "loopback".to_string()),
+            (hooks::MACHINE, MAC.to_string()),
         ];
         all.extend(vars.iter().map(|(k, v)| (*k, v.to_string())));
         Self { dir, vars: all }
@@ -55,13 +58,7 @@ impl Home {
 
     fn process(&self, args: &[&str]) -> std::process::Command {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_torrential"));
-        for key in [
-            "CODEX_SANDBOX_NETWORK_DISABLED",
-            "CODEX_THREAD_ID",
-            "CODEX_CI",
-            "TORRENTIAL_TEST_VERSION",
-            "TORRENTIAL_TEST_ENGINE",
-        ] {
+        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::VERSION, hooks::ENGINE] {
             cmd.env_remove(key);
         }
         cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str())));
@@ -143,11 +140,11 @@ fn concurrent_clients_share_one_engine() {
 
 #[test]
 fn a_version_mismatch_restarts_the_engine() {
-    let mut home = Home::with(&[("TORRENTIAL_TEST_VERSION", "0.0.1-old")]);
+    let mut home = Home::with(&[(hooks::VERSION, "0.0.1-old")]);
     assert_eq!(home.run(&["status"]).code, 0);
     let (old_pid, old_version) = home.engine().unwrap();
     assert_eq!(old_version, "0.0.1-old");
-    home.unset("TORRENTIAL_TEST_VERSION");
+    home.unset(hooks::VERSION);
     let run = home.run(&["status"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     let (new_pid, new_version) = home.engine().unwrap();
@@ -173,10 +170,10 @@ fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json:
 
 #[test]
 fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves_it_running() {
-    let mut home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
+    let mut home = Home::with(&[(hooks::VERSION, "9.0.0")]);
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
-    home.unset("TORRENTIAL_TEST_VERSION");
+    home.unset(hooks::VERSION);
 
     let runs = [home.run(&["status"]), home.run(&["status"])];
 
@@ -192,7 +189,7 @@ fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves
 #[test]
 fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_running() {
     use std::io::Write;
-    let home = Home::with(&[("TORRENTIAL_TEST_VERSION", "9.0.0")]);
+    let home = Home::with(&[(hooks::VERSION, "9.0.0")]);
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
 
@@ -217,10 +214,10 @@ fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film
     use std::io::{Read, Write};
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
     let mut home = Home::with(&[
-        ("TORRENTIAL_TEST_ENGINE", "fake"),
-        ("TORRENTIAL_TEST_FAKE_RATE", "0"),
-        ("TORRENTIAL_TEST_HTTP_PORT", &port),
-        ("TORRENTIAL_TEST_VERSION", "0.1.0"),
+        (hooks::ENGINE, "fake"),
+        (hooks::FAKE_RATE, "0"),
+        (hooks::HTTP_PORT, &port),
+        (hooks::VERSION, "0.1.0"),
     ]);
     let jobs: serde_json::Value = serde_json::from_str(&home.run(&["status", "--json"]).stdout).unwrap();
     let jobs = jobs["jobs"].as_array().unwrap();
@@ -238,7 +235,7 @@ fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film
     read_frame(&mut newer).unwrap();
     newer.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
     let answer = read_frame(&mut newer).unwrap();
-    home.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    home.set(hooks::VERSION, "0.1.1");
     let during = home.run(&["status", "--json"]);
     let kept = home.engine();
     drop(player);
@@ -407,17 +404,6 @@ fn the_engine_holds_no_descriptor_its_client_inherited() {
     );
 }
 
-#[test]
-fn the_engine_exits_after_its_idle_timeout() {
-    let mut home = Home::new();
-    home.set("TORRENTIAL_TEST_IDLE_TIMEOUT", "1s");
-    assert_eq!(home.run(&["status"]).code, 0);
-    let (pid, _) = home.engine().unwrap();
-    eventually("the idle engine exits", Duration::from_secs(10), || !alive(pid));
-    assert!(!home.dir.path().join("th/run/engine.sock").exists(), "the socket was removed");
-    assert!(std::fs::read_to_string(home.state().join("engine.log")).unwrap().contains("engine stopped"));
-}
-
 /// A default-home engine with stand-ins for launchctl and systemctl, which record how they were
 /// called, and the paths of its login service.
 struct Service {
@@ -428,8 +414,7 @@ struct Service {
 
 impl Service {
     fn new() -> Self {
-        let mut home =
-            Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0"), ("CLAUDECODE", "1")]);
+        let mut home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::HTTP_PORT, "0"), ("CLAUDECODE", "1")]);
         let dir = home.dir.path().to_path_buf();
         home.unset("TORRENTIAL_HOME");
         for (var, folder) in [
@@ -447,7 +432,7 @@ impl Service {
             std::fs::write(bin.join(program), script).unwrap();
             std::fs::set_permissions(bin.join(program), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         }
-        home.set("TORRENTIAL_TEST_SERVICE_BIN", &bin.display().to_string());
+        home.set(hooks::SERVICE_BIN, &bin.display().to_string());
         let unit = if cfg!(target_os = "macos") {
             dir.join("Library/LaunchAgents/dev.torrential.engine.plist")
         } else {
@@ -577,7 +562,7 @@ fn magnet(size: u64) -> String {
 
 #[test]
 fn wait_times_out_with_exit_8_while_the_download_runs() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     let get = home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]);
     assert_eq!(get.code, 0, "{}", get.stderr);
     assert!(get.stdout.starts_with("started 9b5212"), "{}", get.stdout);
@@ -597,7 +582,7 @@ fn wait_times_out_with_exit_8_while_the_download_runs() {
 
 #[test]
 fn wait_ends_soon_after_the_engine_is_stopped() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let wait = home
         .process(&["wait", "9b5212", "--timeout", "60s"])
@@ -620,7 +605,7 @@ fn wait_ends_soon_after_the_engine_is_stopped() {
 
 #[test]
 fn wait_follows_a_download_again_when_the_engine_comes_back() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let (pid, _) = home.engine().unwrap();
     let wait = home
@@ -645,11 +630,7 @@ fn wait_follows_a_download_again_when_the_engine_comes_back() {
 
 #[test]
 fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrential() {
-    let mut home = Home::with(&[
-        ("TORRENTIAL_TEST_ENGINE", "fake"),
-        ("TORRENTIAL_TEST_FAKE_RATE", "1MiB"),
-        ("TORRENTIAL_TEST_VERSION", "0.1.0"),
-    ]);
+    let mut home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB"), (hooks::VERSION, "0.1.0")]);
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let (pid, _) = home.engine().unwrap();
     let wait = home
@@ -662,7 +643,7 @@ fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrentia
 
     unsafe { libc::kill(pid, libc::SIGKILL) };
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    home.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    home.set(hooks::VERSION, "0.1.1");
     assert_eq!(home.run(&["status"]).code, 0);
     let wait = wait.wait_with_output().unwrap();
 
@@ -674,7 +655,7 @@ fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrentia
 
 #[test]
 fn search_get_and_wait_rechecks_a_completed_download() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "100GiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "100GiB")]);
     let search = home.run(&["search", "arch", "linux"]);
     assert_eq!(search.code, 0, "{}", search.stderr);
     assert_eq!(search.stdout.lines().nth(1).unwrap().split('\t').next(), Some("9b5212"));
@@ -714,7 +695,7 @@ fn portless(text: &str) -> String {
 
 #[test]
 fn play_json_names_the_video_and_its_subtitles_and_opens_nothing() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     assert_eq!(home.run(&["search", "night", "of", "the", "living", "dead"]).code, 0);
     let doc = home.json(&["play", "4c1e9a", "--json"]);
     let streams: Vec<(u64, String, u64, String)> = doc["streams"]
@@ -755,7 +736,7 @@ fn play_json_names_the_video_and_its_subtitles_and_opens_nothing() {
 
 #[test]
 fn play_searches_for_words_and_for_an_id_that_names_nothing() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     for words in [&["night", "of", "the", "living", "dead"][..], &["dead"]] {
         let doc = home.json(&[&["play"], words, &["--json"]].concat());
         assert_eq!(
@@ -777,7 +758,7 @@ fn play_searches_for_words_and_for_an_id_that_names_nothing() {
 
 #[test]
 fn play_refuses_a_torrent_without_a_video() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake")]);
     assert_eq!(home.run(&["search", "night", "of", "the", "living", "dead"]).code, 0);
     let run = home.run(&["play", "c48e01"]);
     assert_eq!(
@@ -792,7 +773,7 @@ fn play_refuses_a_torrent_without_a_video() {
 
 #[test]
 fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language() {
-    let mut home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let mut home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     let bin = home.dir.path().join("bin");
     let argv = home.dir.path().join("argv");
     std::fs::create_dir_all(&bin).unwrap();
@@ -828,7 +809,7 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
 
 #[test]
 fn a_killed_engine_comes_back_with_the_download_running() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_FAKE_RATE", "1MiB")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::FAKE_RATE, "1MiB")]);
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let (pid, _) = home.engine().unwrap();
     unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -844,7 +825,7 @@ fn a_killed_engine_comes_back_with_the_download_running() {
 #[test]
 fn a_new_engine_keeps_its_state_where_only_its_user_can_change_it() {
     use std::os::unix::fs::PermissionsExt;
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake")]);
     assert_eq!(home.run(&["status"]).code, 0);
     let state = std::fs::metadata(home.dir.path().join("th/state")).unwrap();
     assert_eq!(state.permissions().mode() & 0o777, 0o700);
@@ -853,7 +834,7 @@ fn a_new_engine_keeps_its_state_where_only_its_user_can_change_it() {
 
 #[test]
 fn a_new_fake_installation_starts_with_downloads_that_survive_a_restart() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake")]);
     let states = || {
         let run = home.run(&["status", "--json"]);
         let doc: serde_json::Value = serde_json::from_str(&run.stdout).unwrap();
@@ -1095,7 +1076,7 @@ fn fake_torrent(name: &str, size: u64) -> Vec<u8> {
 
 #[test]
 fn get_takes_its_size_cap_from_setup_unless_max_size_is_passed() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake")]);
     let file = home.dir.path().join("night.torrent");
     std::fs::write(&file, fake_torrent("night-of-the-living-dead-2160p.mkv", 3 << 30)).unwrap();
     let file = file.display().to_string();
@@ -1116,7 +1097,7 @@ fn get_takes_its_size_cap_from_setup_unless_max_size_is_passed() {
 
 #[test]
 fn errors_name_a_reference_by_its_hash_or_kind_never_its_url() {
-    let home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake")]);
+    let home = Home::with(&[(hooks::ENGINE, "fake")]);
     let hash = "ab".repeat(20);
     let magnet = format!("magnet:?xt=urn:btih:{hash}&tr=https%3A%2F%2Fprivate.example%2Fannounce%2Fs3cret");
 
@@ -1155,12 +1136,12 @@ fn errors_name_a_reference_by_its_hash_or_kind_never_its_url() {
 fn web_prints_the_address_of_the_web_app_and_opens_it_unless_told_not_to() {
     use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
-    let mut home = Home::with(&[("TORRENTIAL_TEST_ENGINE", "fake"), ("TORRENTIAL_TEST_HTTP_PORT", "0")]);
+    let mut home = Home::with(&[(hooks::ENGINE, "fake"), (hooks::HTTP_PORT, "0")]);
     // Stands in for the browser, and records the address it was asked to open.
     let (opener, opened) = (home.dir.path().join("opener"), home.dir.path().join("opened"));
     std::fs::write(&opener, format!("#!/bin/sh\necho \"$1\" > '{}'\n", opened.display())).unwrap();
     std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
-    home.set("TORRENTIAL_TEST_OPENER", &opener.display().to_string());
+    home.set(hooks::OPENER, &opener.display().to_string());
 
     let json = home.run(&["web", "--json"]);
     assert_eq!(json.code, 0, "{}", json.stderr);
@@ -1187,25 +1168,4 @@ fn web_prints_the_address_of_the_web_app_and_opens_it_unless_told_not_to() {
     page.read_to_string(&mut answer).unwrap();
     assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
     assert!(answer.contains("\r\n\r\n{\"jobs\":["), "{answer}");
-}
-
-#[test]
-fn an_open_page_keeps_the_engine_running_and_a_closed_one_lets_it_exit() {
-    use std::io::{Read, Write};
-    let mut home = Home::with(&[("TORRENTIAL_TEST_HTTP_PORT", "0")]);
-    home.set("TORRENTIAL_TEST_IDLE_TIMEOUT", "1s");
-    let json = home.run(&["web", "--json"]);
-    let doc: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
-    let port: u16 = doc["url"].as_str().unwrap().rsplit(':').next().unwrap().parse().unwrap();
-    let (pid, _) = home.engine().unwrap();
-    // The page follows downloads for as long as it is open.
-    let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    page.write_all(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
-    let mut head = [0; 15];
-    page.read_exact(&mut head).unwrap();
-    assert_eq!(&head, b"HTTP/1.1 200 OK");
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(alive(pid), "the engine exited under an open page");
-    drop(page);
-    eventually("the idle engine exits", Duration::from_secs(10), || !alive(pid));
 }

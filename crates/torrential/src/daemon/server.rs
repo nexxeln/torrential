@@ -571,9 +571,7 @@ pub(super) async fn listed(ctx: &Ctx, info: &FilesInfo) -> Vec<TorrentFile> {
 }
 
 pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
-    ctx.owner.tell(Command::Connected);
     let _ = serve(&ctx, stream).await;
-    ctx.owner.tell(Command::Disconnected { keep_until: ctx.search.answers_expire() });
 }
 
 async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {

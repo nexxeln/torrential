@@ -14,16 +14,16 @@ use torrential_core::{
 };
 
 use super::super::admission::GIB;
-use super::super::engine_port::{EngineEvent, Fake as FakeEngine, FakeTorrentFile, Swarm, parse_fake};
+use super::super::engine_port::EngineEvent;
+use super::super::fake::{self, Swarm};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
-use super::super::search_port::{self, FakeSource};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::super::titles::{Timing, catalog_port};
 use super::{Gate, Gated, Harness, MIB, Outside, TIMING, prefix, torrent};
 
 /// A search result for a test torrent, listed by `source`.
-pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) -> Release {
+pub(super) fn listed(t: &fake::TorrentFile, source: &str, seeders: Option<u32>) -> Release {
     let hex = t.info_hash.id().to_hex();
     Release {
         id: ReleaseId::Torrent(t.info_hash.id()),
@@ -47,12 +47,12 @@ pub(super) fn listed(t: &FakeTorrentFile, source: &str, seeders: Option<u32>) ->
 /// Four releases of Night of the Living Dead (1968), in the order the search lists them. The
 /// first never sends its file list, the second holds no video, no peer has any piece of the
 /// third, and the fourth plays. The search also finds the 1990 remake, which is not this film.
-pub(super) fn night() -> (Harness, [FakeTorrentFile; 4]) {
+pub(super) fn night() -> (Harness, [fake::TorrentFile; 4]) {
     night_with(Outside::default())
 }
 
 /// `night`, with what `outside` sets.
-pub(super) fn night_with(outside: Outside) -> (Harness, [FakeTorrentFile; 4]) {
+pub(super) fn night_with(outside: Outside) -> (Harness, [fake::TorrentFile; 4]) {
     let night = [
         torrent(0xa1, "Night.of.the.Living.Dead.1968.720p.BluRay.x264", &[("Night.1968.720p.mp4", 2 * GIB)]),
         torrent(0xa2, "Night.of.the.Living.Dead.1968.DVD9", &[("VIDEO_TS/NIGHT.iso", 4 * GIB)]),
@@ -71,8 +71,8 @@ pub(super) fn night_with(outside: Outside) -> (Harness, [FakeTorrentFile; 4]) {
     let mut catalog: Vec<Release> = night[..3].iter().map(|t| listed(t, "knaben", Some(40))).collect();
     catalog.push(listed(&night[3], "archive.org", None));
     catalog.push(listed(&remake, "knaben", Some(90)));
-    let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
-    let search = search_port::Fake::scripted(catalog, script, BTreeMap::new());
+    let script = vec![fake::Source::answers("knaben", 0), fake::Source::answers("archive.org", 0)];
+    let search = fake::Search::scripted(catalog, script, BTreeMap::new());
     let h = Harness::with_outside(search, outside);
     for t in &night[1..] {
         h.swarm.publish(t.clone());
@@ -115,7 +115,7 @@ pub(super) fn step(line: &Value) -> String {
 impl Harness {
     /// The command that plays `files` of `torrent` from its file, by hand or as a title play
     /// tests a source for `title`, and the hold that play has on the download.
-    fn play_command(&self, t: &FakeTorrentFile, files: &[u32], title: Option<&str>) -> (PlayCommand, Hold) {
+    fn play_command(&self, t: &fake::TorrentFile, files: &[u32], title: Option<&str>) -> (PlayCommand, Hold) {
         let hold = Hold::fresh();
         let link = |title: &str| TitleLink { title: title.parse().unwrap(), span: Span::Film, release: None };
         let play = PlayCommand {
@@ -131,7 +131,7 @@ impl Harness {
 
     pub(super) async fn play_for(
         &self,
-        t: &FakeTorrentFile,
+        t: &fake::TorrentFile,
         files: &[u32],
         title: Option<&str>,
     ) -> Result<(Job, Hold), Error> {
@@ -147,7 +147,7 @@ impl Harness {
     }
 
     /// Says a download plays, as a title play does once its video has bytes.
-    async fn played(&self, t: &FakeTorrentFile) {
+    async fn played(&self, t: &fake::TorrentFile) {
         let id = t.info_hash.id();
         self.running.ctx.owner.ask(|reply| Command::Played { id, reply }).await.unwrap();
     }
@@ -164,8 +164,8 @@ impl Harness {
         let _ = running.owner.await;
         drop(running.ctx);
         change();
-        let engine = Box::new(super::Fake::new(swarm.clone()));
-        let running = Self::boot(&dir, engine, super::parse_fake, &disk, &search, &outside);
+        let engine = Box::new(fake::Engine::new(swarm.clone()));
+        let running = Self::boot(&dir, engine, super::fake::parse, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 
@@ -173,7 +173,7 @@ impl Harness {
     pub(super) async fn play_title(
         &self,
         video: &str,
-        pin: Option<&FakeTorrentFile>,
+        pin: Option<&fake::TorrentFile>,
         replace: Option<TorrentId>,
     ) -> Vec<String> {
         let ask = PlayTitle {
@@ -191,7 +191,7 @@ impl Harness {
 
     /// Gets the film to keep from the search, or from `pin` alone, as `torrential get tt0063350`
     /// does into the downloads folder, and answers each step as the web app reads it.
-    async fn get_film(&self, pin: Option<&FakeTorrentFile>) -> Vec<Value> {
+    async fn get_film(&self, pin: Option<&fake::TorrentFile>) -> Vec<Value> {
         let ask = PlayTitle {
             video: "tt0063350".parse().unwrap(),
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
@@ -205,7 +205,7 @@ impl Harness {
         steps
     }
 
-    async fn job(&self, t: &FakeTorrentFile) -> Option<Job> {
+    async fn job(&self, t: &fake::TorrentFile) -> Option<Job> {
         self.status().await.into_iter().find(|j| j.id == t.info_hash.id())
     }
 }
@@ -341,7 +341,7 @@ enum Theirs {
 
 /// A source, what a person has where it writes, the path a refusal names, and what the download
 /// folder holds afterwards.
-type Taken<'a> = (&'a FakeTorrentFile, &'a [Theirs], &'a str, &'a [(&'a str, &'a str)]);
+type Taken<'a> = (&'a fake::TorrentFile, &'a [Theirs], &'a str, &'a [(&'a str, &'a str)]);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_play_makes_no_download_where_anything_already_is_and_leaves_it_as_it_was() {
@@ -468,7 +468,7 @@ async fn getting_a_title_skips_a_source_when_the_disk_cannot_say_that_its_path_i
     assert_eq!(contents(&theirs), pairs(&[("Night.1968.1080p.mp4", "the person's own film")]));
 }
 
-fn pack() -> FakeTorrentFile {
+fn pack() -> fake::TorrentFile {
     torrent(84, "Harbor.Lights.S01", &[("Harbor.Lights.S01E01.mp4", GIB), ("Harbor.Lights.S01E02.mp4", GIB)])
 }
 
@@ -702,7 +702,7 @@ async fn a_download_that_played_and_was_paused_is_paused_again_when_a_later_play
 
 /// Starts a play of the film from `source` alone, and answers it once it waits for the source's
 /// first bytes.
-async fn testing(h: &Harness, source: &FakeTorrentFile) -> tokio::task::JoinHandle<()> {
+async fn testing(h: &Harness, source: &fake::TorrentFile) -> tokio::task::JoinHandle<()> {
     let ctx = h.running.ctx.clone();
     let ask = PlayTitle {
         video: "tt0063350".parse().unwrap(),
@@ -817,8 +817,8 @@ async fn a_trial_whose_pause_cannot_be_recorded_is_put_back_at_the_next_release_
 /// owed still waits.
 async fn stopped_before_it_was_put_back(written: Option<&[u8]>) -> (Harness, PathBuf) {
     let gate = Gate::default();
-    let engine = Gated { port: FakeEngine::new(Swarm::new(0)), gate: gate.clone() };
-    let h = Harness::with_engine(|_| Box::new(engine), parse_fake);
+    let engine = Gated { port: fake::Engine::new(Swarm::new(0)), gate: gate.clone() };
+    let h = Harness::with_engine(|_| Box::new(engine), fake::parse);
     let film = torrent(80, "film", &[("film.mp4", GIB)]);
     let (_, hold) = h.play_for(&film, &[0], Some("tt0063350")).await.unwrap();
     h.until("the trial runs", |jobs| jobs[0].status.name() == "downloading").await;
@@ -865,9 +865,9 @@ async fn an_episode_in_a_season_pack_plays_the_file_whose_name_reads_as_it() {
     );
     let other = torrent(0xb2, "Harbor.Lights.S02E01.1080p.WEB.x264", &[("Harbor.Lights.S02E01.mp4", 900 * MIB)]);
     let catalog = vec![listed(&other, "knaben", Some(30)), listed(&pack, "knaben", Some(20))];
-    let h = Harness::with_search(search_port::Fake::scripted(
+    let h = Harness::with_search(fake::Search::scripted(
         catalog,
-        vec![FakeSource::answers("knaben", 0)],
+        vec![fake::Source::answers("knaben", 0)],
         BTreeMap::new(),
     ));
     h.swarm.publish(pack.clone());
@@ -966,7 +966,7 @@ async fn a_download_here_that_stopped_on_an_error_waits_for_the_search() {
 async fn a_source_whose_file_list_arrives_in_time_plays_while_a_slow_disk_holds_up_the_engine() {
     let film = torrent(0xb7, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
     let catalog = vec![listed(&film, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
     let h = Harness::with_outside(search, Outside { gate: Some(gate.clone()), ..Outside::default() });
     h.swarm.publish(film.clone());
@@ -1002,11 +1002,11 @@ async fn a_play_starts_on_a_lawful_catalog_at_once_and_does_not_wait_for_a_slow_
     let good = torrent(0xc2, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 3 * GIB)]);
     let catalog = vec![listed(&dead, "archive.org", None), listed(&good, "knaben", Some(40))];
     let script = vec![
-        FakeSource::answers("archive.org", 0),
-        FakeSource::answers("knaben", 300),
-        FakeSource::answers("nyaa", 5000),
+        fake::Source::answers("archive.org", 0),
+        fake::Source::answers("knaben", 300),
+        fake::Source::answers("nyaa", 5000),
     ];
-    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, BTreeMap::new()));
+    let h = Harness::with_search(fake::Search::scripted(catalog, script, BTreeMap::new()));
     h.swarm.publish(good.clone());
     h.swarm.set_rate(GIB);
     let started = std::time::Instant::now();
@@ -1034,7 +1034,7 @@ async fn three_dead_swarms_in_a_row_cost_one_wait_for_a_file_list() {
     let night = [name(0xd1, "480p"), name(0xd2, "576p"), name(0xd3, "720p"), name(0xd4, "1080p")]
         .map(|(n, name)| torrent(n, &name, &[("Night.1968.mp4", GIB)]));
     let catalog = night.iter().map(|t| listed(t, "knaben", Some(40))).collect();
-    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(catalog, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let file_list = std::time::Duration::from_secs(1);
     let h = Harness::with_outside(search, Outside { timing: Timing { file_list, ..TIMING }, ..Outside::default() });
     h.swarm.publish(night[3].clone());
@@ -1124,9 +1124,9 @@ async fn replace_skips_a_release_whose_torrent_file_turns_out_to_be_the_stalled_
         ..listed(&stalled, "knaben", Some(40))
     };
     let catalog = vec![by_link, listed(&other, "archive.org", None)];
-    let script = vec![FakeSource::answers("knaben", 0), FakeSource::answers("archive.org", 0)];
+    let script = vec![fake::Source::answers("knaben", 0), fake::Source::answers("archive.org", 0)];
     let torrents = BTreeMap::from([(url.to_string(), stalled.bytes())]);
-    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, torrents));
+    let h = Harness::with_search(fake::Search::scripted(catalog, script, torrents));
     h.swarm.publish(stalled.clone());
     h.swarm.publish(other.clone());
     h.swarm.set_rate(100 * MIB);
@@ -1163,9 +1163,9 @@ async fn a_download_found_by_its_torrent_link_is_listed_once_and_still_answers_t
         torrent_url: Some(url.into()),
         ..listed(&night, "knaben", Some(40))
     };
-    let script = vec![FakeSource::answers("knaben", 0)];
+    let script = vec![fake::Source::answers("knaben", 0)];
     let torrents = BTreeMap::from([(url.to_string(), night.bytes())]);
-    let h = Harness::with_search(search_port::Fake::scripted(vec![by_link], script, torrents));
+    let h = Harness::with_search(fake::Search::scripted(vec![by_link], script, torrents));
     h.swarm.publish(night.clone());
     h.swarm.set_rate(100 * MIB);
     let first = h.play_title("tt0063350", None, None).await;

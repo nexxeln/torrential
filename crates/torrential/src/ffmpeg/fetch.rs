@@ -135,7 +135,7 @@ impl Fetch {
     /// changes which build that is. A test engine fetches nothing; tests that fetch hand their
     /// own build to `Ffmpeg::new`.
     pub fn from_env(env: &Env, allowed: bool) -> Fetch {
-        if env.var("TORRENTIAL_TEST_NETWORK").is_some() || env.var("TORRENTIAL_TEST_ENGINE").is_some() {
+        if env.test().is_some() {
             return Fetch::Unavailable;
         }
         match Build::pinned(std::env::consts::OS, std::env::consts::ARCH, Path::new("/")) {
@@ -617,6 +617,7 @@ fn unquarantine(_: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::hooks;
 
     #[test]
     fn apple_silicon_and_linux_on_arm64_and_x86_64_have_a_pinned_build() {
@@ -696,8 +697,8 @@ mod tests {
         ];
         assert_eq!(fetch(&elsewhere, true), Fetch::Build(pinned.clone()));
         assert_eq!(fetch(&elsewhere, false), Fetch::Off(pinned));
-        assert_eq!(fetch(&[("TORRENTIAL_TEST_ENGINE", "fake"), elsewhere[0]], true), Fetch::Unavailable);
-        assert_eq!(fetch(&[("TORRENTIAL_TEST_NETWORK", "loopback"), elsewhere[0]], true), Fetch::Unavailable);
+        assert_eq!(fetch(&[(hooks::ENGINE, "fake"), elsewhere[0]], true), Fetch::Unavailable);
+        assert_eq!(fetch(&[(hooks::NETWORK, "loopback"), elsewhere[0]], true), Fetch::Unavailable);
     }
 
     #[test]

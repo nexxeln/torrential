@@ -4,8 +4,8 @@ pub mod cast;
 mod detector;
 pub mod devices;
 pub mod engine_port;
+pub mod fake;
 pub mod files;
-mod fixture;
 pub mod http;
 pub mod libtorrent;
 pub mod magnet;
@@ -35,7 +35,7 @@ use torrential_core::{Error, ErrorCode, Preferences};
 
 use crate::config::Config;
 use crate::disk::Disk;
-use crate::env::Env;
+use crate::env::{Env, TestHooks, hooks};
 use crate::log::log;
 use crate::paths::{self, Paths};
 use crate::service;
@@ -78,40 +78,37 @@ impl Ports {
         let installed = Arc::new(move || crate::ffmpeg::Tools::find(path.as_deref()));
         let fetch = crate::ffmpeg::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
         let ffmpeg = crate::ffmpeg::fetch::Ffmpeg::new(installed, crate::ffmpeg::fetch::root(&paths.state), fetch);
-        // The fake engine's subtitles are made up too, unless a test asks for the real sources.
-        let subtitles: Arc<dyn subtitle_port::SubtitlePort> =
-            if fake(env) && env.var("TORRENTIAL_TEST_SUBTITLES") != Some("live") {
-                Arc::new(subtitle_port::Fake::default())
-            } else {
-                Arc::new(subtitle_port::Live::new(&settings.subtitles)?)
+        let test = env.test();
+        // The fake engine's subtitles and catalog are made up too, unless a test asks for the real ones.
+        let fake = |real: &str| test.is_some_and(|test| test.fake_engine() && !test.live(real));
+        let subtitles: Arc<dyn subtitle_port::SubtitlePort> = if fake(hooks::SUBTITLES) {
+            Arc::new(subtitle_port::Fake::default())
+        } else {
+            Arc::new(subtitle_port::Live::new(&settings.subtitles)?)
+        };
+        let catalog: Arc<dyn titles::catalog_port::CatalogPort> = if fake(hooks::CATALOG) {
+            Arc::new(titles::catalog_port::Fake::default())
+        } else {
+            let config = torrential_search::catalog::CatalogConfig {
+                cache_dir: Some(paths.cache.join("catalog")),
+                ..settings.catalog.clone()
             };
-        let catalog: Arc<dyn titles::catalog_port::CatalogPort> =
-            if fake(env) && env.var("TORRENTIAL_TEST_CATALOG") != Some("live") {
-                Arc::new(titles::catalog_port::Fake::default())
-            } else {
-                let config = torrential_search::catalog::CatalogConfig {
-                    cache_dir: Some(paths.cache.join("catalog")),
-                    ..settings.catalog.clone()
-                };
-                Arc::new(titles::catalog_port::Live::new(&config)?)
-            };
-        let tvs = match env.var("TORRENTIAL_TEST_SSDP").map(str::parse) {
-            Some(Ok(address)) => cast::Find::At(address),
-            Some(Err(_)) => return Err(Error::new(ErrorCode::Usage, "TORRENTIAL_TEST_SSDP is not an address")),
+            Arc::new(titles::catalog_port::Live::new(&config)?)
+        };
+        let tvs = match test.map(|test| test.ssdp()).transpose()?.flatten() {
+            Some(address) => cast::Find::At(address),
             None => cast::Find::Multicast,
         };
-        if fake(env) {
-            let rate =
-                env.var("TORRENTIAL_TEST_FAKE_RATE").and_then(torrential_core::units::parse_size).unwrap_or(10 << 20);
-            let swarm = fixture::swarm(rate);
+        if let Some(test) = test.filter(TestHooks::fake_engine) {
+            let swarm = fake::fixture::swarm(test.fake_rate());
             // Torrents no peer sends a piece of, so a title play moves past them.
-            for id in env.var("TORRENTIAL_TEST_DEAD").unwrap_or_default().split(',').filter_map(|id| id.parse().ok()) {
+            for id in test.dead() {
                 swarm.withhold(id, u32::MAX);
             }
             return Ok(Self {
-                engine: Box::new(engine_port::Fake::new(swarm)),
-                parse: engine_port::parse_fake,
-                search: Arc::new(fixture::search(torrential_core::time::now())),
+                engine: Box::new(fake::Engine::new(swarm)),
+                parse: fake::parse,
+                search: Arc::new(fake::fixture::search(torrential_core::time::now())),
                 disk: Box::new(crate::disk::RoomyDisk),
                 machine: Detector::start(env, settings.downloads_dir(paths), Box::new(crate::disk::RoomyDisk)),
                 preferences,
@@ -121,11 +118,11 @@ impl Ports {
                 tvs,
             });
         }
-        let network = match env.var("TORRENTIAL_TEST_NETWORK") {
-            Some("loopback") => Network::Loopback { peers: test_peers(env)? },
-            _ => Network::Public,
+        let network = match test.map(|test| test.loopback_peers()).transpose()?.flatten() {
+            Some(peers) => Network::Loopback { peers },
+            None => Network::Public,
         };
-        let roomy = env.var("TORRENTIAL_TEST_DISK") == Some("roomy");
+        let roomy = test.is_some_and(|test| test.roomy_disk());
         let disk = || -> Box<dyn Disk + Sync> {
             if roomy { Box::new(crate::disk::RoomyDisk) } else { Box::new(crate::disk::RealDisk) }
         };
@@ -147,59 +144,16 @@ impl Ports {
     }
 }
 
-fn test_peers(env: &Env) -> Result<Vec<std::net::SocketAddr>, Error> {
-    let Some(list) = env.var("TORRENTIAL_TEST_PEERS") else { return Ok(Vec::new()) };
-    list.split(',')
-        .map(|peer| {
-            peer.trim().parse().map_err(|_| {
-                Error::new(ErrorCode::Usage, format!("TORRENTIAL_TEST_PEERS has {peer:?}, which is not an address"))
-            })
-        })
-        .collect()
-}
-
-fn fake(env: &Env) -> bool {
-    env.var("TORRENTIAL_TEST_ENGINE") == Some("fake")
-}
-
-/// The settings of an engine a test started, the one with the fake engine or on the loopback
-/// network, and `None` for any other. Every setting that lets a test reach into what the engine
-/// does is read through it.
-fn test_engine(env: &Env) -> Option<&Env> {
-    (fake(env) || env.var("TORRENTIAL_TEST_NETWORK") == Some("loopback")).then_some(env)
-}
-
-/// How long a play leaving the plays folder waits before it goes: no time, unless a test engine
-/// asks for up to a minute, to do something in between.
-fn deletion_pause(env: &Env) -> Duration {
-    test_pause(env, "TORRENTIAL_TEST_DELETION_PAUSE")
-}
-
-/// How long a file waits between the check that it is still the file to move to the Trash and
-/// the move: no time, unless a test engine asks for up to a minute, to change it in between.
-fn trash_pause(env: &Env) -> Duration {
-    test_pause(env, "TORRENTIAL_TEST_TRASH_PAUSE")
-}
-
-fn test_pause(env: &Env, name: &str) -> Duration {
-    let asked = test_engine(env).and_then(|test| test.var(name));
-    asked.and_then(torrential_core::units::parse_duration).map_or(Duration::ZERO, |pause| pause.min(MAX_TEST_PAUSE))
-}
-
-const MAX_TEST_PAUSE: Duration = Duration::from_secs(60);
-
 /// How long a play no one streams keeps downloading. A test engine may ask for less.
-fn plays_idle(env: &Env) -> Duration {
-    let asked = test_engine(env).and_then(|test| test.var("TORRENTIAL_TEST_PLAYS_IDLE"));
-    asked.and_then(torrential_core::units::parse_duration).unwrap_or(owner::plays::IDLE_AFTER)
+fn plays_idle(test: Option<TestHooks>) -> Duration {
+    test.and_then(|test| test.duration(hooks::PLAYS_IDLE)).unwrap_or(owner::plays::IDLE_AFTER)
 }
 
 /// Where the files of a download in a folder the person chose go when they delete them. A test
-/// engine never uses the person's Trash: `TORRENTIAL_TEST_TRASH` names its own, or it keeps one
-/// beside its state.
+/// engine never uses the person's Trash: `TRASH` names its own, or it keeps one beside its state.
 fn trash(env: &Env, paths: &Paths) -> owner::trash::Trash {
-    if let Some(test) = test_engine(env) {
-        let dir = test.var("TORRENTIAL_TEST_TRASH").map_or_else(|| paths.state.join("trash"), PathBuf::from);
+    if let Some(test) = env.test() {
+        let dir = test.path(hooks::TRASH).map_or_else(|| paths.state.join("trash"), Path::to_path_buf);
         return owner::trash::Trash::At(dir);
     }
     let home = || Path::new(env.var("HOME").unwrap_or("/")).join(".local/share");
@@ -297,12 +251,12 @@ async fn switch(ctx: &server::Ctx, to: update::Version, service: bool) {
 
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
 /// systemd started it, a switch to an installed update.
-pub fn run(env: &Env, service: bool) -> u8 {
+pub fn run(env: &Env, service: bool, http_port: Option<u16>) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
-    match serve(env, &paths, service) {
+    match serve(env, &paths, service, http_port) {
         Ok(Ended::Restart) if service => service::RESTART,
         Ok(_) => 0,
         // The other engine serves this home, so launchd and systemd have nothing to start again.
@@ -333,7 +287,7 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     error.code.exit_code()
 }
 
-fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
+fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Result<Ended, Startup> {
     let settings = Config::load(paths, env)?;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
     paths.make_state().map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
@@ -349,34 +303,30 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         Ok(None) => {}
         Err(e) => log(&format!("cannot add a login service: {}", e.message)),
     }
-    let seed = fake(env) && !paths.database().exists();
+    let test = env.test();
+    let seed = test.is_some_and(|test| test.fake_engine()) && !paths.database().exists();
     let mut store = Store::open(&paths.database())?;
     let default_dir = settings.downloads_dir(paths);
     if seed {
-        fixture::seed(&mut store, &default_dir, torrential_core::time::now())?;
+        fake::fixture::seed(&mut store, &default_dir, torrential_core::time::now())?;
     }
-    let save_resume_every = env
-        .var("TORRENTIAL_TEST_SAVE_RESUME_EVERY")
-        .and_then(torrential_core::units::parse_duration)
-        .unwrap_or(SAVE_RESUME_EVERY);
-    let stall_after =
-        env.var("TORRENTIAL_TEST_STALL_AFTER").and_then(torrential_core::units::parse_duration).unwrap_or(STALL_AFTER);
-    let timing = match env.var("TORRENTIAL_TEST_TITLE_WAIT").and_then(torrential_core::units::parse_duration) {
+    let asked = |hook| test.and_then(|test| test.duration(hook));
+    let timing = match asked(hooks::TITLE_WAIT) {
         Some(wait) => titles::Timing { file_list: wait, first_bytes: wait, ..titles::Timing::default() },
         None => titles::Timing::default(),
     };
+    let pause = |hook| test.map_or(Duration::ZERO, |test| test.pause(hook));
     let config = OwnerConfig {
         default_dir,
         probe_dir: paths.cache.join("probes"),
         max_active: MAX_ACTIVE,
-        idle_timeout: env.var("TORRENTIAL_TEST_IDLE_TIMEOUT").and_then(torrential_core::units::parse_duration),
-        save_resume_every,
-        stall_after,
+        save_resume_every: asked(hooks::SAVE_RESUME_EVERY).unwrap_or(SAVE_RESUME_EVERY),
+        stall_after: asked(hooks::STALL_AFTER).unwrap_or(STALL_AFTER),
         writes_stop_within: WRITES_STOP_WITHIN,
-        plays: owner::plays::Plays { root: paths.plays(), max: settings.plays_max.0, idle_after: plays_idle(env) },
+        plays: owner::plays::Plays { root: paths.plays(), max: settings.plays_max.0, idle_after: plays_idle(test) },
         trash: trash(env, paths),
-        deletion_pause: deletion_pause(env),
-        trash_pause: owner::deleter::TrashPause::sleep(trash_pause(env)),
+        deletion_pause: pause(hooks::DELETION_PAUSE),
+        trash_pause: owner::deleter::TrashPause::sleep(pause(hooks::TRASH_PAUSE)),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -392,7 +342,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         })?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
-        let wanted = env.var("TORRENTIAL_TEST_HTTP_PORT").and_then(|port| port.parse().ok()).unwrap_or(http::PORT);
+        let wanted = http_port.or(test.and_then(|test| test.http_port())).unwrap_or(http::PORT);
         // Open pages reconnect to the address they loaded from, so the engine serves where it last did.
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();

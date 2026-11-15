@@ -7,6 +7,10 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
 const SCRIPT: &[u8] = b"#!/bin/sh\necho torrential 0.1.1\n";
 const BROKEN: &[u8] = b"#!/bin/sh\nexit 1\n";
@@ -198,9 +202,9 @@ impl Install {
         let vars = vec![
             ("HOME", dir.path().display().to_string()),
             ("TORRENTIAL_HOME", dir.path().join("th").display().to_string()),
-            ("TORRENTIAL_TEST_RELEASES", server.base.clone()),
-            ("TORRENTIAL_TEST_VERSION", "0.1.0".to_string()),
-            ("TORRENTIAL_TEST_NETWORK", "loopback".to_string()),
+            (hooks::RELEASES, server.base.clone()),
+            (hooks::VERSION, "0.1.0".to_string()),
+            (hooks::NETWORK, "loopback".to_string()),
         ];
         Install { dir, vars }
     }
@@ -220,7 +224,7 @@ impl Install {
 
     fn command(&self, program: &Path, args: &[&str]) -> std::process::Command {
         let mut cmd = std::process::Command::new(program);
-        for key in AGENT_VARS.iter().chain(&["CODEX_SANDBOX_NETWORK_DISABLED", "TORRENTIAL_TEST_ENGINE"]) {
+        for key in AGENT_VARS.iter().chain(&["CODEX_SANDBOX_NETWORK_DISABLED", hooks::ENGINE]) {
             cmd.env_remove(key);
         }
         cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str())));
@@ -296,7 +300,7 @@ fn update_refreshes_the_installed_skill_and_then_reports_the_latest() {
     std::fs::write(copy.join(".torrential.json"), sidecar.to_string()).unwrap();
 
     let updated = install.run(&["update", "--json"]);
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    install.set(hooks::VERSION, "0.1.1");
     let again = install.run(&["update"]);
     let again_json = install.run(&["update", "--json"]);
 
@@ -347,7 +351,7 @@ fn update_check_reports_without_installing() {
 
     let text = install.run(&["update", "--check"]);
     let json = install.run(&["update", "--check", "--json"]);
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    install.set(hooks::VERSION, "0.1.1");
     let current = install.run(&["update", "--check", "--json"]);
 
     assert_eq!(text.stdout, "current: 0.1.0\nlatest:  0.1.1\npolicy:  auto\nnext:    torrential update\n");
@@ -402,7 +406,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 impl Install {
     fn agent_with_engine(server: &Server) -> Install {
         let mut install = Install::new(server);
-        install.set("TORRENTIAL_TEST_ENGINE", "fake");
+        install.set(hooks::ENGINE, "fake");
         install.set("CLAUDECODE", "1");
         install
     }
@@ -596,7 +600,7 @@ fn an_engine_that_aims_at_an_older_release_than_the_installed_one_leaves_the_new
     let server = Server::gated("0.1.1", &built.release("0.1.1"), None, Some(("/latest", gate)));
     let mut install = Install::agent_with_engine(&server);
     let port = free_port();
-    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
+    install.set(hooks::HTTP_PORT, &port.to_string());
     assert_eq!(install.run(&["status", "--json"]).code, 0);
     eventually("the engine asks for the latest release", || server.asked() == ["/latest"]);
     // Meanwhile another home's engine installs 0.1.2 over the shared executable.
@@ -681,8 +685,8 @@ fn under_the_login_service_an_update_installs_while_a_film_plays_and_starts_once
     let server = Server::gated("0.1.1", &built.release("0.1.1"), None, Some(("/latest", gate)));
     let mut install = Install::agent_with_engine(&server);
     let port = free_port();
-    install.set("TORRENTIAL_TEST_FAKE_RATE", "0");
-    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
+    install.set(hooks::FAKE_RATE, "0");
+    install.set(hooks::HTTP_PORT, &port.to_string());
     let old_inode = std::fs::metadata(install.exe()).unwrap().ino();
     let mut service = install.supervise();
     eventually("the service started the engine", || install.running().is_some());
@@ -699,7 +703,7 @@ fn under_the_login_service_an_update_installs_while_a_film_plays_and_starts_once
     drop(player);
     eventually("the service started 0.1.1", || install.running().is_some_and(|(now, v)| now != pid && v == "0.1.1"));
     let news = Install::news(port);
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    install.set(hooks::VERSION, "0.1.1");
     let stop = install.run(&["engine", "stop"]);
     let ended = service.wait().unwrap();
 
@@ -720,7 +724,7 @@ fn without_the_login_service_an_installed_update_starts_with_the_next_command() 
     let server = Server::start("0.1.1", &built.release("0.1.1"), None);
     let mut install = Install::agent_with_engine(&server);
     let port = free_port();
-    install.set("TORRENTIAL_TEST_HTTP_PORT", &port.to_string());
+    install.set(hooks::HTTP_PORT, &port.to_string());
     install.found("0.1.1");
 
     let started = install.run(&["status", "--json"]);
@@ -731,7 +735,7 @@ fn without_the_login_service_an_installed_update_starts_with_the_next_command() 
         })
     });
     let kept = install.running();
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    install.set(hooks::VERSION, "0.1.1");
     let first = install.run(&["status"]);
     let second = install.run(&["status"]);
 
@@ -799,7 +803,7 @@ fn an_engine_that_finds_the_release_after_another_home_installed_it_starts_it_to
     std::fs::remove_dir_all(homes[1].dir.path().join("bin")).unwrap();
     std::os::unix::fs::symlink(homes[0].bin(), homes[1].dir.path().join("bin")).unwrap();
     for home in &mut homes {
-        home.set("TORRENTIAL_TEST_HTTP_PORT", "0");
+        home.set(hooks::HTTP_PORT, "0");
     }
     // Home two starts on 0.1.0 and asks for the latest release, whose answer waits until home one
     // has installed the release it found and runs it.
@@ -869,14 +873,14 @@ fn an_engine_on_another_port_because_its_own_was_taken_comes_back_on_that_port_a
     let mut install = Install::agent_with_engine(&server);
     let taken = TcpListener::bind("127.0.0.1:0").unwrap();
     let wanted = taken.local_addr().unwrap().port();
-    install.set("TORRENTIAL_TEST_HTTP_PORT", &wanted.to_string());
+    install.set(hooks::HTTP_PORT, &wanted.to_string());
     install.found("0.1.1");
 
     let mut service = install.supervise();
     eventually("the service started 0.1.1", || install.starts().iter().any(|(version, ..)| version == "0.1.1"));
     let ports: Vec<u16> = install.starts().into_iter().map(|(_, _, port)| port).collect();
     let news = Install::news(ports[0]);
-    install.set("TORRENTIAL_TEST_VERSION", "0.1.1");
+    install.set(hooks::VERSION, "0.1.1");
     let stop = install.run(&["engine", "stop"]);
     let ended = service.wait().unwrap();
 

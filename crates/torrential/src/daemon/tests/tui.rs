@@ -9,12 +9,12 @@ use torrential_core::{VideoRef, Watched};
 use torrential_tui::Backend;
 
 use super::super::admission::GIB;
-use super::super::search_port::{self, FakeSource};
+use super::super::fake;
 use super::super::server;
 use super::titles::{listed, night};
 use super::{Harness, MIB, torrent};
 use crate::client::tui::EngineBackend;
-use crate::env::Env;
+use crate::env::{Env, hooks};
 use crate::paths::Paths;
 
 /// A machine with no language, so the player is handed no subtitle language whatever the host's
@@ -47,8 +47,9 @@ impl Tui {
             ("HOME", home.clone()),
             ("TORRENTIAL_HOME", format!("{home}/th")),
             ("PATH", format!("{home}/bin")),
-            ("TORRENTIAL_TEST_VERSION", h.running.ctx.version.clone()),
-            ("TORRENTIAL_TEST_MACHINE", MACHINE.to_string()),
+            (hooks::NETWORK, "loopback".to_string()),
+            (hooks::VERSION, h.running.ctx.version.clone()),
+            (hooks::MACHINE, MACHINE.to_string()),
         ];
         let env = Env::from_pairs(vars.iter().map(|(key, value)| (*key, value.as_str())));
         let paths = Paths::from_process(&env).unwrap();
@@ -136,9 +137,9 @@ async fn a_play_from_the_terminal_ui_of_a_finished_film_or_a_caught_up_series_st
             ("Harbor.Lights.S01E03.1080p.WEB.x264.mp4", 900 * MIB),
         ],
     );
-    let search = search_port::Fake::scripted(
+    let search = fake::Search::scripted(
         vec![listed(&pack, "knaben", Some(20))],
-        vec![FakeSource::answers("knaben", 0)],
+        vec![fake::Source::answers("knaben", 0)],
         BTreeMap::new(),
     );
     let h = Harness::with_search(search);

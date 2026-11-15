@@ -83,8 +83,8 @@ fn main() -> ExitCode {
         return ExitCode::from(client::launch::launch_stage(&env));
     }
     let mode = Mode::detect(cli.json, stdout_is_terminal, &env);
-    if let Command::Daemon { command: DaemonCommand::Run { service } } = command {
-        return ExitCode::from(engine(service, mode, &env));
+    if let Command::Daemon { command: DaemonCommand::Run { service, http_port } } = command {
+        return ExitCode::from(engine(service, http_port, mode, &env));
     }
     let notices = !matches!(command, Command::Tui | Command::Update(_) | Command::Completions { .. });
     let exit = client::run(command, mode, &env);
@@ -95,9 +95,9 @@ fn main() -> ExitCode {
 }
 
 /// `torrential engine run`: the engine in this process until it stops.
-fn engine(service: bool, mode: Mode, env: &Env) -> u8 {
+fn engine(service: bool, http_port: Option<u16>, mode: Mode, env: &Env) -> u8 {
     match Paths::from_process(env) {
-        Ok(_) => daemon::run(env, service),
+        Ok(_) => daemon::run(env, service, http_port),
         Err(error) => {
             client::print_error(mode, &error);
             error.code.exit_code()
