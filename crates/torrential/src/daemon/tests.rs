@@ -244,7 +244,6 @@ impl Harness {
             dir: Some(self.dir.path().join("downloads")),
             files: files.iter().map(|f| f.to_string()).collect(),
             max_size: None,
-            setup_max_size: None,
             dry_run: false,
         })
         .await
@@ -259,7 +258,7 @@ impl Harness {
     }
 
     async fn play(&self, target: Target, files: &[u32]) -> Result<PlayReply, Error> {
-        let request = PlayRequest { target, dir: Some(self.downloads()), files: files.to_vec(), setup_max_size: None };
+        let request = PlayRequest { target, dir: Some(self.downloads()), files: files.to_vec() };
         match self.ask(Request::Play(request)).await {
             Response::Play { reply } => Ok(*reply),
             Response::Error { error } => Err(error),
@@ -411,15 +410,8 @@ async fn every_command_answers_usage_for_a_title() {
     let film = || Target::Title("tt0063350".parse().unwrap());
     let refs = || vec!["tt0903747:3:5".to_string()];
     let requests = [
-        Request::Get(GetRequest {
-            target: film(),
-            dir: None,
-            files: Vec::new(),
-            max_size: None,
-            setup_max_size: None,
-            dry_run: false,
-        }),
-        Request::Play(PlayRequest { target: film(), dir: None, files: Vec::new(), setup_max_size: None }),
+        Request::Get(GetRequest { target: film(), dir: None, files: Vec::new(), max_size: None, dry_run: false }),
+        Request::Play(PlayRequest { target: film(), dir: None, files: Vec::new() }),
         Request::Files { target: film(), timeout_ms: 1_000 },
         Request::Status { refs: refs() },
         Request::Pause { refs: refs() },
@@ -719,20 +711,19 @@ async fn a_download_cannot_take_files_another_download_claims_whatever_their_cas
 }
 
 fn request(h: &Harness, target: Target) -> GetRequest {
-    GetRequest {
-        target,
-        dir: Some(h.downloads()),
-        files: Vec::new(),
-        max_size: None,
-        setup_max_size: None,
-        dry_run: false,
-    }
+    GetRequest { target, dir: Some(h.downloads()), files: Vec::new(), max_size: None, dry_run: false }
+}
+
+/// An engine whose config.yaml caps downloads at 2 GiB, as `torrential setup` saves it.
+fn capped() -> Harness {
+    let preferences = Preferences { max_size: Some(2 * GIB), ..Preferences::default() };
+    Harness::with_outside(fake::Search::new(fake::isos()), Outside { preferences, ..Outside::default() })
 }
 
 async fn over_its_setup_cap(h: &Harness, n: u8) -> fake::TorrentFile {
     let film = torrent(n, &format!("film{n}"), &[("film.mkv", 2 * GIB), ("extras.mkv", GIB)]);
     h.swarm.publish(film.clone());
-    h.get_with(GetRequest { setup_max_size: Some(2 * GIB), ..request(h, magnet(&film)) }).await.unwrap();
+    h.get_with(request(h, magnet(&film))).await.unwrap();
     let id = film.info_hash.id();
     h.until("stopped", |jobs| jobs.iter().any(|j| j.id == id && j.status.name() == "error")).await;
     film
@@ -740,7 +731,7 @@ async fn over_its_setup_cap(h: &Harness, n: u8) -> fake::TorrentFile {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cap_from_setup_is_named_when_the_file_list_arrives_over_it() {
-    let h = Harness::new();
+    let h = capped();
     over_its_setup_cap(&h, 41).await;
     let jobs = h.status().await;
     let JobStatus::Error { error } = &jobs[0].status else { panic!("expected an error, got {jobs:?}") };
@@ -756,7 +747,7 @@ async fn a_cap_from_setup_is_named_when_the_file_list_arrives_over_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn get_runs_a_download_stopped_over_its_cap_once_it_fits() {
-    let h = Harness::new();
+    let h = capped();
     let film = over_its_setup_cap(&h, 41).await;
     let show = over_its_setup_cap(&h, 43).await;
 
@@ -779,7 +770,7 @@ async fn get_runs_a_download_stopped_over_its_cap_once_it_fits() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_leaves_a_download_over_its_cap_stopped() {
-    let h = Harness::new();
+    let h = capped();
     let film = over_its_setup_cap(&h, 41).await;
     let iso = torrent(42, "arch.iso", &[("arch.iso", GIB)]);
     h.get(h.torrent_file(&iso), &[]).await.unwrap();
@@ -801,7 +792,7 @@ async fn resume_leaves_a_download_over_its_cap_stopped() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn repair_leaves_a_download_over_its_cap_stopped() {
-    let h = Harness::new();
+    let h = capped();
     let film = over_its_setup_cap(&h, 41).await;
 
     let err = h.changes(Request::Verify { reference: prefix(&film), repair: true }).await.unwrap_err();

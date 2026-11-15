@@ -8,7 +8,7 @@ use tokio::sync::{broadcast, mpsc};
 use torrential_core::protocol::{Change, Event, FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
 use torrential_core::text::sanitize;
 use torrential_core::{
-    Error, ErrorCode, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile, TorrentId,
+    Error, ErrorCode, HexPrefix, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile, TorrentId,
 };
 
 use super::BoxFuture;
@@ -29,7 +29,7 @@ const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
 const HEARTBEAT: Duration = Duration::from_secs(15);
 
 pub(super) async fn search(ctx: &Ctx, query: SearchQuery) -> Result<SearchResult, Error> {
-    let Profile { preferences, player, .. } = query.profile;
+    let (preferences, player) = ((ctx.preferences)(), query.profile.player);
     let rank_for = || ctx.machine.profile(preferences, player);
     let mut result = ctx.search.search_stream(query, &rank_for, tokio::sync::mpsc::unbounded_channel().0).await?;
     record(ctx, &mut result);
@@ -56,7 +56,7 @@ impl<'a> Searching<'a> {
     pub(super) fn start(ctx: &'a Ctx, query: SearchQuery) -> Self {
         let (progress, answers) = mpsc::unbounded_channel();
         let running = Box::pin(async move {
-            let Profile { preferences, player, .. } = query.profile;
+            let (preferences, player) = ((ctx.preferences)(), query.profile.player);
             let rank_for = || ctx.machine.profile(preferences, player);
             ctx.search.search_stream(query, &rank_for, progress).await
         });
@@ -259,7 +259,8 @@ pub(super) async fn metadata(ctx: &Ctx, target: MetaTarget, deadline: Instant) -
 }
 
 pub(super) async fn get(ctx: &Ctx, request: GetRequest) -> Result<torrential_core::protocol::GetReply, Error> {
-    let GetRequest { target, dir, files, max_size, setup_max_size, dry_run } = request;
+    let GetRequest { target, dir, files, max_size, dry_run } = request;
+    let setup_max_size = (ctx.preferences)().max_size;
     let mut source = resolve(ctx, target, "get").await?;
     if dry_run && let Source::Magnet(magnet) = &source {
         let info = metadata(ctx, MetaTarget::Magnet(magnet.clone()), Instant::now() + METADATA_WAIT).await?;
@@ -274,7 +275,8 @@ pub(super) async fn get(ctx: &Ctx, request: GetRequest) -> Result<torrential_cor
 
 pub(super) async fn play(ctx: &Ctx, request: PlayRequest) -> Result<PlayReply, Error> {
     let _playing = ctx.playing.open()?;
-    let PlayRequest { target, dir, files, setup_max_size } = request;
+    let PlayRequest { target, dir, files } = request;
+    let setup_max_size = (ctx.preferences)().max_size;
     let source = resolve(ctx, target, "play").await?;
     let to = Destination::Folder(dir);
     let play = PlayCommand { source, to, files: files.clone(), setup_max_size, title: None, finish: Finish::Stream };
