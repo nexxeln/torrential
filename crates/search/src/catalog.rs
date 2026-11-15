@@ -34,6 +34,9 @@ const LARGEST_LISTING: usize = 1 << 20;
 const LARGEST_DETAILS: usize = 8 << 20;
 const LARGEST_PICTURE: usize = 5 << 20;
 const PICTURES_BUDGET: u64 = 256 << 20;
+/// What the kept details of titles may take, four times the largest a title may have. Past it the
+/// oldest go first.
+const DETAILS_BUDGET: u64 = 32 << 20;
 const MISS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 const REDIRECTS: usize = 5;
 /// The hosts the catalogs' pictures are on: Cinemeta's under metahub.space, IMDb's under
@@ -377,7 +380,7 @@ impl Catalog {
         let kind = kept.as_ref().map(|d| d.details.card.kind).or_else(|| self.listed(id).map(|(kind, _)| kind));
         match self.fetch_described(id, kind).await {
             Ok(Some((body, described))) => {
-                self.shelf.put(&details_name(id), &body).await;
+                self.keep_details(id, &body).await;
                 Ok(described)
             }
             Ok(None) => {
@@ -385,6 +388,12 @@ impl Catalog {
             }
             Err(e) => kept.ok_or_else(|| failed(&format!("look up {id} on Cinemeta"), e)),
         }
+    }
+
+    /// Keeps `id`'s details as Cinemeta answered them, and drops the oldest kept past the budget.
+    async fn keep_details(&self, id: &TitleId, body: &[u8]) {
+        self.shelf.put(&details_name(id), body).await;
+        self.shelf.trim(shelf::TITLES, DETAILS_BUDGET).await;
     }
 
     /// The kept copy of a title's details and its age.
@@ -524,6 +533,22 @@ mod tests {
 
     fn ids(listed: Vec<Listed>) -> Vec<String> {
         listed.into_iter().map(|listed| listed.card.id.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn kept_details_stay_within_their_budget_and_the_oldest_go_first() {
+        let catalog = Catalog::new(&CatalogConfig { online: false, ..CatalogConfig::default() }).unwrap();
+        let ids = ["tt0000001", "tt0000002", "tt0000003"].map(|id| id.parse::<TitleId>().unwrap());
+        let large = vec![b' '; (DETAILS_BUDGET / 3 + 1) as usize];
+        for id in &ids {
+            catalog.keep_details(id, &large).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut kept = Vec::new();
+        for id in &ids {
+            kept.push(catalog.shelf.get(&details_name(id)).await.is_some());
+        }
+        assert_eq!(kept, [false, true, true]);
     }
 
     #[test]
