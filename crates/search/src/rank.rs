@@ -5,7 +5,6 @@ use std::cmp::{Ordering, Reverse};
 use std::ops::RangeInclusive;
 
 use torrential_core::filetype::FileType;
-use torrential_core::stream::preferred;
 use torrential_core::title::{Span, Wanted};
 use torrential_core::{
     Arch, Category, Codec, Container, Decoding, Flag, Language, Player, Plays, Profile, Quality, Resolution, Sort,
@@ -104,7 +103,7 @@ fn opened(player: Player, videos: &[VideoFile]) -> Option<&VideoFile> {
         Player::External => Plays::ANY,
         Player::Browser { .. } | Player::Device(_) => Plays::BROWSER,
     };
-    preferred(videos, |video| video.size, |video| plays.opens(&video.name, false))
+    plays.preferred(videos, |video| video.size, |video| &video.name)
 }
 
 /// Tags that name a codec no browser decodes.

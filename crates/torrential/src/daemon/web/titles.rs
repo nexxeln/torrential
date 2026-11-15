@@ -6,8 +6,8 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
+use torrential_core::catalog::Episode;
 use torrential_core::time::now;
-use torrential_core::title::Episode;
 use torrential_core::{
     ArtKind, AttemptEvent, Decoders, Decoding, Error, ErrorCode, Playback, Player, Plays, Release, ReleaseId,
     TitleCard, TitleId, TorrentId, VideoRef, Viewer, Watched,

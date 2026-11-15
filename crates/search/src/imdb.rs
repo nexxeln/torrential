@@ -153,7 +153,7 @@ fn pick(title: &Title, suggestions: &[Suggestion]) -> Option<Matched> {
 
 #[cfg(test)]
 mod tests {
-    use torrential_core::title::Episode;
+    use torrential_core::catalog::Episode;
 
     use super::*;
 

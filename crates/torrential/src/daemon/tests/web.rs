@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::playback::media::RUNTIME_BYTES;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use torrential_core::media::RUNTIME_BYTES;
 use torrential_core::{
     ArtKind, Display, Error, Playback, Preferences, Screen, Target, TitleCard, TitleDetails, TitleId,
 };
@@ -204,11 +204,14 @@ async fn the_app_answers_for_its_pages_and_not_for_missing_scripts() {
     assert!(headers.contains("cache-control: no-cache\n"), "{headers}");
     assert!(page.starts_with(b"<!doctype html>"), "{}", String::from_utf8_lossy(&page));
     assert_eq!(fetch(&h, "GET", "/watch/9b5212?file=2", &[], "").await.2, page);
+    let torrent_url = "/watch/https%3A%2F%2Farchive.org%2Fdownload%2FSintel%2FSintel_archive.torrent";
+    assert_eq!(fetch(&h, "GET", torrent_url, &[], "").await.2, page);
     assert_eq!(fetch(&h, "GET", "/downloads", &[], "").await.2, page);
     let (status, headers, body) = fetch(&h, "HEAD", "/", &[], "").await;
     assert_eq!((status, body.len()), (200, 0));
     assert!(headers.contains(&format!("content-length: {}\n", page.len())), "{headers}");
     assert_eq!(fetch(&h, "GET", "/assets/index-gone.js", &[], "").await.0, 404);
+    assert_eq!(fetch(&h, "GET", "/assets/x.js", &[], "").await.0, 404);
     assert_eq!(fetch(&h, "POST", "/", &["Content-Type: application/json"], "{}").await.0, 405);
 }
 
@@ -420,7 +423,7 @@ async fn a_page_follows_and_changes_downloads() {
 async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
-    let clip = include_bytes!("../../../../core/tests/fixtures/media/faststart.mp4");
+    let clip = include_bytes!("../../../tests/fixtures/media/faststart.mp4");
     let film = torrent(63, "film", &[("film.mp4", clip.len() as u64), ("film.mkv", 5_000)]);
     h.swarm.publish(film.clone());
     let id = film.info_hash.id().to_hex();

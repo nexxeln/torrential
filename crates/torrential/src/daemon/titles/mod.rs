@@ -10,8 +10,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use torrential_core::catalog::Episode;
 use torrential_core::protocol::{Continue, Home, TitlePage, TitleSources};
-use torrential_core::title::{Episode, title_name};
+use torrential_core::title::{Wanted, season_episodes, title_name};
 use torrential_core::watching::{next, play_target};
 use torrential_core::{
     Category, EpisodeInfo, Error, ErrorCode, HexPrefix, Job, Kind, Next, Player, Preferences, Profile, Quality,
@@ -22,7 +23,7 @@ use super::ctx::Ctx;
 use super::downloads::search;
 use super::owner::Command;
 use super::shelf::Shelf;
-use catalog_port::{CatalogPort, season_episodes, wanted};
+use catalog_port::CatalogPort;
 
 /// How long a release that failed stays at the back of the line.
 const FAILED_FOR: Duration = Duration::from_secs(6 * 60 * 60);
@@ -148,7 +149,7 @@ impl Titles {
         player: Player,
     ) -> Result<SearchQuery, Error> {
         let namesakes = self.catalog.namesakes(&title.details.card).await?;
-        let wanted = wanted(&title.details, &namesakes, title.video.episode)?;
+        let wanted = Wanted::of(&title.details, &namesakes, title.video.episode)?;
         let text = wanted.queries().into_iter().next().unwrap_or_else(|| wanted.name.clone());
         Ok(SearchQuery {
             category: Some(Category::Video),

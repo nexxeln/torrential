@@ -12,6 +12,7 @@ mod log;
 mod machine;
 mod output;
 mod paths;
+mod playback;
 mod player;
 mod qr;
 mod schema;

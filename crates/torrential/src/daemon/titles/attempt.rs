@@ -5,11 +5,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::playback::stream::{self, Playable};
 use tokio::sync::oneshot;
+use torrential_core::catalog::Episode;
 use torrential_core::filetype;
-use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
-use torrential_core::title::{Episode, Span};
+use torrential_core::title::Span;
 use torrential_core::{
     AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Opens, Player, Plays, Quality, Release, ReleaseId,
     Skip, SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,
@@ -513,7 +514,7 @@ fn video_of(metainfo: &Metainfo, episode: Option<Episode>, plays: Plays, remux: 
     let listing = metainfo.listing();
     let playable = match episode {
         Some(episode) => stream::episode(&listing, &sanitize(&metainfo.name), episode),
-        None => stream::pick(&listing, |path| plays.opens(path, false)),
+        None => stream::pick(&listing, plays),
     };
     let playable = playable.filter(|p| !stream::is_sample(&listing[p.video as usize].path)).ok_or(Skip::NoVideo)?;
     let path = &listing[playable.video as usize].path;

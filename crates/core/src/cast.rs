@@ -6,82 +6,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::catalog::VideoRef;
 use crate::error::Error;
-use crate::filetype::FileType;
-use crate::id::Target;
+use crate::filetype::{Container, FileType};
 use crate::preferences::Playback;
 use crate::quality::Quality;
-
-/// A video container, which a TV takes or does not. Its codecs are another matter.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Container {
-    Mkv,
-    Mp4,
-    WebM,
-    Avi,
-    Ts,
-    Mov,
-    Mpeg,
-    Wmv,
-}
-
-/// Each container's name and the MIME types TVs list it by. The extensions its files have are in
-/// [`FileType`]'s table.
-const CONTAINERS: [(Container, &str, &[&str]); 8] = [
-    (Container::Mkv, "mkv", &["video/x-matroska", "video/x-mkv", "video/mkv", "video/matroska"]),
-    (Container::Mp4, "mp4", &["video/mp4", "video/mpeg4", "video/x-m4v"]),
-    (Container::WebM, "webm", &["video/webm"]),
-    (Container::Avi, "avi", &["video/avi", "video/x-msvideo", "video/x-avi", "video/divx"]),
-    (Container::Ts, "ts", &["video/mp2t", "video/vnd.dlna.mpeg-tts", "video/x-mpegts"]),
-    (Container::Mov, "mov", &["video/quicktime"]),
-    (Container::Mpeg, "mpeg", &["video/mpeg"]),
-    (Container::Wmv, "wmv", &["video/x-ms-wmv"]),
-];
-
-impl Container {
-    /// Every container, in the order a TV's list of them is written.
-    pub const ALL: [Container; 8] = [
-        Container::Mkv,
-        Container::Mp4,
-        Container::WebM,
-        Container::Avi,
-        Container::Ts,
-        Container::Mov,
-        Container::Mpeg,
-        Container::Wmv,
-    ];
-
-    fn row(self) -> &'static (Container, &'static str, &'static [&'static str]) {
-        CONTAINERS.iter().find(|row| row.0 == self).expect("every container has a row")
-    }
-
-    pub fn name(self) -> &'static str {
-        self.row().1
-    }
-
-    /// The MIME types a TV may list this container by, the usual one first.
-    pub fn mimes(self) -> &'static [&'static str] {
-        self.row().2
-    }
-
-    /// The container of a file named `path`, by its extension.
-    pub fn of_path(path: &str) -> Option<Container> {
-        FileType::of(path)?.container
-    }
-
-    /// The container a MIME type names, in any case.
-    pub fn of_mime(mime: &str) -> Option<Container> {
-        let mime = mime.trim().to_ascii_lowercase();
-        CONTAINERS.iter().find(|row| row.2.contains(&mime.as_str())).map(|row| row.0)
-    }
-
-    fn of_name(name: &str) -> Option<Container> {
-        CONTAINERS.iter().find(|row| row.1 == name).map(|row| row.0)
-    }
-
-    fn bit(self) -> u16 {
-        1 << CONTAINERS.iter().position(|row| row.0 == self).expect("every container has a row")
-    }
-}
+use crate::target::Target;
 
 /// The containers a TV takes. Written as their names, such as `["mkv", "mp4"]`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -93,7 +21,7 @@ impl Containers {
     }
 
     pub fn iter(self) -> impl Iterator<Item = Container> {
-        CONTAINERS.iter().map(|row| row.0).filter(move |c| self.contains(*c))
+        Container::ALL.into_iter().filter(move |c| self.contains(*c))
     }
 
     /// Whether a file named `path` goes to the TV as it is.
@@ -150,7 +78,22 @@ impl Plays {
     pub fn decodes(self, quality: Quality) -> bool {
         self.decodes.is_none_or(|playback| playback.plays(quality))
     }
+
+    /// Of `videos`, each with its `size` and its `path`, the one a play opens: the largest, unless
+    /// one this screen opens as it is comes within a quarter of its size, which then plays without
+    /// being converted. So a browser plays an archive.org film's MP4 rather than its larger Ogg.
+    pub fn preferred<'a, T>(self, videos: &'a [T], size: impl Fn(&T) -> u64, path: impl Fn(&T) -> &str) -> Option<&'a T> {
+        let largest = videos.iter().max_by_key(|v| size(v))?;
+        let (keep, of) = AS_IS_WITHIN;
+        let near = |v: &&T| u128::from(size(v)) * u128::from(of) >= u128::from(size(largest)) * u128::from(keep);
+        let as_is = |v: &&T| self.opens(path(v), false);
+        Some(videos.iter().filter(near).filter(as_is).max_by_key(|v| size(v)).unwrap_or(largest))
+    }
 }
+
+/// How much smaller than the largest video a file the screen opens as it is may be and still play
+/// instead: a quarter. Archive.org's derivatives of one film come within it of each other.
+const AS_IS_WITHIN: (u64, u64) = (3, 4);
 
 impl FromIterator<Container> for Containers {
     fn from_iter<I: IntoIterator<Item = Container>>(containers: I) -> Self {

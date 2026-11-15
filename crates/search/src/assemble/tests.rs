@@ -1142,7 +1142,7 @@ fn a_trailer_is_not_the_film() {
     let boys = Wanted {
         name: "Trailer Park Boys".into(),
         year: Some(2001),
-        episode: Some(torrential_core::title::Episode { season: 1, episode: 1 }),
+        episode: Some(torrential_core::catalog::Episode { season: 1, episode: 1 }),
         namesakes: Namesakes::None,
         runtime: Some(std::time::Duration::from_secs(25 * 60)),
         season_episodes: Some(6),
@@ -1230,7 +1230,7 @@ fn an_episode_ranks_before_its_season_pack() {
     let wanted = Wanted {
         name: "Breaking Bad".into(),
         year: Some(2008),
-        episode: Some(torrential_core::title::Episode { season: 3, episode: 5 }),
+        episode: Some(torrential_core::catalog::Episode { season: 3, episode: 5 }),
         namesakes: Namesakes::None,
         runtime: Some(std::time::Duration::from_secs(47 * 60)),
         season_episodes: Some(13),

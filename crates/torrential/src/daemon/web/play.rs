@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
+use crate::playback::stream::Playable;
 use serde::{Deserialize, Serialize};
-use torrential_core::stream::Playable;
 use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, TorrentFile, TorrentId};
 

@@ -2,8 +2,6 @@
 //! The columns disagree on a few rows, such as `ogv`, `divx` and `mts`, because each keeps the
 //! answer its question had before they were one table.
 
-use crate::cast::Container;
-
 /// What a file in a torrent is to a play.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -94,6 +92,78 @@ impl FileType {
     /// The row for `extension`, in any case.
     pub fn of_extension(extension: &str) -> Option<&'static FileType> {
         TABLE.iter().find(|row| row.extension.eq_ignore_ascii_case(extension))
+    }
+}
+
+/// A video container, which a TV takes or does not. Its codecs are another matter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Container {
+    Mkv,
+    Mp4,
+    WebM,
+    Avi,
+    Ts,
+    Mov,
+    Mpeg,
+    Wmv,
+}
+
+/// Each container's name and the MIME types TVs list it by. The extensions its files have are in
+/// [`FileType`]'s table.
+const CONTAINERS: [(Container, &str, &[&str]); 8] = [
+    (Container::Mkv, "mkv", &["video/x-matroska", "video/x-mkv", "video/mkv", "video/matroska"]),
+    (Container::Mp4, "mp4", &["video/mp4", "video/mpeg4", "video/x-m4v"]),
+    (Container::WebM, "webm", &["video/webm"]),
+    (Container::Avi, "avi", &["video/avi", "video/x-msvideo", "video/x-avi", "video/divx"]),
+    (Container::Ts, "ts", &["video/mp2t", "video/vnd.dlna.mpeg-tts", "video/x-mpegts"]),
+    (Container::Mov, "mov", &["video/quicktime"]),
+    (Container::Mpeg, "mpeg", &["video/mpeg"]),
+    (Container::Wmv, "wmv", &["video/x-ms-wmv"]),
+];
+
+impl Container {
+    /// Every container, in the order a TV's list of them is written.
+    pub const ALL: [Container; 8] = [
+        Container::Mkv,
+        Container::Mp4,
+        Container::WebM,
+        Container::Avi,
+        Container::Ts,
+        Container::Mov,
+        Container::Mpeg,
+        Container::Wmv,
+    ];
+
+    fn row(self) -> &'static (Container, &'static str, &'static [&'static str]) {
+        CONTAINERS.iter().find(|row| row.0 == self).expect("every container has a row")
+    }
+
+    pub fn name(self) -> &'static str {
+        self.row().1
+    }
+
+    /// The MIME types a TV may list this container by, the usual one first.
+    pub fn mimes(self) -> &'static [&'static str] {
+        self.row().2
+    }
+
+    /// The container of a file named `path`, by its extension.
+    pub fn of_path(path: &str) -> Option<Container> {
+        FileType::of(path)?.container
+    }
+
+    /// The container a MIME type names, in any case.
+    pub fn of_mime(mime: &str) -> Option<Container> {
+        let mime = mime.trim().to_ascii_lowercase();
+        CONTAINERS.iter().find(|row| row.2.contains(&mime.as_str())).map(|row| row.0)
+    }
+
+    pub(crate) fn of_name(name: &str) -> Option<Container> {
+        CONTAINERS.iter().find(|row| row.1 == name).map(|row| row.0)
+    }
+
+    pub(crate) fn bit(self) -> u16 {
+        1 << CONTAINERS.iter().position(|row| row.0 == self).expect("every container has a row")
     }
 }
 

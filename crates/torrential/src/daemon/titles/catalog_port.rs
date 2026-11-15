@@ -1,10 +1,10 @@
 //! Films and series: their details, pictures, and what to search for to find one.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use torrential_core::catalog::Country;
-use torrential_core::title::{Episode, Namesakes, Wanted, normalized};
+use torrential_core::catalog::Episode;
+use torrential_core::title::normalized;
 use torrential_core::{Art, ArtKind, EpisodeInfo, Error, ErrorCode, Kind, Season, TitleCard, TitleDetails, TitleId};
 use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat, Picture};
 
@@ -23,52 +23,6 @@ pub trait CatalogPort: Send + Sync {
     /// catalog lists them.
     fn namesakes<'a>(&'a self, card: &'a TitleCard) -> BoxFuture<'a, Result<Vec<TitleCard>, Error>>;
     fn art<'a>(&'a self, id: &'a TitleId, kind: ArtKind) -> BoxFuture<'a, Result<Picture, Error>>;
-}
-
-/// How many episodes the season of `episode` has, or `None` for a film. Refuses an episode of a
-/// film, a series without an episode, and an episode the series does not have.
-pub fn season_episodes(details: &TitleDetails, episode: Option<Episode>) -> Result<Option<u32>, Error> {
-    let card = &details.card;
-    match (card.kind, episode) {
-        (Kind::Film, None) => Ok(None),
-        (Kind::Film, Some(e)) => {
-            Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {e}", card.name))
-                .with_hint(format!("play {} without an episode", card.id)))
-        }
-        (Kind::Series, None) => {
-            Err(Error::new(ErrorCode::Usage, format!("{} is a series, so name one of its episodes", card.name))
-                .with_hint(format!("name an episode such as {}:1:1", card.id)))
-        }
-        (Kind::Series, Some(e)) => {
-            let season = details.seasons.iter().find(|s| s.number == e.season);
-            if !season.is_some_and(|s| s.episodes.iter().any(|info| info.episode == e)) {
-                return Err(Error::new(ErrorCode::NotFound, format!("{e} is not an episode of {}", card.name)));
-            }
-            Ok(season.map(|s| s.episodes.len() as u32))
-        }
-    }
-}
-
-/// How to tell the releases of `episode` of the title `details` describes, or of the film, from
-/// others. `namesakes` are the titles of its kind that share its name, in the catalog's order.
-pub fn wanted(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<Episode>) -> Result<Wanted, Error> {
-    let card = &details.card;
-    let season_episodes = season_episodes(details, episode)?;
-    let shared = namesakes.iter().any(|other| other.id != card.id);
-    let namesakes = match namesakes.first() {
-        _ if !shared => Namesakes::None,
-        Some(first) if first.id == card.id => Namesakes::Leading,
-        _ => Namesakes::Shadowed,
-    };
-    Ok(Wanted {
-        name: card.name.clone(),
-        year: card.year,
-        episode,
-        namesakes,
-        runtime: details.runtime_min.map(|minutes| Duration::from_secs(u64::from(minutes) * 60)),
-        season_episodes,
-        countries: details.countries,
-    })
 }
 
 pub struct Live(Catalog);
@@ -279,8 +233,11 @@ impl CatalogPort for Fake {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use torrential_core::VideoRef;
     use torrential_core::catalog::Countries;
+    use torrential_core::title::{Namesakes, Wanted};
 
     use super::*;
 
@@ -289,7 +246,7 @@ mod tests {
         let video: VideoRef = video.parse().unwrap();
         let details = fake.title(&video.title).await.unwrap();
         let namesakes = fake.namesakes(&details.card).await.unwrap();
-        let wanted = wanted(&details, &namesakes, video.episode).unwrap();
+        let wanted = Wanted::of(&details, &namesakes, video.episode).unwrap();
         (details, wanted)
     }
 
@@ -298,7 +255,7 @@ mod tests {
         let (night, remake, series) = (night(), remake(), harbor_lights());
         let both = [night.card.clone(), remake.card.clone()];
         let read = |details: &TitleDetails, namesakes: &[TitleCard], episode| {
-            wanted(details, namesakes, episode).map(|w| (w.year, w.namesakes, w.runtime, w.season_episodes))
+            Wanted::of(details, namesakes, episode).map(|w| (w.year, w.namesakes, w.runtime, w.season_episodes))
         };
         let minutes = |m: u64| Some(Duration::from_secs(m * 60));
         assert_eq!(read(&night, &both, None), Ok((Some(1968), Namesakes::Leading, minutes(96), None)));
@@ -311,7 +268,7 @@ mod tests {
         assert_eq!(read(&series, &[], episode(0, 1)), Ok((Some(2019), Namesakes::None, minutes(44), Some(1))));
 
         let refused = |details: &TitleDetails, episode| {
-            let e = wanted(details, &[], episode).unwrap_err();
+            let e = Wanted::of(details, &[], episode).unwrap_err();
             (e.code, e.message)
         };
         assert_eq!(

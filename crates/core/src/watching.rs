@@ -1,16 +1,17 @@
 //! Where a person stopped each film and episode, what of a title to play next, and the steps a
 //! title play reports.
 
-use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::catalog::Episode;
 use crate::catalog::{EpisodeInfo, Kind, TitleCard, TitleDetails, TitleId, VideoRef};
-use crate::error::Error;
+use crate::error::SourceReport;
+use crate::error::{Error, Skip, Tried};
 use crate::id::{ReleaseId, TorrentId};
-use crate::release::{Release, SourceReport};
-use crate::title::{Episode, Span};
+use crate::release::Release;
+use crate::title::Span;
 
 /// Where a person stopped one film or episode. Whether it is finished follows from the position.
 #[derive(Clone, PartialEq, Debug)]
@@ -221,90 +222,6 @@ pub enum Check {
     FirstBytes,
 }
 
-/// Why a play moved past a source.
-#[derive(Clone, PartialEq, Debug, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "reason")]
-pub enum Skip {
-    NoFileList {
-        waited_s: u32,
-    },
-    /// No file reads as this film or episode, or the largest is a sample.
-    NoVideo,
-    /// The video plays in a browser, ffmpeg is missing, and the file is not MP4, M4V, MOV, or WebM.
-    Unplayable {
-        container: String,
-    },
-    /// The video plays on a TV, which does not take its container.
-    NotOnTv {
-        container: String,
-    },
-    TooLarge {
-        error: Error,
-    },
-    NoData {
-        waited_s: u32,
-    },
-    Stalled,
-    Failed {
-        error: Error,
-    },
-}
-
-/// Why a play moved past a source, as it goes on the wire: with `text`, which says it in plain
-/// words. A read leaves the text out.
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case", tag = "reason")]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Skip"))]
-pub(crate) enum SkipWire<'a> {
-    NoFileList { waited_s: u32, text: String },
-    NoVideo { text: String },
-    Unplayable { container: &'a str, text: String },
-    NotOnTv { container: &'a str, text: String },
-    TooLarge { error: &'a Error, text: String },
-    NoData { waited_s: u32, text: String },
-    Stalled { text: String },
-    Failed { error: &'a Error, text: String },
-}
-
-impl Serialize for Skip {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let text = self.to_string();
-        let wire = match self {
-            Skip::NoFileList { waited_s } => SkipWire::NoFileList { waited_s: *waited_s, text },
-            Skip::NoVideo => SkipWire::NoVideo { text },
-            Skip::Unplayable { container } => SkipWire::Unplayable { container, text },
-            Skip::NotOnTv { container } => SkipWire::NotOnTv { container, text },
-            Skip::TooLarge { error } => SkipWire::TooLarge { error, text },
-            Skip::NoData { waited_s } => SkipWire::NoData { waited_s: *waited_s, text },
-            Skip::Stalled => SkipWire::Stalled { text },
-            Skip::Failed { error } => SkipWire::Failed { error, text },
-        };
-        wire.serialize(serializer)
-    }
-}
-
-/// Why a play moved past a source, in plain words.
-impl fmt::Display for Skip {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Skip::NoFileList { waited_s } => write!(f, "no peer sent its file list in {waited_s}s"),
-            Skip::NoVideo => f.write_str("none of its files is the video"),
-            Skip::Unplayable { container } => write!(f, "its .{container} file needs ffmpeg, which is not installed"),
-            Skip::NotOnTv { container } => write!(f, "the TV does not play its .{container} file"),
-            Skip::TooLarge { error } | Skip::Failed { error } => f.write_str(&crate::text::sanitize(&error.message)),
-            Skip::NoData { waited_s } => write!(f, "no data arrived in {waited_s}s"),
-            Skip::Stalled => f.write_str("it stalled"),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct Tried {
-    pub release: ReleaseId,
-    pub reason: Skip,
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -312,7 +229,8 @@ mod tests {
     use super::*;
     use crate::catalog::{Art, Season};
     use crate::error::ErrorCode;
-    use crate::release::{Category, SourceOutcome};
+    use crate::error::SourceOutcome;
+    use crate::release::Category;
 
     const HASH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 

@@ -1,8 +1,10 @@
 use std::time::Duration;
 
-use crate::filetype::{FileType, Kind};
-use crate::job::TorrentFile;
-use crate::title::{self, Episode};
+use torrential_core::catalog::Episode;
+use torrential_core::filetype::{FileType, Kind};
+use torrential_core::job::TorrentFile;
+use torrential_core::title;
+use torrential_core::Plays;
 
 /// Folders that hold the subtitles for every video in the torrent.
 const SUBTITLE_FOLDERS: [&str; 4] = ["sub", "subs", "subtitle", "subtitles"];
@@ -12,10 +14,6 @@ const MARGIN: f64 = 0.9;
 
 /// Video on disk before playback starts.
 const HEAD_BUFFER: Duration = Duration::from_secs(10);
-
-/// How much smaller than the largest video a file the player opens as it is may be and still play
-/// instead: a quarter. Archive.org's derivatives of one film come within it of each other.
-const AS_IS_WITHIN: (u64, u64) = (3, 4);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Playable {
@@ -33,25 +31,15 @@ pub enum Start {
     Stalled,
 }
 
-/// The video a play opens, plus the subtitle files that belong with it: the largest video, unless
-/// one the player opens as it is, by `as_is` on its path, comes within a quarter of its size. So a
-/// browser plays an archive.org film's MP4 rather than its larger Ogg, which it cannot decode.
-pub fn pick(files: &[TorrentFile], as_is: impl Fn(&str) -> bool) -> Option<Playable> {
+/// The video a play in `plays` opens, as [`Plays::preferred`] chooses among the videos that are
+/// not samples, plus the subtitle files that belong with it.
+pub fn pick(files: &[TorrentFile], plays: Plays) -> Option<Playable> {
     let videos: Vec<&TorrentFile> = files.iter().filter(|f| kind(&f.path) == Some(Kind::Video)).collect();
     let features: Vec<&TorrentFile> = videos.iter().copied().filter(|f| !is_sample(&f.path)).collect();
     let candidates = if features.is_empty() { &videos } else { &features };
-    let video = preferred(candidates, |f| f.size, |f| as_is(&f.path))?;
+    let video = *plays.preferred(candidates, |f| f.size, |f| &f.path)?;
     let subtitles = subtitles(files, video, features.len());
     Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
-}
-
-/// Of `videos`, the largest, unless one the player opens as it is comes within a quarter of its
-/// size; then the largest of those.
-pub fn preferred<T>(videos: &[T], size: impl Fn(&T) -> u64, as_is: impl Fn(&T) -> bool) -> Option<&T> {
-    let largest = videos.iter().max_by_key(|v| size(v))?;
-    let (keep, of) = AS_IS_WITHIN;
-    let near = |v: &&T| u128::from(size(v)) * u128::from(of) >= u128::from(size(largest)) * u128::from(keep);
-    Some(videos.iter().filter(near).filter(|v| as_is(v)).max_by_key(|v| size(v)).unwrap_or(largest))
 }
 
 /// The file a person chose to watch, plus the subtitle files that belong with it. When some of
@@ -125,6 +113,8 @@ fn in_subtitle_folder(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use torrential_core::{Container, Opens};
+
     use super::*;
 
     fn picked<'a>(listing: &[(&'a str, u64)]) -> Option<(&'a str, Vec<&'a str>)> {
@@ -139,7 +129,7 @@ mod tests {
                 risk: None,
             })
             .collect();
-        let playable = pick(&files, |_| true)?;
+        let playable = pick(&files, Plays::ANY)?;
         let path = |index: u32| listing[index as usize].0;
         Some((path(playable.video), playable.subtitles.into_iter().map(path).collect()))
     }
@@ -214,11 +204,11 @@ mod tests {
                 risk: None,
             })
             .collect();
-        let picked = |as_is: fn(&str) -> bool| pick(&files, as_is).map(|p| night[p.video as usize].0);
-        let browser = |path: &str| FileType::of(path).is_some_and(|t| t.browser.is_some());
-        assert_eq!(picked(|_| true), Some("Night/Night.ogv"), "a player that opens any file takes the largest");
-        assert_eq!(picked(browser), Some("Night/Night_512kb.mp4"), "a browser takes the MP4, 89% of the Ogg");
-        assert_eq!(picked(|path| path.ends_with(".mov")), Some("Night/Night.ogv"), "the MOV is 61% of the Ogg");
+        let picked = |plays: Plays| pick(&files, plays).map(|p| night[p.video as usize].0);
+        let tv = |containers: &[Container]| Plays { opens: Opens::Only(containers.iter().copied().collect()), ..Plays::ANY };
+        assert_eq!(picked(Plays::ANY), Some("Night/Night.ogv"), "a player that opens any file takes the largest");
+        assert_eq!(picked(Plays::BROWSER), Some("Night/Night_512kb.mp4"), "a browser takes the MP4, 89% of the Ogg");
+        assert_eq!(picked(tv(&[Container::Mov])), Some("Night/Night.ogv"), "the MOV is 61% of the Ogg");
     }
 
     #[test]

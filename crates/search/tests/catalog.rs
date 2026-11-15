@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use torrential_core::catalog::Episode;
 use torrential_core::catalog::{Countries, Country};
-use torrential_core::title::Episode;
 use torrential_core::{ArtKind, ErrorCode, Kind, TitleCard, TitleId};
 use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat};
 

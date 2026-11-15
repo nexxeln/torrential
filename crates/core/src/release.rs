@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::error::{Skip, SourceReport};
 use crate::id::ReleaseId;
 use crate::profile::Profile;
 use crate::quality::Quality;
 use crate::title::{Span, Wanted};
-use crate::watching::Skip;
 
 /// A torrent offered by one or more search sources, merged by infohash. Its JSON
 /// also carries the [`Quality`] its name gives.
@@ -239,46 +239,6 @@ impl SearchQuery {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "outcome")]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub enum SourceOutcome {
-    Ok {
-        results: u32,
-    },
-    Cached {
-        results: u32,
-    },
-    Timeout,
-    Http {
-        status: u16,
-    },
-    Connect {
-        reason: String,
-    },
-    /// A response that did not parse.
-    BadResponse {
-        reason: String,
-    },
-    /// Most rows matched no query word, as when an API returns its latest uploads.
-    Irrelevant,
-}
-
-impl SourceOutcome {
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Self::Ok { .. } | Self::Cached { .. })
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct SourceReport {
-    pub source: String,
-    #[serde(flatten)]
-    pub outcome: SourceOutcome,
-    pub elapsed_ms: u32,
-}
-
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SearchResult {
@@ -308,6 +268,7 @@ impl SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SourceOutcome;
 
     fn named(name: &str, category: Option<Category>) -> Release {
         Release {
