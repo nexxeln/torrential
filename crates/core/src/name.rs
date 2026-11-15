@@ -1,4 +1,4 @@
-//! How release names split into words and years. The title reader, quality and architecture
+//! How release names split into words and years. The title reader, quality, cut and architecture
 //! tags, language markers and the search's relevance all split names this way.
 
 /// A year as a name writes it: four digits from 1900 to 2099.
