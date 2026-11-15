@@ -1,4 +1,5 @@
 import { type ComponentProps, type MouseEvent, useSyncExternalStore } from "react";
+import { TITLE_ID, VIDEO_REF } from "./lib/video";
 
 export type Route =
   /** Continue watching and the library, or with a query, the films and shows named like it. */
@@ -15,8 +16,6 @@ export type Route =
   | { page: "missing" };
 
 const CHANGED = "torrential:navigate";
-const TITLE = /^tt\d+$/;
-const VIDEO = /^tt\d+(:\d+:\d+)?$/;
 
 /** A path segment as typed. A malformed escape stays as it is, and names no page. */
 function decoded(segment: string): string {
@@ -36,11 +35,11 @@ function parse(href: string): Route {
   const parts = url.pathname.split("/").filter(Boolean).map(decoded);
   const query = url.searchParams;
   if (parts.length === 0) return { page: "home", query: query.get("q") ?? "" };
-  if (parts[0] === "title" && parts.length === 2 && TITLE.test(parts[1]!)) {
+  if (parts[0] === "title" && parts.length === 2 && TITLE_ID.test(parts[1]!)) {
     const sources = query.get("sources");
-    return { page: "title", id: parts[1]!, season: number(query.get("season")), sources: sources && VIDEO.test(sources) ? sources : null };
+    return { page: "title", id: parts[1]!, season: number(query.get("season")), sources: sources && VIDEO_REF.test(sources) ? sources : null };
   }
-  if (parts[0] === "play" && parts.length === 2 && VIDEO.test(parts[1]!)) {
+  if (parts[0] === "play" && parts.length === 2 && VIDEO_REF.test(parts[1]!)) {
     return { page: "play", video: parts[1]!, source: query.get("source") };
   }
   if (parts[0] === "torrents" && parts.length === 1) {

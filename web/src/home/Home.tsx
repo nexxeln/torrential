@@ -1,7 +1,8 @@
 import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
-import { type ApiError, artUrl, asApiError, type Continue, type Home as HomeData, home } from "../api";
-import { count, minutes, sentence } from "../lib/format";
+import { type ApiError, artUrl, type Continue, ENGINE_UNREACHABLE, type Home as HomeData, home } from "../api";
+import { count, minutesLeft, sentence } from "../lib/format";
 import { useJobs } from "../lib/jobs";
+import { useLatest } from "../lib/useLatest";
 import { SearchField, useSearchText } from "../search/SearchField";
 import { homePath, Link, navigate, playPath, titlePath, torrentsPath } from "../router";
 import { Blank, Picture } from "../titles/Picture";
@@ -97,7 +98,7 @@ function ContinueCard({ item }: { item: Continue }) {
     <Picture src={artUrl(title.id, "background")} alt="" className="absolute inset-0 size-full object-cover" fallback={<Blank kind={title.kind} />} />
   );
   const started = item.resume_at !== null && item.duration !== null && item.duration > 0;
-  const left = started ? `${minutes((item.duration! - item.resume_at!) / 60)} left` : episode ? "Next episode" : "Not started";
+  const left = started ? minutesLeft(item.resume_at!, item.duration!) : episode ? "Next episode" : "Not started";
   const what = episode ? `${episodeCode(episode)} · ${episodeName(episode)}` : title.year;
   return (
     <li className="snap-start">
@@ -137,20 +138,18 @@ function Shelf() {
   const [state, setState] = useState<HomeState>(() => (lastShelf ? { kind: "ready", home: lastShelf } : { kind: "loading" }));
   // Asks again when the engine comes back.
   const live = useJobs().link === "live";
-  useEffect(() => {
-    const stop = new AbortController();
-    home(stop.signal).then(
-      (found) => {
-        lastShelf = found;
-        setState({ kind: "ready", home: found });
-      },
-      (thrown) => !stop.signal.aborted && setState({ kind: "failed", error: asApiError(thrown) }),
-    );
-    return () => stop.abort();
-  }, [live]);
+  useLatest(
+    home,
+    (found) => {
+      lastShelf = found;
+      setState({ kind: "ready", home: found });
+    },
+    (error) => setState({ kind: "failed", error }),
+    [live],
+  );
 
   // The header says when the engine is not running.
-  if (state.kind === "loading" || (state.kind === "failed" && state.error.code === "engine_unreachable")) return null;
+  if (state.kind === "loading" || (state.kind === "failed" && state.error.code === ENGINE_UNREACHABLE)) return null;
   if (state.kind === "failed") {
     return (
       <p className="max-w-[60ch] text-base text-pretty text-pencil sm:text-sm">

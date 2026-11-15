@@ -2,7 +2,7 @@ import { XMarkIcon } from "@heroicons/react/16/solid";
 import { useState } from "react";
 import type { Job } from "../api";
 import { bytes, clock, percent, rate } from "../lib/format";
-import { useJobs } from "../lib/jobs";
+import { STATE_WORDS, useJobs } from "../lib/jobs";
 import { fileName, readable } from "../lib/release";
 import { forgetPosition, type Position, positions } from "../lib/storage";
 import { Link, watchPath } from "../router";
@@ -44,17 +44,14 @@ function summary(job: Job): string {
     case "downloading":
       return [share, rate(progress.down_rate)].filter(Boolean).join(" · ");
     case "done":
-      return progress.size ? bytes(progress.size) : "Done";
+      return progress.size ? bytes(progress.size) : STATE_WORDS.done;
     case "paused":
-      return ["Paused", share].filter(Boolean).join(" · ");
+      return [STATE_WORDS.paused, share].filter(Boolean).join(" · ");
     case "error":
-      return "Failed";
     case "metadata":
-      return "Finding peers";
     case "queued":
-      return "Queued";
     case "checking":
-      return "Checking";
+      return STATE_WORDS[job.state];
   }
 }
 

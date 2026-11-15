@@ -1,7 +1,8 @@
 import { BookmarkIcon, PlayIcon, StarIcon } from "@heroicons/react/16/solid";
 import { Fragment, type ReactNode, useEffect } from "react";
 import { artUrl, type Next, setSaved, type TitlePage as Title } from "../api";
-import { count, list, minutes, sentence } from "../lib/format";
+import { count, list, minutes, minutesLeft, sentence } from "../lib/format";
+import { videoOf } from "../lib/video";
 import { Link, navigate, playPath, titlePath } from "../router";
 import { CastButton } from "../cast/CastButton";
 import { Button, buttonClass } from "../ui/Button";
@@ -12,7 +13,7 @@ import { Logo } from "./Logo";
 import { Picture } from "./Picture";
 import { Sources } from "./Sources";
 import { useTitle } from "./useTitle";
-import { episodeCode, findEpisode, playingOrder, videoOf } from "./words";
+import { episodeCode, findEpisode, playingOrder } from "./words";
 
 /** What the page's Play button plays. */
 interface Primary {
@@ -39,7 +40,7 @@ function primaryOf(page: Title): Primary | null {
   return {
     video: target.video,
     label: episode ? `${verb} ${episodeCode(episode)}` : verb,
-    left: resuming && duration ? `${minutes((duration - target.resume_at!) / 60)} left` : null,
+    left: resuming && duration ? minutesLeft(target.resume_at!, duration) : null,
   };
 }
 

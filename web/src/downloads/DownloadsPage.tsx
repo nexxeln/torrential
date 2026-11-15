@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { type ApiError, asApiError, change, type Job } from "../api";
 import { bytes, count, percent, rate, sentence, span } from "../lib/format";
-import { useJobs } from "../lib/jobs";
+import { STATE_WORDS, useJobs } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { Link, watchPath } from "../router";
 import { Button, buttonClass } from "../ui/Button";
@@ -9,23 +9,13 @@ import { Header } from "../ui/Header";
 import { Meter } from "../ui/Meter";
 import { trashed } from "./trashed";
 
-const STATES: Record<Job["state"], string> = {
-  queued: "Queued",
-  metadata: "Finding peers",
-  checking: "Checking files",
-  downloading: "Downloading",
-  paused: "Paused",
-  done: "Done",
-  error: "Failed",
-};
-
 function facts(job: Job): string {
   const { progress } = job;
   const size = progress.size;
   const have = size === null ? null : job.state === "done" ? bytes(size) : `${bytes(progress.verified)} of ${bytes(size)}`;
   const moving = job.state === "downloading";
   return [
-    STATES[job.state],
+    STATE_WORDS[job.state],
     have,
     moving ? rate(progress.down_rate) : null,
     moving ? count(progress.peers, "peer") : null,

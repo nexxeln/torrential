@@ -66,6 +66,11 @@ export function sentence(text: string): string {
   return /[.!?…]$/.test(capital) ? capital : `${capital}.`;
 }
 
+/** What is left of a video stopped at `position` of `duration` seconds: `1h 12m left`. */
+export function minutesLeft(position: number, duration: number): string {
+  return `${minutes((duration - position) / 60)} left`;
+}
+
 /** A running time: `1h 36m`, `2h`, `14m`. */
 export function minutes(count: number): string {
   const whole = Math.max(0, Math.round(count));

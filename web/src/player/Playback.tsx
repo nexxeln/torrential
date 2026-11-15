@@ -12,7 +12,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { MediaInfo, PlayInfo } from "../api";
+import { type MediaInfo, mediaErrorCode, type PlayInfo } from "../api";
 import { CastButton } from "../cast/CastButton";
 import { useCasting } from "../cast/casts";
 import { clock } from "../lib/format";
@@ -30,9 +30,10 @@ import {
 import { isTv } from "../lib/tv";
 import { navigate, watchPath } from "../router";
 import { Button } from "../ui/Button";
+import { ControlButton } from "../ui/ControlButton";
 import { PlayerActions } from "./actions";
 import { Buffering, Ended, PlayingReadout, Problem, Starting, TopBar } from "./Chrome";
-import { ControlButton, Controls } from "./Controls";
+import { Controls } from "./Controls";
 import { type PlayerParts, PlayerContext, Scrub } from "./context";
 import { CueTrack } from "./cues";
 import { FeedbackLayer } from "./FeedbackLayer";
@@ -279,7 +280,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const failure = sourceState.kind === "failed" ? sourceState.error : null;
   const converts = media.ffmpeg === "ready";
   useEffect(() => {
-    if (failure && howKind === "direct" && converts && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
+    if (failure && howKind === "direct" && converts && [mediaErrorCode(3), mediaErrorCode(4)].some((code) => code === failure.code)) setDirectWorks(false);
   }, [failure, howKind, converts]);
 
   // Where playback is, remembered for the next visit while it plays here.
