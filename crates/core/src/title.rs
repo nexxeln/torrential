@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Countries, Country, TitleCard};
+use crate::catalog::{self, Countries, Country, Episode, TitleCard, TitleDetails};
 use crate::error::{Error, ErrorCode};
 use crate::filetype::{FileType, Kind};
 use crate::name::{self, year};
@@ -21,20 +21,6 @@ pub struct Title {
     /// The year in the name. For a series, the year it began.
     pub year: Option<u16>,
     pub episode: Option<Episode>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct Episode {
-    pub season: u32,
-    pub episode: u32,
-}
-
-/// An episode as people write it, such as S03E05.
-impl fmt::Display for Episode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "S{:02}E{:02}", self.season, self.episode)
-    }
 }
 
 /// A film's name and year, or a series' name and the episode, as `Harbor Lights S01E02`.
@@ -296,6 +282,30 @@ pub enum Namesakes {
     Shadowed,
 }
 
+/// How many episodes the season of `episode` has, or `None` for a film. Refuses an episode of a
+/// film, a series without an episode, and an episode the series does not have.
+pub fn season_episodes(details: &TitleDetails, episode: Option<Episode>) -> Result<Option<u32>, Error> {
+    let card = &details.card;
+    match (card.kind, episode) {
+        (catalog::Kind::Film, None) => Ok(None),
+        (catalog::Kind::Film, Some(e)) => {
+            Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {e}", card.name))
+                .with_hint(format!("play {} without an episode", card.id)))
+        }
+        (catalog::Kind::Series, None) => {
+            Err(Error::new(ErrorCode::Usage, format!("{} is a series, so name one of its episodes", card.name))
+                .with_hint(format!("name an episode such as {}:1:1", card.id)))
+        }
+        (catalog::Kind::Series, Some(e)) => {
+            let season = details.seasons.iter().find(|s| s.number == e.season);
+            if !season.is_some_and(|s| s.episodes.iter().any(|info| info.episode == e)) {
+                return Err(Error::new(ErrorCode::NotFound, format!("{e} is not an episode of {}", card.name)));
+            }
+            Ok(season.map(|s| s.episodes.len() as u32))
+        }
+    }
+}
+
 /// The film or episode a person wants, as the catalog names it, to tell its releases from others.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Wanted {
@@ -316,6 +326,29 @@ pub struct Wanted {
 }
 
 impl Wanted {
+    /// How to tell the releases of `episode` of the title `details` describes, or of the film,
+    /// from others. `namesakes` are the titles of its kind that share its name, in the catalog's
+    /// order.
+    pub fn of(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<Episode>) -> Result<Wanted, Error> {
+        let card = &details.card;
+        let season_episodes = season_episodes(details, episode)?;
+        let shared = namesakes.iter().any(|other| other.id != card.id);
+        let namesakes = match namesakes.first() {
+            _ if !shared => Namesakes::None,
+            Some(first) if first.id == card.id => Namesakes::Leading,
+            _ => Namesakes::Shadowed,
+        };
+        Ok(Wanted {
+            name: card.name.clone(),
+            year: card.year,
+            episode,
+            namesakes,
+            runtime: details.runtime_min.map(|minutes| Duration::from_secs(u64::from(minutes) * 60)),
+            season_episodes,
+            countries: details.countries,
+        })
+    }
+
     /// The reading of `release` that is this title, or `None`. The name must be the same once
     /// normalized. A film's year may be 1 off the catalog's, since a release can name the year
     /// after the premiere. A series' year must be the year it began. A country code after the

@@ -4,9 +4,8 @@
 //! and system language would.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
-use torrential_core::title::{Namesakes, Span, Wanted, normalized};
+use torrential_core::title::{Span, Wanted, normalized};
 use torrential_core::{Category, Language, Machine, Os, Preferences, Profile, Screen, SearchQuery, VideoRef};
 use torrential_search::catalog::{Catalog, CatalogConfig};
 use torrential_search::{ResultCache, Search, SearchConfig};
@@ -23,22 +22,8 @@ async fn main() {
     let catalog = Catalog::new(&CatalogConfig::default()).expect("a catalog");
     let details = catalog.title(&video.title).await.unwrap_or_else(|e| fail(&e.to_string()));
     let same = catalog.namesakes(&details.card).await.unwrap_or_default();
-    let namesakes = match same.iter().position(|card| card.id == details.card.id) {
-        _ if same.len() < 2 => Namesakes::None,
-        Some(0) => Namesakes::Leading,
-        _ => Namesakes::Shadowed,
-    };
-    let season = video.episode.and_then(|e| details.seasons.iter().find(|s| s.number == e.season));
-    let wanted = Wanted {
-        name: details.card.name.clone(),
-        year: details.card.year,
-        episode: video.episode,
-        namesakes,
-        runtime: details.runtime_min.map(|minutes| Duration::from_secs(u64::from(minutes) * 60)),
-        season_episodes: season.map(|s| s.episodes.len() as u32),
-        countries: details.countries,
-    };
-    println!("{} ({:?}), {namesakes:?}, queries {:?}", wanted.name, wanted.year, wanted.queries());
+    let wanted = Wanted::of(&details, &same, video.episode).unwrap_or_else(|e| fail(&e.to_string()));
+    println!("{} ({:?}), {:?}, queries {:?}", wanted.name, wanted.year, wanted.namesakes, wanted.queries());
     println!("ranked for {}", profile.describe());
 
     let search = Search::new(&SearchConfig::default(), ResultCache::new()).expect("a search");

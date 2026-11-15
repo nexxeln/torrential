@@ -6,9 +6,10 @@ pub mod view;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use torrential_core::catalog::Episode;
 use torrential_core::protocol::{Home, TitlePage, TitlePlayed};
 use torrential_core::text::sanitize;
-use torrential_core::title::{Episode, title_name};
+use torrential_core::title::title_name;
 use torrential_core::units::count;
 use torrential_core::{AttemptEvent, Check, EpisodeInfo, Error, TitleCard, TitleId, VideoRef};
 

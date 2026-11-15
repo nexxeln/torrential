@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 use serde_json::Value;
-use torrential_core::catalog::Countries;
-use torrential_core::title::Episode;
+use torrential_core::catalog::Episode;
+use torrential_core::catalog::{Countries, Country};
 use torrential_core::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetails, TitleId};
 use url::Url;
 
@@ -159,7 +159,7 @@ pub fn described(body: &[u8], id: &TitleId) -> Result<Option<Described>, serde_j
         genres: meta.genres.unwrap_or_default().iter().map(|genre| unescaped(genre)).collect(),
         runtime_min: meta.runtime.and_then(|runtime| minutes(&runtime.text())),
         cast: meta.cast.unwrap_or_default().iter().map(|name| unescaped(name)).collect(),
-        countries: meta.country.as_deref().map(Countries::listed_in).unwrap_or_default(),
+        countries: meta.country.as_deref().map(listed_in).unwrap_or_default(),
         art: Art {
             poster: pictures.poster.is_some(),
             background: pictures.background.is_some(),
@@ -196,6 +196,25 @@ fn seasons(episodes: impl Iterator<Item = EpisodeInfo>) -> Vec<Season> {
         .into_iter()
         .map(|((_, number), episodes)| Season { number, episodes: episodes.into_values().collect() });
     seasons.collect()
+}
+
+/// The names Cinemeta writes each country by.
+const COUNTRY_NAMES: [(Country, &[&str]); 6] = [
+    (Country::Us, &["United States", "United States of America", "USA"]),
+    (Country::Uk, &["United Kingdom", "UK"]),
+    (Country::Au, &["Australia"]),
+    (Country::Ca, &["Canada"]),
+    (Country::Nz, &["New Zealand"]),
+    (Country::Ie, &["Ireland"]),
+];
+
+/// The countries Cinemeta lists as `United States, United Kingdom`. A country without a code in
+/// `Country` is left out.
+fn listed_in(text: &str) -> Countries {
+    let named = |name: &str| {
+        COUNTRY_NAMES.iter().find(|(_, names)| names.iter().any(|n| n.eq_ignore_ascii_case(name))).map(|row| row.0)
+    };
+    text.split(',').filter_map(|name| named(name.trim())).collect()
 }
 
 fn address(text: Option<String>) -> Option<Url> {
@@ -265,6 +284,22 @@ fn unescaped(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn countries_read_from_the_names_cinemeta_lists() {
+        let listed = |text| listed_in(text).iter().collect::<Vec<_>>();
+        assert_eq!(listed("United States"), [Country::Us]);
+        assert_eq!(
+            listed("Ireland, United Kingdom, Netherlands, United States"),
+            [Country::Us, Country::Uk, Country::Ie]
+        );
+        assert_eq!(
+            listed("Australia,New Zealand, Canada, USA, United States"),
+            [Country::Us, Country::Au, Country::Ca, Country::Nz]
+        );
+        assert_eq!(listed("Netherlands"), []);
+        assert!(listed_in("").is_empty());
+    }
 
     #[test]
     fn html_references_in_names_are_decoded() {

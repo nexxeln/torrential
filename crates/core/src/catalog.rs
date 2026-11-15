@@ -6,7 +6,6 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::{Error, ErrorCode};
-use crate::title::Episode;
 
 /// An IMDb title ID such as `tt0063350`: `tt` and 7 to 10 digits.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -68,6 +67,20 @@ impl Kind {
             Self::Film => "film",
             Self::Series => "series",
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Episode {
+    pub season: u32,
+    pub episode: u32,
+}
+
+/// An episode as people write it, such as S03E05.
+impl fmt::Display for Episode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "S{:02}E{:02}", self.season, self.episode)
     }
 }
 
@@ -180,20 +193,16 @@ pub enum Country {
 impl Country {
     pub(crate) const ALL: [Country; 6] = [Country::Us, Country::Uk, Country::Au, Country::Ca, Country::Nz, Country::Ie];
 
-    /// The code release names use, and the names a catalog writes the country by.
-    fn spellings(self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            Country::Us => ("US", &["United States", "United States of America", "USA"]),
-            Country::Uk => ("UK", &["United Kingdom", "UK"]),
-            Country::Au => ("AU", &["Australia"]),
-            Country::Ca => ("CA", &["Canada"]),
-            Country::Nz => ("NZ", &["New Zealand"]),
-            Country::Ie => ("IE", &["Ireland"]),
-        }
-    }
-
+    /// The code release names use.
     pub fn code(self) -> &'static str {
-        self.spellings().0
+        match self {
+            Country::Us => "US",
+            Country::Uk => "UK",
+            Country::Au => "AU",
+            Country::Ca => "CA",
+            Country::Nz => "NZ",
+            Country::Ie => "IE",
+        }
     }
 
     /// The country a code such as `US` or `uk` stands for.
@@ -227,15 +236,6 @@ impl From<Country> for String {
 pub struct Countries(u8);
 
 impl Countries {
-    /// The countries a catalog lists as `United States, United Kingdom`. A country without a code
-    /// in `Country` is left out.
-    pub fn listed_in(text: &str) -> Countries {
-        let named = |name: &str| {
-            Country::ALL.into_iter().find(|country| country.spellings().1.iter().any(|n| n.eq_ignore_ascii_case(name)))
-        };
-        text.split(',').filter_map(|name| named(name.trim())).collect()
-    }
-
     pub fn contains(self, country: Country) -> bool {
         self.0 & country.bit() != 0
     }
@@ -366,23 +366,11 @@ mod tests {
     }
 
     #[test]
-    fn a_country_reads_from_its_code_or_the_names_a_catalog_lists() {
+    fn a_country_reads_from_its_code() {
         assert_eq!(
             ["US", "uk", "Ie", "GB", "USA"].map(Country::of_code),
             [Some(Country::Us), Some(Country::Uk), Some(Country::Ie), None, None]
         );
-        let listed = |text| Countries::listed_in(text).iter().collect::<Vec<_>>();
-        assert_eq!(listed("United States"), [Country::Us]);
-        assert_eq!(
-            listed("Ireland, United Kingdom, Netherlands, United States"),
-            [Country::Us, Country::Uk, Country::Ie]
-        );
-        assert_eq!(
-            listed("Australia,New Zealand, Canada, USA, United States"),
-            [Country::Us, Country::Au, Country::Ca, Country::Nz]
-        );
-        assert_eq!(listed("Netherlands"), []);
-        assert!(Countries::listed_in("").is_empty());
         let both = Countries::from([Country::Nz, Country::Uk]);
         assert_eq!((both.contains(Country::Uk), both.contains(Country::Us)), (true, false));
         assert_eq!(format!("{both:?}"), r#"{"UK", "NZ"}"#);

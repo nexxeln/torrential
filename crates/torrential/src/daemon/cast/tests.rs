@@ -74,7 +74,7 @@ fn a_tv_gets_the_dlna_headers_and_samsung_its_subtitle() {
 fn a_download_made_by_playing_one_film_or_episode_names_it() {
     let link = |span| TitleLink { title: "tt0063350".parse().unwrap(), span, release: None };
     assert_eq!(video_of(&link(Span::Film)), Some("tt0063350".parse().unwrap()));
-    let episode = torrential_core::title::Episode { season: 3, episode: 5 };
+    let episode = torrential_core::catalog::Episode { season: 3, episode: 5 };
     assert_eq!(video_of(&link(Span::Episode(episode))), Some("tt0063350:3:5".parse().unwrap()));
     assert_eq!(video_of(&link(Span::Season(3))), None, "a season pack holds many");
 }

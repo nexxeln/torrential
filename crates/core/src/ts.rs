@@ -4,8 +4,9 @@
 use ts_rs::{Config, TS};
 
 use crate::catalog::{Country, EpisodeInfoWire};
+use crate::error::SkipWire;
 use crate::release::ReleaseWire;
-use crate::watching::{SkipWire, WatchedWire};
+use crate::watching::WatchedWire;
 
 /// Implements `TS` for types that serialize as `$ts` by hand.
 macro_rules! written_as {

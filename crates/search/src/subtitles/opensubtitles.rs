@@ -82,7 +82,7 @@ impl Provider for OpenSubtitles {
 mod tests {
     use super::super::FileHash;
     use super::*;
-    use torrential_core::title::Episode;
+    use torrential_core::catalog::Episode;
 
     #[test]
     fn a_search_names_the_title_and_the_file_when_its_hash_is_known() {

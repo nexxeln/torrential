@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::playback::media::RUNTIME_BYTES;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use torrential_core::media::RUNTIME_BYTES;
 use torrential_core::{
     ArtKind, Display, Error, Playback, Preferences, Screen, Target, TitleCard, TitleDetails, TitleId,
 };
@@ -423,7 +423,7 @@ async fn a_page_follows_and_changes_downloads() {
 async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
     let h = Harness::new();
     h.swarm.set_rate(100 * GIB);
-    let clip = include_bytes!("../../../../core/tests/fixtures/media/faststart.mp4");
+    let clip = include_bytes!("../../../tests/fixtures/media/faststart.mp4");
     let film = torrent(63, "film", &[("film.mp4", clip.len() as u64), ("film.mkv", 5_000)]);
     h.swarm.publish(film.clone());
     let id = film.info_hash.id().to_hex();

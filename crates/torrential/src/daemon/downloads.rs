@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::playback::media::RUNTIME_BYTES;
+use crate::playback::stream::{self, Playable};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
-use torrential_core::media::RUNTIME_BYTES;
 use torrential_core::protocol::{Change, Event, FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
-use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Job, JobStatus, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile,
@@ -213,7 +213,7 @@ pub(super) async fn resolve(ctx: &Ctx, target: Target, command: &'static str) ->
         Target::TorrentFile(path) => {
             Ok(Source::Torrent { metainfo: read_torrent(ctx, &path).await?, origin: Origin::File })
         }
-        Target::Title(video) => Err(torrential_core::id::not_a_torrent(&video, command)),
+        Target::Title(video) => Err(torrential_core::target::not_a_torrent(&video, command)),
     }
 }
 

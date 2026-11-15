@@ -12,8 +12,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use tokio::time::Instant;
+use torrential_core::catalog::Episode;
 use torrential_core::cut::Cut;
-use torrential_core::title::{Episode, Title};
+use torrential_core::title::Title;
 use torrential_core::{Error, ErrorCode};
 use url::Url;
 

@@ -52,7 +52,7 @@ pub fn title(engine: impl FnOnce() -> Result<Conn, Error>, args: GetArgs, mode: 
         (args.dry_run, "--dry-run"),
     ];
     if let Some((_, flag)) = torrent_only.into_iter().find(|(given, _)| *given) {
-        return Err(torrential_core::id::not_a_torrent(&video, flag));
+        return Err(torrential_core::target::not_a_torrent(&video, flag));
     }
     let (exit, job) = request_title(&mut engine()?, TitleRequest { video, source: args.source }, mode)?;
     follow(exit, &job, mode, env)

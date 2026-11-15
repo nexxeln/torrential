@@ -1,8 +1,8 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Modifier;
+use torrential_core::catalog::Episode;
 use torrential_core::error::Details;
 use torrential_core::protocol::{Continue, Home, TitlePage, TitlePlayed};
-use torrential_core::title::Episode;
 use torrential_core::{
     Art, AttemptEvent, Check, EpisodeInfo, Kind, Next, Season, Skip, TitleCard, TitleDetails, TitleId, Tried, VideoRef,
     Watched,

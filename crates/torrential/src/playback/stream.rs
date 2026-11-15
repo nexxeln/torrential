@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use crate::filetype::{FileType, Kind};
-use crate::job::TorrentFile;
-use crate::title::{self, Episode};
+use torrential_core::catalog::Episode;
+use torrential_core::filetype::{FileType, Kind};
+use torrential_core::job::TorrentFile;
+use torrential_core::title;
 
 /// Folders that hold the subtitles for every video in the torrent.
 const SUBTITLE_FOLDERS: [&str; 4] = ["sub", "subs", "subtitle", "subtitles"];
