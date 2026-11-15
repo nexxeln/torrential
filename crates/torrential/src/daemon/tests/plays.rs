@@ -155,8 +155,6 @@ async fn the_play_watched_longest_ago_leaves_once_the_plays_folder_is_over_its_l
     h.get(Target::Prefix(prefix(&got)), &[]).await.unwrap();
     post(&h, "/api/play", json!({ "ref": magnet_link(&older) })).await;
     h.until("every play is done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
-    // When a play was watched is kept to the second.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     assert_eq!(h.status().await.len(), 3, "the plays that may leave take 2 GiB of 3 GiB");
 
     post(&h, "/api/play", json!({ "ref": magnet_link(&newer) })).await;
@@ -321,7 +319,6 @@ async fn saving_a_title_while_its_play_leaves_the_plays_folder_keeps_the_play_an
     h.play_title("tt0063350", Some(&night[3]), None).await;
     let folder = h.play_folder(&night[3]);
     written(&folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4"), MIB);
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     gate.close();
     h.play_web(&torrent(0x51, "film", &[("film.mp4", 2 * GIB)])).await;
     gate.until_held(1).await;
@@ -329,7 +326,9 @@ async fn saving_a_title_while_its_play_leaves_the_plays_folder_keeps_the_play_an
     assert_eq!(post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await.0, 200);
     gate.open();
     tokio::time::sleep(Duration::from_millis(1_500)).await;
-    assert_eq!(names(&h).await, named(&["night_of_the_living_dead", "film"]));
+    let mut kept = names(&h).await;
+    kept.sort();
+    assert_eq!(kept, named(&["film", "night_of_the_living_dead"]));
     assert!(folder.join("night_of_the_living_dead/night_of_the_living_dead.mp4").exists());
 }
 
@@ -348,7 +347,6 @@ async fn get_on_a_play_fails_when_it_cannot_note_that_the_play_is_the_persons_an
     let error = h.get(Target::Prefix(prefix(&mine)), &[]).await.unwrap_err();
     assert!(error.message.ends_with("the disk is failing"), "{error:?}");
     database.execute_batch("DROP TRIGGER refuse").unwrap();
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     h.play_web(&torrent(0x62, "next", &[("next.mp4", 2 * GIB)])).await;
     h.until("the next play is done", |jobs| jobs.len() == 2 && jobs.iter().all(|job| job.status.name() == "done"))
         .await;
@@ -363,7 +361,6 @@ async fn a_play_whose_file_is_handed_to_a_stream_stays_until_the_stream_ends() {
     let older = torrent(0x71, "older", &[("older.mp4", 2 * GIB)]);
     h.play_web(&older).await;
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let id = older.info_hash.id();
     let stream = h.running.ctx.owner.ask(|reply| Command::Stream { id, index: 0, reply }).await.unwrap();
 
@@ -414,7 +411,6 @@ async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_go
 
     h.play_web(&torrent(0x92, "older", &[("older.mp4", MIB)])).await;
     h.until("older is done", |jobs| jobs.len() == 1 && jobs[0].status.name() == "done").await;
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     h.play_web(&torrent(0x93, "newer", &[("newer.mp4", MIB)])).await;
     h.until("the play watched longest ago leaves, for what is left to delete counts", |jobs| {
         jobs.len() == 1 && jobs[0].name.as_deref() == Some("newer")
@@ -436,7 +432,6 @@ async fn a_new_play_on_a_full_disk_starts_once_older_plays_make_room() {
     h.play_web(&older).await;
     h.until("half of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
     assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     h.disk.set_free(reserve(ROOMY.total) + GIB);
     h.disk.frees(h.play_folder(&older), 2 * GIB);
 
@@ -606,7 +601,6 @@ async fn a_play_too_large_to_get_is_refused_before_any_play_leaves_for_it() {
     let older = torrent(0xb5, "older", &[("older.mp4", 2 * GIB)]);
     h.play_web(&older).await;
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
 
     let huge = torrent(0xb6, "huge", &[("huge.mkv", 60 * GIB)]);
     h.swarm.publish(huge.clone());
@@ -629,7 +623,6 @@ async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_ca
     written(&inner.join("older.mp4"), MIB);
     h.until("half of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
     assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     h.disk.set_free(reserve(ROOMY.total) + GIB);
     let shut = |mode| std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(mode)).unwrap();
     shut(0o555);
@@ -708,7 +701,6 @@ async fn older_play_leaving() -> Harness {
     h.play_web(&older).await;
     h.until("some of it is there", |jobs| jobs[0].progress.verified >= 2 * GIB).await;
     assert!(matches!(h.ask(Request::Pause { refs: vec![prefix(&older)] }).await, Response::Changed { .. }));
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     gate.close();
     h.play_web(&torrent(0xe8, "newer", &[("newer.mp4", GIB)])).await;
     gate.until_held(1).await;

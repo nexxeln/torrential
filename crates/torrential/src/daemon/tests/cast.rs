@@ -17,7 +17,6 @@ use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode
 
 use super::super::cast::Find;
 use super::super::fake;
-use super::super::names::Names;
 use super::devices::{lan, listening, squatter};
 use super::titles::listed;
 use super::web::{magnet_link, post};
@@ -1002,7 +1001,7 @@ async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tab_that_resumes_a_video_a_tv_plays_keeps_its_place_until_the_tv_resumes() {
-    let Some(ip) = lan() else { return };
+    let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;
     let h = harness(&tv, fake::Search::new(Vec::new()));
     let film = torrent(99, "Night", &[("Night.mkv", 2 * MIB)]);
@@ -1044,8 +1043,6 @@ async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
     control(&h, CastAction::Pause).await.unwrap();
     tv.until("its fetches of the video", |screen| screen.fetches.len() == 3).await;
-    // When a play was watched is kept to the second.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
 
     let newer = torrent(88, "newer", &[("newer.mp4", 2 * GIB)]);
     h.swarm.publish(newer.clone());

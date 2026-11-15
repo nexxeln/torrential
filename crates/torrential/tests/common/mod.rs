@@ -23,16 +23,8 @@ pub const MAC: &str =
 
 /// What a command passes on from the test's own environment: how to run the binary and how to
 /// spell file names. Everything else torrential reads comes from the home.
-const PASSED_ON: [&str; 8] = [
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "LD_LIBRARY_PATH",
-    "DYLD_LIBRARY_PATH",
-    "RUST_BACKTRACE",
-];
+const PASSED_ON: [&str; 8] =
+    ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "RUST_BACKTRACE"];
 
 pub struct Home {
     pub dir: tempfile::TempDir,

@@ -18,7 +18,11 @@ const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) App
 
 /// The machine's address on the home network, which these tests reach the engine by.
 pub(super) fn lan() -> Ipv4Addr {
-    Names::read().lan.first().copied().expect("these tests need an address on a home network, and this machine has none")
+    Names::read()
+        .lan
+        .first()
+        .copied()
+        .expect("these tests need an address on a home network, and this machine has none")
 }
 
 struct Answer {

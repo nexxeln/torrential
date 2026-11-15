@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use torrential_core::{Error, InfoHash, Job, JobStatus, PieceMap, Place, Progress, Selection, TitleLink, TorrentId};
 
@@ -99,8 +99,8 @@ pub enum Home {
 /// A download in torrential's plays folder.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Play {
-    /// When someone last pressed play on it or streamed it, in Unix seconds.
-    pub watched_at: i64,
+    /// When someone last pressed play on it or streamed it.
+    pub watched_at: SystemTime,
     /// The person asked for it by hand with `get`, so it never leaves the plays folder or stops
     /// by itself.
     pub by_hand: bool,

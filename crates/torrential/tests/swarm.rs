@@ -68,7 +68,10 @@ impl Home {
     }
 
     fn logged_addrs(&self) -> Vec<SocketAddr> {
-        self.log().lines().filter_map(|l| l.split_once(" listening on ")?.1.strip_suffix(" (tcp)")?.parse().ok()).collect()
+        self.log()
+            .lines()
+            .filter_map(|l| l.split_once(" listening on ")?.1.strip_suffix(" (tcp)")?.parse().ok())
+            .collect()
     }
 
     fn downloads(&self) -> PathBuf {

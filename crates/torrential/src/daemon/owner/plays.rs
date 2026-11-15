@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, ChangeResult, Kept};
@@ -51,8 +51,7 @@ pub enum Destination {
 pub struct Share {
     pub id: TorrentId,
     pub bytes: u64,
-    /// Unix seconds.
-    pub watched_at: i64,
+    pub watched_at: SystemTime,
     /// Someone streams it, or a title play is testing it.
     pub busy: bool,
 }
@@ -140,7 +139,7 @@ impl Owner {
             Destination::Folder(dir) => Ok((dir, Home::Folder)),
             Destination::Plays => {
                 let (dir, folder) = self.tending.deleter.make_play(id)?;
-                Ok((Some(dir), Home::Plays(Play { watched_at: now(), by_hand: false, folder })))
+                Ok((Some(dir), Home::Plays(Play { watched_at: SystemTime::now(), by_hand: false, folder })))
             }
         }
     }
@@ -210,7 +209,7 @@ impl Owner {
     fn watched_now(&mut self, id: TorrentId) {
         let Some(job) = self.jobs.get_mut(&id) else { return };
         let Home::Plays(play) = &mut job.record.home else { return };
-        play.watched_at = now();
+        play.watched_at = SystemTime::now();
         if let Err(error) = self.store.watched(id, play.watched_at) {
             log(&format!("cannot note when {id} was watched: {}", error.message));
         }
@@ -326,7 +325,7 @@ impl Owner {
         }
         self.tending.tended_at = Some(at);
         self.closed_streams();
-        let (clock, idle_after) = (now(), self.config.plays.idle_after);
+        let (clock, idle_after) = (SystemTime::now(), self.config.plays.idle_after);
         let idle: Vec<TorrentId> = self
             .jobs
             .values()
@@ -334,7 +333,7 @@ impl Owner {
             .filter(|job| job.record.intent == Intent::Running && !self.playing(job.id()))
             .filter(|job| {
                 let Home::Plays(play) = job.record.home else { return false };
-                Duration::from_secs(clock.saturating_sub(play.watched_at).max(0) as u64) >= idle_after
+                clock.duration_since(play.watched_at).unwrap_or_default() >= idle_after
             })
             .map(JobEntry::id)
             .collect();
@@ -350,7 +349,7 @@ impl Owner {
     /// but the one for room on the disk, so a full plays folder does not stop the play from
     /// starting, and a play refused for another reason sends no play away.
     pub(super) fn make_room_for(&mut self, id: TorrentId, bytes: u64) {
-        self.make_room(Some(Share { id, bytes, watched_at: now(), busy: true }));
+        self.make_room(Some(Share { id, bytes, watched_at: SystemTime::now(), busy: true }));
     }
 
     /// Whether `id` is leaving the plays folder.
@@ -538,8 +537,8 @@ mod tests {
         TorrentId::from_bytes([n; 20])
     }
 
-    fn share(n: u8, bytes: u64, watched_at: i64, busy: bool) -> Share {
-        Share { id: id(n), bytes, watched_at, busy }
+    fn share(n: u8, bytes: u64, watched_at: u64, busy: bool) -> Share {
+        Share { id: id(n), bytes, watched_at: SystemTime::UNIX_EPOCH + Duration::from_secs(watched_at), busy }
     }
 
     #[test]

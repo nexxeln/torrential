@@ -154,7 +154,8 @@ fn sources_lists_a_films_releases_in_the_order_play_tries_them() {
 
 #[test]
 fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
-    let home = Home::playing().with(hooks::DEAD, ARCHIVE).with(hooks::TITLE_WAIT, "1s").with(hooks::FAKE_RATE, "100MiB");
+    let home =
+        Home::playing().with(hooks::DEAD, ARCHIVE).with(hooks::TITLE_WAIT, "1s").with(hooks::FAKE_RATE, "100MiB");
     let doc = home.json(&["get", "tt0063350", "--json"]);
     let title = &doc["title"];
     assert_eq!(

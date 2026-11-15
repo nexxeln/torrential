@@ -1,5 +1,6 @@
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use torrential_core::{Error, InfoHash, PieceMap, Release, Selection, TitleLink, TorrentId};
@@ -160,7 +161,7 @@ impl Store {
                 title: linked(title).map_err(|_| bad("title link"))?,
                 home: match play {
                     (Some(watched_at), Some(by_hand), Some(device), Some(inode)) => {
-                        Home::Plays(Play { watched_at, by_hand, folder: identity(device, inode) })
+                        Home::Plays(Play { watched_at: at(watched_at), by_hand, folder: identity(device, inode) })
                     }
                     _ => Home::Folder,
                 },
@@ -207,7 +208,7 @@ impl Store {
                     "INSERT INTO plays (job, watched_at, by_hand, device, inode) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         record.id.to_hex(),
-                        play.watched_at,
+                        unix(play.watched_at),
                         play.by_hand,
                         play.folder.device as i64,
                         play.folder.inode as i64
@@ -434,9 +435,9 @@ impl Store {
     }
 
     /// Notes that someone pressed play on a play, or streamed it, at `at`.
-    pub fn watched(&mut self, id: TorrentId, at: i64) -> Result<(), Error> {
+    pub fn watched(&mut self, id: TorrentId, at: SystemTime) -> Result<(), Error> {
         self.write(|tx| {
-            tx.execute("UPDATE plays SET watched_at = ?2 WHERE job = ?1", params![id.to_hex(), at]).map(drop)
+            tx.execute("UPDATE plays SET watched_at = ?2 WHERE job = ?1", params![id.to_hex(), unix(at)]).map(drop)
         })
     }
 
@@ -638,6 +639,16 @@ fn save_resume(
     .map(drop)
 }
 
+/// A time as the database keeps it, in whole Unix seconds.
+fn unix(at: SystemTime) -> i64 {
+    at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// A time the database kept in whole Unix seconds.
+fn at(seconds: i64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(seconds.max(0) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -778,15 +789,15 @@ mod tests {
         let folder = Identity { device: u64::MAX, inode: 7 };
         let play = JobRecord {
             dir: "/th/data/plays/0101010101010101-0".into(),
-            home: Home::Plays(Play { watched_at: 100, by_hand: false, folder }),
+            home: Home::Plays(Play { watched_at: at(100), by_hand: false, folder }),
             ..record(1)
         };
         store.insert(&play, None, 100).unwrap();
         store.insert(&record(2), None, 100).unwrap();
-        store.watched(play.id, 250).unwrap();
+        store.watched(play.id, at(250)).unwrap();
         store.by_hand(play.id).unwrap();
         let homes: Vec<Home> = store.jobs().unwrap().into_iter().map(|j| j.record.home).collect();
-        assert_eq!(homes, [Home::Plays(Play { watched_at: 250, by_hand: true, folder }), Home::Folder]);
+        assert_eq!(homes, [Home::Plays(Play { watched_at: at(250), by_hand: true, folder }), Home::Folder]);
         let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
         let name = PlayName::parse("0101010101010101-0").unwrap();
         let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
@@ -807,7 +818,7 @@ mod tests {
         let stopped = Error::new(ErrorCode::PathConflict, "the plays folder it was in was moved");
         assert_eq!(store.plays_folder().unwrap(), None);
         store.use_plays_folder(first, &stopped).unwrap();
-        let home = Home::Plays(Play { watched_at: 100, by_hand: false, folder: Identity { device: 1, inode: 9 } });
+        let home = Home::Plays(Play { watched_at: at(100), by_hand: false, folder: Identity { device: 1, inode: 9 } });
         let done = Intent::Done { finished_at: 150 };
         store.insert(&JobRecord { home, ..record(1) }, None, 100).unwrap();
         store.insert(&JobRecord { home, intent: done.clone(), ..record(2) }, None, 100).unwrap();
@@ -863,7 +874,7 @@ mod tests {
         assert_eq!(jobs[0].metainfo.as_deref(), Some(&b"torrent"[..]));
 
         let folder = Identity { device: 1, inode: 9 };
-        let play = JobRecord { home: Home::Plays(Play { watched_at: 200, by_hand: false, folder }), ..record(3) };
+        let play = JobRecord { home: Home::Plays(Play { watched_at: at(200), by_hand: false, folder }), ..record(3) };
         store.insert(&play, None, 200).unwrap();
         let tomb = Tombstone { id: play.id, name: None, path: None, removed_at: 300 };
         let name = PlayName::parse("0303030303030303-0").unwrap();

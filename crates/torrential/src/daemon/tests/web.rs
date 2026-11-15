@@ -996,7 +996,8 @@ fn film(dir: &Path, tools: &Tools) -> Option<Vec<u8>> {
 async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
     let h = Harness::new();
     let tools = Tools::find(std::env::var("PATH").ok().as_deref());
-    let made = tools.both().and_then(|_| film(h.dir.path(), &tools)).expect("this machine's ffmpeg makes the test film");
+    let made =
+        tools.both().and_then(|_| film(h.dir.path(), &tools)).expect("this machine's ffmpeg makes the test film");
     *h.outside.tools.lock().unwrap() = tools;
     h.swarm.set_rate(100 * GIB);
     // "déjà vu" in Windows-1252, as old subtitle files are.
@@ -1956,7 +1957,7 @@ async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg
         h.swarm.publish(t.clone());
         h.play_for(t, &[0], Some("tt0063350")).await.unwrap();
     }
-    let (Some(phone), Some(tv)) = (On::pair(&h).await, On::pair(&h).await) else { return };
+    let (phone, tv) = (On::pair(&h).await, On::pair(&h).await);
     let phone_screen = json!({ "width": 1170, "height": 2532, "scale": 3, "playback": "h264" });
     let tv_screen = json!({ "width": 3840, "height": 2160, "scale": 1, "playback": "hevc-hdr" });
 
@@ -2055,7 +2056,7 @@ async fn a_phone_and_a_tv_on_the_home_network_each_get_the_copy_for_their_screen
     let outside = Outside { preferences: phone_screen, search: Some(search), ..Outside::default() };
     let h = Harness::with_outside(fake::Search::default(), outside);
     h.play_for(&uhd, &[0], Some("tt0063350")).await.unwrap();
-    let (Some(phone), Some(tv)) = (On::pair(&h).await, On::pair(&h).await) else { return };
+    let (phone, tv) = (On::pair(&h).await, On::pair(&h).await);
 
     async fn listed(h: &Harness, on: &On, viewer: &str) -> Vec<String> {
         let path = format!("/api/title/sources?video=tt0063350&{viewer}");

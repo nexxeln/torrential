@@ -293,7 +293,10 @@ fn a_streaming_search_sends_updates_before_the_result() {
     let server = Server::start(|_| {
         vec![
             ("/knaben/", vec![ok(fixture("knaben/v2-search-ubuntu.json"))]),
-            ("/apibay/", vec![Reply::Bytes { body: fixture("apibay/q.php-ubuntu.json"), delay: Duration::from_millis(800) }]),
+            (
+                "/apibay/",
+                vec![Reply::Bytes { body: fixture("apibay/q.php-ubuntu.json"), delay: Duration::from_millis(800) }],
+            ),
         ]
     });
     let home = Home::searching(&server, &["knaben", "apibay"], "");

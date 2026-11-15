@@ -122,7 +122,11 @@ fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_ru
 fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film_ends() {
     use std::io::{Read, Write};
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
-    let mut home = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "0").with(hooks::HTTP_PORT, &port).with(hooks::VERSION, "0.1.0");
+    let mut home = Home::new()
+        .with(hooks::ENGINE, "fake")
+        .with(hooks::FAKE_RATE, "0")
+        .with(hooks::HTTP_PORT, &port)
+        .with(hooks::VERSION, "0.1.0");
     let jobs: serde_json::Value = serde_json::from_str(&home.run(&["status", "--json"]).stdout).unwrap();
     let jobs = jobs["jobs"].as_array().unwrap();
     let id = jobs.iter().find(|j| j["name"] == "wikipedia-en-2026-09-text").unwrap()["id"].as_str().unwrap();
@@ -492,10 +496,7 @@ fn wait_ends_soon_after_the_engine_is_stopped() {
     let wait = wait.finish();
 
     assert!(started.elapsed() < Duration::from_secs(10), "wait took {:?}", started.elapsed());
-    assert_eq!(
-        (wait.code, wait.stderr.as_str()),
-        (6, "error[daemon_unavailable]: the engine stopped while waiting\n")
-    );
+    assert_eq!((wait.code, wait.stderr.as_str()), (6, "error[daemon_unavailable]: the engine stopped while waiting\n"));
 }
 
 #[test]
