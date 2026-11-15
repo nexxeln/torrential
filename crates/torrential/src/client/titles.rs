@@ -109,7 +109,7 @@ pub fn sources(mut conn: Conn, video: VideoRef, mode: Mode) -> Result<u8, Error>
     let request = Request::Sources { video: video.clone() };
     match answer(conn.call(&request)?).map_err(|e| findable(e, &video))? {
         Response::Sources { sources } => {
-            let doc = views::sources(&sources, crate::daemon::owner::now());
+            let doc = views::sources(&sources, torrential_core::time::now());
             Ok(emit(mode, &doc, &Typed { kind: "sources", body: &*sources }))
         }
         other => Err(connect::unexpected(&other)),

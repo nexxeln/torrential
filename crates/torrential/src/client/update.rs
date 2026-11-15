@@ -1,8 +1,8 @@
 use serde::Serialize;
 use torrential_core::Error;
+use torrential_core::time::now;
 
 use crate::cli::UpdateArgs;
-use crate::daemon::owner::now;
 use crate::env::Env;
 use crate::output::{self, Body, Cell, Doc, Mode, Typed};
 use crate::paths::Paths;

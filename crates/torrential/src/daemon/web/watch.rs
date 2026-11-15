@@ -13,12 +13,13 @@ use torrential_core::protocol::Event;
 use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
 
 use super::super::http::{self, Connection, Request};
-use super::super::owner::{self, Command, StreamFile, Update};
+use super::super::owner::{Command, StreamFile, Update};
 use super::super::server::{Ctx, HEARTBEAT};
 use super::fetch::Found;
 use super::ffmpeg::{self, Encoder, Picture};
 use super::media::Media;
 use super::{fail, file_of, number};
+use crate::log::log;
 
 /// Bytes read from each end of a video for its runtime when ffprobe is not installed, as `play` reads.
 const HEADER: u64 = 2 * 1024 * 1024;
@@ -58,7 +59,7 @@ pub async fn events(conn: &mut Connection<'_>, request: &Request) -> io::Result<
                 }
                 Err(broadcast::error::RecvError::Closed) => return conn.end().await,
             },
-            _ = heartbeat.tick() => Event::Heartbeat { at: owner::now() },
+            _ = heartbeat.tick() => Event::Heartbeat { at: torrential_core::time::now() },
             gone = conn.gone() => return Err(gone),
         };
         heartbeat.reset();
@@ -285,7 +286,7 @@ async fn pipe(
             conn.end().await
         }
         (true, false) => {
-            super::super::log(&format!("ffmpeg stopped while converting for the web player: {complaint}"));
+            log(&format!("ffmpeg stopped while converting for the web player: {complaint}"));
             Err(io::ErrorKind::ConnectionAborted.into())
         }
         (false, false) => {

@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crossterm::event::Event as TermEvent;
 use torrential_core::protocol::Event;
@@ -47,7 +47,7 @@ pub fn run(backend: impl Backend) -> io::Result<Exit> {
 fn session<B: Backend>(terminal: &mut ratatui::DefaultTerminal, backend: Arc<B>, mode: ColorMode) -> io::Result<State> {
     let size = terminal.size()?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut state = State::new(Instant::now(), unix_now(), (size.width, size.height), home);
+    let mut state = State::new(Instant::now(), torrential_core::time::now(), (size.width, size.height), home);
     state.say(Tone::Info, "Downloads keep running after you quit.");
     terminal.draw(|frame| draw(frame, &state, mode))?;
     let (tx, rx) = mpsc::channel();
@@ -73,10 +73,6 @@ fn draw(frame: &mut ratatui::Frame, state: &State, mode: ColorMode) {
     if let Some(at) = view::render(frame.buffer_mut(), state, mode) {
         frame.set_cursor_position(at);
     }
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 fn urgency(state: &State, msg: &Msg) -> Option<Duration> {
@@ -115,7 +111,7 @@ fn run_loop<B: Backend>(
         let mut next = Some(first);
         while let Some(msg) = next {
             state.now = Instant::now();
-            state.clock = unix_now();
+            state.clock = torrential_core::time::now();
             if let Some(after) = urgency(state, &msg) {
                 let at = if after.is_zero() { state.now } else { (drawn + after).max(state.now) };
                 due = Some(due.map_or(at, |d| d.min(at)));

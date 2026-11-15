@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use crate::log::log;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Slice, TorrentId};
@@ -251,7 +252,7 @@ fn apply(port: &mut dyn EnginePort, command: EngineCommand) -> Option<EngineEven
         EngineCommand::Limit(id, rate) => {
             // A limit the engine cannot set leaves the download running as it was, not failed.
             if let Err(error) = port.limit(id, rate) {
-                super::log(&format!("cannot change how fast {id} downloads: {}", error.message));
+                log(&format!("cannot change how fast {id} downloads: {}", error.message));
             }
             return None;
         }

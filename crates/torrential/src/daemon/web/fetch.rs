@@ -17,6 +17,7 @@ use torrential_core::{Error, ErrorCode};
 
 use super::ffmpeg::{self, INSTALL, Programs, Tools};
 use crate::env::Env;
+use crate::log::log;
 
 /// jellyfin-ffmpeg's portable macOS build, which links only to `/usr/lib` and the system frameworks
 /// and leaves out fdk-aac.
@@ -383,7 +384,7 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
     let started = Instant::now();
     let fetched: Result<Programs, Failure> = async {
         let partial = Partial::create(root)?;
-        super::super::log(&format!("fetching ffmpeg {} from {}", build.version, build.url));
+        log(&format!("fetching ffmpeg {} from {}", build.version, build.url));
         let archive = partial.path.join(ARCHIVE);
         download(build, &archive, report).await?;
         let (into, unpacked) = (partial.path.clone(), build.clone());
@@ -405,10 +406,10 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
     .await;
     match &fetched {
         Ok(_) => {
-            super::super::log(&format!("fetched ffmpeg {} in {} s", build.version, started.elapsed().as_secs()));
+            log(&format!("fetched ffmpeg {} in {} s", build.version, started.elapsed().as_secs()));
         }
         Err(Failure::Again(error) | Failure::Refused(error)) => {
-            super::super::log(&format!("cannot fetch ffmpeg: {}", error.message));
+            log(&format!("cannot fetch ffmpeg: {}", error.message));
         }
     }
     fetched

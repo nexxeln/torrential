@@ -27,6 +27,7 @@ use super::owner::{
 };
 use super::search_port::{Progress, SearchPort};
 use super::titles::attempt::{self, Containers, PlayTitle};
+use crate::log::log;
 use crate::machine::Detector;
 use crate::output::views::title_name;
 use crate::update::Version;
@@ -123,7 +124,7 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         Request::GetTitle(request) => play_title(ctx, request, Finish::Keep, mpsc::unbounded_channel().0).await,
         Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port) }),
         Request::AddDevice => {
-            ctx.devices.add(ctx.http_port, super::owner::now()).map(|list| Response::Devices { list })
+            ctx.devices.add(ctx.http_port, torrential_core::time::now()).map(|list| Response::Devices { list })
         }
         Request::RemoveDevice { id } => ctx.devices.remove(&id, ctx.http_port).map(|list| Response::Devices { list }),
         Request::Tvs { fresh } => Ok(Response::Tvs { list: ctx.casts.search(fresh).await }),
@@ -260,7 +261,7 @@ pub(super) async fn release_source(
         match fetch(ctx, url).await {
             Ok(metainfo) => return Ok(Source::Torrent { metainfo, origin: Origin::Url }),
             Err(error) if !magnet.as_ref().is_some_and(Magnet::has_trackers) => return Err(error),
-            Err(error) => super::log(&format!("{} falls back to its magnet: {}", release.id.to_ref(), error.message)),
+            Err(error) => log(&format!("{} falls back to its magnet: {}", release.id.to_ref(), error.message)),
         }
     }
     match (magnet, release.id) {
@@ -323,7 +324,7 @@ pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Erro
     let watched = ctx.titles.shelf.watched(&id)?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     Ok(TitlePage {
-        next: next(&details, &watched, super::owner::now()),
+        next: next(&details, &watched, torrential_core::time::now()),
         saved: ctx.titles.shelf.is_saved(&id)?,
         downloads: jobs.into_iter().filter(|job| job.title.as_ref().is_some_and(|link| link.title == id)).collect(),
         watched,
@@ -336,7 +337,7 @@ pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Erro
 /// deadline, so an unreachable catalog cannot hold the lists up. Past it, each title's details
 /// come from the copy kept on this machine, and a title with none is left out.
 pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
-    let now = super::owner::now();
+    let now = torrential_core::time::now();
     let deadline = tokio::time::Instant::now() + ctx.titles.timing.home;
     let catalog = &ctx.titles.catalog;
     let mut going_on = Vec::new();
@@ -360,7 +361,7 @@ pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
 
 /// The releases of the film or episode `video` names, in the order a play tries them.
 async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
-    let title = ctx.titles.resolve(&video, super::owner::now()).await?;
+    let title = ctx.titles.resolve(&video, torrential_core::time::now()).await?;
     let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)(), Player::External).await?).await?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let ffmpeg = ctx.web.ffmpeg.converts();
@@ -632,7 +633,7 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
 /// any other version. Any other engine stops only when nothing plays and every download is saved.
 async fn switch(ctx: &Ctx, client: &str) -> Response {
     if older(client, &ctx.version) {
-        super::log(&format!("torrential {client} asked the engine to stop for its own version"));
+        log(&format!("torrential {client} asked the engine to stop for its own version"));
         let error = Error::new(
             ErrorCode::DaemonVersion,
             format!("the engine runs the newer torrential {}, so it keeps running", ctx.version),
@@ -683,7 +684,7 @@ async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: Owne
                 }
                 Err(broadcast::error::RecvError::Closed) => return Ok(()),
             },
-            _ = heartbeat.tick() => Event::Heartbeat { at: super::owner::now() },
+            _ = heartbeat.tick() => Event::Heartbeat { at: torrential_core::time::now() },
             read = tokio::io::AsyncReadExt::read(&mut rd, &mut probe) => match read {
                 Ok(0) | Err(_) => return Ok(()),
                 Ok(_) => continue,

@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use torrential_core::protocol::{Request, Response};
+use torrential_core::time::now;
 use torrential_core::units::count;
 use torrential_core::{DeviceList, Error, PairingOffer};
 
@@ -10,7 +11,6 @@ use super::connect::{self, Conn};
 use super::{answer, emit};
 use crate::cli::DevicesCommand;
 use crate::daemon::devices::qr;
-use crate::daemon::owner::now;
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, Mode, Typed};

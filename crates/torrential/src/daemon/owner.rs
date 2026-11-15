@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::protocol::{Change, GetOutcome, GetReply};
+use torrential_core::time::now;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleCard, TitleId, TitleLink,
     TorrentId,
@@ -22,6 +23,7 @@ use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
 use super::store::{Store, Tombstone};
+use crate::log::log;
 use deleter::Deleter;
 use plays::{Destination, Plays, Tending};
 pub use streams::Lease;
@@ -336,10 +338,6 @@ pub struct Owner {
     resume_saved_at: Instant,
 }
 
-pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
-}
-
 impl Owner {
     pub fn new(
         mut store: Store,
@@ -415,7 +413,7 @@ impl Owner {
                 event = events.recv() => match event {
                     Some(event) => self.engine_event(event),
                     None => {
-                        super::log("the engine thread stopped, so the engine process is exiting");
+                        log("the engine thread stopped, so the engine process is exiting");
                         self.ended = Some(Ended::Stopped);
                     }
                 },
@@ -1003,7 +1001,7 @@ impl Owner {
             Some(PutBack::Fail(error)) => self.fail(id, error),
             Some(PutBack::Remove) => {
                 if let Err(error) = self.remove(&[id.to_hex()], false) {
-                    super::log(&format!("{id} stays, for it could not be removed: {}", error.message));
+                    log(&format!("{id} stays, for it could not be removed: {}", error.message));
                 }
             }
         }
