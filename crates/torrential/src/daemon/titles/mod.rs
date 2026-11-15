@@ -68,11 +68,11 @@ impl Titles {
     }
 
     /// `video`'s sources in the order a play in `player` tries them and a list of sources shows
-    /// them: the downloads in `jobs` that hold it, then the top of `ranked`. A download on this
-    /// machine goes ahead of a release that is not, when `player` reuses it with `ffmpeg` there or
-    /// not. Any other download that holds it comes after the top of `ranked`. A release that failed
-    /// lately goes last, with why. Releases ranked below the top rarely play better, so neither
-    /// shows them.
+    /// them: the downloads in `jobs` that hold it, then the top of `ranked`. A download takes the
+    /// place of the release of `ranked` it was found as. A download on this machine goes ahead of a
+    /// release that is not, when `player` reuses it with `ffmpeg` there or not. Any other download
+    /// that holds it comes after the top of `ranked`. A release that failed lately goes last, with
+    /// why. Releases ranked below the top rarely play better, so neither shows them.
     pub fn line(
         &self,
         jobs: &[Job],
@@ -88,12 +88,20 @@ impl Titles {
             matches!(release.id, ReleaseId::Torrent(id) if here.contains(&id))
                 && player.reuses(Quality::parse(&release.name), ffmpeg)
         };
-        let (first, other): (Vec<Release>, Vec<Release>) =
-            jobs.iter().filter_map(|job| holding(job, video)).partition(|release| reused(release));
+        let mut found_as = HashSet::new();
+        let held: Vec<Release> = jobs
+            .iter()
+            .filter_map(|job| {
+                let (release, found) = holding(job, video, &ranked)?;
+                found_as.extend(found);
+                Some(release)
+            })
+            .collect();
+        let (first, other): (Vec<Release>, Vec<Release>) = held.into_iter().partition(|release| reused(release));
         let mut seen = HashSet::new();
         let mut line: Vec<Release> = first
             .into_iter()
-            .chain(ranked.into_iter().take(MOST_CONSIDERED))
+            .chain(ranked.into_iter().take(MOST_CONSIDERED).filter(|release| !found_as.contains(&release.id)))
             .chain(other)
             .filter(|release| seen.insert(release.id))
             .map(|release| Release { failed: failed_lately(&release.id).map(|(_, why)| why.clone()), ..release })
@@ -156,11 +164,17 @@ impl Resolved {
 }
 
 /// A download on this machine that a title play made for `video`'s title and that holds it, as a
-/// release to try.
-fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
+/// release to try, and the ID of the release of `ranked` it was found as. It has that release's
+/// name, sources, and age, but its own ID and size.
+fn holding(job: &Job, video: &VideoRef, ranked: &[Release]) -> Option<(Release, Option<ReleaseId>)> {
     let link = job.title.as_ref().filter(|link| link.title == video.title && link.span.covers(video.episode))?;
-    Some(Release {
-        id: ReleaseId::Torrent(job.id),
+    let id = ReleaseId::Torrent(job.id);
+    if let Some(found) = ranked.iter().find(|release| release.id == id || link.release == Some(release.id)) {
+        let release = Release { id, size: job.progress.size, span: Some(link.span), failed: None, ..found.clone() };
+        return Some((release, Some(found.id)));
+    }
+    let release = Release {
+        id,
         name: job.name.clone().unwrap_or_else(|| job.id.to_hex()),
         size: job.progress.size,
         seeders: None,
@@ -175,7 +189,8 @@ fn holding(job: &Job, video: &VideoRef) -> Option<Release> {
         span: Some(link.span),
         swarm: None,
         failed: None,
-    })
+    };
+    Some((release, None))
 }
 
 /// The episode a series plays next, or its first aired one when the person has caught up.
@@ -311,7 +326,11 @@ mod tests {
         let ranked = vec![
             listed(by_link, "Night.of.the.Living.Dead.1968.720p.x264", "knaben"),
             listed(by_hash, "Night Of The Living Dead (with spanish subtitles)", "archive.org"),
-            listed(ReleaseId::Torrent(TorrentId::from_bytes([7; 20])), "Night of the Living Dead (1968)", "archive.org"),
+            listed(
+                ReleaseId::Torrent(TorrentId::from_bytes([7; 20])),
+                "Night of the Living Dead (1968)",
+                "archive.org",
+            ),
         ];
         let job = |n: u8, name: &str, release: ReleaseId| Job {
             id: TorrentId::from_bytes([n; 20]),
@@ -326,18 +345,37 @@ mod tests {
             title: Some(TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: Some(release) }),
             place: torrential_core::Place::Folder,
         };
-        let jobs = [job(50, "Night.1968.720p", by_link), job(6, "NightOfTheLivingDeadwithSpanishSubtitles_595", by_hash)];
+        let jobs =
+            [job(50, "Night.1968.720p", by_link), job(6, "NightOfTheLivingDeadwithSpanishSubtitles_595", by_hash)];
         let line = titles.line(&jobs, &video("tt0063350"), ranked, Player::External, false);
-        let rows: Vec<(String, &str, Vec<String>, Option<u64>, Option<i64>)> = line
+        let rows: Vec<_> = line
             .iter()
             .map(|r| (r.id.to_ref()[..2].to_string(), r.name.as_str(), r.sources.clone(), r.size, r.published))
             .collect();
         assert_eq!(
             rows,
             [
-                ("32".into(), "Night.of.the.Living.Dead.1968.720p.x264", vec!["knaben".into()], Some(734_003_200), Some(1_294_411_507)),
-                ("06".into(), "Night Of The Living Dead (with spanish subtitles)", vec!["archive.org".into()], Some(734_003_200), Some(1_294_411_507)),
-                ("07".into(), "Night of the Living Dead (1968)", vec!["archive.org".into()], Some(1_416_157_892), Some(1_294_411_507)),
+                (
+                    "32".into(),
+                    "Night.of.the.Living.Dead.1968.720p.x264",
+                    vec!["knaben".into()],
+                    Some(734_003_200),
+                    Some(1_294_411_507)
+                ),
+                (
+                    "06".into(),
+                    "Night Of The Living Dead (with spanish subtitles)",
+                    vec!["archive.org".into()],
+                    Some(734_003_200),
+                    Some(1_294_411_507)
+                ),
+                (
+                    "07".into(),
+                    "Night of the Living Dead (1968)",
+                    vec!["archive.org".into()],
+                    Some(1_416_157_892),
+                    Some(1_294_411_507)
+                ),
             ],
             "each download here once, under the name, source, and age of the release it was found as"
         );

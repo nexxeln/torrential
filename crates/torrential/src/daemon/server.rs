@@ -368,12 +368,21 @@ async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
     Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
 }
 
-/// The release among `video`'s sources whose ID starts with `prefix`.
+/// The release among `video`'s sources whose ID starts with `prefix`, or that is the download
+/// here of a release whose ID does, as listed before the download started.
 pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<Release, Error> {
     let parsed: HexPrefix = prefix.parse()?;
     let sources = sources(ctx, video.clone()).await?;
     let name = title_name(&sources.title, sources.video.episode);
-    let matching: Vec<&Release> = sources.result.releases.iter().filter(|r| parsed.matches(&r.id)).collect();
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    let found_as = |release: &Release| {
+        jobs.iter().any(|job| {
+            ReleaseId::Torrent(job.id) == release.id
+                && job.title.as_ref().and_then(|link| link.release).is_some_and(|found| parsed.matches(&found))
+        })
+    };
+    let matching: Vec<&Release> =
+        sources.result.releases.iter().filter(|r| parsed.matches(&r.id) || found_as(r)).collect();
     match matching.as_slice() {
         [one] => Ok((*one).clone()),
         [] => Err(Error::new(ErrorCode::NotFound, format!("no source of {name} has an ID that starts with {prefix}"))

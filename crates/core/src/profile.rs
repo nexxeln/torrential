@@ -237,11 +237,20 @@ impl Language {
     }
 
     /// The languages a release name marks, as `Doblada Al Español` marks Spanish. Words
-    /// of the query do not count, so a search for The French Connection finds no French.
+    /// of the query do not count, so a search for The French Connection finds no French, and
+    /// neither do subtitles, as in `with spanish subtitles`.
     pub fn named_in(name: &str, query_words: &[String]) -> Vec<Language> {
+        const SUBTITLES: [&str; 5] = ["sub", "subs", "subbed", "subtitle", "subtitles"];
         let lower = name.to_lowercase();
-        let words: Vec<&str> =
-            lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !query_words.iter().any(|q| q == w)).collect();
+        let all: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let words: Vec<&str> = all
+            .iter()
+            .enumerate()
+            .filter(|(i, w)| {
+                !query_words.iter().any(|q| q == *w) && !all.get(i + 1).is_some_and(|next| SUBTITLES.contains(next))
+            })
+            .map(|(_, w)| *w)
+            .collect();
         MARKERS
             .iter()
             .filter(|(_, _, markers)| words.iter().any(|w| markers.contains(w)))
