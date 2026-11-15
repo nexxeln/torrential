@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
+use torrential_core::protocol::WRITES_STOP_WITHIN;
 use torrential_core::{Error, ErrorCode, Preferences};
 
 use crate::config::Config;
@@ -58,7 +59,6 @@ const SAVE_RESUME_EVERY: Duration = Duration::from_secs(5 * 60);
 /// Longer than libtorrent's 15-minute DHT announce, so a new source gets a round of discovery.
 const STALL_AFTER: Duration = Duration::from_secs(20 * 60);
 pub const MAX_ACTIVE: usize = 3;
-const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
 
 pub struct Ports {
     pub engine: Box<dyn EnginePort>,

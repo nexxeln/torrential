@@ -1,20 +1,17 @@
 //! `torrential get`: starts a download, or plans one with `--dry-run`.
 
 use std::path::Path;
-use std::time::Duration;
 
 use serde::Serialize;
-use torrential_core::protocol::{
-    GetOutcome, GetReply, GetRequest, METADATA_WAIT, Request, Response, TitlePlayed, TitleRequest,
-};
+use torrential_core::protocol::{GetOutcome, GetReply, GetRequest, Request, Response, TitlePlayed, TitleRequest};
 use torrential_core::text::sanitize;
 use torrential_core::units::{format_limit, format_size};
 use torrential_core::{Error, Job, Target};
 
 use super::connect::{self, Conn};
+use super::emit;
 use super::rows::{next_for_stopped, rerun_get, selection, short_ids, state_cell};
 use super::{absolute, titles, wait};
-use super::{answer, emit};
 use crate::cli::{GetArgs, Until};
 use crate::env::Env;
 use crate::output::format;
@@ -43,11 +40,7 @@ pub fn run(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path
         setup_max_size,
         dry_run,
     });
-    let within = if dry_run { METADATA_WAIT + Duration::from_secs(15) } else { connect::DEFAULT_REPLY_WITHIN };
-    let reply = match answer(conn.call_within(&request, within)?)? {
-        Response::Get { reply } => reply,
-        other => return Err(connect::unexpected(&other)),
-    };
+    let reply: Box<GetReply> = conn.ask(&request)?;
     let exit = emit(mode, &get(&reply, dir.as_deref()), &Response::Get { reply: reply.clone() });
     if dry_run {
         return Ok(exit);
@@ -79,10 +72,8 @@ fn request_title(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(
     let shown = titles::Shown::new(mode);
     let answered = titles::steps(conn, &Request::GetTitle(request), &video, |step| shown.step(step, "Downloading"));
     drop(shown);
-    let (reply, title) = match answered? {
-        Response::GetTitle { reply, title } => (*reply, *title),
-        other => return Err(connect::unexpected(&other)),
-    };
+    let (reply, title): (Box<GetReply>, Box<TitlePlayed>) = answered?;
+    let (reply, title) = (*reply, *title);
     #[derive(Serialize)]
     struct Got<'a> {
         reply: &'a GetReply,

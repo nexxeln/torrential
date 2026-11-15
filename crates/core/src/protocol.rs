@@ -3,10 +3,13 @@
 //! A frame is a 4-byte big-endian length followed by that many bytes of JSON. The
 //! client's first frame is `Request::Hello`. A `Watch` request turns the connection
 //! into a stream of `Event` frames until the client disconnects. A title play sends a
-//! `TitleFrame::Step` for each step before its reply.
+//! `Frame::Update` for each step before its reply.
 
+use std::io::{self, Read};
 use std::path::PathBuf;
+use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::cast::{Cast, CastAction, CastRequest, TvList};
@@ -19,7 +22,12 @@ use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
 
 /// How long the engine waits for a torrent's file list before it gives up.
-pub const METADATA_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+pub const METADATA_WAIT: Duration = Duration::from_secs(60);
+/// How long the engine waits for libtorrent to stop writing a download it pauses.
+pub const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
+/// How long the engine may take to find a title's source and start it, between two steps.
+pub const STEP_WITHIN: Duration = Duration::from_secs(240);
+const REPLY_WITHIN: Duration = Duration::from_secs(30);
 
 pub const WIRE_VERSION: u32 = 8;
 /// Version of every JSON document printed with `--json`.
@@ -95,7 +103,7 @@ pub enum Request {
         video: VideoRef,
     },
     /// Plays a film or an episode from the first of its releases that starts. The engine sends a
-    /// `TitleFrame::Step` for each step, then `Response::PlayTitle`.
+    /// a `Frame::Update` for each step, then `Response::PlayTitle`.
     PlayTitle(TitleRequest),
     /// The same play, answered as `get` answers, for a download kept without a player. Once a
     /// source starts, it downloads as `get` downloads, not in playing order.
@@ -113,7 +121,7 @@ pub enum Request {
     Tvs {
         fresh: bool,
     },
-    /// Plays a film, an episode, or a torrent's video on a TV. A title sends a `TitleFrame::Step`
+    /// Plays a film, an episode, or a torrent's video on a TV. A title sends a `Frame::Update`
     /// for each step of finding its source. The reply comes once the TV plays, or the cast fails.
     Cast(CastRequest),
     /// Pauses, resumes, seeks, stops, or sets the volume of the cast on a TV: its ID or a part of
@@ -124,6 +132,22 @@ pub enum Request {
     },
     /// The films and episodes to go on with, and the saved titles.
     Home,
+}
+
+impl Request {
+    /// How long a client waits for the engine to answer this request. For a streamed reply, the
+    /// limit holds for each frame. A watch's events come with no limit.
+    pub fn within(&self) -> Duration {
+        match self {
+            Request::Hello { .. } => Duration::from_secs(5),
+            Request::Search { query, .. } => Duration::from_millis(query.timeout_ms.into()) + Duration::from_secs(10),
+            Request::Files { timeout_ms, .. } => Duration::from_millis((*timeout_ms).into()) + Duration::from_secs(15),
+            Request::Get(get) if get.dry_run => METADATA_WAIT + Duration::from_secs(15),
+            Request::Pause { .. } | Request::Shutdown { .. } => 2 * WRITES_STOP_WITHIN,
+            Request::PlayTitle(_) | Request::GetTitle(_) | Request::Cast(_) => STEP_WITHIN,
+            _ => REPLY_WITHIN,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -287,12 +311,67 @@ pub struct TitlePlayed {
     pub resume_at: Option<f64>,
 }
 
-/// What the engine sends for `PlayTitle` and `GetTitle`: a step at a time, then the reply.
+/// One frame of a streamed reply: an update while the engine works, or the reply that ends it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum TitleFrame {
-    Step { step: Box<AttemptEvent> },
+pub enum Frame<U> {
+    Update(U),
     Reply(Box<Response>),
+}
+
+/// A step of a title play or a cast, as the update of a `Frame`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct TitleStep {
+    pub step: Box<AttemptEvent>,
+}
+
+/// What one kind of `Response` carries, for a client that knows which kind its request gets.
+pub trait Reply: Sized {
+    /// What `response` carries, or `response` itself when it is another kind.
+    fn from_response(response: Response) -> Result<Self, Box<Response>>;
+}
+
+macro_rules! replies {
+    ($($reply:ty => $kind:ident { $($field:ident),+ }),* $(,)?) => {$(
+        impl Reply for $reply {
+            fn from_response(response: Response) -> Result<Self, Box<Response>> {
+                match response {
+                    Response::$kind { $($field),+ } => Ok(replies!(@take $($field),+)),
+                    other => Err(Box::new(other)),
+                }
+            }
+        }
+    )*};
+    (@take $field:ident) => { $field };
+    (@take $($field:ident),+) => { ($($field),+) };
+}
+
+replies! {
+    (String, u32, u32, u16) => Hello { engine_version, wire, pid, http_port },
+    SearchResult => Search { result },
+    FilesReply => Files { files },
+    Box<GetReply> => Get { reply },
+    Box<PlayReply> => Play { reply },
+    Vec<Job> => Jobs { jobs },
+    Vec<Change> => Changed { changes },
+    Vec<TitleCard> => Titles { titles },
+    Box<TitlePage> => Title { title },
+    Box<TitleSources> => Sources { sources },
+    (Box<PlayReply>, Box<TitlePlayed>) => PlayTitle { reply, title },
+    (Box<GetReply>, Box<TitlePlayed>) => GetTitle { reply, title },
+    DeviceList => Devices { list },
+    TvList => Tvs { list },
+    Box<Cast> => Cast { cast },
+    Box<Home> => Home { home },
+}
+
+impl Reply for () {
+    fn from_response(response: Response) -> Result<Self, Box<Response>> {
+        match response {
+            Response::Ok => Ok(()),
+            other => Err(Box::new(other)),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -453,6 +532,40 @@ pub fn encode_frame<T: Serialize>(message: &T) -> Result<Vec<u8>, serde_json::Er
     Ok(frame)
 }
 
+/// The length of the body that follows a frame's 4-byte `header`, refused over `MAX_FRAME`.
+pub fn frame_len(header: [u8; 4]) -> io::Result<usize> {
+    let len = u32::from_be_bytes(header) as usize;
+    if len > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a {len}-byte frame is over the {MAX_FRAME}-byte limit"),
+        ));
+    }
+    Ok(len)
+}
+
+pub fn decode_frame<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
+    serde_json::from_slice(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Reads one frame, or `None` when the stream ends before the next frame starts.
+pub fn read_frame<T: DeserializeOwned>(r: &mut impl Read) -> io::Result<Option<T>> {
+    let mut header = [0; 4];
+    let first = loop {
+        match r.read(&mut header[..1]) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            other => break other?,
+        }
+    };
+    if first == 0 {
+        return Ok(None);
+    }
+    r.read_exact(&mut header[1..])?;
+    let mut body = vec![0; frame_len(header)?];
+    r.read_exact(&mut body)?;
+    decode_frame(&body).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,12 +585,13 @@ mod tests {
 
     #[test]
     fn a_title_play_steps_then_replies_in_frames_a_reader_tells_apart() {
-        let step = TitleFrame::Step { step: Box::new(AttemptEvent::Check { check: crate::watching::Check::FileList }) };
+        let check = AttemptEvent::Check { check: crate::watching::Check::FileList };
+        let step = Frame::Update(TitleStep { step: Box::new(check) });
         let text = serde_json::to_string(&step).unwrap();
         assert_eq!(text, r#"{"step":{"type":"check","check":"file_list"}}"#);
-        assert_eq!(serde_json::from_str::<TitleFrame>(&text).unwrap(), step);
-        let reply: TitleFrame = serde_json::from_str(r#"{"type":"ok"}"#).unwrap();
-        assert_eq!(reply, TitleFrame::Reply(Box::new(Response::Ok)));
+        assert_eq!(serde_json::from_str::<Frame<TitleStep>>(&text).unwrap(), step);
+        let reply: Frame<TitleStep> = serde_json::from_str(r#"{"type":"ok"}"#).unwrap();
+        assert_eq!(reply, Frame::Reply(Box::new(Response::Ok)));
     }
 
     /// The requests each wire version added, the first entry holding every request of version 5.
@@ -544,6 +658,39 @@ mod tests {
         assert_eq!(serde_json::from_str::<Before05>(&asked).unwrap(), Before05::Shutdown);
         let old: Request = serde_json::from_str(r#"{"op":"shutdown"}"#).unwrap();
         assert_eq!(old, Request::Shutdown { asked: false });
+    }
+
+    #[test]
+    fn frames_round_trip_and_end_cleanly() {
+        let mut buf = encode_frame(&Request::Shutdown { asked: true }).unwrap();
+        buf.extend(encode_frame(&Response::Ok).unwrap());
+        let mut cursor = io::Cursor::new(buf);
+        assert_eq!(read_frame::<Request>(&mut cursor).unwrap(), Some(Request::Shutdown { asked: true }));
+        assert_eq!(read_frame::<Response>(&mut cursor).unwrap(), Some(Response::Ok));
+        assert_eq!(read_frame::<Response>(&mut cursor).unwrap(), None);
+    }
+
+    #[test]
+    fn a_stream_cut_inside_a_frame_is_an_error() {
+        let frame = encode_frame(&Request::Shutdown { asked: true }).unwrap();
+        for cut in [2, 7] {
+            let err = read_frame::<Request>(&mut io::Cursor::new(&frame[..cut])).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn oversized_frames_are_refused_before_allocating() {
+        let err = read_frame::<Request>(&mut io::Cursor::new(u32::MAX.to_be_bytes().to_vec())).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_reply_takes_only_its_own_kind_of_response() {
+        let jobs = Response::Jobs { jobs: Vec::new() };
+        assert_eq!(Vec::<Job>::from_response(jobs.clone()), Ok(Vec::new()));
+        assert_eq!(<()>::from_response(jobs.clone()), Err(Box::new(jobs)));
+        assert_eq!(<()>::from_response(Response::Ok), Ok(()));
     }
 
     #[test]

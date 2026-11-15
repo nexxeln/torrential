@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use torrential_core::protocol::{Event, Request};
+use torrential_core::protocol::{Event, Frame, Request, Response, read_frame};
 use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, JobStatus, TorrentId};
 
@@ -16,7 +16,6 @@ use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, json_document, json_line};
 use crate::paths::Paths;
-use crate::wire;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(100);
 const HUMAN_HEARTBEAT: Duration = Duration::from_secs(240);
@@ -133,7 +132,7 @@ fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Ev
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         loop {
-            let event = match wire::read::<Event>(&mut stream) {
+            let event = match read_frame::<Event>(&mut stream) {
                 Ok(Some(event)) => Ok(event),
                 Ok(None) | Err(_) => match back(&engine, &ids) {
                     Ok((jobs, again)) => {
@@ -155,17 +154,16 @@ fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Ev
 /// Asks the engine to follow `refs` and reads the snapshot it answers with.
 fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Error> {
     conn.send(&Request::Watch { refs })?;
-    let mut stream = conn.into_stream();
-    let lost =
-        |e: std::io::Error| Error::new(ErrorCode::DaemonUnavailable, format!("lost the connection to the engine: {e}"));
-    let first: Option<serde_json::Value> = wire::read(&mut stream).map_err(lost)?;
-    let first = first.ok_or_else(|| lost(std::io::ErrorKind::UnexpectedEof.into()))?;
-    match serde_json::from_value::<Event>(first.clone()) {
-        Ok(Event::Snapshot { jobs }) => Ok((jobs, stream)),
-        _ => match serde_json::from_value(first) {
-            Ok(torrential_core::protocol::Response::Error { error }) => Err(error),
-            _ => Err(Error::internal("the engine sent an unexpected first watch event")),
+    let (mut stream, log) = conn.into_stream();
+    let first = read_frame(&mut stream).map_err(|e| connect::lost(e, &log))?;
+    let unexpected = || Error::internal("the engine sent an unexpected first watch event");
+    match first.ok_or_else(|| connect::lost(std::io::ErrorKind::UnexpectedEof.into(), &log))? {
+        Frame::Update(Event::Snapshot { jobs }) => Ok((jobs, stream)),
+        Frame::Reply(reply) => match *reply {
+            Response::Error { error } => Err(error),
+            _ => Err(unexpected()),
         },
+        Frame::Update(_) => Err(unexpected()),
     }
 }
 

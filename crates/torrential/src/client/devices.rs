@@ -2,13 +2,13 @@
 
 use std::io::Write;
 
-use torrential_core::protocol::{Request, Response};
+use torrential_core::protocol::Request;
 use torrential_core::time::now;
 use torrential_core::units::count;
 use torrential_core::{DeviceList, Error, PairingOffer};
 
-use super::connect::{self, Conn};
-use super::{answer, emit};
+use super::connect::Conn;
+use super::emit;
 use crate::cli::DevicesCommand;
 use crate::output::format;
 use crate::output::theme::Token;
@@ -22,10 +22,7 @@ pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Resul
         Some(DevicesCommand::Remove { id }) => Request::RemoveDevice { id },
     };
     let adding = request == Request::AddDevice;
-    let list = match answer(conn.call(&request)?)? {
-        Response::Devices { list } => list,
-        other => return Err(connect::unexpected(&other)),
-    };
+    let list: DeviceList = conn.ask(&request)?;
     let doc = match &list.offer {
         Some(offer) if adding => {
             if mode == Mode::Human {

@@ -1,15 +1,13 @@
 //! `torrential search`: torrents that match the words.
 
-use std::time::Duration;
-
 use torrential_core::protocol::{Request, Response};
 use torrential_core::text::sanitize;
 use torrential_core::units::size_text;
 use torrential_core::{Arch, Error, Preferences, Profile, SearchQuery, SearchResult, SourceOutcome};
 
-use super::connect::{self, Conn};
+use super::connect::Conn;
+use super::emit;
 use super::rows::{ranked_for, release_ids, release_row};
-use super::{answer, emit};
 use crate::cli::SearchArgs;
 use crate::output::format::{self, source_outcome};
 use crate::output::{Body, Doc, Mode};
@@ -29,14 +27,9 @@ pub fn run(mut conn: Conn, args: SearchArgs, preferences: Preferences, mode: Mod
         profile: Profile { preferences, ..Profile::default() },
         wanted: None,
     };
-    let within = args.timeout + Duration::from_secs(10);
-    match answer(conn.call_within(&Request::Search { query, stream: false }, within)?)? {
-        Response::Search { result } => {
-            let doc = search(&result, torrential_core::time::now());
-            Ok(emit(mode, &doc, &Response::Search { result }))
-        }
-        other => Err(connect::unexpected(&other)),
-    }
+    let result: SearchResult = conn.ask(&Request::Search { query, stream: false })?;
+    let doc = search(&result, torrential_core::time::now());
+    Ok(emit(mode, &doc, &Response::Search { result }))
 }
 
 pub fn search(result: &SearchResult, now: i64) -> Doc {

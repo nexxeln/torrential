@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use serde_json::Value;
 use sha2::Digest;
-use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame};
+use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame, read_frame};
 use torrential_core::{Target, TorrentId};
 use torrential_engine as lt;
 
@@ -791,11 +791,7 @@ fn a_download_to_files_a_queued_download_will_write_is_refused() {
 
 fn ask(socket: &mut std::os::unix::net::UnixStream, request: &Request) -> Value {
     socket.write_all(&encode_frame(request).unwrap()).unwrap();
-    let mut len = [0u8; 4];
-    socket.read_exact(&mut len).unwrap();
-    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    socket.read_exact(&mut body).unwrap();
-    serde_json::from_slice(&body).unwrap()
+    read_frame(socket).unwrap().expect("the engine answered")
 }
 
 /// The status line and headers, and the body, of one GET with a `Range` header.

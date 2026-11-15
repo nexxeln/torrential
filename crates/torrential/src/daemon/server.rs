@@ -9,8 +9,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::error::Details;
 use torrential_core::protocol::{
-    Event, GetOutcome, GetReply, METADATA_WAIT, PlayReply, Request, Response, TitleFrame, TitlePlayed, TitleRequest,
-    WIRE_VERSION,
+    Event, Frame, GetOutcome, GetReply, METADATA_WAIT, PlayReply, Request, Response, TitlePlayed, TitleRequest,
+    TitleStep, WIRE_VERSION,
 };
 use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, SearchQuery, TorrentId};
 
@@ -155,7 +155,7 @@ async fn title_frames(
     let reply = loop {
         tokio::select! {
             biased;
-            Some(step) = steps.recv() => wire::write_async(wr, &TitleFrame::Step { step: Box::new(step) }).await?,
+            Some(step) = steps.recv() => wire::write_async(wr, &Frame::Update(TitleStep { step: Box::new(step) })).await?,
             reply = &mut play => break reply,
             read = tokio::io::AsyncReadExt::read(rd, &mut probe) => match read {
                 Ok(0) | Err(_) => return Ok(()),
@@ -164,7 +164,7 @@ async fn title_frames(
         }
     };
     while let Ok(step) = steps.try_recv() {
-        wire::write_async(wr, &TitleFrame::Step { step: Box::new(step) }).await?;
+        wire::write_async(wr, &Frame::Update(TitleStep { step: Box::new(step) })).await?;
     }
     wire::write_async(wr, &reply.unwrap_or_else(|error| Response::Error { error })).await
 }
@@ -182,7 +182,7 @@ async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -
         tokio::select! {
             biased;
             step = steps.recv() => match step {
-                Ok(step) => wire::write_async(wr, &TitleFrame::Step { step: Box::new(step) }).await?,
+                Ok(step) => wire::write_async(wr, &Frame::Update(TitleStep { step: Box::new(step) })).await?,
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break (&mut playing).await,
             },
@@ -255,7 +255,7 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
 /// engine newer than the client keeps running, since torrential 0.4 sends this stop to an engine of
 /// any other version. Any other engine stops only when nothing plays and every download is saved.
 async fn switch(ctx: &Ctx, client: &str) -> Response {
-    if older(client, &ctx.version) {
+    if Version::newer(&ctx.version, client) {
         log(&format!("torrential {client} asked the engine to stop for its own version"));
         let error = Error::new(
             ErrorCode::DaemonVersion,
@@ -275,10 +275,6 @@ async fn switch(ctx: &Ctx, client: &str) -> Response {
         }
         Err(error) => Response::Error { error },
     }
-}
-
-fn older(client: &str, engine: &str) -> bool {
-    Version::parse(engine).is_some_and(|engine| engine.newer_than(client))
 }
 
 async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {

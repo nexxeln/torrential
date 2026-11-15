@@ -1,30 +1,20 @@
 //! `torrential pause`, `resume`, `rm` and `verify`: what each did to the downloads it named.
 
-use std::time::Duration;
-
 use torrential_core::id::shortest_unique_prefix;
 use torrential_core::protocol::{Change, ChangeResult, Request, Response};
 use torrential_core::{Error, TorrentId};
 
-use super::connect::{self, Conn};
+use super::connect::Conn;
+use super::emit;
 use super::rows::{SHORT_ID, short_ref};
-use super::{answer, emit};
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, Mode};
 
 pub fn run(mut conn: Conn, request: Request, command: ChangeCommand, mode: Mode) -> Result<u8, Error> {
-    let within = match command {
-        ChangeCommand::Pause => Duration::from_secs(20),
-        _ => connect::DEFAULT_REPLY_WITHIN,
-    };
-    match answer(conn.call_within(&request, within)?)? {
-        Response::Changed { changes } => {
-            let doc = self::changes(command, &changes);
-            Ok(emit(mode, &doc, &Response::Changed { changes }))
-        }
-        other => Err(connect::unexpected(&other)),
-    }
+    let changes: Vec<Change> = conn.ask(&request)?;
+    let doc = self::changes(command, &changes);
+    Ok(emit(mode, &doc, &Response::Changed { changes }))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
