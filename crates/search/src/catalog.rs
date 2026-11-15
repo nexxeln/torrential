@@ -179,8 +179,8 @@ impl PictureFrom {
             && url.password().is_none()
     }
 
-    /// A client for pictures. A redirect to an address a picture may not come from stops, and
-    /// its answer then reads as a picture elsewhere.
+    /// A client for pictures, which connects only to public addresses. A redirect to an address
+    /// a picture may not come from stops, and its answer then reads as a picture elsewhere.
     fn client(&self) -> Result<Http, Error> {
         let from = self.clone();
         let policy = reqwest::redirect::Policy::custom(move |attempt| {
@@ -192,7 +192,7 @@ impl PictureFrom {
                 attempt.stop()
             }
         });
-        Http::redirecting(AGENT, false, policy).map_err(no_client)
+        Http::public(AGENT, policy).map_err(no_client)
     }
 }
 
@@ -540,6 +540,16 @@ mod tests {
 
     fn ids(listed: Vec<Listed>) -> Vec<String> {
         listed.into_iter().map(|listed| listed.card.id.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_picture_host_whose_name_leads_to_this_machine_is_never_connected_to() {
+        let from = PictureFrom { mirror: Some("localhost".into()), plain: None };
+        let url = Url::parse("https://localhost/poster.jpg").unwrap();
+        assert!(from.allows(&url));
+        let fetched = from.client().unwrap().get(&url, LARGEST_PICTURE, Instant::now() + LOOKUP_WITHIN).await;
+        let Err(FetchError::Connect(why)) = fetched else { panic!("not refused: {fetched:?}") };
+        assert!(why.contains("localhost has no address on the public internet"), "{why}");
     }
 
     #[test]

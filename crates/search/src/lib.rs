@@ -104,6 +104,8 @@ pub struct Search {
 
 struct Inner {
     http: Http,
+    /// For the redirects of a torrent's web seeds, which must not lead inside.
+    seeds: Http,
     sources: Vec<Arc<Source>>,
     disabled: Vec<String>,
     stores: Stores,
@@ -282,7 +284,7 @@ impl Search {
         }
         let file = file.filter(|file| web_seeds.iter().any(|seed| redirect::request(seed, file).is_some()))?;
         let (file, web_seeds) = (file.to_path_buf(), web_seeds.to_vec());
-        Some(Either::Right(async move { Ok(redirect::roots(&inner.http, &file, &web_seeds).await) }))
+        Some(Either::Right(async move { Ok(redirect::roots(&inner.seeds, &file, &web_seeds).await) }))
     }
 
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {
@@ -311,10 +313,12 @@ impl Search {
 
 impl Inner {
     fn new(config: &SearchConfig, cache: ResultCache, record: bool) -> Result<Inner, Error> {
-        let http = Http::new(record).map_err(|e| Error::internal(format!("cannot build the HTTP client: {e}")))?;
+        let client = |e: reqwest::Error| Error::internal(format!("cannot build the HTTP client: {e}"));
+        let http = Http::new(record).map_err(client)?;
+        let seeds = Http::public(http::USER_AGENT, redirect::policy()).map_err(client)?;
         let sources = sources::registry(config)?;
         let disabled = config.disabled.clone();
-        Ok(Inner { http, sources, disabled, stores: Stores::new(config.cache_dir.clone()), cache })
+        Ok(Inner { http, seeds, sources, disabled, stores: Stores::new(config.cache_dir.clone()), cache })
     }
 
     fn saved_links(&self, linked: Vec<Linked>) -> Vec<(Release, Option<SavedLink>)> {
