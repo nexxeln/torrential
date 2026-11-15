@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-use torrential_core::protocol::{Request, Response};
+use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode, Target, TvList, VideoRef};
 
 use super::super::cast::Find;
@@ -58,6 +58,8 @@ struct Screen {
     hang_up: Vec<&'static str>,
     /// The next action of this name waits this long before the TV does it.
     slow: Option<(&'static str, Duration)>,
+    /// How long the TV takes to get where a seek sends it, after it answers the seek.
+    seek_lag: Duration,
 }
 
 #[derive(Clone)]
@@ -245,8 +247,17 @@ fn act(screen: &Arc<Mutex<Screen>>, action: &str, body: &str, sink: &str) -> Str
         "Stop" => shown.transport = "STOPPED",
         "Seek" => {
             let target = argument("Target").unwrap_or_default();
-            shown.position =
+            let position =
                 target.split(':').filter_map(|p| p.parse::<f64>().ok()).fold(0.0, |total, part| total * 60.0 + part);
+            if shown.seek_lag.is_zero() {
+                shown.position = position;
+            } else {
+                let (screen, lag) = (screen.clone(), shown.seek_lag);
+                tokio::spawn(async move {
+                    tokio::time::sleep(lag).await;
+                    screen.lock().unwrap().position = position;
+                });
+            }
         }
         "SetVolume" => shown.volume = argument("DesiredVolume").and_then(|v| v.parse().ok()).unwrap_or(0),
         "GetVolume" => return format!("<CurrentVolume>{}</CurrentVolume>", shown.volume),
@@ -628,6 +639,70 @@ async fn a_cast_stopped_on_the_tv_ends_and_keeps_where_it_stopped() {
     assert_eq!(ended.state, CastState::Ended { error: None });
     assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))));
     assert_eq!(tv.actions().iter().filter(|action| *action == "Stop").count(), 0, "the TV stopped it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cast_that_resumes_shows_where_it_resumes_while_the_tv_seeks_there() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let film = torrent(89, "Night", &[("Night.mp4", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mp4"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    // As an LG TV does, it starts at the top and gets where the seek sends it a moment later.
+    tv.set(|screen| (screen.position, screen.seek_lag) = (1.0, Duration::from_secs(3)));
+
+    let request =
+        CastRequest { video: Some(night()), start_at: Some(2_473.0), ..by_hand(Target::Prefix(prefix(&film))) };
+    let (mut view, _) = h.running.ctx.casts.start(request).await.unwrap();
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let watching = tokio::spawn({
+        let shown = shown.clone();
+        async move {
+            while view.changed().await.is_ok() {
+                let position = view.borrow().position;
+                let mut shown = shown.lock().unwrap();
+                if shown.last() != Some(&position) {
+                    shown.push(position);
+                }
+            }
+        }
+    });
+    tv.until("the seek to where it resumes", |screen| screen.position == 2_473.0).await;
+    tv.set(|screen| screen.position = 2_480.0);
+    until(&h, "seven seconds on", |cast| cast.position == Some(2_480.0)).await;
+    control(&h, CastAction::Stop).await.unwrap();
+    watching.abort();
+    assert_eq!(*shown.lock().unwrap(), [None, Some(2_473.0), Some(2_480.0)], "never the top of the film");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_while_a_cast_plays_resumes_where_the_tv_last_was() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let film = torrent(0xb8, "Night.of.the.Living.Dead.1968.720p.x264", &[("Night.1968.720p.mkv", 2 * MIB)]);
+    let catalog = vec![listed(&film, "knaben", Some(40))];
+    let search = search_port::Fake::scripted(catalog, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let h = harness(&tv, search);
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(100 * GIB);
+
+    cast(&h, by_hand(Target::Title(night()))).await.unwrap();
+    tv.set(|screen| screen.position = 1_200.0);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while kept(&h) != Some((1_200.0, Some(5_760.0))) {
+        assert!(Instant::now() < deadline, "the playing cast keeps the TV's place every five seconds: {:?}", kept(&h));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let video = night();
+    let Response::PlayTitle { title, .. } = h.ask(Request::PlayTitle(TitleRequest { video, source: None })).await
+    else {
+        panic!("the command line's play answers a title")
+    };
+    assert_eq!(title.resume_at, Some(1_200.0));
+    control(&h, CastAction::Stop).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
