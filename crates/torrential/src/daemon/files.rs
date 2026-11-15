@@ -1,23 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use torrential_core::text::sanitize;
-use torrential_core::{Error, ErrorCode, FileRisk, InfoHash, Selection};
+use torrential_core::{Error, FileRisk, InfoHash, Selection};
 pub use torrential_engine::on_disk;
 
 use super::engine_port::{MetaFile, Metainfo};
-
-pub fn compile(patterns: &[String]) -> Result<GlobSet, Error> {
-    let mut set = GlobSetBuilder::new();
-    for pattern in patterns {
-        let glob = GlobBuilder::new(pattern).case_insensitive(true).literal_separator(false).build().map_err(|e| {
-            Error::new(ErrorCode::Usage, format!("--files {pattern:?} is not a valid glob: {}", e.kind()))
-                .with_hint("use a glob such as '*.mkv' or an exact path from torrential files")
-        })?;
-        set.add(glob);
-    }
-    set.build().map_err(|e| Error::new(ErrorCode::Usage, format!("--files patterns do not compile: {e}")))
-}
+use crate::selection::{compile, some_match};
 
 pub fn wanted(metainfo: &Metainfo, selection: &Selection) -> Result<Vec<bool>, Error> {
     let patterns = match selection {
@@ -28,16 +16,6 @@ pub fn wanted(metainfo: &Metainfo, selection: &Selection) -> Result<Vec<bool>, E
     let wanted: Vec<bool> =
         metainfo.files.iter().map(|f| set.is_match(&f.path) || set.is_match(sanitize(&f.path))).collect();
     some_match(wanted, patterns, &metainfo.name, &metainfo.info_hash.id().to_hex())
-}
-
-pub fn some_match(wanted: Vec<bool>, patterns: &[String], name: &str, id: &str) -> Result<Vec<bool>, Error> {
-    if wanted.contains(&true) {
-        return Ok(wanted);
-    }
-    let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
-    Err(Error::new(ErrorCode::NoSelection, format!("no file in {name} matches {}", quoted.join(", ")))
-        .with_hint(format!("run torrential files {} to see the paths", &id[..6]))
-        .with_next(format!("torrential files {}", &id[..6])))
 }
 
 pub fn targets(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {
@@ -103,6 +81,7 @@ pub fn risks(metainfo: &Metainfo) -> Vec<Option<FileRisk>> {
 mod tests {
     use super::*;
     use crate::daemon::engine_port::FakeTorrentFile;
+    use torrential_core::ErrorCode;
 
     fn film() -> Metainfo {
         FakeTorrentFile {

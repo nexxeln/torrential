@@ -8,7 +8,6 @@
 pub mod assets;
 mod cast;
 pub mod devices;
-pub mod fetch;
 pub mod ffmpeg;
 pub mod media;
 mod online;
@@ -33,10 +32,11 @@ use super::devices::Asker;
 use super::http::{Connection, Method, Request};
 use super::owner::Command;
 use super::search_port::Progress;
-use super::server::{self, Ctx, METADATA_WAIT};
+use super::server::{self, Ctx};
 use super::subtitle_port::SubtitlePort;
-use fetch::{Fetching, Ffmpeg, Stage};
+use crate::ffmpeg::fetch::{Fetching, Ffmpeg, Stage};
 use media::Media;
+use torrential_core::protocol::METADATA_WAIT;
 
 const NDJSON: &str = "application/x-ndjson";
 const VTT: &str = "text/vtt; charset=utf-8";

@@ -7,7 +7,7 @@ use torrential_core::protocol::{
 };
 use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
-use super::admission::{FakeDisk, GIB, Space};
+use super::admission::GIB;
 use super::engine_port::{
     AddTorrent, EngineEvent, EnginePort, Fake, FakeTorrentFile, MetaFile, Metainfo, ParseTorrent, Swarm, disagreement,
     parse_fake,
@@ -20,9 +20,10 @@ use super::search_port::{self, SearchPort, fake_catalog};
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
-use super::web::fetch::{Fetch, Ffmpeg};
-use super::web::ffmpeg::Tools;
 use super::{Ports, Running, server, start};
+use crate::disk::{FakeDisk, Space};
+use crate::ffmpeg::Tools;
+use crate::ffmpeg::fetch::{Fetch, Ffmpeg};
 
 const ROOMY: Space = Space { device: 1, total: 1000 * GIB, free: 500 * GIB };
 const GIB_PIECE: u64 = GIB / 1024;
@@ -172,7 +173,7 @@ impl Harness {
             parse,
             search: outside.search.clone().unwrap_or_else(|| Arc::new(search.clone())),
             disk: Box::new(disk.clone()),
-            machine: crate::machine::Detector::detected(
+            machine: super::detector::Detector::detected(
                 torrential_core::Machine {
                     os: torrential_core::Os::Linux,
                     display: outside.display,

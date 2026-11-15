@@ -10,10 +10,10 @@ use torrential_core::{DeviceList, Error, PairingOffer};
 use super::connect::{self, Conn};
 use super::{answer, emit};
 use crate::cli::DevicesCommand;
-use crate::daemon::devices::qr;
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::qr::qr;
 
 pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Result<u8, Error> {
     let request = match command {

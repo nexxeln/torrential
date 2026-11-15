@@ -8,7 +8,7 @@ use serde_json::json;
 use torrential_core::protocol::{Change, GetRequest, Kept, PlayRequest, Request, Response};
 use torrential_core::{ErrorCode, JobStatus, Place, Selection, Target, TorrentId};
 
-use super::super::admission::{GIB, reserve};
+use super::super::admission::GIB;
 use super::super::engine_port::{EngineEvent, FakeTorrentFile};
 use super::super::owner::Command;
 use super::super::owner::deleter::{Identity, PlayName, TrashPause};
@@ -16,6 +16,7 @@ use super::super::store::{Store, Tombstone};
 use super::titles::{night, night_with};
 use super::web::{magnet_link, post};
 use super::{Gate, Harness, MIB, Outside, Player, ROOMY, prefix, torrent, written};
+use crate::disk::reserve;
 
 impl Harness {
     async fn rm(&self, refs: Vec<String>, delete: bool) -> Vec<Change> {
