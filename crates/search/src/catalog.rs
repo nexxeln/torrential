@@ -526,6 +526,16 @@ mod tests {
         listed.into_iter().map(|listed| listed.card.id.to_string()).collect()
     }
 
+    #[tokio::test]
+    async fn a_picture_host_whose_name_leads_to_this_machine_is_never_connected_to() {
+        let from = PictureFrom { mirror: Some("localhost".into()), plain: None };
+        let url = Url::parse("https://localhost/poster.jpg").unwrap();
+        assert!(from.allows(&url));
+        let fetched = from.client().unwrap().get(&url, LARGEST_PICTURE, Instant::now() + LOOKUP_WITHIN).await;
+        let Err(FetchError::Connect(why)) = fetched else { panic!("not refused: {fetched:?}") };
+        assert!(why.contains("localhost has no address on the public internet"), "{why}");
+    }
+
     #[test]
     fn exact_names_come_first_and_each_group_takes_films_and_series_in_turn() {
         let films = vec![

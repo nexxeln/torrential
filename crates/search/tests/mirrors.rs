@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -71,6 +73,54 @@ async fn web_seeds_that_serve_the_file_or_redirect_to_one_file_add_none() {
     let found = search(SearchConfig::default()).mirrors("Big Set", Some(file), &seeds).unwrap().await.unwrap();
 
     assert_eq!(found, Vec::<String>::new());
+}
+
+/// A server that redirects every request to `to` followed by the path, and counts what it is asked.
+async fn redirecting(to: String) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = asked.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let (to, count) = (to.clone(), count.clone());
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                let path = String::from_utf8_lossy(&head).split_whitespace().nth(1).unwrap_or("/").to_string();
+                let reply = if to.is_empty() {
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/9\r\nContent-Length: 1\r\n\r\nx"
+                        .to_string()
+                } else {
+                    format!("HTTP/1.1 302 Found\r\nLocation: {to}{path}\r\nContent-Length: 0\r\n\r\n")
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    (base, asked)
+}
+
+#[tokio::test]
+async fn a_web_seed_cannot_redirect_the_lookup_to_this_machine_or_the_home_network() {
+    let (inside, asked) = redirecting(String::new()).await;
+    let port = inside.rsplit(':').next().unwrap();
+    let (to_address, _) = redirecting(inside.clone()).await;
+    let (to_name, _) = redirecting(format!("http://localhost:{port}")).await;
+    let file = Path::new("Big Set/disc 1.mkv");
+    let seeds = [format!("{to_address}/set/"), format!("{to_name}/set/")];
+
+    let found = search(SearchConfig::default()).mirrors("Big Set", Some(file), &seeds).unwrap().await.unwrap();
+
+    assert_eq!(found, Vec::<String>::new());
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing reached the server inside");
 }
 
 #[tokio::test]
