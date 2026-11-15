@@ -543,8 +543,9 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
         headers,
         "cache-control: no-store\nconnection: close\ncontent-type: video/mp4\ntransfer-encoding: chunked\n"
     );
+    assert_eq!(tools.calls()[1], "ffmpeg -version", "whether this ffmpeg paces its reading is asked once");
     assert_eq!(
-        tools.calls()[1],
+        tools.calls()[2],
         format!(
             "ffmpeg -v error -nostdin -ss 3000.500 -copyts -i {url} -map 0:0 -c:v copy -tag:v hvc1 -map 0:2 -c:a copy \
              -map_chapters -1 -map_metadata -1 -avoid_negative_ts disabled -movflags \
@@ -555,7 +556,7 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: text/vtt; charset=utf-8\n"), "{headers}");
     assert_eq!(
-        tools.calls()[2],
+        tools.calls()[3],
         format!(
             "ffmpeg -v error -nostdin -ss 60.000 -copyts -i {url} -map 0:3 -c:s webvtt -avoid_negative_ts disabled \
              -flush_packets 1 -f webvtt pipe:1"
@@ -580,7 +581,7 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
             (404, "not_found", "Film (2024).mkv has no subtitle track at stream 9"),
         ]
     );
-    assert_eq!(tools.calls().len(), 3, "a refused request runs nothing");
+    assert_eq!(tools.calls().len(), 4, "a refused request runs nothing");
 }
 
 /// The version of the stand-in build, which names the folder it unpacks into.
