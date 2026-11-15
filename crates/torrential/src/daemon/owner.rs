@@ -19,19 +19,21 @@ use super::files;
 use super::magnet::{self, Magnet};
 use super::metainfo::{Metainfo, ParseTorrent};
 use super::playing::Playing;
-use super::resolve::{self, Found, Scope};
+use super::resolve::{self, Found, Scope, no_download};
 use super::search_port::SavedLink;
 use super::shelf::Shelf;
 use super::store::{Store, Tombstone};
 use crate::disk::Disk;
 use crate::log::{log, persist};
 use deleter::Deleter;
+use holds::{Before, Holds, OnDisk, PutBack};
 use plays::{Destination, Plays, Tending};
 pub use streams::Lease;
 use streams::Streams;
 use torrential_search::WebSeeds;
 
 pub mod deleter;
+mod holds;
 pub mod plays;
 mod streams;
 pub mod trash;
@@ -182,6 +184,12 @@ pub enum Shelving {
     Unsave(TitleId),
 }
 
+/// What `rm` takes off the list: a download, or one already removed, which it answers for.
+enum Removing {
+    Download(TorrentId),
+    Gone(Tombstone),
+}
+
 pub enum Command {
     Resolve { prefix: HexPrefix, results: Vec<Release>, command: &'static str, reply: Reply<Resolved> },
     Get { get: Box<GetCommand>, reply: Reply<GetReply> },
@@ -232,71 +240,6 @@ struct PendingPause {
     reply: Reply<Vec<Change>>,
 }
 
-/// A download title plays are testing, or one the last of them gave up and that is not yet put
-/// back.
-struct UnderTest {
-    /// The plays testing it. Empty once the last has given up.
-    holds: BTreeSet<Hold>,
-    before: Before,
-}
-
-/// What a download was before the first title play to test it reached it.
-enum Before {
-    /// Not on this machine. The play made it.
-    Absent,
-    Paused,
-    /// Stopped on this error.
-    Failed(Error),
-    /// Running or done, which a play leaves as it is.
-    Kept,
-}
-
-/// What a download no title play tests any more is still owed.
-enum PutBack {
-    Nothing,
-    /// Nothing until the engine has stopped writing it, which shows what it left on disk.
-    Wait,
-    Pause,
-    Fail(Error),
-    /// Takes it off the list. Nothing of it is on disk.
-    Remove,
-}
-
-/// What a download has on disk.
-enum OnDisk {
-    /// The engine may still write it.
-    Unsettled,
-    Nothing,
-    Something,
-}
-
-impl Before {
-    /// How to put `job` back as it was. No file is ever deleted. A download that was here stays,
-    /// paused or stopped again if the play resumed it. A download the play made stays once it
-    /// is finished or has played. Otherwise it is stopped, and it leaves the list only when
-    /// nothing of it is on disk, so no file is left without a download to show for it.
-    fn put_back(&self, job: &JobEntry, on_disk: impl FnOnce() -> OnDisk) -> PutBack {
-        let finished = matches!(job.record.intent, Intent::Done { .. })
-            || matches!(job.observed, Observed::InEngine(Phase::Finishing { .. }));
-        let running = job.record.intent == Intent::Running;
-        match self {
-            Before::Kept => PutBack::Nothing,
-            Before::Paused if running => PutBack::Pause,
-            Before::Failed(error) if running => PutBack::Fail(error.clone()),
-            Before::Paused | Before::Failed(_) => PutBack::Nothing,
-            Before::Absent if finished || job.record.title.as_ref().is_none_or(|linked| linked.played) => {
-                PutBack::Nothing
-            }
-            Before::Absent => match (on_disk(), running) {
-                (OnDisk::Nothing, _) => PutBack::Remove,
-                (OnDisk::Unsettled | OnDisk::Something, true) => PutBack::Pause,
-                (OnDisk::Unsettled, false) => PutBack::Wait,
-                (OnDisk::Something, false) => PutBack::Nothing,
-            },
-        }
-    }
-}
-
 struct Stopping {
     waiting: BTreeSet<TorrentId>,
     deadline: Instant,
@@ -321,9 +264,7 @@ pub struct Owner {
     streamed: BTreeSet<TorrentId>,
     /// Who streams which download now, and how far ahead of each player its film is.
     streams: Streams,
-    /// The downloads title plays are testing or have yet to put back. Only in memory: after a
-    /// restart no play is running, so nothing is under test and every download stays as it is.
-    under_test: BTreeMap<TorrentId, UnderTest>,
+    holds: Holds,
     metadata_waiters: Vec<MetadataWaiter>,
     pauses: Vec<PendingPause>,
     tending: Tending,
@@ -379,7 +320,7 @@ impl Owner {
             draining: BTreeSet::new(),
             streamed: BTreeSet::new(),
             streams: Streams::new(playing),
-            under_test: BTreeMap::new(),
+            holds: Holds::default(),
             metadata_waiters: Vec::new(),
             pauses: Vec::new(),
             stopping: None,
@@ -479,22 +420,42 @@ impl Owner {
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
             }
-            Command::Pause { refs, reply } => {
-                self.adopt(&refs, "pause");
-                self.pause(refs, reply)
-            }
+            Command::Pause { refs, reply } => match self.resolve_jobs(&refs, "pause") {
+                Ok(ids) => {
+                    if !refs.is_empty() {
+                        self.adopt(&ids);
+                    }
+                    self.pause(ids, reply)
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
             Command::Resume { refs, all, reply } => {
-                self.adopt(&refs, "resume");
-                let resumed = self.resume(&refs, all);
+                let ids = if all { Ok(None) } else { self.resolve_jobs(&refs, "resume").map(Some) };
+                let resumed = ids.and_then(|ids| {
+                    if !refs.is_empty() {
+                        self.adopt(ids.as_deref().unwrap_or_default());
+                    }
+                    self.resume(ids.as_deref())
+                });
                 if let Ok(changes) = &resumed {
                     self.touch_plays(changes);
                 }
                 let _ = reply.send(resumed);
             }
-            Command::Remove { refs, delete, reply } => self.rm(refs, delete, reply),
+            Command::Remove { refs, delete, reply } => match self.removals(&refs) {
+                Ok(removing) => self.rm(removing, delete, reply),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
             Command::Verify { reference, repair, reply } => {
-                self.adopt(std::slice::from_ref(&reference), "verify");
-                let _ = reply.send(self.verify(&reference, repair));
+                let verified = self.resolve_job(&reference, "verify").and_then(|id| {
+                    self.adopt(&[id]);
+                    self.verify(id, repair)
+                });
+                let _ = reply.send(verified);
             }
             Command::Watch { refs, reply } => {
                 let watch = self.resolve_jobs(&refs, "wait").map(|ids| (self.views(&ids), self.updates.subscribe()));
@@ -666,22 +627,17 @@ impl Owner {
         let dry_run = get.dry_run;
         let reply = self.get(get, None, Home::Folder)?;
         if !dry_run {
-            self.adopt(&[reply.job.id.to_hex()], "get");
+            self.adopt(&[reply.job.id]);
             self.keep_play(reply.job.id)?;
         }
         Ok(reply)
     }
 
     /// Makes the downloads a person named in a command theirs. The plays testing one leave it as
-    /// the person has it, whatever it was before. A command for every download names none.
-    fn adopt(&mut self, refs: &[String], command: &'static str) {
-        if refs.is_empty() {
-            return;
-        }
-        for id in self.resolve_jobs(refs, command).unwrap_or_default() {
-            if let Some(test) = self.under_test.get_mut(&id) {
-                test.before = Before::Kept;
-            }
+    /// the person has it, whatever it was before. A command for every download adopts none.
+    fn adopt(&mut self, ids: &[TorrentId]) {
+        for &id in ids {
+            self.holds.adopt(id);
         }
     }
 
@@ -712,7 +668,7 @@ impl Owner {
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
         if home == Home::Folder {
-            self.tending.deleter.outside_plays(&dir)?;
+            self.tending.outside_plays(&dir)?;
         }
         let cap = Cap::new(max_size, setup_max_size);
         let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
@@ -973,11 +929,10 @@ impl Owner {
         }
         let job = &self.jobs[&id];
         if matches!(job.record.intent, Intent::Paused | Intent::Failed { .. }) {
-            self.resume(&[id.to_hex()], false)?;
+            self.resume(Some(&[id]))?;
         }
         if let Some(play) = title {
-            let test = self.under_test.entry(id).or_insert(UnderTest { holds: BTreeSet::new(), before });
-            test.holds.insert(play.hold);
+            self.holds.test(id, play.hold, before);
         }
         if finish == Finish::Stream {
             self.streamed.insert(id);
@@ -999,24 +954,21 @@ impl Owner {
             self.store.played(id)?;
             linked.played = true;
         }
-        self.under_test.remove(&id);
+        self.holds.end(id);
         Ok(())
     }
 
     /// Ends a title play's test of a download that did not play. While another play still tests
     /// the download, nothing changes. The last play to give up puts the download back.
     fn release(&mut self, hold: Hold) {
-        for test in self.under_test.values_mut() {
-            test.holds.remove(&hold);
-        }
+        self.holds.release(hold);
         self.put_back_all();
         self.schedule();
     }
 
     /// Tries again whatever is still owed to the downloads no play tests.
     fn put_back_all(&mut self) {
-        let ids: Vec<TorrentId> = self.under_test.keys().copied().collect();
-        for id in ids {
+        for id in self.holds.ids() {
             self.put_back(id);
         }
     }
@@ -1025,23 +977,19 @@ impl Owner {
     /// stays owed, and is tried again when the engine lets go of the download, at the next
     /// release, and when the engine stops.
     fn put_back(&mut self, id: TorrentId) {
-        let owed = |owner: &Self| {
-            let test = owner.under_test.get(&id).filter(|test| test.holds.is_empty())?;
-            let job = owner.jobs.get(&id);
-            Some(job.map_or(PutBack::Nothing, |job| test.before.put_back(job, || owner.on_disk(job))))
-        };
+        let owed = |owner: &Self| owner.holds.owed(id, owner.jobs.get(&id), |job| owner.on_disk(job));
         match owed(self) {
             None | Some(PutBack::Nothing | PutBack::Wait) => {}
-            Some(PutBack::Pause) => self.pause(vec![id.to_hex()], oneshot::channel().0),
+            Some(PutBack::Pause) => self.pause(vec![id], oneshot::channel().0),
             Some(PutBack::Fail(error)) => self.fail(id, error),
             Some(PutBack::Remove) => {
-                if let Err(error) = self.remove(&[id.to_hex()], false) {
+                if let Err(error) = self.remove(vec![Removing::Download(id)], false) {
                     log(&format!("{id} stays, for it could not be removed: {}", error.message));
                 }
             }
         }
         if matches!(owed(self), Some(PutBack::Nothing)) {
-            self.under_test.remove(&id);
+            self.holds.end(id);
         }
     }
 
@@ -1146,14 +1094,7 @@ impl Owner {
         }
     }
 
-    fn pause(&mut self, refs: Vec<String>, reply: Reply<Vec<Change>>) {
-        let ids = match self.resolve_jobs(&refs, "pause") {
-            Ok(ids) => ids,
-            Err(e) => {
-                let _ = reply.send(Err(e));
-                return;
-            }
-        };
+    fn pause(&mut self, ids: Vec<TorrentId>, reply: Reply<Vec<Change>>) {
         let mut changes = Vec::new();
         let mut waiting = BTreeSet::new();
         for id in ids {
@@ -1199,19 +1140,20 @@ impl Owner {
         Change::new(id.to_hex(), self.jobs[&id].record.name.clone(), result)
     }
 
-    fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
+    /// Resumes `ids`, or with `None` every paused or stopped download that fits under its cap.
+    fn resume(&mut self, ids: Option<&[TorrentId]>) -> Result<Vec<Change>, Error> {
         let resumable = |j: &JobEntry| matches!(j.record.intent, Intent::Paused | Intent::Failed { .. });
         let fits = |j: &JobEntry| {
             j.selected_size().map_or(Ok(()), |size| admission::check_size(size, j.record.cap, Some(j.id())))
         };
-        let ids = if all {
-            self.jobs.values().filter(|j| resumable(j) && fits(j).is_ok()).map(JobEntry::id).collect()
-        } else {
-            let ids = self.resolve_jobs(refs, "resume")?;
-            for job in ids.iter().map(|id| &self.jobs[id]).filter(|j| resumable(j)) {
-                fits(job)?;
+        let ids: Vec<TorrentId> = match ids {
+            None => self.jobs.values().filter(|j| resumable(j) && fits(j).is_ok()).map(JobEntry::id).collect(),
+            Some(ids) => {
+                for job in ids.iter().map(|id| &self.jobs[id]).filter(|j| resumable(j)) {
+                    fits(job)?;
+                }
+                ids.to_vec()
             }
-            ids
         };
         let mut changes = Vec::new();
         for id in ids {
@@ -1239,43 +1181,48 @@ impl Owner {
     /// Takes downloads off the list. What of them to delete is put on record with each removal,
     /// and deleted once the engine lets go of it: a play's folder always, and the files of a
     /// download in a folder the person chose only with `delete`.
-    fn remove(&mut self, refs: &[String], delete: bool) -> Result<Vec<Change>, Error> {
-        let mut targets = Vec::new();
+    /// What `refs` name for `rm`: a download, or one removed lately, which answers that it was.
+    fn removals(&self, refs: &[String]) -> Result<Vec<Removing>, Error> {
+        let mut removing = Vec::new();
         for reference in refs {
             match self.resolve_job(reference, "rm") {
-                Ok(id) => targets.push(Ok(id)),
+                Ok(id) => removing.push(Removing::Download(id)),
                 Err(e) if e.code == ErrorCode::NotFound => match self.tombstone(reference) {
-                    Some(tomb) => targets.push(Err(tomb.clone())),
+                    Some(tomb) => removing.push(Removing::Gone(tomb.clone())),
                     None => return Err(e),
                 },
                 Err(e) => return Err(e),
             }
         }
+        Ok(removing)
+    }
+
+    fn remove(&mut self, removing: Vec<Removing>, delete: bool) -> Result<Vec<Change>, Error> {
         let now = now();
         let mut changes = Vec::new();
-        for target in targets {
+        for target in removing {
             match target {
-                Err(tomb) => changes.push(Change {
+                Removing::Gone(tomb) => changes.push(Change {
                     path: tomb.path,
                     ..Change::new(tomb.id.to_hex(), tomb.name, ChangeResult::AlreadyRemoved)
                 }),
-                Ok(id) if !self.jobs.contains_key(&id) => {}
-                Ok(id) => {
+                Removing::Download(id) if !self.jobs.contains_key(&id) => {}
+                Removing::Download(id) => {
                     let job = &self.jobs[&id];
                     let view = job.view();
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
                     let doom = self.doom(job, delete);
-                    self.tending.deleter.remove(&mut self.store, &tomb, doom)?;
+                    self.tending.remove(&mut self.store, &tomb, doom)?;
                     let job = self.jobs.remove(&id).expect("resolved above");
                     self.streamed.remove(&id);
-                    self.under_test.remove(&id);
+                    self.holds.end(id);
                     if job.observed.in_engine() {
                         self.engine.send(id, move |e| e.remove(id));
                         self.draining.insert(id);
                     }
                     if self.draining.contains(&id) {
-                        self.tending.letting_go.insert(id, Self::writes(&job));
+                        self.tending.letting_go(id, Self::writes(&job));
                     }
                     self.pauses.iter_mut().for_each(|p| {
                         p.waiting.remove(&id);
@@ -1311,8 +1258,7 @@ impl Owner {
         }
     }
 
-    fn verify(&mut self, reference: &str, repair: bool) -> Result<Vec<Change>, Error> {
-        let id = self.resolve_job(reference, "verify")?;
+    fn verify(&mut self, id: TorrentId, repair: bool) -> Result<Vec<Change>, Error> {
         let job = &self.jobs[&id];
         let short = &id.to_hex()[..6];
         let Some(metainfo) = job.metainfo.clone() else {
@@ -1430,7 +1376,7 @@ impl Owner {
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
-                self.tending.letting_go.remove(&id);
+                self.tending.let_go(id);
                 self.leave();
                 self.put_back(id);
                 self.finish_deletions();
@@ -1976,10 +1922,4 @@ enum Stopper {
 // Default macOS filesystems ignore case.
 fn claim_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
-}
-
-fn no_download(reference: &str) -> Error {
-    Error::new(ErrorCode::NotFound, format!("no download matches {reference}"))
-        .with_hint("run torrential status to list downloads")
-        .with_next("torrential status")
 }
