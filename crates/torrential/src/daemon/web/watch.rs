@@ -12,9 +12,10 @@ use tokio::sync::broadcast;
 use torrential_core::protocol::Event;
 use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
 
+use super::super::ctx::Ctx;
+use super::super::downloads::HEARTBEAT;
 use super::super::http::{self, Connection, Request};
 use super::super::owner::{Command, StreamFile, Update};
-use super::super::server::{Ctx, HEARTBEAT};
 use super::ffmpeg::{self, Encoder, Picture};
 use super::media::Media;
 use super::{fail, file_of, number};

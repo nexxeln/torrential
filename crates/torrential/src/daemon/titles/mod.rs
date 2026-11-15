@@ -9,12 +9,17 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use torrential_core::protocol::{Continue, Home, TitlePage, TitleSources};
+use torrential_core::title::title_name;
 use torrential_core::watching::next;
 use torrential_core::{
-    Category, EpisodeInfo, Error, ErrorCode, Job, Kind, Player, Preferences, Profile, Quality, Release, ReleaseId,
-    SearchQuery, Skip, TitleDetails, TorrentId, VideoRef,
+    Category, EpisodeInfo, Error, ErrorCode, HexPrefix, Job, Kind, Next, Player, Preferences, Profile, Quality,
+    Release, ReleaseId, SearchQuery, Skip, TitleDetails, TitleId, TorrentId, VideoRef,
 };
 
+use super::ctx::Ctx;
+use super::downloads::search;
+use super::owner::Command;
 use catalog_port::{CatalogPort, season_episodes, wanted};
 use shelf::Shelf;
 
@@ -22,6 +27,8 @@ use shelf::Shelf;
 const FAILED_FOR: Duration = Duration::from_secs(6 * 60 * 60);
 /// Ranked releases a play looks at. The rest rarely play better than these.
 const MOST_CONSIDERED: usize = 12;
+/// Titles listed under Continue on the home screens.
+const CONTINUE_MOST: usize = 20;
 
 /// What the engine knows about films and series, beside its downloads.
 pub struct Titles {
@@ -220,6 +227,86 @@ fn aired(details: &TitleDetails, info: &EpisodeInfo, now: i64) -> Result<(), Err
             Err(Error::new(ErrorCode::Usage, format!("{episode} airs on {day}, so it has no sources yet")))
         }
         None => Err(Error::new(ErrorCode::Usage, format!("{episode} has no air date yet, so it has no sources"))),
+    }
+}
+
+/// One title as the catalog describes it, with where the person stopped, what plays next, and
+/// the downloads made by playing it. The socket's `title` and `GET /api/title` both answer with it.
+pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Error> {
+    let details = ctx.titles.catalog.title(&id).await?;
+    let watched = ctx.titles.shelf.watched(&id)?;
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    Ok(TitlePage {
+        next: next(&details, &watched, torrential_core::time::now()),
+        saved: ctx.titles.shelf.is_saved(&id)?,
+        downloads: jobs.into_iter().filter(|job| job.title.as_ref().is_some_and(|link| link.title == id)).collect(),
+        watched,
+        details,
+    })
+}
+
+/// For each title watched lately, its video to go on with, and the saved titles. A finished film,
+/// and a series the person has caught up with, are left out. The catalog lookups share one
+/// deadline, so an unreachable catalog cannot hold the lists up. Past it, each title's details
+/// come from the copy kept on this machine, and a title with none is left out.
+pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
+    let now = torrential_core::time::now();
+    let deadline = tokio::time::Instant::now() + ctx.titles.timing.home;
+    let catalog = &ctx.titles.catalog;
+    let mut going_on = Vec::new();
+    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
+        let id = &recent.video.title;
+        let details = match tokio::time::timeout_at(deadline, catalog.title(id)).await {
+            Ok(looked_up) => looked_up.ok(),
+            Err(_) => catalog.kept(id).await,
+        };
+        let Some(details) = details else { continue };
+        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
+        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
+        let episode = video
+            .episode
+            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
+        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
+        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
+    }
+    Ok(Home { going_on, saved: ctx.titles.shelf.saved()? })
+}
+
+/// The releases of the film or episode `video` names, in the order a play tries them.
+pub(super) async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
+    let title = ctx.titles.resolve(&video, torrential_core::time::now()).await?;
+    let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)(), Player::External).await?).await?;
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    let ffmpeg = ctx.web.ffmpeg.converts();
+    result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);
+    Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
+}
+
+/// The release among `video`'s sources whose ID starts with `prefix`, or that is the download
+/// here of a release whose ID does, as listed before the download started.
+pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<Release, Error> {
+    let parsed: HexPrefix = prefix.parse()?;
+    let sources = sources(ctx, video.clone()).await?;
+    let name = title_name(&sources.title, sources.video.episode);
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    let found_as = |release: &Release| {
+        jobs.iter().any(|job| {
+            ReleaseId::Torrent(job.id) == release.id
+                && job.title.as_ref().and_then(|link| link.release).is_some_and(|found| parsed.matches(&found))
+        })
+    };
+    let matching: Vec<&Release> =
+        sources.result.releases.iter().filter(|r| parsed.matches(&r.id) || found_as(r)).collect();
+    match matching.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(Error::new(ErrorCode::NotFound, format!("no source of {name} has an ID that starts with {prefix}"))
+            .with_hint(format!("run torrential sources {video} to list them"))
+            .with_next(format!("torrential sources {video}"))),
+        many => Err(Error::new(
+            ErrorCode::AmbiguousRef,
+            format!("{prefix} starts the IDs of {} sources of {name}", many.len()),
+        )
+        .with_hint("give more of the ID")),
     }
 }
 
