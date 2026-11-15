@@ -63,6 +63,8 @@ mod tests {
         let page = Some((&b"page"[..], "text/html; charset=utf-8", "no-cache"));
         assert_eq!(read("/"), page);
         assert_eq!(read("/watch/9b5212"), page);
+        assert_eq!(read("/watch/https%3A%2F%2Farchive.org%2Fdownload%2FSintel%2FSintel_archive.torrent"), page);
+        assert_eq!(read("/watch/Sintel.2010.1080p.mkv"), page);
         assert_eq!(read("/downloads"), page);
         assert_eq!(read("/index.html"), page);
         assert_eq!(
@@ -71,7 +73,7 @@ mod tests {
         );
         assert_eq!(read("/favicon.svg"), Some((&b"svg"[..], "image/svg+xml", "no-cache")));
         assert_eq!(read("/assets/index-old.js"), None, "a stale script must not get the page");
-        assert_eq!(read("/robots.txt"), None);
+        assert_eq!(read("/assets/x"), None);
     }
 
     #[test]

@@ -204,11 +204,14 @@ async fn the_app_answers_for_its_pages_and_not_for_missing_scripts() {
     assert!(headers.contains("cache-control: no-cache\n"), "{headers}");
     assert!(page.starts_with(b"<!doctype html>"), "{}", String::from_utf8_lossy(&page));
     assert_eq!(fetch(&h, "GET", "/watch/9b5212?file=2", &[], "").await.2, page);
+    let torrent_url = "/watch/https%3A%2F%2Farchive.org%2Fdownload%2FSintel%2FSintel_archive.torrent";
+    assert_eq!(fetch(&h, "GET", torrent_url, &[], "").await.2, page);
     assert_eq!(fetch(&h, "GET", "/downloads", &[], "").await.2, page);
     let (status, headers, body) = fetch(&h, "HEAD", "/", &[], "").await;
     assert_eq!((status, body.len()), (200, 0));
     assert!(headers.contains(&format!("content-length: {}\n", page.len())), "{headers}");
     assert_eq!(fetch(&h, "GET", "/assets/index-gone.js", &[], "").await.0, 404);
+    assert_eq!(fetch(&h, "GET", "/assets/x.js", &[], "").await.0, 404);
     assert_eq!(fetch(&h, "POST", "/", &["Content-Type: application/json"], "{}").await.0, 405);
 }
 
