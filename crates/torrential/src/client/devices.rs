@@ -2,18 +2,18 @@
 
 use std::io::Write;
 
-use torrential_core::protocol::{Request, Response};
-use torrential_core::units::count;
+use torrential_core::protocol::Request;
+use torrential_core::time::now;
+use torrential_core::units::{self, count};
 use torrential_core::{DeviceList, Error, PairingOffer};
 
-use super::connect::{self, Conn};
-use super::{answer, emit};
+use super::connect::Conn;
+use super::emit;
 use crate::cli::DevicesCommand;
-use crate::daemon::devices::qr;
-use crate::daemon::owner::now;
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
+use torrential_daemon::qr::qr;
 
 pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Result<u8, Error> {
     let request = match command {
@@ -22,10 +22,7 @@ pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Resul
         Some(DevicesCommand::Remove { id }) => Request::RemoveDevice { id },
     };
     let adding = request == Request::AddDevice;
-    let list = match answer(conn.call(&request)?)? {
-        Response::Devices { list } => list,
-        other => return Err(connect::unexpected(&other)),
-    };
+    let list: DeviceList = conn.ask(&request)?;
     let doc = match &list.offer {
         Some(offer) if adding => {
             if mode == Mode::Human {
@@ -36,7 +33,7 @@ pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Resul
         }
         _ => list_doc(&list, now()),
     };
-    Ok(emit(mode, &doc, &Typed { kind: "devices", body: &list }))
+    Ok(emit(mode, &doc, &Typed { kind: DocKind::Devices, body: &list }))
 }
 
 fn list_doc(list: &DeviceList, now: i64) -> Doc {
@@ -72,7 +69,9 @@ fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
     if let Some(lan) = offer.lan_address.as_ref().filter(|lan| **lan != offer.address) {
         fields.push(("or", Cell::new(format!("http://{lan}"))));
     }
-    fields.push(("expires", Cell::new(format!("in {}", format::age(Some(now), offer.expires_at)))));
+    let left = offer.expires_at.saturating_sub(now).max(0) as u64;
+    let expires = if left < 60 { "in under a minute".to_string() } else { format!("in {}", units::age(left)) };
+    fields.push(("expires", Cell::new(expires)));
     let mut summary =
         vec!["scan the QR code with the phone's camera, or open the address on the TV and enter the code".to_string()];
     summary.extend(unreachable.map(String::from));

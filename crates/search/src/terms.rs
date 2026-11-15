@@ -1,6 +1,8 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::HashSet;
 
+use torrential_core::name::{self, year};
+
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "de", "der", "die", "das", "el", "for", "in", "la", "le", "of", "on", "or", "the",
     "to", "with",
@@ -126,12 +128,7 @@ fn joinable(run: &[String]) -> bool {
 }
 
 fn tokens(s: &str) -> Vec<String> {
-    s.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).map(str::to_lowercase).collect()
-}
-
-fn year(token: &str) -> Option<u16> {
-    let n: u16 = token.parse().ok().filter(|_| token.len() == 4)?;
-    (1900..=2099).contains(&n).then_some(n)
+    name::words(s).map(str::to_lowercase).collect()
 }
 
 #[cfg(test)]

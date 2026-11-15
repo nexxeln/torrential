@@ -1,0 +1,11 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/x-ndjson",
+  "body": {
+    "type": "ready"
+  }
+}

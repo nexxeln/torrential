@@ -1,0 +1,95 @@
+{
+ "result": [
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321.gif",
+   "source": "derivative",
+   "format": "Animated GIF",
+   "original": "PhantasmagoriaTheater-NightOfTheLivingDead1968321.mov",
+   "md5": "fee5cb6677665b0298b811e9b47049b0",
+   "mtime": "1255680600",
+   "size": "392050",
+   "crc32": "ed29800c",
+   "sha1": "4ea048c4926df2a926c76dee280709d8ecceecca"
+  },
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321.mov",
+   "source": "original",
+   "format": "Quicktime",
+   "md5": "ce95a590e65613cb5be15deda1e30ec5",
+   "mtime": "1255679777",
+   "size": "286303405",
+   "crc32": "979d18df",
+   "sha1": "26d7172d01b93a561d89261bc199bccf385483be",
+   "length": "5740.53",
+   "height": "240",
+   "width": "320"
+  },
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321.ogv",
+   "source": "derivative",
+   "format": "Ogg Video",
+   "original": "PhantasmagoriaTheater-NightOfTheLivingDead1968321.mov",
+   "md5": "0458bb0f6c5a40bdbbf4f9a1b648c5b7",
+   "mtime": "1255688977",
+   "size": "469976138",
+   "crc32": "38775f9c",
+   "sha1": "ff89be95460b172621d21644562768c8d7750d90",
+   "length": "5740.53",
+   "height": "300",
+   "width": "400"
+  },
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321_512kb.mp4",
+   "source": "derivative",
+   "format": "512Kb MPEG4",
+   "original": "PhantasmagoriaTheater-NightOfTheLivingDead1968321.mov",
+   "md5": "c9e27a78a28a98724f18fe9d6652c0ff",
+   "mtime": "1255685293",
+   "size": "416743288",
+   "crc32": "3c48c758",
+   "sha1": "160393312052f74e8232761f62a28aea345dc045",
+   "length": "5740.5",
+   "height": "240",
+   "width": "320"
+  },
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321_archive.torrent",
+   "source": "metadata",
+   "btih": "b42ef954921eb08816118ad3b1c4b935cafad247",
+   "mtime": "1635264373",
+   "size": "24962",
+   "md5": "a17d17ae1274fbdf751c813eaa43acc2",
+   "crc32": "dbe54a5c",
+   "sha1": "09bec2feb6a12e723397f4397bbaa9d8eb7ee60a",
+   "format": "Archive BitTorrent"
+  },
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321_files.xml",
+   "source": "original",
+   "format": "Metadata",
+   "md5": "5fc17e69ec0b738fdf8e3b797f5d101c",
+   "summation": "md5"
+  },
+  {
+   "name": "PhantasmagoriaTheater-NightOfTheLivingDead1968321_meta.xml",
+   "source": "original",
+   "format": "Metadata",
+   "mtime": "1467273139",
+   "size": "974",
+   "md5": "234291170077872dc9e470a6a6b1d463",
+   "crc32": "57d8b1db",
+   "sha1": "8372027f415ef4201975a7c88684145f0fe7f99a"
+  },
+  {
+   "name": "__ia_thumb.jpg",
+   "source": "original",
+   "mtime": "1633290782",
+   "size": "7836",
+   "md5": "7d9dc2a4ae8179672a2a99ffa96c9738",
+   "crc32": "966ef1a4",
+   "sha1": "8d398a0aed5b851445026e8366b54db077962241",
+   "format": "Item Tile",
+   "rotation": "0"
+  }
+ ]
+}

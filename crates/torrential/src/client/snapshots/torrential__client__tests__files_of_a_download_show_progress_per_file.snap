@@ -1,0 +1,47 @@
+---
+source: crates/torrential/src/client/tests.rs
+expression: "both(&files(&reply), &Response::Files { files: reply })"
+---
+SIZE	DONE	PATH
+4.0 GiB	100%	debian-13.1.0-amd64-DVD-1.iso
+4.0 GiB	25.0%	debian-13.1.0-amd64-DVD-2.iso
+4.0 GiB	-	debian-13.1.0-amd64-DVD-3.iso
+# 3 files in debian-13.1.0-amd64-DVD · 12.0 GiB · file list from the download in 0.0s
+next: torrential wait 9b5212
+
+--- json
+{
+  "schema": 1,
+  "type": "files",
+  "files": {
+    "id": "9b521219bc48550140a666f74a29048ed78e933b",
+    "name": "debian-13.1.0-amd64-DVD",
+    "total_size": 12884901888,
+    "files": [
+      {
+        "index": 0,
+        "path": "debian-13.1.0-amd64-DVD-1.iso",
+        "size": 4294967296,
+        "selected": true,
+        "verified": 4294967296
+      },
+      {
+        "index": 1,
+        "path": "debian-13.1.0-amd64-DVD-2.iso",
+        "size": 4294967296,
+        "selected": true,
+        "verified": 1073741824
+      },
+      {
+        "index": 2,
+        "path": "debian-13.1.0-amd64-DVD-3.iso",
+        "size": 4294967296,
+        "selected": false,
+        "verified": 0
+      }
+    ],
+    "metadata_source": "download",
+    "elapsed_ms": 3
+  },
+  "next": "torrential wait 9b5212"
+}

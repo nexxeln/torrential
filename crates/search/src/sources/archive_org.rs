@@ -1,13 +1,51 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared, join_all};
 use serde::Deserialize;
-use tokio::time::Instant;
-use torrential_core::{Category, Error, ErrorCode, Flag};
+use tokio::time::{Instant, timeout_at};
+use torrential_core::filetype::{FileType, Kind};
+use torrential_core::{Category, Codec, Error, ErrorCode, Flag};
 use url::Url;
 
 use super::{Ctx, Failure, at};
 use crate::http::Http;
-use crate::observation::{Identity, Observation, infohash, web_url};
+use crate::observation::{Identity, Observation, VideoCodec, VideoFile, infohash, web_url};
+use crate::store::{FRESH_FOR, Store};
+
+/// The items of the wanted title, most downloaded first, whose files a title's search reads.
+const FILES_OF: usize = 12;
+/// How long into a title's search those lists may come, most about a second after archive.org's
+/// answer. By then a title play still waits for a lawful catalog, which it does for 2.5 seconds
+/// before another index's strong swarm may go first. A list that comes later serves the next
+/// search, and its item ranks without it now.
+const LISTS_BY: Duration = Duration::from_secs(2);
+/// How long one list may take to come, whoever waits for it.
+const LIST_WITHIN: Duration = Duration::from_secs(10);
+/// The lists kept before all are read again.
+const LISTS_KEPT: usize = 512;
+/// What the kept lists may take under the cache folder. Past it the oldest go first.
+const LISTS_BUDGET: u64 = 16 << 20;
+
+/// Archive.org's video formats by the codec their files hold. An `MPEG4` file is an MP4 that
+/// archive.org made or took in, which holds H.264. A format left out, such as `Matroska` or
+/// `QuickTime`, does not say.
+const FORMAT_CODECS: [(&str, VideoCodec); 12] = [
+    ("h.264", VideoCodec::Modern(Codec::H264)),
+    ("h.264 IA", VideoCodec::Modern(Codec::H264)),
+    ("h.264 MPEG4", VideoCodec::Modern(Codec::H264)),
+    ("MPEG4", VideoCodec::Modern(Codec::H264)),
+    ("512Kb MPEG4", VideoCodec::Modern(Codec::H264)),
+    ("HiRes MPEG4", VideoCodec::Modern(Codec::H264)),
+    ("Ogg Video", VideoCodec::Old),
+    ("Ogg Theora", VideoCodec::Old),
+    ("MPEG2", VideoCodec::Old),
+    ("DivX", VideoCodec::Old),
+    ("Cinepack", VideoCodec::Old),
+    ("Motion JPEG", VideoCodec::Old),
+];
 
 const FIELDS: [&str; 10] = [
     "identifier",
@@ -52,7 +90,132 @@ pub(super) async fn search(ctx: &Ctx<'_>, base: &Url) -> Result<Vec<Observation>
         pairs.append_pair("sort[]", "downloads desc").append_pair("rows", "50").append_pair("output", "json");
     }
     let body = ctx.http.get(&url, 4 << 20, ctx.deadline).await?;
-    parse(&body, base).map_err(Failure::BadResponse)
+    let mut items = items(&body, base).map_err(Failure::BadResponse)?;
+    if let Some(wanted) = ctx.wanted {
+        let until = (ctx.started + LISTS_BY).min(ctx.deadline);
+        let of_title = |o: &Observation| o.category == Some(Category::Video) && wanted.fit(o.name()).is_some();
+        let videos = items.iter_mut().filter(|(_, o)| of_title(o)).take(FILES_OF);
+        join_all(videos.map(|(id, observation)| async move { observation.videos = files(ctx, base, id, until).await }))
+            .await;
+    }
+    Ok(items.into_iter().map(|(_, observation)| observation).collect())
+}
+
+/// The video files of the item `id`, from archive.org's list of its files, by `until`. None when
+/// the list has not come by then or will not, and the search is then partial.
+async fn files(ctx: &Ctx<'_>, base: &Url, id: &str, until: Instant) -> Vec<VideoFile> {
+    let listing = ctx.stores.lists.of(ctx.http, at(base, &format!("metadata/{id}/files")), id);
+    match timeout_at(until, listing).await {
+        Ok(Some(files)) => files,
+        Ok(None) => {
+            ctx.stores.lists.forget(id);
+            ctx.mark_partial();
+            Vec::new()
+        }
+        Err(_) => {
+            ctx.mark_partial();
+            Vec::new()
+        }
+    }
+}
+
+type Listing = Shared<BoxFuture<'static, Option<Vec<VideoFile>>>>;
+
+/// Items' lists of their files, each read once by this engine and shared by the searches that ask
+/// while it comes, such as a title's two queries. Under the cache folder each is kept for a day, as
+/// `files/<identifier>.json`, so a later engine has it at once.
+pub(crate) struct Lists {
+    reading: Mutex<HashMap<String, Listing>>,
+    store: Option<Arc<Store>>,
+}
+
+impl Lists {
+    pub fn new(store: Option<Arc<Store>>) -> Lists {
+        Lists { reading: Mutex::default(), store }
+    }
+
+    fn of(&self, http: &Http, url: Url, id: &str) -> Listing {
+        let mut lists = self.reading.lock().unwrap_or_else(|e| e.into_inner());
+        if lists.len() >= LISTS_KEPT && !lists.contains_key(id) {
+            lists.clear();
+        }
+        let read = || {
+            let (http, store, name) = (http.detached(), self.store.clone(), format!("files/{id}.json"));
+            let task = tokio::spawn(async move {
+                if let Some(store) = &store
+                    && let Some(kept) = store.get(&name).await.filter(|kept| kept.age() < FRESH_FOR)
+                    && let Ok(files) = video_files(&kept.bytes)
+                {
+                    return Some(files);
+                }
+                let body = http.get(&url, 2 << 20, Instant::now() + LIST_WITHIN).await.ok()?;
+                let files = video_files(&body).ok()?;
+                if let Some(store) = &store {
+                    store.put(&name, &body).await;
+                    store.trim("files", LISTS_BUDGET).await;
+                }
+                Some(files)
+            });
+            task.map(Result::ok).map(Option::flatten).boxed().shared()
+        };
+        lists.entry(id.to_string()).or_insert_with(read).clone()
+    }
+
+    /// Forgets the list of `id`, which did not come, so the next search asks again.
+    fn forget(&self, id: &str) {
+        self.reading.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    }
+}
+
+#[derive(Deserialize)]
+struct Files {
+    #[serde(default)]
+    result: Vec<FileDoc>,
+}
+
+#[derive(Deserialize)]
+struct FileDoc {
+    name: String,
+    format: Option<String>,
+    size: Option<Number>,
+    width: Option<Number>,
+    height: Option<Number>,
+}
+
+/// Archive.org writes a file's numbers as strings, and now and then as numbers.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Number {
+    Text(String),
+    Number(u64),
+}
+
+impl Number {
+    fn get(&self) -> Option<u64> {
+        match self {
+            Number::Text(text) => text.trim().parse().ok(),
+            Number::Number(n) => Some(*n),
+        }
+    }
+}
+
+/// The files of a list that are videos with a picture, as their names and archive.org's sizes say.
+fn video_files(body: &[u8]) -> Result<Vec<VideoFile>, String> {
+    let files: Files = serde_json::from_slice(body).map_err(|e| format!("files JSON: {e}"))?;
+    let read = |n: &Option<Number>| n.as_ref().and_then(Number::get);
+    let video = |file: &FileDoc| FileType::of(&file.name).is_some_and(|t| t.kind == Some(Kind::Video));
+    Ok(files
+        .result
+        .into_iter()
+        .filter(video)
+        .filter_map(|file| {
+            let (width, height) = (u32::try_from(read(&file.width)?).ok()?, u32::try_from(read(&file.height)?).ok()?);
+            let size = read(&file.size)?;
+            let format = file.format.as_deref();
+            let codec = FORMAT_CODECS.iter().find(|(name, _)| Some(*name) == format).map(|(_, codec)| *codec);
+            (width > 0 && height > 0).then_some(VideoFile { name: file.name, size, width, height, codec })
+        })
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -100,9 +263,23 @@ impl Text {
     }
 }
 
+#[cfg(test)]
 fn parse(body: &[u8], base: &Url) -> Result<Vec<Observation>, String> {
+    Ok(items(body, base)?.into_iter().map(|(_, observation)| observation).collect())
+}
+
+/// Each item an answer lists, by its identifier.
+fn items(body: &[u8], base: &Url) -> Result<Vec<(String, Observation)>, String> {
     let feed: Feed = serde_json::from_slice(body).map_err(|e| format!("advancedsearch JSON: {e}"))?;
-    Ok(feed.response.docs.into_iter().filter_map(|doc| observation(doc, base)).collect())
+    Ok(feed
+        .response
+        .docs
+        .into_iter()
+        .filter_map(|doc| {
+            let id = doc.identifier.clone();
+            Some((id, observation(doc, base)?))
+        })
+        .collect())
 }
 
 /// Archive.org identifiers start with a letter or digit, then letters, digits, `-`, `_`, and `.`.
@@ -148,7 +325,7 @@ fn category(doc: &Doc) -> Option<Category> {
     })
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Item {
     identifier: String,
     metadata: Url,
@@ -169,7 +346,26 @@ pub(super) fn item(base: &Url, name: &str, web_seeds: &[String]) -> Option<Item>
     })
 }
 
+/// The item whose `.torrent` file is at `url`, as archive.org links it:
+/// `<base>download/<identifier>/<file>.torrent`.
+pub(super) fn item_of_link(base: &Url, url: &Url) -> Option<Item> {
+    let download = at(base, "download/");
+    if (url.scheme(), url.host_str(), url.port()) != (download.scheme(), download.host_str(), download.port()) {
+        return None;
+    }
+    let (identifier, file) = url.path().strip_prefix(download.path())?.split_once('/')?;
+    (is_identifier(identifier) && file.ends_with(".torrent")).then(|| Item {
+        identifier: identifier.to_string(),
+        metadata: at(base, &format!("metadata/{identifier}")),
+        scheme: base.scheme().to_string(),
+    })
+}
+
 impl Item {
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
     pub async fn mirrors(&self, http: &Http) -> Result<Vec<String>, Error> {
         const CAP: usize = 16 << 20;
         const WITHIN: Duration = Duration::from_secs(20);
@@ -251,6 +447,29 @@ mod tests {
     }
 
     #[test]
+    fn an_items_video_files_carry_the_size_of_their_picture() {
+        let listed = fixture::read("archive.org/metadata-files-PhantasmagoriaTheater-NightOfTheLivingDead1968321.json");
+        let videos: Vec<(String, u64, u32, u32, Option<VideoCodec>)> = video_files(&listed)
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.name.rsplit_once('.').unwrap().1.to_string(), v.size, v.width, v.height, v.codec))
+            .collect();
+        let h264 = Some(VideoCodec::Modern(Codec::H264));
+        assert_eq!(
+            videos,
+            [
+                ("mov".to_string(), 286_303_405, 320, 240, None),
+                ("ogv".to_string(), 469_976_138, 400, 300, Some(VideoCodec::Old)),
+                ("mp4".to_string(), 416_743_288, 320, 240, h264),
+            ]
+        );
+        assert_eq!(
+            video_files(br#"{"result": [{"name": "a.mp4", "size": 9, "width": "0", "height": "0"}]}"#),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
     fn a_film_filed_as_audio_is_video() {
         let base = Url::parse("https://archive.org/").unwrap();
         let all = parse(&fixture::read("archive.org/advancedsearch.php-big-buck-bunny.json"), &base).unwrap();
@@ -285,6 +504,18 @@ mod tests {
             assert_eq!(super::item(&base, "BigBuckBunny_124", &seeds(list)), None, "{list:?}");
         }
         assert_eq!(super::item(&base, "..", &caminandes), None);
+    }
+
+    #[test]
+    fn a_torrent_link_on_archive_org_names_its_item() {
+        let base = Url::parse("https://archive.org/").unwrap();
+        let read = |link: &str| item_of_link(&base, &Url::parse(link).unwrap()).map(|item| item.identifier);
+        let night = "https://archive.org/download/night_of_the_living_dead/night_of_the_living_dead_archive.torrent";
+        assert_eq!(read(night).as_deref(), Some("night_of_the_living_dead"));
+        assert_eq!(read("https://archive.org/download/night_of_the_living_dead/film.mp4"), None, "not a .torrent");
+        assert_eq!(read("http://archive.org/download/night/night_archive.torrent"), None, "another scheme");
+        assert_eq!(read("https://example.com/download/night/night_archive.torrent"), None, "another host");
+        assert_eq!(read("https://archive.org/details/night/night_archive.torrent"), None, "not a download");
     }
 
     #[test]

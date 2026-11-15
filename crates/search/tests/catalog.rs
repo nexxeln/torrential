@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use torrential_core::catalog::Episode;
 use torrential_core::catalog::{Countries, Country};
-use torrential_core::title::Episode;
 use torrential_core::{ArtKind, ErrorCode, Kind, TitleCard, TitleId};
 use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat};
 
@@ -194,7 +194,7 @@ fn listed(cards: &[TitleCard]) -> Vec<(&str, Kind, &str, Option<u16>)> {
 const NIGHT: &str = "Night of the Living Dead";
 
 /// What Cinemeta alone lists for Night of the Living Dead: titles with that exact name first,
-/// films and series in turn.
+/// films and series in turn, then the others whose names hold every word.
 const CINEMETAS_NIGHTS: [(&str, Kind, &str, Option<u16>); 11] = [
     ("tt0063350", Kind::Film, NIGHT, Some(1968)),
     ("tt49275788", Kind::Series, NIGHT, None),
@@ -204,9 +204,9 @@ const CINEMETAS_NIGHTS: [(&str, Kind, &str, Option<u16>); 11] = [
     ("tt13742126", Kind::Film, NIGHT, Some(2021)),
     ("tt10675496", Kind::Film, NIGHT, None),
     ("tt23054560", Kind::Film, NIGHT, None),
-    ("tt31435652", Kind::Series, "Nyaight of the Living Cat", Some(2025)),
-    ("tt4928166", Kind::Series, "The Living and the Dead", Some(2016)),
     ("tt0489244", Kind::Film, "Night of the Living Dead 3D", Some(2006)),
+    ("tt2006801", Kind::Film, "Night of the Living Dead: Resurrection", Some(2012)),
+    ("tt1879012", Kind::Film, "Night of the Living Dead 3D: Re-Animation", Some(2012)),
 ];
 
 #[tokio::test]
@@ -226,11 +226,15 @@ async fn a_search_lists_imdbs_titles_in_imdbs_order_then_cinemetas_others() {
             ("tt3393372", Kind::Film, NIGHT, Some(2014)),
             ("tt10675496", Kind::Film, NIGHT, None),
             ("tt23054560", Kind::Film, NIGHT, None),
-            ("tt31435652", Kind::Series, "Nyaight of the Living Cat", Some(2025)),
-            ("tt4928166", Kind::Series, "The Living and the Dead", Some(2016)),
+            ("tt2006801", Kind::Film, "Night of the Living Dead: Resurrection", Some(2012)),
+            ("tt1879012", Kind::Film, "Night of the Living Dead 3D: Re-Animation", Some(2012)),
         ]
     );
-    assert_eq!(found.len(), 40, "IMDb's five films are among Cinemeta's forty, and each is listed once");
+    assert_eq!(
+        found.len(),
+        20,
+        "IMDb's five films are among Cinemeta's twenty with every word, and each is listed once"
+    );
     let mut asked = server.asked();
     asked.sort();
     assert_eq!(
@@ -261,28 +265,13 @@ async fn short_films_cinemetas_search_misses_come_first() {
     let catalog = server.catalog(true, None);
     let sintel = catalog.search("sintel").await.unwrap();
     assert_eq!(
-        listed(&sintel[..4]),
-        [
-            (SINTEL, Kind::Film, "Sintel", Some(2010)),
-            ("tt0816692", Kind::Film, "Interstellar", Some(2014)),
-            ("tt1196946", Kind::Series, "The Mentalist", Some(2008)),
-            ("tt30094508", Kind::Film, "SinÉl", Some(2024)),
-        ]
+        listed(&sintel),
+        [(SINTEL, Kind::Film, "Sintel", Some(2010))],
+        "not IMDb's Interstellar and The Mentalist, nor Cinemeta's Angry Birds and Intel Extreme Masters"
     );
-    assert_eq!(sintel.len(), 43, "IMDb's three and Cinemeta's forty, without IMDb's five people");
 
     let bunny = catalog.search("Big Buck Bunny").await.unwrap();
-    assert_eq!(
-        listed(&bunny),
-        [
-            (BIG_BUCK_BUNNY, Kind::Film, "Big Buck Bunny", Some(2008)),
-            ("tt43518493", Kind::Film, "Big Buck Massacre", Some(2026)),
-            ("tt38743705", Kind::Series, "Big Bunny", Some(2001)),
-            ("tt2659136", Kind::Film, "The Big Bunny", None),
-            ("tt6061564", Kind::Series, "The Big Cartoonie Show", Some(1999)),
-            ("tt7917752", Kind::Film, "Hugh Hefner: The Big Bunny", Some(2018)),
-        ]
-    );
+    assert_eq!(listed(&bunny), [(BIG_BUCK_BUNNY, Kind::Film, "Big Buck Bunny", Some(2008))]);
 }
 
 #[tokio::test]
@@ -308,7 +297,7 @@ async fn with_imdb_down_a_search_answers_in_cinemetas_order() {
     let server = recorded_but("/imdb/").await;
     let found = server.catalog(true, None).search("night of the living dead").await.unwrap();
     assert_eq!(listed(&found[..11]), CINEMETAS_NIGHTS);
-    assert_eq!(found.len(), 40);
+    assert_eq!(found.len(), 20);
 }
 
 #[tokio::test]
@@ -317,7 +306,7 @@ async fn with_cinemeta_down_a_search_answers_from_imdb_and_namesakes_follow_imdb
     let catalog = server.catalog(true, None);
     let found = catalog.search("sintel").await.unwrap();
     let names: Vec<&str> = found.iter().map(|card| card.name.as_str()).collect();
-    assert_eq!(names, ["Sintel", "Interstellar", "The Mentalist"]);
+    assert_eq!(names, ["Sintel"]);
 
     let american = TitleCard {
         id: id("tt0386676"),

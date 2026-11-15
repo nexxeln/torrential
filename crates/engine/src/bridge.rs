@@ -1,10 +1,11 @@
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::path::{Path, PathBuf};
 
-use crate::alert::{Alert, SessionStats, Transport};
+use torrential_core::InfoHash;
+
+use crate::alert::Alert;
 use crate::config::{Config, Dht, UploadPolicy};
 use crate::error::{EngineError, ErrorKind, NativeError};
-use crate::identity::{InfoHash, InfoHashV1, InfoHashV2};
 use crate::torrent::{
     AddTorrent, FileEntry, FileIndex, FilePriority, FileProgress, FileSelection, Progress, ResumeData, TorrentSource,
     TorrentState, TorrentStatus,
@@ -36,13 +37,10 @@ pub(crate) mod ffi {
         listen_interfaces: String,
         dht: bool,
         dht_bootstrap_nodes: String,
-        lsd: bool,
-        upnp: bool,
-        natpmp: bool,
-        download_rate_limit: i32,
-        upload_rate_limit: i32,
+        local_network: bool,
+        upload_rate_limit: u32,
         upload_off: bool,
-        connections_limit: i32,
+        connections_limit: u32,
         multiple_connections_per_ip: bool,
         peer_fingerprint: String,
         user_agent: String,
@@ -88,14 +86,18 @@ pub(crate) mod ffi {
         hashes: Hashes,
         name: String,
         has_metadata: bool,
-        piece_length: u32,
         files: Vec<FileRecord>,
         web_seeds: Vec<String>,
     }
 
+    enum Priority {
+        Skip,
+        Normal,
+    }
+
     struct PriorityRecord {
         index: u32,
-        priority: u8,
+        priority: Priority,
     }
 
     enum State {
@@ -120,7 +122,7 @@ pub(crate) mod ffi {
     struct FileProgressRecord {
         index: u32,
         size: u64,
-        priority: u8,
+        priority: Priority,
         verified: u64,
     }
 
@@ -160,20 +162,6 @@ pub(crate) mod ffi {
         ListenSucceeded,
         ListenFailed,
         DhtBootstrapped,
-        SessionStats,
-    }
-
-    enum Transport {
-        Tcp,
-        TcpSsl,
-        Utp,
-        UtpSsl,
-        Socks5,
-        Socks5Ssl,
-        Http,
-        HttpSsl,
-        I2p,
-        Rtc,
     }
 
     struct AlertRecord {
@@ -188,19 +176,14 @@ pub(crate) mod ffi {
         address: String,
         scope_id: u32,
         port: u16,
-        transport: Transport,
+        transport: String,
         interface_name: String,
         bytes: Vec<u8>,
-        stats: StatsRecord,
     }
 
-    struct StatsRecord {
-        sent_payload_bytes: i64,
-        received_payload_bytes: i64,
-        sent_bytes: i64,
-        received_bytes: i64,
-        dht_nodes: i64,
-        peers_connected: i64,
+    extern "Rust" {
+        type AlertWaker;
+        fn wake(waker: &AlertWaker);
     }
 
     unsafe extern "C++" {
@@ -226,7 +209,7 @@ pub(crate) mod ffi {
         fn status(self: &Session, id: &[u8]) -> Result<StatusRecord>;
         fn piece_slices(self: &Session, id: &[u8], slices: u32) -> Result<Vec<PieceCounts>>;
         fn missing_pieces(self: &Session, id: &[u8]) -> Result<MissingCounts>;
-        fn want_range(self: Pin<&mut Session>, id: &[u8], file: u32, offset: u64, length: u64) -> Result<bool>;
+        fn want_range(self: Pin<&mut Session>, id: &[u8], file: u32, offset: u64, length: u64) -> Result<u64>;
         fn written_pieces(
             self: &Session,
             id: &[u8],
@@ -237,18 +220,24 @@ pub(crate) mod ffi {
         ) -> Result<Vec<PieceCounts>>;
         fn download_in_order(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn set_download_limit(self: Pin<&mut Session>, id: &[u8], bytes_per_second: u32) -> Result<()>;
-        fn download_limit(self: &Session, id: &[u8]) -> Result<u32>;
-        fn post_session_stats(self: Pin<&mut Session>) -> Result<()>;
         fn save_state(self: &Session) -> Result<Vec<u8>>;
         fn listen_port(self: &Session) -> Result<u16>;
         fn wait_alerts(self: Pin<&mut Session>, timeout_ms: u32) -> Result<Vec<AlertRecord>>;
+        fn set_alert_notify(self: Pin<&mut Session>, waker: Box<AlertWaker>);
 
         fn parse_magnet(uri: &str) -> Result<ParsedTorrent>;
         fn parse_metainfo(bytes: &[u8]) -> Result<ParsedTorrent>;
         fn parse_resume_data(bytes: &[u8]) -> Result<ParsedTorrent>;
         fn create_torrent(path: &str, piece_size: u32, hybrid: bool) -> Result<Vec<u8>>;
-        fn libtorrent_version() -> Result<String>;
+        fn native_path(path: &[u8]) -> Vec<u8>;
     }
+}
+
+/// What libtorrent calls, on its own thread, when alerts arrive while none were waiting.
+pub(crate) struct AlertWaker(pub(crate) Box<dyn Fn() + Send + Sync>);
+
+fn wake(waker: &AlertWaker) {
+    (waker.0)();
 }
 
 // SAFETY: lt::session has no thread affinity. Its calls are marshalled to
@@ -276,9 +265,9 @@ pub(crate) fn error(e: cxx::Exception) -> EngineError {
 
 pub(crate) fn info_hash(h: &ffi::Hashes) -> Result<InfoHash, EngineError> {
     match (h.has_v1, h.has_v2) {
-        (true, false) => Ok(InfoHash::V1(InfoHashV1::from_bytes(h.v1))),
-        (false, true) => Ok(InfoHash::V2(InfoHashV2::from_bytes(h.v2))),
-        (true, true) => Ok(InfoHash::Hybrid { v1: InfoHashV1::from_bytes(h.v1), v2: InfoHashV2::from_bytes(h.v2) }),
+        (true, false) => Ok(InfoHash::V1(h.v1)),
+        (false, true) => Ok(InfoHash::V2(h.v2)),
+        (true, true) => Ok(InfoHash::Hybrid { v1: h.v1, v2: h.v2 }),
         (false, false) => Err(EngineError::new(ErrorKind::Native, "record has no info hash")),
     }
 }
@@ -307,38 +296,19 @@ fn state(s: ffi::State) -> Result<TorrentState, EngineError> {
     })
 }
 
-fn transport(t: ffi::Transport) -> Result<Transport, EngineError> {
-    Ok(match t {
-        ffi::Transport::Tcp => Transport::Tcp,
-        ffi::Transport::TcpSsl => Transport::TcpSsl,
-        ffi::Transport::Utp => Transport::Utp,
-        ffi::Transport::UtpSsl => Transport::UtpSsl,
-        ffi::Transport::Socks5 => Transport::Socks5,
-        ffi::Transport::Socks5Ssl => Transport::Socks5Ssl,
-        ffi::Transport::Http => Transport::Http,
-        ffi::Transport::HttpSsl => Transport::HttpSsl,
-        ffi::Transport::I2p => Transport::I2p,
-        ffi::Transport::Rtc => Transport::Rtc,
-        _ => return Err(EngineError::new(ErrorKind::Native, "unknown transport")),
+pub(crate) fn priority(p: FilePriority) -> ffi::Priority {
+    match p {
+        FilePriority::Skip => ffi::Priority::Skip,
+        FilePriority::Normal => ffi::Priority::Normal,
+    }
+}
+
+fn priority_from(p: ffi::Priority) -> Result<FilePriority, EngineError> {
+    Ok(match p {
+        ffi::Priority::Skip => FilePriority::Skip,
+        ffi::Priority::Normal => FilePriority::Normal,
+        _ => return Err(EngineError::new(ErrorKind::Native, "unknown file priority")),
     })
-}
-
-pub(crate) fn priority(p: FilePriority) -> u8 {
-    match p {
-        FilePriority::Skip => 0,
-        FilePriority::Low => 1,
-        FilePriority::Normal => 4,
-        FilePriority::High => 7,
-    }
-}
-
-fn priority_from(p: u8) -> FilePriority {
-    match p {
-        0 => FilePriority::Skip,
-        1..=3 => FilePriority::Low,
-        4 => FilePriority::Normal,
-        _ => FilePriority::High,
-    }
 }
 
 pub(crate) fn path_str(path: &Path) -> Result<&str, EngineError> {
@@ -354,29 +324,22 @@ pub(crate) fn settings(config: &Config) -> ffi::SessionSettings {
     };
     let (upload_rate_limit, upload_off) = match config.upload {
         UploadPolicy::Normal => (0, false),
-        UploadPolicy::Capped(rate) => (setting_int(rate.get()), false),
+        UploadPolicy::Capped(rate) => (rate.get(), false),
         UploadPolicy::Off => (0, true),
     };
     ffi::SessionSettings {
         listen_interfaces,
         dht,
         dht_bootstrap_nodes,
-        lsd: config.lsd,
-        upnp: config.upnp,
-        natpmp: config.natpmp,
-        download_rate_limit: config.download_limit.map_or(0, |r| setting_int(r.get())),
+        local_network: config.local_network,
         upload_rate_limit,
         upload_off,
-        connections_limit: setting_int(config.connections.max_connections.get()),
+        connections_limit: config.connections.max_connections.get(),
         multiple_connections_per_ip: config.connections.multiple_per_ip,
         peer_fingerprint: config.client.peer_id_prefix.clone(),
         user_agent: config.client.user_agent.clone(),
         state: config.dht_state.as_ref().map_or_else(Vec::new, |s| s.as_bytes().to_vec()),
     }
-}
-
-fn setting_int(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 pub(crate) fn add_params(add: &AddTorrent) -> Result<ffi::AddParams, EngineError> {
@@ -419,13 +382,15 @@ pub(crate) fn status(r: ffi::StatusRecord) -> Result<TorrentStatus, EngineError>
         Progress::Known(
             r.files
                 .into_iter()
-                .map(|f| FileProgress {
-                    index: FileIndex::new(f.index),
-                    size: f.size,
-                    priority: priority_from(f.priority),
-                    verified: f.verified,
+                .map(|f| {
+                    Ok(FileProgress {
+                        index: FileIndex::new(f.index),
+                        size: f.size,
+                        priority: priority_from(f.priority)?,
+                        verified: f.verified,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, EngineError>>()?,
         )
     } else {
         Progress::AwaitingMetadata
@@ -490,17 +455,16 @@ pub(crate) fn alert(r: ffi::AlertRecord) -> Result<Alert, EngineError> {
                 IpAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(v6, r.port, 0, r.scope_id)),
                 v4 => SocketAddr::new(v4, r.port),
             },
-            transport: transport(r.transport)?,
+            transport: r.transport,
         },
         K::ListenFailed => Alert::ListenFailed {
             interface: r.interface_name,
             port: r.port,
-            transport: transport(r.transport)?,
+            transport: r.transport,
             operation: r.operation,
             error: required_error(r.error),
         },
         K::DhtBootstrapped => Alert::DhtBootstrapped,
-        K::SessionStats => Alert::SessionStats(session_stats(&r.stats)),
         _ => return Err(EngineError::new(ErrorKind::Native, "unknown alert kind")),
     })
 }
@@ -509,15 +473,4 @@ fn ip(address: &str) -> Result<IpAddr, EngineError> {
     address.parse().map_err(|_| {
         EngineError::new(ErrorKind::Native, format!("libtorrent reported an unparsable address {address:?}"))
     })
-}
-
-fn session_stats(s: &ffi::StatsRecord) -> SessionStats {
-    SessionStats {
-        sent_payload_bytes: non_negative(s.sent_payload_bytes),
-        received_payload_bytes: non_negative(s.received_payload_bytes),
-        sent_bytes: non_negative(s.sent_bytes),
-        received_bytes: non_negative(s.received_bytes),
-        dht_nodes: non_negative(s.dht_nodes),
-        peers_connected: non_negative(s.peers_connected),
-    }
 }

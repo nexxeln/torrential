@@ -1,0 +1,50 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "title",
+    "title": {
+      "id": "tt0063350",
+      "kind": "film",
+      "name": "Night of the Living Dead",
+      "year": 1968,
+      "rating": 7.8,
+      "synopsis": "Strangers shelter in a farmhouse while the dead walk outside.",
+      "genres": [
+        "Horror",
+        "Thriller"
+      ],
+      "runtime_min": 96,
+      "cast": [
+        "Duane Jones",
+        "Judith O'Dea",
+        "Karl Hardman"
+      ],
+      "countries": [
+        "US"
+      ],
+      "art": {
+        "poster": true,
+        "background": true,
+        "logo": true
+      },
+      "seasons": [],
+      "saved": false,
+      "watched": [],
+      "next": {
+        "video": "tt0063350",
+        "resume_at": null
+      },
+      "play_target": {
+        "video": "tt0063350",
+        "resume_at": null
+      },
+      "downloads": []
+    },
+    "next": "torrential play tt0063350"
+  }
+}

@@ -1,0 +1,14 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "400 Bad Request",
+  "type": "application/json",
+  "body": {
+    "error": {
+      "code": "usage",
+      "message": "the search has no words: q is empty"
+    }
+  }
+}

@@ -1,10 +1,11 @@
 import { CheckIcon } from "@heroicons/react/16/solid";
 import { artUrl, type EpisodeInfo, type TitlePage, type Watched } from "../api";
-import { day, minutes } from "../lib/format";
+import { day, minutesLeft } from "../lib/format";
+import { videoOf } from "../lib/video";
 import { Link, playPath } from "../router";
 import { Meter } from "../ui/Meter";
 import { Blank, Picture } from "./Picture";
-import { episodeName, hasAired, seasonName, videoOf } from "./words";
+import { episodeName, seasonName } from "./words";
 
 /** The regular seasons in order, then the specials. */
 export function seasonOrder(page: TitlePage): number[] {
@@ -13,15 +14,15 @@ export function seasonOrder(page: TitlePage): number[] {
 }
 
 function facts(episode: EpisodeInfo, watched: Watched | undefined, next: boolean): string {
-  if (!hasAired(episode)) return episode.aired === null ? "Not announced yet" : `Airs ${day(episode.aired)}`;
-  const left = watched && !watched.finished && watched.duration ? `${minutes((watched.duration - watched.position) / 60)} left` : null;
+  if (!episode.has_aired) return episode.aired === null ? "Not announced yet" : `Airs ${day(episode.aired)}`;
+  const left = watched && !watched.finished && watched.duration ? minutesLeft(watched.position, watched.duration) : null;
   return [day(episode.aired!), left, next ? "Up next" : null].filter(Boolean).join(" · ");
 }
 
 const ROW = "grid grid-cols-[--spacing(32)_minmax(0,1fr)] items-start gap-x-4 gap-y-2 rounded-lg p-2 sm:grid-cols-[--spacing(44)_minmax(0,1fr)]";
 
 function EpisodeRow({ id, episode, watched, next }: { id: string; episode: EpisodeInfo; watched: Watched | undefined; next: boolean }) {
-  const aired = hasAired(episode);
+  const aired = episode.has_aired;
   const started = watched && !watched.finished && watched.duration ? watched.position / watched.duration : null;
   const body = (
     <>

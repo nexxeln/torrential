@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <libtorrent/alert_types.hpp>
+#include <libtorrent/aux_/path.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/create_torrent.hpp>
 #include <libtorrent/entry.hpp>
@@ -20,9 +21,7 @@
 #include <libtorrent/peer_request.hpp>
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/session_params.hpp>
-#include <libtorrent/session_stats.hpp>
 #include <libtorrent/torrent_info.hpp>
-#include <libtorrent/version.hpp>
 #include <libtorrent/write_resume_data.hpp>
 
 #include "torrential-engine/src/bridge.rs.h"
@@ -89,30 +88,101 @@ State to_state(lt::torrent_status::state_t s) {
   fail(FailureKind::Native, "unknown torrent state " + std::to_string(static_cast<int>(s)));
 }
 
-Transport to_transport(lt::socket_type_t t) {
+rust::String transport_name(lt::socket_type_t t) {
   switch (t) {
-    case lt::socket_type_t::tcp: return Transport::Tcp;
-    case lt::socket_type_t::tcp_ssl: return Transport::TcpSsl;
-    case lt::socket_type_t::utp: return Transport::Utp;
-    case lt::socket_type_t::utp_ssl: return Transport::UtpSsl;
-    case lt::socket_type_t::socks5: return Transport::Socks5;
-    case lt::socket_type_t::socks5_ssl: return Transport::Socks5Ssl;
-    case lt::socket_type_t::http: return Transport::Http;
-    case lt::socket_type_t::http_ssl: return Transport::HttpSsl;
-    case lt::socket_type_t::i2p: return Transport::I2p;
-    case lt::socket_type_t::rtc: return Transport::Rtc;
+    case lt::socket_type_t::tcp: return "tcp";
+    case lt::socket_type_t::tcp_ssl: return "tcpssl";
+    case lt::socket_type_t::utp: return "utp";
+    case lt::socket_type_t::utp_ssl: return "utpssl";
+    case lt::socket_type_t::socks5: return "socks5";
+    case lt::socket_type_t::socks5_ssl: return "socks5ssl";
+    case lt::socket_type_t::http: return "http";
+    case lt::socket_type_t::http_ssl: return "httpssl";
+    case lt::socket_type_t::i2p: return "i2p";
+    case lt::socket_type_t::rtc: return "rtc";
   }
   fail(FailureKind::Native, "unknown socket type " + std::to_string(static_cast<int>(t)));
 }
 
+lt::download_priority_t to_lt(Priority p) {
+  return p == Priority::Skip ? lt::dont_download : lt::default_priority;
+}
+
+Priority to_priority(lt::download_priority_t p) {
+  return p == lt::dont_download ? Priority::Skip : Priority::Normal;
+}
+
+// libtorrent takes an int, and reads both 0 and the largest int as no limit.
+int rate_limit(std::uint32_t bytes_per_second) {
+  return static_cast<int>(std::min<std::uint32_t>(bytes_per_second, std::numeric_limits<int>::max() - 1));
+}
+
+// Pad files align the files of v2 and hybrid torrents to pieces. They keep an index and hold no
+// bytes of the torrent.
+template <typename Each>
+void each_file(lt::file_storage const& fs, Each&& each) {
+  for (lt::file_index_t const f : fs.file_range()) {
+    if (!fs.pad_file_at(f)) each(f);
+  }
+}
+
+[[noreturn]] void no_such_file(std::uint32_t index, int files) {
+  fail(FailureKind::InvalidInput,
+       "file index " + std::to_string(index) + " is out of range for " + std::to_string(files) + " files");
+}
+
+lt::file_index_t file_at(lt::file_storage const& fs, std::uint32_t file) {
+  lt::file_index_t const f(static_cast<int>(file));
+  if (file >= static_cast<std::uint32_t>(fs.num_files()) || fs.pad_file_at(f)) {
+    no_such_file(file, fs.num_files());
+  }
+  return f;
+}
+
+// The end of `length` bytes of the file from `offset`, cut at the file's end.
+std::uint64_t range_end(lt::file_storage const& fs, lt::file_index_t f, std::uint64_t offset,
+                        std::uint64_t length) {
+  auto const size = static_cast<std::uint64_t>(fs.file_size(f));
+  if (length == 0 || offset >= size) {
+    fail(FailureKind::InvalidInput, "byte range " + std::to_string(offset) + "+" + std::to_string(length) +
+                                        " is outside the " + std::to_string(size) + "-byte file");
+  }
+  return length > size - offset ? size : offset + length;
+}
+
+// Pieces past the end of the list keep the default priority.
+bool selected(std::vector<lt::download_priority_t> const& priorities, std::size_t piece) {
+  return piece >= priorities.size() || priorities[piece] != lt::dont_download;
+}
+
+// Whether reading a piece from the file returns the torrent's bytes. A piece passes its hash check
+// while its blocks can still wait in the write cache, and leaves the download queue once they are
+// all written.
+class Written {
+ public:
+  explicit Written(lt::torrent_handle const& h)
+      : status_(h.status(lt::torrent_handle::query_pieces)), writing_(h.get_download_queue()) {}
+
+  bool operator()(lt::piece_index_t p) const {
+    // A seed can report no bitfield at all.
+    if (status_.pieces.empty() && status_.is_seeding) return true;
+    if (p >= status_.pieces.end_index() || !status_.pieces.get_bit(p)) return false;
+    return std::none_of(writing_.begin(), writing_.end(),
+                        [p](lt::partial_piece_info const& q) { return q.piece_index == p; });
+  }
+
+ private:
+  lt::torrent_status status_;
+  std::vector<lt::partial_piece_info> writing_;
+};
+
 rust::Vec<FileRecord> file_records(lt::file_storage const& fs, lt::renamed_files const& names) {
   rust::Vec<FileRecord> out;
-  for (lt::file_index_t const f : fs.file_range()) {
-    if (fs.pad_file_at(f)) continue;
+  each_file(fs, [&](lt::file_index_t f) {
     out.push_back(FileRecord{static_cast<std::uint32_t>(static_cast<int>(f)),
                              str(names.file_path(fs, f)),
                              static_cast<std::uint64_t>(fs.file_size(f))});
-  }
+  });
   return out;
 }
 
@@ -125,7 +195,6 @@ ParsedTorrent parsed(lt::add_torrent_params const& atp) {
     p.hashes = to_hashes(atp.ti->info_hashes());
     p.name = str(atp.ti->name());
     p.has_metadata = true;
-    p.piece_length = static_cast<std::uint32_t>(atp.ti->piece_length());
     p.files = file_records(fs, names);
   } else {
     p.hashes = to_hashes(atp.info_hashes);
@@ -205,12 +274,12 @@ lt::session_params make_params(SessionSettings const& s) {
   p.set_str(lt::settings_pack::listen_interfaces, std::string(s.listen_interfaces));
   p.set_bool(lt::settings_pack::enable_dht, s.dht);
   p.set_str(lt::settings_pack::dht_bootstrap_nodes, std::string(s.dht_bootstrap_nodes));
-  p.set_bool(lt::settings_pack::enable_lsd, s.lsd);
-  p.set_bool(lt::settings_pack::enable_upnp, s.upnp);
-  p.set_bool(lt::settings_pack::enable_natpmp, s.natpmp);
-  p.set_int(lt::settings_pack::download_rate_limit, s.download_rate_limit);
-  p.set_int(lt::settings_pack::upload_rate_limit, s.upload_rate_limit);
-  p.set_int(lt::settings_pack::connections_limit, s.connections_limit);
+  p.set_bool(lt::settings_pack::enable_lsd, s.local_network);
+  p.set_bool(lt::settings_pack::enable_upnp, s.local_network);
+  p.set_bool(lt::settings_pack::enable_natpmp, s.local_network);
+  p.set_int(lt::settings_pack::upload_rate_limit, rate_limit(s.upload_rate_limit));
+  p.set_int(lt::settings_pack::connections_limit,
+            static_cast<int>(std::min<std::uint32_t>(s.connections_limit, std::numeric_limits<int>::max())));
   p.set_bool(lt::settings_pack::allow_multiple_connections_per_ip, s.multiple_connections_per_ip);
   p.set_str(lt::settings_pack::peer_fingerprint, std::string(s.peer_fingerprint));
   p.set_str(lt::settings_pack::user_agent, std::string(s.user_agent));
@@ -255,12 +324,6 @@ lt::ip_filter every_peer_global() {
   return filter;
 }
 
-int metric(char const* name) {
-  int const index = lt::find_metric_idx(name);
-  if (index < 0) fail(FailureKind::Native, std::string("missing session metric ") + name);
-  return index;
-}
-
 // asio writes a scoped IPv6 address as fe80::1%lo0, which no Rust address
 // type parses, so the scope travels as its interface index.
 void set_address(AlertRecord& r, lt::address const& address) {
@@ -302,11 +365,7 @@ std::string describe_exception(std::exception_ptr error) {
   }
 }
 
-Session::Session(SessionSettings const& settings)
-    : session_(make_params(settings)),
-      stats_{metric("net.sent_payload_bytes"), metric("net.recv_payload_bytes"),
-             metric("net.sent_bytes"),         metric("net.recv_bytes"),
-             metric("dht.dht_nodes"),          metric("peer.num_peers_connected")} {
+Session::Session(SessionSettings const& settings) : session_(make_params(settings)) {
   session_.set_peer_class_filter(every_peer_global());
 }
 
@@ -354,15 +413,11 @@ AddResult Session::add_torrent(AddParams const& p) {
     atp.flags |= lt::torrent_flags::default_dont_download;
     int const known = atp.ti && atp.ti->is_valid() ? atp.ti->num_files() : -1;
     for (std::uint32_t const index : p.selected) {
-      int const i = static_cast<int>(index);
-      if (known >= 0 && i >= known) {
-        fail(FailureKind::InvalidInput, "file index " + std::to_string(i) + " is out of range for " +
-                                  std::to_string(known) + " files");
+      if (known >= 0 && index >= static_cast<std::uint32_t>(known)) no_such_file(index, known);
+      if (atp.file_priorities.size() <= index) {
+        atp.file_priorities.resize(index + std::size_t{1}, lt::dont_download);
       }
-      if (static_cast<int>(atp.file_priorities.size()) <= i) {
-        atp.file_priorities.resize(static_cast<std::size_t>(i) + 1, lt::dont_download);
-      }
-      atp.file_priorities[static_cast<std::size_t>(i)] = lt::default_priority;
+      atp.file_priorities[index] = lt::default_priority;
     }
   }
 
@@ -385,11 +440,8 @@ void Session::set_file_priorities(rust::Slice<const std::uint8_t> id,
   std::vector<lt::download_priority_t> all = h.get_file_priorities();
   all.resize(static_cast<std::size_t>(files), lt::default_priority);
   for (PriorityRecord const& p : priorities) {
-    if (static_cast<int>(p.index) >= files) {
-      fail(FailureKind::InvalidInput, "file index " + std::to_string(p.index) + " is out of range for " +
-                                std::to_string(files) + " files");
-    }
-    all[p.index] = lt::download_priority_t(p.priority);
+    if (p.index >= static_cast<std::uint32_t>(files)) no_such_file(p.index, files);
+    all[p.index] = to_lt(p.priority);
   }
   h.prioritize_files(all);
 }
@@ -435,15 +487,15 @@ rust::Vec<std::uint8_t> Session::torrent_file(rust::Slice<const std::uint8_t> id
     lt::file_storage const& fs = ti->layout();
     auto const layers = h.piece_layers();
     auto& dict = torrent["piece layers"].dict();
-    for (lt::file_index_t const f : fs.file_range()) {
-      if (fs.pad_file_at(f) || fs.file_size(f) <= fs.piece_length()) continue;
+    each_file(fs, [&](lt::file_index_t f) {
+      if (fs.file_size(f) <= fs.piece_length()) return;
       auto const i = static_cast<std::size_t>(static_cast<int>(f));
       if (i >= layers.size() || static_cast<int>(layers[i].size()) != fs.file_num_pieces(f)) {
         fail(FailureKind::NoMetadata, "piece layers are not complete yet");
       }
       std::string& layer = dict[fs.root(f).to_string()].string();
       for (lt::sha256_hash const& hash : layers[i]) layer += hash.to_string();
-    }
+    });
   }
   std::vector<char> buf;
   lt::bencode(std::back_inserter(buf), torrent);
@@ -479,15 +531,14 @@ StatusRecord Session::status(rust::Slice<const std::uint8_t> id) const {
     std::vector<std::int64_t> verified;
     h.file_progress(verified, lt::torrent_handle::piece_granularity);
     std::vector<lt::download_priority_t> const priorities = h.get_file_priorities();
-    for (lt::file_index_t const f : fs.file_range()) {
-      if (fs.pad_file_at(f)) continue;
+    each_file(fs, [&](lt::file_index_t f) {
       auto const i = static_cast<std::size_t>(static_cast<int>(f));
       lt::download_priority_t const prio = i < priorities.size() ? priorities[i] : lt::default_priority;
       r.files.push_back(FileProgressRecord{static_cast<std::uint32_t>(i),
                                            static_cast<std::uint64_t>(fs.file_size(f)),
-                                           static_cast<std::uint8_t>(prio),
+                                           to_priority(prio),
                                            static_cast<std::uint64_t>(verified.at(i))});
-    }
+    });
   }
   return r;
 }
@@ -505,7 +556,7 @@ rust::Vec<PieceCounts> Session::piece_slices(rust::Slice<const std::uint8_t> id,
     std::size_t const end = std::max(begin + 1, (s + 1) * pieces / slices);
     PieceCounts r{};
     for (std::size_t i = begin; i < end; ++i) {
-      if (i < priorities.size() && priorities[i] == lt::dont_download) continue;
+      if (!selected(priorities, i)) continue;
       ++r.selected;
       if (st.pieces.get_bit(lt::piece_index_t(static_cast<int>(i)))) ++r.verified;
     }
@@ -522,7 +573,7 @@ MissingCounts Session::missing_pieces(rust::Slice<const std::uint8_t> id) const 
   h.piece_availability(availability);
   MissingCounts r{};
   for (std::size_t i = 0; i < static_cast<std::size_t>(st.pieces.size()); ++i) {
-    if (i < priorities.size() && priorities[i] == lt::dont_download) continue;
+    if (!selected(priorities, i)) continue;
     if (st.pieces.get_bit(lt::piece_index_t(static_cast<int>(i)))) continue;
     ++r.missing;
     if (i >= availability.size() || availability[i] == 0) ++r.unavailable;
@@ -530,37 +581,26 @@ MissingCounts Session::missing_pieces(rust::Slice<const std::uint8_t> id) const 
   return r;
 }
 
-bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
-                         std::uint64_t length) {
+std::uint64_t Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file, std::uint64_t offset,
+                                  std::uint64_t length) {
   lt::torrent_handle const h = find_with_metadata(id);
   auto const ti = h.torrent_file();
   lt::file_storage const& fs = ti->layout();
-  lt::file_index_t const f(static_cast<int>(file));
-  if (file >= static_cast<std::uint32_t>(fs.num_files()) || fs.pad_file_at(f)) {
-    fail(FailureKind::InvalidInput, "file index " + std::to_string(file) + " is out of range for " +
-                                        std::to_string(fs.num_files()) + " files");
-  }
-  auto const size = static_cast<std::uint64_t>(fs.file_size(f));
-  if (length == 0 || offset >= size) {
-    fail(FailureKind::InvalidInput, "byte range " + std::to_string(offset) + "+" + std::to_string(length) +
-                                        " is outside the " + std::to_string(size) + "-byte file");
-  }
-  std::uint64_t const end = length > size - offset ? size : offset + length;
+  lt::file_index_t const f = file_at(fs, file);
+  std::uint64_t const end = range_end(fs, f, offset, length);
   lt::piece_index_t const first = fs.map_file(f, static_cast<std::int64_t>(offset), 0).piece;
   lt::piece_index_t const last = fs.map_file(f, static_cast<std::int64_t>(end - 1), 0).piece;
-  lt::piece_index_t const file_last = fs.map_file(f, static_cast<std::int64_t>(size - 1), 0).piece;
-  lt::torrent_status const st = h.status(lt::torrent_handle::query_pieces);
-  // A piece passes its hash check while its blocks can still wait in the
-  // write cache, and leaves the download queue once they are all written.
-  // Only then does reading the file return its bytes.
-  std::vector<lt::partial_piece_info> const writing = h.get_download_queue();
-  bool written = true;
+  lt::piece_index_t const file_last = fs.map_file(f, fs.file_size(f) - 1, 0).piece;
+  Written const written_piece(h);
+  // The bytes from `offset` on that the file holds, up to the first piece not yet written.
+  std::uint64_t written = end;
   int deadline_ms = 0;
   for (lt::piece_index_t p = first; p <= last; ++p) {
-    bool const queued = std::any_of(writing.begin(), writing.end(),
-                                    [p](lt::partial_piece_info const& q) { return q.piece_index == p; });
-    if (st.pieces.get_bit(p) && !queued) continue;
-    written = false;
+    if (written_piece(p)) continue;
+    if (written == end) {
+      std::int64_t const piece_start = static_cast<std::int64_t>(static_cast<int>(p)) * fs.piece_length();
+      written = std::max(offset, static_cast<std::uint64_t>(std::max<std::int64_t>(piece_start - fs.file_offset(f), 0)));
+    }
     h.set_piece_deadline(p, deadline_ms);
     deadline_ms += 100;
   }
@@ -570,7 +610,7 @@ bool Session::want_range(rust::Slice<const std::uint8_t> id, std::uint32_t file,
   // and then returns to where it plays, and a range of one piece would leave
   // every other peer picking at random.
   if (last < file_last) h.set_sequential_range(first, file_last);
-  return written;
+  return written - offset;
 }
 
 rust::Vec<PieceCounts> Session::written_pieces(rust::Slice<const std::uint8_t> id, std::uint32_t file,
@@ -579,30 +619,9 @@ rust::Vec<PieceCounts> Session::written_pieces(rust::Slice<const std::uint8_t> i
   lt::torrent_handle const h = find_with_metadata(id);
   auto const ti = h.torrent_file();
   lt::file_storage const& fs = ti->layout();
-  lt::file_index_t const f(static_cast<int>(file));
-  if (file >= static_cast<std::uint32_t>(fs.num_files()) || fs.pad_file_at(f)) {
-    fail(FailureKind::InvalidInput, "file index " + std::to_string(file) + " is out of range for " +
-                                        std::to_string(fs.num_files()) + " files");
-  }
-  auto const size = static_cast<std::uint64_t>(fs.file_size(f));
-  if (length == 0 || offset >= size) {
-    fail(FailureKind::InvalidInput, "byte range " + std::to_string(offset) + "+" + std::to_string(length) +
-                                        " is outside the " + std::to_string(size) + "-byte file");
-  }
-  std::uint64_t const span = length > size - offset ? size - offset : length;
-  lt::torrent_status const st = h.status(lt::torrent_handle::query_pieces);
-  // A seed can report no bitfield at all.
-  bool const seed = st.pieces.empty() && st.is_seeding;
-  // As in want_range: a piece still in the download queue can have blocks
-  // waiting in the write cache, so the file does not hold its bytes yet.
-  std::vector<lt::partial_piece_info> const writing = h.get_download_queue();
-  auto const written = [&](int p) {
-    if (seed) return true;
-    if (p >= st.pieces.size() || !st.pieces.get_bit(lt::piece_index_t(p))) return false;
-    return std::none_of(writing.begin(), writing.end(), [p](lt::partial_piece_info const& q) {
-      return static_cast<int>(q.piece_index) == p;
-    });
-  };
+  lt::file_index_t const f = file_at(fs, file);
+  std::uint64_t const span = range_end(fs, f, offset, length) - offset;
+  Written const written(h);
   auto const piece_at = [&](std::uint64_t byte) {
     return static_cast<int>(fs.map_file(f, static_cast<std::int64_t>(byte), 0).piece);
   };
@@ -618,7 +637,7 @@ rust::Vec<PieceCounts> Session::written_pieces(rust::Slice<const std::uint8_t> i
     for (int p = piece_at(begin), last = piece_at(end - 1); p <= last; ++p) {
       if (p != known) {
         known = p;
-        known_written = written(p);
+        known_written = written(lt::piece_index_t(p));
       }
       ++c.selected;
       if (known_written) ++c.verified;
@@ -633,17 +652,8 @@ void Session::download_in_order(rust::Slice<const std::uint8_t> id) {
 }
 
 void Session::set_download_limit(rust::Slice<const std::uint8_t> id, std::uint32_t bytes_per_second) {
-  // libtorrent takes an int, and reads both 0 and the largest int as no limit.
-  std::uint32_t const most = std::numeric_limits<int>::max() - 1;
-  find(id).set_download_limit(static_cast<int>(std::min(bytes_per_second, most)));
+  find(id).set_download_limit(rate_limit(bytes_per_second));
 }
-
-std::uint32_t Session::download_limit(rust::Slice<const std::uint8_t> id) const {
-  // libtorrent says -1 when there is no limit.
-  return static_cast<std::uint32_t>(std::max(find(id).download_limit(), 0));
-}
-
-void Session::post_session_stats() { session_.post_session_stats(); }
 
 rust::Vec<std::uint8_t> Session::save_state() const {
   lt::session_params const params = session_.session_state(lt::session_handle::save_dht_state);
@@ -730,7 +740,7 @@ rust::Vec<AlertRecord> Session::wait_alerts(std::uint32_t timeout_ms) {
         r.kind = AlertKind::ListenSucceeded;
         set_address(r, l->address);
         r.port = static_cast<std::uint16_t>(l->port);
-        r.transport = to_transport(l->socket_type);
+        r.transport = transport_name(l->socket_type);
         keep = true;
         break;
       }
@@ -740,7 +750,7 @@ rust::Vec<AlertRecord> Session::wait_alerts(std::uint32_t timeout_ms) {
         r.interface_name = str(l->listen_interface());
         set_address(r, l->address);
         r.port = static_cast<std::uint16_t>(l->port);
-        r.transport = to_transport(l->socket_type);
+        r.transport = transport_name(l->socket_type);
         r.operation = str(lt::operation_name(l->op));
         r.error = to_error(l->error);
         keep = true;
@@ -750,21 +760,18 @@ rust::Vec<AlertRecord> Session::wait_alerts(std::uint32_t timeout_ms) {
         r.kind = AlertKind::DhtBootstrapped;
         keep = true;
         break;
-      case lt::session_stats_alert::alert_type: {
-        auto const c = lt::alert_cast<lt::session_stats_alert>(a)->counters();
-        r.kind = AlertKind::SessionStats;
-        r.stats = StatsRecord{c[stats_.sent_payload_bytes], c[stats_.received_payload_bytes],
-                              c[stats_.sent_bytes],         c[stats_.received_bytes],
-                              c[stats_.dht_nodes],          c[stats_.peers_connected]};
-        keep = true;
-        break;
-      }
       default:
         break;
     }
     if (keep) out.push_back(std::move(r));
   }
   return out;
+}
+
+void Session::set_alert_notify(rust::Box<AlertWaker> waker) {
+  // libtorrent may call this until the session is gone, so the call owns the waker.
+  auto const shared = std::make_shared<rust::Box<AlertWaker>>(std::move(waker));
+  session_.set_alert_notify([shared] { wake(**shared); });
 }
 
 std::unique_ptr<Session> new_session(SessionSettings const& settings) {
@@ -804,6 +811,10 @@ rust::Vec<std::uint8_t> create_torrent(rust::Str path, std::uint32_t piece_size,
   return to_vec(t.generate_buf());
 }
 
-rust::String libtorrent_version() { return rust::String(lt::version()); }
+rust::Vec<std::uint8_t> native_path(rust::Slice<const std::uint8_t> path) {
+  std::string const native =
+      lt::convert_to_native_path_string(std::string(reinterpret_cast<char const*>(path.data()), path.size()));
+  return to_vec(std::vector<char>(native.begin(), native.end()));
+}
 
 }

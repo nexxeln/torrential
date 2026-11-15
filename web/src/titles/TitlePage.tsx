@@ -1,7 +1,7 @@
 import { BookmarkIcon, PlayIcon, StarIcon } from "@heroicons/react/16/solid";
 import { Fragment, type ReactNode, useEffect } from "react";
-import { artUrl, type Next, setSaved, type TitlePage as Title } from "../api";
-import { count, list, minutes, sentence } from "../lib/format";
+import { artUrl, setSaved, type TitlePage as Title } from "../api";
+import { count, list, minutes, minutesLeft, sentence } from "../lib/format";
 import { Link, navigate, playPath, titlePath } from "../router";
 import { CastButton } from "../cast/CastButton";
 import { Button, buttonClass } from "../ui/Button";
@@ -12,7 +12,7 @@ import { Logo } from "./Logo";
 import { Picture } from "./Picture";
 import { Sources } from "./Sources";
 import { useTitle } from "./useTitle";
-import { episodeCode, findEpisode, playingOrder, videoOf } from "./words";
+import { episodeCode, findEpisode } from "./words";
 
 /** What the page's Play button plays. */
 interface Primary {
@@ -22,24 +22,17 @@ interface Primary {
   left: string | null;
 }
 
-/** A finished film, or a series that is caught up, starts over. */
-function restart(page: Title): Next | null {
-  if (page.kind === "film") return { video: page.id, resume_at: null };
-  const first = playingOrder(page, false)[0];
-  return first ? { video: videoOf(page.id, first), resume_at: null } : null;
-}
-
 function primaryOf(page: Title): Primary | null {
-  const target = page.next ?? restart(page);
+  const target = page.play_target;
   if (!target) return null;
   const episode = findEpisode(page, target.video);
-  const resuming = target.resume_at !== null && target.resume_at > 0;
+  const resuming = target.resume_at !== null;
   const verb = resuming ? "Resume" : "Play";
   const duration = page.watched.find((entry) => entry.video === target.video)?.duration ?? (page.runtime_min ? page.runtime_min * 60 : null);
   return {
     video: target.video,
     label: episode ? `${verb} ${episodeCode(episode)}` : verb,
-    left: resuming && duration ? `${minutes((duration - target.resume_at!) / 60)} left` : null,
+    left: resuming && duration ? minutesLeft(target.resume_at!, duration) : null,
   };
 }
 

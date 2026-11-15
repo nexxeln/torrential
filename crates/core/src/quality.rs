@@ -1,9 +1,11 @@
 use std::fmt;
-use std::ops::RangeInclusive;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+
+use crate::name;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Quality {
     /// `None` when the name carries no resolution tag.
     pub resolution: Option<Resolution>,
@@ -13,72 +15,46 @@ pub struct Quality {
     pub hdr: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Resolution {
-    /// 576 lines or fewer, such as a DVD rip.
-    #[serde(rename = "sd")]
-    Sd,
-    #[serde(rename = "720p")]
-    P720,
-    #[serde(rename = "1080p")]
-    P1080,
-    #[serde(rename = "2160p")]
-    P2160,
+crate::words! {
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum Resolution {
+        /// 576 lines or fewer, such as a DVD rip.
+        Sd = "sd",
+        P720 = "720p",
+        P1080 = "1080p",
+        P2160 = "2160p",
+    }
 }
 
 impl Resolution {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sd => "sd",
-            Self::P720 => "720p",
-            Self::P1080 => "1080p",
-            Self::P2160 => "2160p",
-        }
-    }
-
     fn from_dimensions(token: &str) -> Option<Resolution> {
         let (width, height) = token.split_once('x')?;
         if width.len() < 3 || height.len() < 3 || !height.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        Some(match width.parse::<u32>().ok()? {
+        Some(Self::of_width(width.parse().ok()?))
+    }
+
+    /// The resolution of a picture `width` pixels wide, so that a film cropped wider or narrower
+    /// than 16:9 counts as what it was made for.
+    pub const fn of_width(width: u32) -> Resolution {
+        match width {
             3800.. => Self::P2160,
             1900.. => Self::P1080,
             1200.. => Self::P720,
             _ => Self::Sd,
-        })
-    }
-}
-
-/// The Mbit/s at each resolution that looks right and streams comfortably. A small encode of a
-/// popular release sits low in it, and a remux runs above it.
-pub fn band(resolution: Option<Resolution>) -> RangeInclusive<f64> {
-    match resolution {
-        Some(Resolution::Sd) => 0.3..=4.0,
-        Some(Resolution::P720) => 0.6..=8.0,
-        Some(Resolution::P1080) => 1.0..=16.0,
-        Some(Resolution::P2160) => 3.0..=40.0,
-        None => 0.3..=16.0,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Codec {
-    /// x264, H.264, or AVC.
-    H264,
-    /// x265, H.265, or HEVC.
-    Hevc,
-    Av1,
-}
-
-impl Codec {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::H264 => "h264",
-            Self::Hevc => "hevc",
-            Self::Av1 => "av1",
         }
+    }
+}
+
+crate::words! {
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum Codec {
+        /// x264, H.264, or AVC.
+        H264 = "h264",
+        /// x265, H.265, or HEVC.
+        Hevc = "hevc",
+        Av1 = "av1",
     }
 }
 
@@ -86,11 +62,7 @@ impl Quality {
     /// The first resolution and codec tags in the name. Tags are whole words, so
     /// `x264aac` and a bare `HD` stay unknown.
     pub fn parse(name: &str) -> Quality {
-        let tokens: Vec<String> = name
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect();
+        let tokens = name::tags(name);
         let mut quality = Quality::default();
         let mut dolby_vision = false;
         for (i, token) in tokens.iter().enumerate() {

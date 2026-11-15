@@ -24,18 +24,44 @@ pub fn parse_size(input: &str) -> Option<u64> {
 }
 
 /// Formats bytes with IEC units and one decimal: `1.5 GiB`, `568.8 MiB`, `912 B`.
+/// A size in at most three figures, in binary units: `512 B`, `1.5 GiB`, `100 MiB`.
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    while value.round() >= 1000.0 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
-    format!("{value:.1} {}", UNITS[unit])
+    match (unit, value) {
+        (0, value) => format!("{value} B"),
+        (_, value) if value < 99.95 => format!("{value:.1} {}", UNITS[unit]),
+        (_, value) => format!("{value:.0} {}", UNITS[unit]),
+    }
+}
+
+/// How long ago something happened, in its largest unit: `now` under a minute, then `5m`, `3h`,
+/// `40d`, and `2y` from a year.
+pub fn age(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const YEAR: u64 = 365 * DAY;
+    match seconds {
+        0..MINUTE => "now".into(),
+        MINUTE..HOUR => format!("{}m", seconds / MINUTE),
+        HOUR..DAY => format!("{}h", seconds / HOUR),
+        DAY..YEAR => format!("{}d", seconds / DAY),
+        _ => format!("{}y", seconds / YEAR),
+    }
+}
+
+/// `age` as a phrase: `just now`, or `5m ago`.
+pub fn ago(seconds: u64) -> String {
+    match seconds {
+        0..60 => "just now".into(),
+        _ => format!("{} ago", age(seconds)),
+    }
 }
 
 /// A limit as people type it: `8 GB` or `50 GiB` when it is a whole number of one unit,
@@ -132,9 +158,60 @@ pub fn count(n: usize, noun: &str) -> String {
     if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
 }
 
+/// Seconds below ten minutes, then as `format_duration` writes it.
+pub fn elapsed(d: Duration) -> String {
+    if d.as_secs() < 600 { format!("{}s", d.as_secs()) } else { format_duration(d) }
+}
+
+/// `4:05` or `1:36:12`, as a player shows a time.
+pub fn clock(d: Duration) -> String {
+    let (h, m, s) = (d.as_secs() / 3600, d.as_secs() % 3600 / 60, d.as_secs() % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// A Unix time in UTC, as `2026-11-15T09:30:00Z`.
+pub fn timestamp(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The format vectors the web app's tests read too.
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/format.json")).expect("the vectors are JSON")
+    }
+
+    #[test]
+    fn sizes_ages_and_clocks_read_as_the_shared_vectors_say() {
+        let vectors = vectors();
+        for case in vectors["size"].as_array().unwrap() {
+            assert_eq!(format_size(case["bytes"].as_u64().unwrap()), case["text"], "{case}");
+        }
+        for case in vectors["age"].as_array().unwrap() {
+            assert_eq!(age(case["seconds"].as_u64().unwrap()), case["text"], "{case}");
+        }
+        for case in vectors["clock"].as_array().unwrap() {
+            assert_eq!(clock(Duration::from_secs(case["seconds"].as_u64().unwrap())), case["text"], "{case}");
+        }
+    }
 
     #[test]
     fn parses_iec_and_si_sizes() {
@@ -149,7 +226,7 @@ mod tests {
     fn formats_sizes_and_rates() {
         assert_eq!(format_size(912), "912 B");
         assert_eq!(format_size(1_640_497_152), "1.5 GiB");
-        assert_eq!(format_size(596_399_542), "568.8 MiB");
+        assert_eq!(format_size(596_399_542), "569 MiB");
         assert_eq!(format_rate(40_265_318), "38.4 MiB/s");
     }
 

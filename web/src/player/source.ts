@@ -1,4 +1,4 @@
-import { type ApiError, streamUrl } from "../api";
+import { type ApiError, errorOf, mediaErrorCode, STREAM_ENDED_EARLY, STREAM_FAILED, streamUrl } from "../api";
 import { mediaSourceClass } from "./plan";
 
 export type SourceState = { kind: "streaming" } | { kind: "failed"; error: ApiError };
@@ -21,7 +21,7 @@ const MEDIA_ERRORS: Record<number, string> = {
 
 function mediaError(element: HTMLVideoElement): ApiError {
   const code = element.error?.code ?? 0;
-  return { code: `media_error_${code}`, message: MEDIA_ERRORS[code] ?? "The video stopped with an unknown error." };
+  return { code: mediaErrorCode(code), message: MEDIA_ERRORS[code] ?? "The video stopped with an unknown error." };
 }
 
 /**
@@ -90,10 +90,10 @@ export interface RemuxOptions {
 }
 
 /** Seconds buffered ahead of the playhead before reading the stream pauses. */
-const AHEAD = 60;
+const BUFFER_AHEAD = 60;
 const LEAST_AHEAD = 8;
 /** Seconds kept behind the playhead for short seeks back. */
-const BEHIND = 45;
+const BUFFER_BEHIND = 45;
 /** A seek this close past the buffered end waits for the running stream instead of starting another. */
 const NEARLY = 10;
 /** Rapid seeks, as from a held arrow key, settle for this long before a stream starts. */
@@ -126,7 +126,7 @@ export class RemuxSource implements Source {
   private stream = { start: 0, ended: false };
   /** Where the last stream stopped short of the end, to tell a retry that makes no progress. */
   private shortAt: number | null = null;
-  private ahead = AHEAD;
+  private ahead = BUFFER_AHEAD;
   private settle: ReturnType<typeof setTimeout> | undefined;
   private failed = false;
   /** Where playback begins, until the element has metadata and holds that time itself. */
@@ -321,10 +321,7 @@ export class RemuxSource implements Source {
       }
       const { id, file, video, audio } = this.options;
       const response = await fetch(streamUrl(id, file, { t: at, video, audio }), { signal: request.signal });
-      if (!response.ok || !response.body) {
-        const body = (await response.json().catch(() => null)) as { error?: ApiError } | null;
-        throw body?.error ?? { code: "internal", message: `The engine answered ${response.status} for the video stream.` };
-      }
+      if (!response.ok || !response.body) throw await errorOf(response);
       const reader = response.body.getReader();
       for (;;) {
         while (current() && this.aheadNow() > this.ahead) await sleep(250);
@@ -344,7 +341,7 @@ export class RemuxSource implements Source {
       this.fail(
         known
           ? (error as ApiError)
-          : { code: "stream_failed", message: "The video stream from the engine stopped.", hint: String(error) },
+          : { code: STREAM_FAILED, message: "The video stream from the engine stopped.", hint: String(error) },
       );
     }
   }
@@ -366,7 +363,7 @@ export class RemuxSource implements Source {
       } catch (error) {
         const full = error instanceof DOMException && error.name === "QuotaExceededError";
         if (!full || attempt >= 20) throw error;
-        // The buffer holds less of a high-bitrate video than AHEAD seconds. Keep less, and wait for playback to use some.
+        // The buffer holds less of a high-bitrate video than BUFFER_AHEAD seconds. Keep less, and wait for playback to use some.
         this.ahead = Math.max(LEAST_AHEAD, Math.min(this.ahead, this.aheadNow()) * 0.7);
         await this.remove(buffer, 0, Math.max(0, this.element.currentTime - 5));
         while (current() && this.aheadNow() > this.ahead) await sleep(250);
@@ -395,8 +392,8 @@ export class RemuxSource implements Source {
 
   private async trim(buffer: SourceBuffer): Promise<void> {
     const { buffered, currentTime } = this.element;
-    if (buffered.length && buffered.start(0) < currentTime - BEHIND * 2) {
-      await this.remove(buffer, 0, currentTime - BEHIND);
+    if (buffered.length && buffered.start(0) < currentTime - BUFFER_BEHIND * 2) {
+      await this.remove(buffer, 0, currentTime - BUFFER_BEHIND);
     }
   }
 
@@ -414,7 +411,7 @@ export class RemuxSource implements Source {
     const nearEnd = duration !== null && end >= duration - Math.max(60, duration * 0.02);
     if (!complete && !nearEnd) {
       this.shortfall = {
-        code: "stream_ended_early",
+        code: STREAM_ENDED_EARLY,
         message: "The video stream stopped before the end of the file.",
         hint: "The file may be damaged, or ffmpeg cannot read past this point.",
       };

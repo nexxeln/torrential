@@ -1,0 +1,19 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "changed",
+    "changes": [
+      {
+        "id": "6f2c815d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "name": "wikipedia-en-2026-09-text",
+        "result": "paused"
+      }
+    ],
+    "next": "torrential resume 6f2c81"
+  }
+}

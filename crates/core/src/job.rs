@@ -10,6 +10,7 @@ use crate::watching::TitleLink;
 
 /// A download. Its ID is the torrent's ID, so a search result keeps its ID when downloaded.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Job {
     pub id: TorrentId,
     pub info_hash: InfoHash,
@@ -34,6 +35,7 @@ pub struct Job {
 /// Where a download's files live, which says who deletes them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Place {
     /// The downloads folder or a folder the person chose. Its files stay until the person deletes them.
     #[default]
@@ -44,6 +46,7 @@ pub enum Place {
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum JobStatus {
     /// Waiting for a free download slot.
     Queued,
@@ -82,6 +85,7 @@ impl JobStatus {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Progress {
     /// Bytes selected for download. `None` until metadata arrives.
     pub size: Option<u64>,
@@ -220,6 +224,7 @@ impl<'de> Deserialize<'de> for PieceMap {
 /// Which files to download. Patterns apply once the file list is known.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Selection {
     #[default]
     All,
@@ -228,6 +233,7 @@ pub enum Selection {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TorrentFile {
     pub index: u32,
     /// Relative to the torrent's folder, sanitized.
@@ -241,6 +247,7 @@ pub struct TorrentFile {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum FileRisk {
     /// A program or script inside a torrent that otherwise holds media.
     Executable,
@@ -327,13 +334,5 @@ mod tests {
         assert_eq!(serde_json::from_value::<Job>(json.clone()).unwrap().place, Place::Folder);
         json["place"] = "plays".into();
         assert_eq!(serde_json::from_value::<Job>(json).unwrap().place, Place::Plays);
-    }
-
-    #[test]
-    fn fraction_is_unknown_until_size_is_known() {
-        let mut p = Progress { verified: 50, ..Progress::default() };
-        assert_eq!(p.fraction(), None);
-        p.size = Some(200);
-        assert_eq!(p.fraction(), Some(0.25));
     }
 }

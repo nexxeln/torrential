@@ -1,28 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { type Job, pieces, type StreamedFile } from "../api";
 import { arrived } from "../lib/pieces";
+import { PIECE_RUNS } from "../wire";
 
 /** How much of each equal run of the playing file is on disk, from 0 to 1, in file order. */
 export type Downloaded = number[];
 
-const RUNS = 200;
 const POLL_MS = 1000;
-const GIVE_UP = 3;
-const WHOLE: Downloaded = Array.from({ length: RUNS }, () => 1);
+const WHOLE: Downloaded = Array.from({ length: PIECE_RUNS }, () => 1);
 
 /** The torrent-wide map, read for this file: coarse for a small file in a large torrent, but always there. */
 function fromTorrentMap(job: Job, file: StreamedFile, totalSize: number): Downloaded {
   const runs = arrived(job, file, totalSize);
-  return Array.from({ length: RUNS }, (_, i) => {
-    const middle = (i + 0.5) / RUNS;
+  return Array.from({ length: PIECE_RUNS }, (_, i) => {
+    const middle = (i + 0.5) / PIECE_RUNS;
     return runs.find((run) => run.from <= middle && middle < run.to)?.share ?? 0;
   });
 }
 
 /**
  * Which parts of the playing file have downloaded. Asks the engine for the file's own piece map
- * about once a second while the download runs, and reads the job's torrent-wide map when that
- * route does not answer.
+ * about once a second while the download runs, and reads the job's torrent-wide map while the
+ * engine does not answer.
  */
 export function useDownloaded(job: Job, file: StreamedFile, totalSize: number): Downloaded {
   const [own, setOwn] = useState<Downloaded | null>(null);
@@ -33,20 +32,12 @@ export function useDownloaded(job: Job, file: StreamedFile, totalSize: number): 
     if (done) return;
     const stop = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
-    let failures = 0;
     const poll = () =>
       pieces(id, file.index, stop.signal)
-        .then((map) => {
-          failures = 0;
-          setOwn([...map.pieces].map((eighths) => (Number(eighths) || 0) / 8));
-        })
-        .catch(() => {
-          failures += 1;
-          setOwn(null);
-        })
+        .then((map) => setOwn([...map.pieces].map((eighths) => (Number(eighths) || 0) / 8)))
+        .catch(() => setOwn(null))
         .finally(() => {
-          // An engine without the route keeps the torrent-wide map, and is not asked forever.
-          if (!stop.signal.aborted && failures < GIVE_UP) timer = setTimeout(poll, POLL_MS);
+          if (!stop.signal.aborted) timer = setTimeout(poll, POLL_MS);
         });
     void poll();
     return () => {

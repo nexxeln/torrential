@@ -6,7 +6,6 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::{Error, ErrorCode};
-use crate::title::Episode;
 
 /// An IMDb title ID such as `tt0063350`: `tt` and 7 to 10 digits.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -55,9 +54,34 @@ impl fmt::Display for TitleId {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Kind {
     Film,
     Series,
+}
+
+impl Kind {
+    /// `film` or `series`, as a person reads it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Film => "film",
+            Self::Series => "series",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Episode {
+    pub season: u32,
+    pub episode: u32,
+}
+
+/// An episode as people write it, such as S03E05.
+impl fmt::Display for Episode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "S{:02}E{:02}", self.season, self.episode)
+    }
 }
 
 /// What plays: a film, or one episode of a series. A series ID alone names the series, and
@@ -116,6 +140,7 @@ impl fmt::Display for VideoRef {
 
 /// Enough of a title to list it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitleCard {
     pub id: TitleId,
     pub kind: Kind,
@@ -135,6 +160,7 @@ fn one_decimal<S: Serializer>(rating: &Option<f32>, s: S) -> Result<S::Ok, S::Er
 /// One title as the catalog describes it. Pictures are served by title ID, so only whether each
 /// exists shows here.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitleDetails {
     #[serde(flatten)]
     pub card: TitleCard,
@@ -165,22 +191,18 @@ pub enum Country {
 }
 
 impl Country {
-    const ALL: [Country; 6] = [Country::Us, Country::Uk, Country::Au, Country::Ca, Country::Nz, Country::Ie];
+    pub(crate) const ALL: [Country; 6] = [Country::Us, Country::Uk, Country::Au, Country::Ca, Country::Nz, Country::Ie];
 
-    /// The code release names use, and the names a catalog writes the country by.
-    fn spellings(self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            Country::Us => ("US", &["United States", "United States of America", "USA"]),
-            Country::Uk => ("UK", &["United Kingdom", "UK"]),
-            Country::Au => ("AU", &["Australia"]),
-            Country::Ca => ("CA", &["Canada"]),
-            Country::Nz => ("NZ", &["New Zealand"]),
-            Country::Ie => ("IE", &["Ireland"]),
-        }
-    }
-
+    /// The code release names use.
     pub fn code(self) -> &'static str {
-        self.spellings().0
+        match self {
+            Country::Us => "US",
+            Country::Uk => "UK",
+            Country::Au => "AU",
+            Country::Ca => "CA",
+            Country::Nz => "NZ",
+            Country::Ie => "IE",
+        }
     }
 
     /// The country a code such as `US` or `uk` stands for.
@@ -214,15 +236,6 @@ impl From<Country> for String {
 pub struct Countries(u8);
 
 impl Countries {
-    /// The countries a catalog lists as `United States, United Kingdom`. A country without a code
-    /// in `Country` is left out.
-    pub fn listed_in(text: &str) -> Countries {
-        let named = |name: &str| {
-            Country::ALL.into_iter().find(|country| country.spellings().1.iter().any(|n| n.eq_ignore_ascii_case(name)))
-        };
-        text.split(',').filter_map(|name| named(name.trim())).collect()
-    }
-
     pub fn contains(self, country: Country) -> bool {
         self.0 & country.bit() != 0
     }
@@ -268,6 +281,7 @@ impl fmt::Debug for Countries {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Art {
     pub poster: bool,
     pub background: bool,
@@ -284,12 +298,13 @@ pub enum ArtKind {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Season {
     pub number: u32,
     pub episodes: Vec<EpisodeInfo>,
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize)]
 pub struct EpisodeInfo {
     #[serde(flatten)]
     pub episode: Episode,
@@ -298,6 +313,38 @@ pub struct EpisodeInfo {
     pub aired: Option<i64>,
     pub overview: Option<String>,
     pub thumbnail: bool,
+}
+
+impl EpisodeInfo {
+    /// An episode plays once its air date has passed. One with no date announced has not aired.
+    pub fn aired_by(&self, now: i64) -> bool {
+        self.aired.is_some_and(|aired| aired <= now)
+    }
+}
+
+/// An episode as it goes on the wire, with whether it has aired by the engine's clock. A read
+/// leaves that out, so a copy kept on disk says nothing stale.
+#[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "EpisodeInfo"))]
+pub(crate) struct EpisodeInfoWire<'a> {
+    #[serde(flatten)]
+    episode: Episode,
+    name: &'a Option<String>,
+    /// Unix seconds. `None` when no date is announced.
+    aired: Option<i64>,
+    /// The air date has passed, so the episode plays.
+    has_aired: bool,
+    overview: &'a Option<String>,
+    thumbnail: bool,
+}
+
+impl Serialize for EpisodeInfo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let EpisodeInfo { episode, name, aired, overview, thumbnail } = self;
+        let has_aired = self.aired_by(crate::time::now());
+        EpisodeInfoWire { episode: *episode, name, aired: *aired, has_aired, overview, thumbnail: *thumbnail }
+            .serialize(serializer)
+    }
 }
 
 #[cfg(test)]
@@ -319,23 +366,11 @@ mod tests {
     }
 
     #[test]
-    fn a_country_reads_from_its_code_or_the_names_a_catalog_lists() {
+    fn a_country_reads_from_its_code() {
         assert_eq!(
             ["US", "uk", "Ie", "GB", "USA"].map(Country::of_code),
             [Some(Country::Us), Some(Country::Uk), Some(Country::Ie), None, None]
         );
-        let listed = |text| Countries::listed_in(text).iter().collect::<Vec<_>>();
-        assert_eq!(listed("United States"), [Country::Us]);
-        assert_eq!(
-            listed("Ireland, United Kingdom, Netherlands, United States"),
-            [Country::Us, Country::Uk, Country::Ie]
-        );
-        assert_eq!(
-            listed("Australia,New Zealand, Canada, USA, United States"),
-            [Country::Us, Country::Au, Country::Ca, Country::Nz]
-        );
-        assert_eq!(listed("Netherlands"), []);
-        assert!(Countries::listed_in("").is_empty());
         let both = Countries::from([Country::Nz, Country::Uk]);
         assert_eq!((both.contains(Country::Uk), both.contains(Country::Us)), (true, false));
         assert_eq!(format!("{both:?}"), r#"{"UK", "NZ"}"#);

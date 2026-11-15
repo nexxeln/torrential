@@ -1,0 +1,44 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "setup",
+    "result": "shown",
+    "profile": {
+      "screen": {
+        "value": "1080p",
+        "source": "detected"
+      },
+      "playback": {
+        "value": "hevc-hdr",
+        "source": "detected"
+      },
+      "max_size": null,
+      "room": null,
+      "arch": "arm64",
+      "language": "en",
+      "detected": {
+        "os": "macos",
+        "display": {
+          "width": 3024,
+          "height": 1964,
+          "hdr": true
+        },
+        "arch": "arm64",
+        "language": "en"
+      },
+      "preferences": {
+        "screen": null,
+        "max_size": null,
+        "playback": null
+      }
+    },
+    "updates": "auto",
+    "file": "[home]/th/config/config.yaml",
+    "next": "torrential setup --screen phone|laptop|tv|tv-4k|auto --max-size 8GB|none --playback hevc-hdr|hevc|h264|auto --updates notify|auto|off"
+  }
+}

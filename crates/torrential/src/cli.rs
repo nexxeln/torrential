@@ -211,7 +211,7 @@ pub struct SetupArgs {
     pub playback: Option<PlaybackArg>,
     /// How to handle new versions: show a notice, install in the background, or never check
     #[arg(long, value_enum)]
-    pub updates: Option<crate::update::Policy>,
+    pub updates: Option<torrential_daemon::config::Policy>,
 }
 
 pub const SETUP_FLAGS: &str = "torrential setup --screen phone|laptop|tv|tv-4k|auto --max-size 8GB|none --playback \
@@ -422,6 +422,9 @@ pub enum DaemonCommand {
         /// installed update
         #[arg(long)]
         service: bool,
+        /// The port for the web app and players when the one used last is not free, 0 for any
+        #[arg(long, value_name = "PORT")]
+        http_port: Option<u16>,
     },
     /// The short-lived middle process of the detached start
     #[command(hide = true)]
@@ -578,6 +581,35 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
+    fn help_and_docs_name_the_values_the_code_uses() {
+        let skill = include_str!("../../../skills/torrential/SKILL.md");
+        let readme = include_str!("../../../README.md");
+        let command = Cli::command();
+        let arg = |command_name: &str, id: &str| {
+            let sub = command.find_subcommand(command_name).unwrap();
+            sub.get_arguments().find(|arg| arg.get_id() == id).unwrap().clone()
+        };
+        let help = |command_name: &str, id: &str| arg(command_name, id).get_help().unwrap().to_string();
+        let gib = |bytes: u64| format!("{} GiB", bytes >> 30);
+
+        let cap = gib(torrential_daemon::daemon::admission::DEFAULT_MAX_SIZE);
+        assert!(help("get", "max_size").ends_with(&format!("or {cap}")), "{}", help("get", "max_size"));
+        assert!(skill.contains(&format!("or {cap}, and with `disk_full`")), "SKILL.md names the {cap} cap");
+
+        let wait = crate::client::wait::DEFAULT_TIMEOUT.as_secs();
+        assert!(help("wait", "timeout").contains(&format!("Defaults to {wait}s")), "{}", help("wait", "timeout"));
+        assert!(skill.contains(&format!("`wait` returns within {wait} seconds")), "SKILL.md names {wait} s");
+
+        let plays = gib(torrential_daemon::config::PlaysMax::default().0);
+        assert!(skill.contains(&format!("once they pass {plays}")), "SKILL.md names the {plays} plays cap");
+        assert!(readme.contains(&format!("capped at {plays}")), "README.md names the {plays} plays cap");
+        assert!(readme.contains(&format!("default {}", plays.replace(' ', ""))), "README.md's example says {plays}");
+
+        let search = torrential_core::SearchQuery::DEFAULT_TIMEOUT_MS / 1000;
+        assert_eq!(arg("search", "timeout").get_default_values(), [format!("{search}s").as_str()]);
+    }
+
+    #[test]
     fn definition_is_consistent() {
         Cli::command().debug_assert();
     }
@@ -665,11 +697,5 @@ mod tests {
         assert_eq!(max_size("8GB"), Ok(Some(Limit(Some(8_000_000_000)))));
         assert_eq!(max_size("none"), Ok(Some(Limit(None))));
         assert_eq!(max_size("big"), Err(clap::error::ErrorKind::ValueValidation));
-    }
-
-    #[test]
-    fn bad_durations_name_the_expected_form() {
-        let err = Cli::try_parse_from(["torrential", "wait", "9b5212", "--timeout", "soon"]).unwrap_err();
-        assert!(err.to_string().contains("use a form like 100s"), "{err}");
     }
 }

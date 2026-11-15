@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::error::{Skip, SourceReport};
 use crate::id::ReleaseId;
 use crate::profile::Profile;
 use crate::quality::Quality;
 use crate::title::{Span, Wanted};
-use crate::watching::Skip;
 
 /// A torrent offered by one or more search sources, merged by infohash. Its JSON
 /// also carries the [`Quality`] its name gives.
@@ -49,30 +49,36 @@ impl Release {
     }
 }
 
+/// A release as it goes on the wire: its fields, and the quality its name says.
+#[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Release"))]
+pub(crate) struct ReleaseWire<'a> {
+    id: &'a ReleaseId,
+    name: &'a str,
+    size: Option<u64>,
+    seeders: Option<u32>,
+    leechers: Option<u32>,
+    published: Option<i64>,
+    category: Option<Category>,
+    quality: Quality,
+    flags: &'a BTreeSet<Flag>,
+    sources: &'a [String],
+    magnet: &'a Option<String>,
+    torrent_url: &'a Option<String>,
+    info_url: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    span: Option<Span>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    swarm: Option<Swarm>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Skip>", optional))]
+    failed: &'a Option<Skip>,
+}
+
 impl Serialize for Release {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Fields<'a> {
-            id: &'a ReleaseId,
-            name: &'a str,
-            size: Option<u64>,
-            seeders: Option<u32>,
-            leechers: Option<u32>,
-            published: Option<i64>,
-            category: Option<Category>,
-            quality: Quality,
-            flags: &'a BTreeSet<Flag>,
-            sources: &'a [String],
-            magnet: &'a Option<String>,
-            torrent_url: &'a Option<String>,
-            info_url: &'a Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            span: Option<Span>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            swarm: Option<Swarm>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            failed: &'a Option<Skip>,
-        }
         let Release {
             id,
             name,
@@ -90,7 +96,7 @@ impl Serialize for Release {
             swarm,
             failed,
         } = self;
-        Fields {
+        ReleaseWire {
             id,
             name,
             size: *size,
@@ -115,6 +121,7 @@ impl Serialize for Release {
 /// How likely a release's swarm is to send data now. Lower plays first.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Swarm {
     Strong,
     Fair,
@@ -122,52 +129,23 @@ pub enum Swarm {
     Unknown,
 }
 
-impl Swarm {
-    /// The tier of a swarm with `seeders`, listed by a lawful catalog or not. `None` for a swarm
-    /// known to have no seeder outside a lawful catalog. A lawful catalog that does not count
-    /// seeders serves its files from web seeds over HTTP, as dependable as any swarm.
-    pub fn of(seeders: Option<u32>, lawful: bool) -> Option<Swarm> {
-        match (seeders, lawful) {
-            (Some(20..), _) | (None, true) => Some(Swarm::Strong),
-            (Some(5..=19), _) => Some(Swarm::Fair),
-            (Some(1..=4), _) => Some(Swarm::Weak),
-            (Some(0), true) | (None, false) => Some(Swarm::Unknown),
-            (Some(0), false) => None,
-        }
+crate::words! {
+    #[derive(Hash, PartialOrd, Ord)]
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum Category {
+        Video = "video",
+        Audio = "audio",
+        Software = "software",
+        Book = "book",
+        Game = "game",
+        Dataset = "dataset",
+        Other = "other",
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Category {
-    Video,
-    Audio,
-    Software,
-    Book,
-    Game,
-    Dataset,
-    Other,
-}
-
-impl Category {
-    pub const ALL: [Category; 7] =
-        [Self::Video, Self::Audio, Self::Software, Self::Book, Self::Game, Self::Dataset, Self::Other];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Video => "video",
-            Self::Audio => "audio",
-            Self::Software => "software",
-            Self::Book => "book",
-            Self::Game => "game",
-            Self::Dataset => "dataset",
-            Self::Other => "other",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Flag {
     /// Published by the project that made the content, such as archlinux.org.
     Official,
@@ -261,46 +239,11 @@ impl SearchQuery {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "outcome")]
-pub enum SourceOutcome {
-    Ok {
-        results: u32,
-    },
-    Cached {
-        results: u32,
-    },
-    Timeout,
-    Http {
-        status: u16,
-    },
-    Connect {
-        reason: String,
-    },
-    /// A response that did not parse.
-    BadResponse {
-        reason: String,
-    },
-    /// Most rows matched no query word, as when an API returns its latest uploads.
-    Irrelevant,
-}
-
-impl SourceOutcome {
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Self::Ok { .. } | Self::Cached { .. })
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct SourceReport {
-    pub source: String,
-    #[serde(flatten)]
-    pub outcome: SourceOutcome,
-    pub elapsed_ms: u32,
-}
-
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SearchResult {
+    /// The web app does not read it, so its TypeScript does not describe it.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub query: SearchQuery,
     /// Ranked, filtered, and cut to `query.limit`.
     pub releases: Vec<Release>,
@@ -325,6 +268,7 @@ impl SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SourceOutcome;
 
     fn named(name: &str, category: Option<Category>) -> Release {
         Release {

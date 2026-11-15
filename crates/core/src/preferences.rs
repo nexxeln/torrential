@@ -25,29 +25,17 @@ impl Preferences {
     }
 }
 
-/// Where the user watches, when that is not this machine's own display.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Screen {
-    #[serde(rename = "phone")]
-    Phone,
-    #[serde(rename = "laptop")]
-    Laptop,
-    #[serde(rename = "tv")]
-    Tv,
-    #[serde(rename = "tv-4k")]
-    Tv4k,
+crate::words! {
+    /// Where the user watches, when that is not this machine's own display.
+    pub enum Screen {
+        Phone = "phone",
+        Laptop = "laptop",
+        Tv = "tv",
+        Tv4k = "tv-4k",
+    }
 }
 
 impl Screen {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Phone => "phone",
-            Self::Laptop => "laptop",
-            Self::Tv => "tv",
-            Self::Tv4k => "tv-4k",
-        }
-    }
-
     /// The resolution that suits this screen. A phone shows 720p as well as 1080p, in a
     /// smaller file.
     pub const fn target(self) -> Resolution {
@@ -59,26 +47,47 @@ impl Screen {
     }
 }
 
+crate::words! {
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum Playback {
+        HevcHdr = "hevc-hdr",
+        Hevc = "hevc",
+        /// For a player that may not handle HEVC, since every player handles H.264.
+        H264 = "h264",
+    }
+}
+
+crate::words! {
+    /// How a browser decodes a codec, as its `mediaCapabilities` says: in hardware, which keeps up
+    /// and spares the battery, in software, or not at all.
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum Decoding {
+        Hardware = "hardware",
+        Software = "software",
+        No = "no",
+    }
+}
+
+/// How a browser decodes each codec a release's name may give.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Playback {
-    #[serde(rename = "hevc-hdr")]
-    HevcHdr,
-    #[serde(rename = "hevc")]
-    Hevc,
-    /// For a player that may not handle HEVC, since every player handles H.264.
-    #[serde(rename = "h264")]
-    H264,
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Decoders {
+    pub h264: Decoding,
+    pub hevc: Decoding,
+    pub av1: Decoding,
+}
+
+impl Decoders {
+    pub const fn of(self, codec: Codec) -> Decoding {
+        match codec {
+            Codec::H264 => self.h264,
+            Codec::Hevc => self.hevc,
+            Codec::Av1 => self.av1,
+        }
+    }
 }
 
 impl Playback {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::HevcHdr => "hevc-hdr",
-            Self::Hevc => "hevc",
-            Self::H264 => "h264",
-        }
-    }
-
     /// AV1 is newer than HEVC, so a player that may not handle HEVC may not handle it
     /// either. An unknown codec plays.
     pub const fn plays(self, quality: Quality) -> bool {

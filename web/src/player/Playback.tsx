@@ -12,27 +12,23 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { MediaInfo, PlayInfo } from "../api";
+import { type MediaInfo, mediaErrorCode, type PlayInfo, type TorrentFile } from "../api";
 import { CastButton } from "../cast/CastButton";
-import { useCasting } from "../cast/casts";
 import { clock } from "../lib/format";
-import { fileName, isVideoFile, readable } from "../lib/release";
 import {
-  forgetPosition,
-  position,
   preferences,
-  savePosition,
   savePreferences,
   saveSubtitleOffset,
   subtitleOffset,
   type SubtitleStyle,
 } from "../lib/storage";
 import { isTv } from "../lib/tv";
-import { navigate, watchPath } from "../router";
+import { SAVE_EVERY_MS } from "../wire";
 import { Button } from "../ui/Button";
+import { ControlButton } from "../ui/ControlButton";
 import { PlayerActions } from "./actions";
-import { Buffering, Ended, PlayingReadout, Problem, Starting, TopBar } from "./Chrome";
-import { ControlButton, Controls } from "./Controls";
+import { Buffering, Ended, type Heading, PlayingReadout, Problem, TopBar } from "./Chrome";
+import { Controls } from "./Controls";
 import { type PlayerParts, PlayerContext, Scrub } from "./context";
 import { CueTrack } from "./cues";
 import { FeedbackLayer } from "./FeedbackLayer";
@@ -54,8 +50,6 @@ import { useVideo, VideoStore } from "./video";
 /** The controls hide after this long without input while the video plays. */
 const IDLE_MS = 2500;
 /** A stored position this early is not worth resuming. */
-const WORTH_RESUMING = 10;
-const SAVE_EVERY_MS = 5000;
 /** A click waits this long for a second one before it plays or pauses, so a double click only toggles fullscreen. */
 const DOUBLE_MS = 220;
 /** Scroll-wheel distance for one 5% step of volume. */
@@ -68,20 +62,14 @@ const ENDS = {
   torrent: ["This is the last video of the torrent", "This is the first video of the torrent"],
 } as const;
 
-/** A name for what plays, over the picture. */
-export interface Heading {
-  title: string;
-  /** Under the title: an episode's number and name, or a film's year. */
-  detail: string | null;
-}
-
 /** Where a video starts, and where the place it stopped is kept. */
 export interface Memory {
   /** Seconds. */
   start: number;
   /** Starting at `start` picks up an earlier visit, which the player says, with a way to start over. */
   resumed: boolean;
-  save: (time: number, duration: number) => void;
+  /** Where the video is. `starts` when it started or resumed here since the last save, which takes the place from other screens. */
+  save: (time: number, duration: number | null, starts: boolean) => void;
   forget: () => void;
 }
 
@@ -91,15 +79,19 @@ export interface Neighbor {
   go: () => void;
 }
 
-/** A film or an episode played by title, instead of a file of a torrent. */
-export interface Titled {
-  kind: "film" | "episode";
-  /** The film or episode, such as `tt0903747:3:5`. */
-  video: string;
+/** What the player plays, as the page that opens it says: a file of a torrent, a film, or an episode. */
+export interface Shown {
+  kind: "torrent" | "film" | "episode";
+  /** A film or an episode, such as `tt0903747:3:5`, which a cast plays by title. Null for a file of a torrent. */
+  video: string | null;
   heading: Heading;
-  /** The episodes N and P move to, and the one the end of the video counts down to. */
+  /** What the system's media controls say plays. */
+  nowPlaying: { title: string; album: string };
+  /** The videos N and P move to, and the one the end of the video counts down to. */
   previous: Neighbor | null;
   next: Neighbor | null;
+  /** The torrent's videos, which the files panel lists when there are several. Empty for a title. */
+  videos: TorrentFile[];
   memory: Memory;
   /** Shown before the first frame. */
   cover: ReactNode;
@@ -111,14 +103,13 @@ export interface Titled {
   replacing: boolean;
 }
 
-interface Props {
+export interface PlaybackProps {
   play: PlayInfo;
   media: MediaInfo;
   /** Asks the engine for the video again, from the start of the session. */
   onReload: () => void;
   onBack: () => void;
-  /** Without it, the player names the release, moves through the torrent's videos, and keeps positions in this browser. */
-  titled?: Titled;
+  shown: Shown;
 }
 
 /** Safari on iPhone fills the screen only with its own player, which this opens. */
@@ -173,43 +164,22 @@ function useAwake(): [boolean, () => void, () => void] {
   return [awake, wake, sleep];
 }
 
-/** A file of a season by its own name: the episode, without the show's title that its release already says. */
-function episodeName(path: string, release: string): string {
-  const own = readable(fileName(path));
-  const whole = `${own.title} ${own.tags}`.trim();
-  const show = readable(release).title;
-  return (whole.startsWith(show) && whole.slice(show.length).trim()) || whole;
-}
-
-/** A torrent's file starts where this browser saw it stop, and keeps its place there. */
-function torrentMemory(play: PlayInfo): Memory {
-  const { id, name, video: file } = play;
-  const stored = position(id, file.index);
-  const start = stored && !stored.finished && stored.time > WORTH_RESUMING ? stored.time : 0;
-  return {
-    start,
-    resumed: start > 0,
-    save: (time, duration) => savePosition({ id, file: file.index, name, path: file.path, time, duration }),
-    forget: () => forgetPosition(id, file.index),
-  };
-}
-
 /**
  * The player once the engine has said what is in the file: the picture, and everything drawn over
  * it. Memoized, because the page above renders with every report of the download's progress.
  */
-export const Playback = memo(function Playback(props: Props) {
+export const Playback = memo(function Playback(props: PlaybackProps) {
   const frame = useRef<HTMLDivElement>(null);
   const [element, setElement] = useState<HTMLVideoElement | null>(null);
   return (
     <div ref={frame} className="relative size-full overflow-hidden bg-black select-none">
-      <video ref={setElement} playsInline poster={props.titled?.poster ?? undefined} className="absolute inset-0 size-full" />
+      <video ref={setElement} playsInline poster={props.shown.poster ?? undefined} className="absolute inset-0 size-full" />
       {element && <Stage element={element} frame={frame} {...props} />}
     </div>
   );
 });
 
-function Stage({ element, frame, play, media, onReload, onBack, titled }: Props & { element: HTMLVideoElement; frame: RefObject<HTMLDivElement | null> }) {
+function Stage({ element, frame, play, media, onReload, onBack, shown }: PlaybackProps & { element: HTMLVideoElement; frame: RefObject<HTMLDivElement | null> }) {
   const { id, video: file } = play;
   const parts = useMemo<PlayerParts>(
     () => ({ element, video: new VideoStore(element), feedback: new FeedbackStore(), scrub: new Scrub() }),
@@ -227,8 +197,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const [fullscreen, toggleFullscreen] = useFullscreen(frame, element);
   const [awake, wake, sleep] = useAwake();
 
-  const ownMemory = titled?.memory;
-  const memory = useMemo(() => ownMemory ?? torrentMemory(play), [ownMemory, play]);
+  const { memory } = shown;
   /** The last time played, which a new source starts from and the position memory stores. */
   const lastTime = useRef(memory.start);
   const [resumeNotice, setResumeNotice] = useState(memory.resumed);
@@ -237,7 +206,6 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   timeline.current = { duration, fps: media.video?.fps ?? null, chapters: media.chapters };
   const actions = useMemo(() => new PlayerActions(element, feedback, () => timeline.current), [element, feedback]);
 
-  // Which way the file reaches the element.
   const [audio, setAudio] = useState<number | null>(null);
   const [directWorks, setDirectWorks] = useState(true);
   const how = useMemo(() => plan(media, audio, directWorks), [media, audio, directWorks]);
@@ -279,17 +247,16 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   const failure = sourceState.kind === "failed" ? sourceState.error : null;
   const converts = media.ffmpeg === "ready";
   useEffect(() => {
-    if (failure && howKind === "direct" && converts && /^media_error_[34]$/.test(failure.code)) setDirectWorks(false);
+    if (failure && howKind === "direct" && converts && [mediaErrorCode(3), mediaErrorCode(4)].some((code) => code === failure.code)) setDirectWorks(false);
   }, [failure, howKind, converts]);
 
-  // Where playback is, remembered for the next visit while it plays here.
+  // Where playback is, remembered for the next visit while it plays here. The engine keeps a title's place for the
+  // screen that started or resumed it last.
   const [unsaved] = useState(() => new Unsaved());
-  const casting = useRef(false);
-  casting.current = useCasting(titled?.video);
   const remember = useCallback(
     (seen: boolean) => {
-      if (!unsaved.take({ seen, cast: casting.current }) || !duration || lastTime.current <= WORTH_RESUMING / 2) return;
-      memory.save(lastTime.current, duration);
+      const save = unsaved.take({ seen });
+      if (save) memory.save(lastTime.current, duration || null, save.starts);
     },
     [unsaved, memory, duration],
   );
@@ -302,7 +269,12 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     const now = () => remember(!document.hidden);
     // The page was in view until it hid, so where it got to is still worth saving.
     const hide = () => remember(true);
+    const resume = () => {
+      unsaved.resume();
+      now();
+    };
     const stop = new AbortController();
+    element.addEventListener("play", resume, { signal: stop.signal });
     for (const name of ["timeupdate", "ended"]) element.addEventListener(name, follow, { signal: stop.signal });
     for (const name of ["pause", "ended"]) element.addEventListener(name, now, { signal: stop.signal });
     document.addEventListener("visibilitychange", () => document.hidden && hide(), { signal: stop.signal });
@@ -365,7 +337,8 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     if (chosenKey === announced.current) return;
     const first = announced.current === undefined;
     announced.current = chosenKey;
-    if (!first) feedback.note(chosen ? `Subtitles: ${chosen.label}${chosen.source?.kind === "online" ? ", found online" : ""}` : "Subtitles off");
+    const online = chosen?.source?.kind === "online" ? (chosen.exact ? ", timed for this file" : ", found online") : "";
+    if (!first) feedback.note(chosen ? `Subtitles: ${chosen.label}${online}` : "Subtitles off");
     // A track already shifted on an earlier visit needs no telling.
     setHint(loose && subtitleOffset(id, file.index, loose) === 0 ? loose : null);
   }, [chosenKey, chosen, loose, feedback, id, file.index]);
@@ -394,27 +367,13 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
   }, [frame]);
   const openMenu = useCallback((page: "subtitles" | "main") => setMenu((path) => (path[0] === page ? [] : [page])), []);
 
-  const videos = useMemo(
-    () => play.files.filter((f) => isVideoFile(f.path)).sort((a, b) => a.path.localeCompare(b.path, "en", { numeric: true })),
-    [play.files],
-  );
-  const here = videos.findIndex((f) => f.index === file.index);
-  const nextFile = videos[here + 1] ?? null;
-  const previousFile = videos[here - 1] ?? null;
-  const torrentNext = useMemo<Neighbor | null>(
-    () => nextFile && { name: episodeName(nextFile.path, play.name), go: () => navigate(watchPath(id, nextFile.index), { replace: true }) },
-    [id, nextFile, play.name],
-  );
-  const torrentPrevious = useMemo<Neighbor | null>(
-    () => previousFile && { name: episodeName(previousFile.path, play.name), go: () => navigate(watchPath(id, previousFile.index), { replace: true }) },
-    [id, previousFile, play.name],
-  );
-  const next = titled ? titled.next : torrentNext;
-  const previous = titled ? titled.previous : torrentPrevious;
+  const { next, previous, videos } = shown;
   const goNext = next?.go ?? null;
   const goPrevious = previous?.go ?? null;
-  const multiple = !titled && videos.length > 1;
-  const ends = ENDS[titled?.kind ?? "torrent"];
+  const multiple = videos.length > 1;
+  const ends = ENDS[shown.kind];
+  /** A title's player goes back to its page, and a torrent's to wherever it came from. */
+  const back = shown.kind === "torrent" ? undefined : "Back";
 
   const run = useCallback(
     (action: Command) => {
@@ -489,12 +448,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     return () => removeEventListener("keydown", pressed);
   }, [run, sheet]);
 
-  const nowPlaying = titled
-    ? titled.kind === "episode"
-      ? { title: titled.heading.detail ?? titled.heading.title, album: titled.heading.title }
-      : { title: titled.heading.title, album: "" }
-    : { title: multiple ? episodeName(file.path, play.name) : readable(play.name).title, album: readable(play.name).title };
-  useMediaSession({ ...nowPlaying, actions, video, onNext: goNext, onPrevious: goPrevious });
+  useMediaSession({ ...shown.nowPlaying, actions, video, onNext: goNext, onPrevious: goPrevious });
   useWakeLock(video);
   const airPlay = useAirPlay(element, how.kind === "direct");
 
@@ -568,8 +522,8 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
         />
 
         <SubtitleLayer track={track} offset={offset} style={style} lifted={showControls} sample={menu.at(-1) === "style"} />
-        {starting && (titled ? titled.cover : <Starting step={2} name={play.name} readout={<PlayingReadout play={play} />} />)}
-        {!stuck && <Buffering play={play} quiet={titled?.replacing ?? false} />}
+        {starting && shown.cover}
+        {!stuck && <Buffering play={play} quiet={shown.replacing} />}
         <FeedbackLayer />
 
         {!stuck && !waiting && paused && needsClick && (
@@ -589,7 +543,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
             onNext={goNext ?? onBack}
             onReplay={() => (actions.seekTo(0), actions.play())}
             onBack={onBack}
-            back={titled ? "Back" : undefined}
+            back={back}
           />
         )}
 
@@ -599,17 +553,15 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           className="absolute inset-x-0 top-0 z-10 transition-opacity duration-300 data-hidden:pointer-events-none data-hidden:opacity-0 motion-reduce:transition-none"
         >
           <TopBar
-            name={starting || titled ? null : play.name}
-            heading={starting ? null : titled?.heading}
-            file={multiple ? fileName(file.path) : null}
+            heading={starting ? null : shown.heading}
             readout={starting ? null : <PlayingReadout play={play} />}
             onBack={onBack}
           />
         </div>
         {stats && <Stats media={media} how={how} play={play} subtitle={chosen} offset={offset} audio={heard} />}
 
-        {titled?.overlay}
-        {failure && <Problem title="The video stopped" error={failure} onRetry={() => source.current?.retry()} onBack={onBack} back={titled ? "Back" : undefined} />}
+        {shown.overlay}
+        {failure && <Problem title="The video stopped" error={failure} onRetry={() => source.current?.retry()} onBack={onBack} back={back} />}
         {blocked === "ffmpeg" && (
           <Problem
             title="This file needs ffmpeg"
@@ -621,7 +573,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
             }
             onRetry={onReload}
             onBack={onBack}
-            back={titled ? "Back" : undefined}
+            back={back}
           >
             <p className="text-sm text-pretty text-soft">
               Browsers cannot read {media.container === "matroska" ? "MKV" : media.container} files by themselves. torrential
@@ -630,7 +582,7 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
           </Problem>
         )}
         {blocked === "browser" && (
-          <Problem title="This browser cannot play the video" onRetry={onReload} onBack={onBack} back={titled ? "Back" : undefined}>
+          <Problem title="This browser cannot play the video" onRetry={onReload} onBack={onBack} back={back}>
             <p className="text-sm text-pretty text-soft">
               It has no decoder for {media.video?.codec.toUpperCase() ?? "this format"}. Try another browser, or run{" "}
               <code className="font-mono">torrential play {id.slice(0, 6)}</code> to watch in a desktop player.
@@ -694,12 +646,12 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
             filesOpen={filesOpen}
             hasFiles={multiple}
             hasNext={next !== null}
-            nextLabel={titled ? "Next episode (N)" : "Next video (N)"}
+            nextLabel={shown.kind === "torrent" ? "Next video (N)" : "Next episode (N)"}
             airPlay={airPlay}
             cast={
               <CastButton
                 look="player"
-                start={{ ref: id, file: file.index, video: titled?.video, subtitle: chosen?.source?.kind === "file" ? chosen.source.index : undefined }}
+                start={{ ref: id, file: file.index, video: shown.video ?? undefined, subtitle: chosen?.source?.kind === "file" ? chosen.source.index : undefined }}
                 at={() => element.currentTime}
                 onOpen={setCastOpen}
                 onCast={() => {

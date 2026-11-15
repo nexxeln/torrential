@@ -2,12 +2,13 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use torrential_core::InfoHash;
 use torrential_engine::{
-    AddTorrent, Added, Alert, FileEntry, FileIndex, FileSelection, InfoHash, Magnet, Progress, TorrentFormat,
+    AddTorrent, Added, Alert, Config, FileEntry, FileIndex, FileSelection, Magnet, Progress, TorrentFormat,
     TorrentSource,
 };
 
-use crate::support::{Fixture, Node, PIECE, bencode, expected_hashes, info_hash, loopback, magnet, sha256_file};
+use crate::support::{Fixture, Node, PIECE, bencode, expected_hashes, info_hash, magnet, sha256_file};
 
 const FILES: [(&str, usize); 3] = [("a.bin", 40_000), ("b.bin", 30_000), ("c.bin", 50_000)];
 
@@ -22,10 +23,10 @@ fn magnet_leecher_fetches_metadata_and_only_the_selected_files() {
         [entry(0, "swarm/a.bin", 40_000), entry(1, "swarm/b.bin", 30_000), entry(2, "swarm/c.bin", 50_000),]
     );
 
-    let mut seeder = Node::new(loopback());
+    let mut seeder = Node::new(Config::loopback());
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let magnet = Magnet::parse(&magnet(Some(hashes.0), None)).unwrap();
     let mut add = AddTorrent::new(TorrentSource::Magnet(magnet.clone()), download.path());

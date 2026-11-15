@@ -5,7 +5,7 @@ use torrential_engine::{
     AddTorrent, Config, FileIndex, FileSelection, TorrentFormat, TorrentSource, UploadPolicy, WrittenPieces,
 };
 
-use crate::support::{Fixture, Node, PIECE, TIMEOUT, loopback, rate, total_size};
+use crate::support::{Fixture, Node, PIECE, TIMEOUT, rate, total_size};
 
 const MIB: usize = 1024 * 1024;
 
@@ -13,18 +13,19 @@ const MIB: usize = 1024 * 1024;
 fn a_wanted_range_is_written_before_most_of_the_file() {
     let fixture = Fixture::new("film", &[("film.mkv", 2 * MIB)], 61);
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut seeder = Node::new(Config { upload: UploadPolicy::Capped(rate(256 * 1024).unwrap()), ..loopback() });
+    let mut seeder =
+        Node::new(Config { upload: UploadPolicy::Capped(rate(256 * 1024).unwrap()), ..Config::loopback() });
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent.clone()), download.path());
     add.peers = vec![seeder.addr()];
     let id = leecher.add(add);
     let (file, offset, length) = (FileIndex::new(0), 1_300_000, 100_000);
-    assert!(!leecher.session.want_range(id, file, offset, length).unwrap(), "nothing has arrived yet");
+    assert_eq!(leecher.session.want_range(id, file, offset, length).unwrap(), 0, "nothing has arrived yet");
     let deadline = Instant::now() + TIMEOUT;
-    while !leecher.session.want_range(id, file, offset, length).unwrap() {
+    while leecher.session.want_range(id, file, offset, length).unwrap() < length {
         assert!(Instant::now() < deadline, "the range never arrived");
         leecher.idle(Duration::from_millis(50));
     }
@@ -42,10 +43,11 @@ fn the_written_pieces_of_a_file_are_counted_without_asking_for_any() {
     let files = [("a.bin", MIB / 2), ("film.mkv", 2 * MIB), ("z.bin", MIB / 2)];
     let fixture = Fixture::new("film", &files, 62);
     let torrent = fixture.torrent(TorrentFormat::V1);
-    let mut seeder = Node::new(Config { upload: UploadPolicy::Capped(rate(256 * 1024).unwrap()), ..loopback() });
+    let mut seeder =
+        Node::new(Config { upload: UploadPolicy::Capped(rate(256 * 1024).unwrap()), ..Config::loopback() });
     seeder.seed(&torrent, fixture.save_path());
 
-    let mut leecher = Node::new(loopback());
+    let mut leecher = Node::new(Config::loopback());
     let download = TempDir::new().unwrap();
     let mut add = AddTorrent::new(TorrentSource::Metainfo(torrent.clone()), download.path());
     add.files = FileSelection::Only([FileIndex::new(1)].into());
@@ -60,7 +62,7 @@ fn the_written_pieces_of_a_file_are_counted_without_asking_for_any() {
     // The middle of the film arrives first, as when a player seeks there.
     let (offset, length) = (1_300_000, 100_000);
     let deadline = Instant::now() + TIMEOUT;
-    while !leecher.session.want_range(id, film, offset, length).unwrap() {
+    while leecher.session.want_range(id, film, offset, length).unwrap() < length {
         assert!(Instant::now() < deadline, "the range never arrived");
         leecher.idle(Duration::from_millis(50));
     }

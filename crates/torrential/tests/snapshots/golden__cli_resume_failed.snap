@@ -1,0 +1,19 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "changed",
+    "changes": [
+      {
+        "id": "a90d445d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "name": "openwebtext-2019",
+        "result": "resumed"
+      }
+    ],
+    "next": "torrential wait a90d44"
+  }
+}

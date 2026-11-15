@@ -96,7 +96,6 @@ export function Menu({ page, title, onBack, onClose, children }: MenuProps) {
 
 interface LinkProps {
   label: string;
-  /** The row's current setting. */
   value?: string;
   onOpen: () => void;
 }

@@ -1,0 +1,122 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "id": "tt9999901",
+    "kind": "series",
+    "name": "Harbor Lights",
+    "year": 2019,
+    "rating": 8.1,
+    "synopsis": "A lighthouse keeper's family runs a harbor town's only inn.",
+    "genres": [
+      "Drama"
+    ],
+    "runtime_min": 44,
+    "cast": [
+      "Ada Byrne"
+    ],
+    "countries": [
+      "IE"
+    ],
+    "art": {
+      "poster": true,
+      "background": false,
+      "logo": false
+    },
+    "seasons": [
+      {
+        "number": 0,
+        "episodes": [
+          {
+            "season": 0,
+            "episode": 1,
+            "name": "Lights Out",
+            "aired": 1608768000,
+            "has_aired": true,
+            "overview": null,
+            "thumbnail": false
+          }
+        ]
+      },
+      {
+        "number": 1,
+        "episodes": [
+          {
+            "season": 1,
+            "episode": 1,
+            "name": "Pilot",
+            "aired": 1556668800,
+            "has_aired": true,
+            "overview": null,
+            "thumbnail": true
+          },
+          {
+            "season": 1,
+            "episode": 2,
+            "name": "Undertow",
+            "aired": 1557273600,
+            "has_aired": true,
+            "overview": null,
+            "thumbnail": true
+          },
+          {
+            "season": 1,
+            "episode": 3,
+            "name": "Fog Bell",
+            "aired": 1557878400,
+            "has_aired": true,
+            "overview": null,
+            "thumbnail": false
+          }
+        ]
+      },
+      {
+        "number": 2,
+        "episodes": [
+          {
+            "season": 2,
+            "episode": 1,
+            "name": "Return",
+            "aired": 1588291200,
+            "has_aired": true,
+            "overview": null,
+            "thumbnail": false
+          },
+          {
+            "season": 2,
+            "episode": 2,
+            "name": "Tide Tables",
+            "aired": 4102444800,
+            "has_aired": false,
+            "overview": null,
+            "thumbnail": false
+          },
+          {
+            "season": 2,
+            "episode": 3,
+            "name": "Untitled",
+            "aired": null,
+            "has_aired": false,
+            "overview": null,
+            "thumbnail": false
+          }
+        ]
+      }
+    ],
+    "saved": false,
+    "watched": [],
+    "next": {
+      "video": "tt9999901:1:1",
+      "resume_at": null
+    },
+    "play_target": {
+      "video": "tt9999901:1:1",
+      "resume_at": null
+    },
+    "downloads": []
+  }
+}

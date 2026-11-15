@@ -1,8 +1,6 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use sha1::{Digest, Sha1};
 use tokio::time::Instant;
@@ -11,8 +9,8 @@ use url::Url;
 use super::{Ctx, Failure};
 use crate::http::Http;
 use crate::observation::hex;
+use crate::store::{self, FRESH_FOR, Store};
 
-const FRESH_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 const REFETCH_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const REFRESH_WITHIN: Duration = Duration::from_secs(30);
 
@@ -20,13 +18,13 @@ pub(super) type Check = fn(&[u8]) -> bool;
 
 #[derive(Clone)]
 pub(crate) struct Pages {
-    dir: Option<PathBuf>,
+    store: Option<Arc<Store>>,
     refreshing: Arc<Mutex<HashSet<Url>>>,
 }
 
 impl Pages {
-    pub fn new(cache_dir: Option<PathBuf>) -> Pages {
-        Pages { dir: cache_dir.map(|d| d.join("pages")), refreshing: Arc::default() }
+    pub fn new(store: Option<Arc<Store>>) -> Pages {
+        Pages { store, refreshing: Arc::default() }
     }
 
     pub async fn get(&self, ctx: &Ctx<'_>, url: &Url, cap: usize, check: Check) -> Result<Vec<u8>, Failure> {
@@ -69,25 +67,13 @@ impl Pages {
     }
 
     async fn read(&self, url: &Url, check: Check) -> Option<(Duration, Vec<u8>)> {
-        let path = self.dir.as_ref()?.join(file_name(url));
-        let modified = tokio::fs::metadata(&path).await.ok()?.modified().ok()?;
-        let body = tokio::fs::read(&path).await.ok()?;
-        let age = SystemTime::now().duration_since(modified).unwrap_or(Duration::MAX);
-        check(&body).then_some((age, body))
+        let kept = self.store.as_ref()?.get(&file_name(url)).await?;
+        check(&kept.bytes).then(|| (kept.age(), kept.bytes.to_vec()))
     }
 
     async fn write(&self, url: &Url, body: &[u8]) {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let Some(dir) = &self.dir else { return };
-        let name = file_name(url);
-        let tmp = dir.join(format!("{name}.{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        let written = async {
-            tokio::fs::create_dir_all(dir).await?;
-            tokio::fs::write(&tmp, body).await?;
-            tokio::fs::rename(&tmp, dir.join(&name)).await
-        };
-        if written.await.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
+        if let Some(store) = &self.store {
+            store.put(&file_name(url), body).await;
         }
     }
 
@@ -97,5 +83,5 @@ impl Pages {
 }
 
 fn file_name(url: &Url) -> String {
-    hex(&Sha1::digest(url.as_str().as_bytes()))
+    format!("{}/{}", store::PAGES, hex(&Sha1::digest(url.as_str().as_bytes())))
 }

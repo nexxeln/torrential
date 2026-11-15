@@ -1,0 +1,308 @@
+//! Builds the commands that turn a download into what a browser plays.
+
+use std::path::Path;
+
+use torrential_core::filetype::{FileType, Kind};
+
+use super::Media;
+
+/// Keeps the file's own timestamps in the fragments, so a stream that starts at 50 minutes says so.
+/// `frag_discont` writes them, and `-copyts` with `-avoid_negative_ts disabled` keeps ffmpeg from
+/// moving them to zero first.
+const FRAGMENTED: &str = "frag_keyframe+empty_moov+default_base_moof+frag_discont";
+
+/// Seconds between keyframes when the engine encodes the video, which is how far a seek can miss by.
+const KEYFRAME_EVERY: f64 = 2.0;
+/// How much faster than it plays ffmpeg reads a file it converts, once past the burst. A browser
+/// that never pushes back on a stream, as Safari does not, would otherwise make ffmpeg convert the
+/// whole film as fast as it can.
+const READ_RATE: &str = "1.5";
+/// Seconds of the file ffmpeg reads at full speed first: as much as the web player keeps ahead.
+const READ_BURST: &str = "60";
+const HIGHEST: (u32, u32) = (1920, 1080);
+
+/// The video the stream carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Picture {
+    /// The file's own, untouched.
+    Copy,
+    /// Encoded again as H.264, for a codec the browser cannot decode.
+    H264,
+}
+
+/// The encoder to use for `Picture::H264`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Encoder {
+    /// Apple's hardware encoder.
+    VideoToolbox,
+    X264,
+}
+
+impl Encoder {
+    pub const fn of_host() -> Encoder {
+        if cfg!(target_os = "macos") { Encoder::VideoToolbox } else { Encoder::X264 }
+    }
+}
+
+pub fn probe(url: &str) -> Vec<String> {
+    strings(&["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", url])
+}
+
+/// A JPEG of the frame at `t` seconds, 240 pixels wide, written to stdout. ffmpeg reads the file on
+/// disk and not through the engine, so it cannot make the engine fetch a piece.
+pub fn thumbnail(path: &Path, t: f64) -> Vec<String> {
+    let input = format!("file:{}", path.display());
+    let mut args = strings(&["-v", "error", "-nostdin", "-ss", &seconds(t), "-i", &input]);
+    args.extend(strings(&["-frames:v", "1", "-an", "-sn", "-dn", "-vf", "scale=240:-2", "-q:v", "5"]));
+    args.extend(strings(&["-f", "mjpeg", "pipe:1"]));
+    args
+}
+
+/// Whether the ffmpeg that printed `version` for `-version` can pace its reading with a burst,
+/// which ffmpeg 6.1 and later can. A build from ffmpeg's main branch names no release, and is newer.
+pub fn paces(version: &str) -> bool {
+    let Some(named) = version.lines().next().and_then(|line| line.strip_prefix("ffmpeg version ")) else {
+        return false;
+    };
+    if named.starts_with("N-") {
+        return true;
+    }
+    let numbers: Vec<u32> =
+        named.trim_start_matches('n').split(['.', '-', ' ']).map_while(|part| part.parse().ok()).take(2).collect();
+    match numbers[..] {
+        [major, minor] => (major, minor) >= (6, 1),
+        [major] => major > 6,
+        _ => false,
+    }
+}
+
+/// A fragmented MP4 of the file at `url` from `t` seconds on, written to stdout: its video, and
+/// `audio` as AAC. With `paced`, ffmpeg reads no faster than the video plays, past a burst.
+pub fn stream(
+    url: &str,
+    media: &Media,
+    t: f64,
+    audio: Option<u32>,
+    picture: Picture,
+    encoder: Encoder,
+    paced: bool,
+) -> Vec<String> {
+    let mut args = strings(&["-v", "error", "-nostdin"]);
+    args.extend(from(t));
+    args.extend(pacing(paced));
+    args.extend(strings(&["-copyts", "-i", url]));
+    let mut add = |more: &[&str]| args.extend(strings(more));
+    if let Some(video) = &media.video {
+        add(&["-map", &format!("0:{}", video.stream)]);
+        match picture {
+            Picture::Copy if video.codec == "hevc" => add(&["-c:v", "copy", "-tag:v", "hvc1"]),
+            Picture::Copy => add(&["-c:v", "copy"]),
+            Picture::H264 => {
+                let (width, height) = HIGHEST;
+                let fit = format!(
+                    "scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+                );
+                let between = (video.fps.unwrap_or(24.0) * KEYFRAME_EVERY).round().max(1.0);
+                add(&["-vf", &fit, "-g", &format!("{between}")]);
+                match encoder {
+                    Encoder::VideoToolbox => {
+                        add(&["-c:v", "h264_videotoolbox", "-profile:v", "high", "-b:v", bitrate(video.height)])
+                    }
+                    Encoder::X264 => {
+                        add(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-profile:v", "high"])
+                    }
+                }
+            }
+        }
+    }
+    if let Some(track) = media.audio_track(audio) {
+        add(&["-map", &format!("0:{}", track.stream)]);
+        match track.codec.as_str() {
+            "aac" => add(&["-c:a", "copy"]),
+            _ => add(&["-c:a", "aac", "-ac", "2", "-b:a", "192k"]),
+        }
+    }
+    // A chapter list would become a third track, which a Media Source buffer refuses.
+    add(&["-map_chapters", "-1", "-map_metadata", "-1", "-avoid_negative_ts", "disabled"]);
+    add(&["-movflags", FRAGMENTED, "-f", "mp4", "pipe:1"]);
+    args
+}
+
+/// WebVTT of the subtitle track `stream` of the file at `url` from `t` seconds on, on the file's
+/// own timeline. With `paced`, ffmpeg reads no faster than the video plays, past a burst.
+pub fn embedded_subtitles(url: &str, stream: u32, t: f64, paced: bool) -> Vec<String> {
+    let mut args = strings(&["-v", "error", "-nostdin"]);
+    args.extend(from(t));
+    args.extend(pacing(paced));
+    args.extend(strings(&["-copyts", "-i", url]));
+    args.extend(strings(&["-map", &format!("0:{stream}"), "-c:s", "webvtt", "-avoid_negative_ts", "disabled"]));
+    args.extend(strings(&["-flush_packets", "1", "-f", "webvtt", "pipe:1"]));
+    args
+}
+
+/// WebVTT of a subtitle file read from stdin. `format` is ffmpeg's name for what the file is, when
+/// its name says.
+pub fn subtitle_file(format: Option<&str>) -> Vec<String> {
+    let mut args = strings(&["-v", "error"]);
+    if let Some(format) = format {
+        args.extend(strings(&["-f", format]));
+    }
+    args.extend(strings(&["-i", "pipe:0", "-c:s", "webvtt", "-f", "webvtt", "pipe:1"]));
+    args
+}
+
+/// ffmpeg's name for the format of a subtitle file, by its extension.
+pub fn subtitle_format(name: &str) -> Option<&'static str> {
+    FileType::of(name).filter(|t| t.kind == Some(Kind::Subtitle))?.ffmpeg
+}
+
+fn pacing(paced: bool) -> Vec<String> {
+    if paced { strings(&["-readrate", READ_RATE, "-readrate_initial_burst", READ_BURST]) } else { Vec::new() }
+}
+
+fn bitrate(height: u32) -> &'static str {
+    match height {
+        0..=480 => "2M",
+        481..=720 => "4M",
+        _ => "8M",
+    }
+}
+
+/// The seek that starts a conversion `t` seconds in. A conversion from the start has none: a seek
+/// reads the file's index, which a Matroska file keeps at its end, and playing from the beginning
+/// would wait for the last piece of the download.
+fn from(t: f64) -> Vec<String> {
+    if t.is_finite() && t > 0.0 { strings(&["-ss", &seconds(t)]) } else { Vec::new() }
+}
+
+fn seconds(t: f64) -> String {
+    format!("{:.3}", if t.is_finite() { t.max(0.0) } else { 0.0 })
+}
+
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| arg.to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tracks::{Audio, Video};
+    use super::*;
+    use crate::ffmpeg::fetch::Readiness;
+
+    const URL: &str = "http://127.0.0.1:47919/ab/0/film.mkv";
+
+    fn media(codec: &str, audio: &[(&str, bool)]) -> Media {
+        let audio = (1..)
+            .zip(audio)
+            .map(|(stream, &(codec, default))| Audio {
+                stream,
+                codec: codec.into(),
+                channels: 6,
+                language: None,
+                title: None,
+                default,
+            })
+            .collect();
+        let video = Video {
+            stream: 0,
+            codec: codec.into(),
+            mime: None,
+            width: 3840,
+            height: 2160,
+            bit_depth: 10,
+            hdr: false,
+            fps: Some(23.976),
+        };
+        Media {
+            duration: Some(60.0),
+            container: "matroska".into(),
+            video: Some(video),
+            audio,
+            subtitles: Vec::new(),
+            direct: None,
+            ffmpeg: Readiness::Ready,
+            chapters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stream_copies_what_browsers_decode_and_converts_the_rest() {
+        let film = media("hevc", &[("ac3", false), ("aac", true)]);
+        let line = |args: Vec<String>| args.join(" ");
+        let tail = "-map_chapters -1 -map_metadata -1 -avoid_negative_ts disabled -movflags \
+                    frag_keyframe+empty_moov+default_base_moof+frag_discont -f mp4 pipe:1";
+        assert_eq!(
+            line(stream(URL, &film, 3000.5, None, Picture::Copy, Encoder::X264, false)),
+            format!(
+                "-v error -nostdin -ss 3000.500 -copyts -i {URL} -map 0:0 -c:v copy -tag:v hvc1 -map 0:2 -c:a copy {tail}"
+            )
+        );
+        assert_eq!(
+            line(stream(URL, &media("h264", &[("ac3", false)]), 0.0, Some(1), Picture::Copy, Encoder::X264, false)),
+            format!("-v error -nostdin -copyts -i {URL} -map 0:0 -c:v copy -map 0:1 -c:a aac -ac 2 -b:a 192k {tail}")
+        );
+        let fit = "-vf scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:\
+                   force_divisible_by=2,format=yuv420p -g 48";
+        assert_eq!(
+            line(stream(URL, &media("mpeg4", &[]), -4.0, Some(7), Picture::H264, Encoder::VideoToolbox, false)),
+            format!(
+                "-v error -nostdin -copyts -i {URL} -map 0:0 {fit} -c:v h264_videotoolbox -profile:v high \
+                 -b:v 8M {tail}"
+            )
+        );
+        assert!(
+            line(stream(URL, &film, 1.0, None, Picture::H264, Encoder::X264, false))
+                .contains(&format!("{fit} -c:v libx264 -preset veryfast -crf 21 -profile:v high -map 0:2"))
+        );
+    }
+
+    #[test]
+    fn a_paced_conversion_reads_at_one_and_a_half_times_its_speed_after_a_minute() {
+        let film = media("h264", &[("aac", true)]);
+        let paced = stream(URL, &film, 600.0, None, Picture::Copy, Encoder::X264, true).join(" ");
+        assert!(
+            paced.starts_with(&format!(
+                "-v error -nostdin -ss 600.000 -readrate 1.5 -readrate_initial_burst 60 -copyts -i {URL}"
+            )),
+            "{paced}"
+        );
+        assert_eq!(
+            embedded_subtitles(URL, 3, 0.0, true).join(" "),
+            format!(
+                "-v error -nostdin -readrate 1.5 -readrate_initial_burst 60 -copyts -i {URL} -map 0:3 -c:s webvtt \
+                 -avoid_negative_ts disabled -flush_packets 1 -f webvtt pipe:1"
+            )
+        );
+    }
+
+    #[test]
+    fn only_ffmpeg_6_1_and_later_pace_their_reading() {
+        let versions = [
+            "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+            "ffmpeg version n8.1.3-27-g8dca1586f4 Copyright (c) 2000-2026 the FFmpeg developers",
+            "ffmpeg version 7.0 Copyright (c) 2000-2024 the FFmpeg developers",
+            "ffmpeg version N-118185-g1e2bd3f44c-20250102 Copyright (c) 2000-2025 the FFmpeg developers",
+            "ffmpeg version 6.0 Copyright (c) 2000-2023 the FFmpeg developers",
+            "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021 the FFmpeg developers",
+            "ffmpeg version git-2024-01-02 Copyright",
+            "",
+        ];
+        assert_eq!(versions.map(paces), [true, true, true, true, false, false, false, false]);
+    }
+
+    #[test]
+    fn a_thumbnail_is_read_from_the_file_on_disk() {
+        let args = thumbnail(Path::new("/downloads/Film (2024)/film.mkv"), 1230.0).join(" ");
+        assert_eq!(
+            args,
+            "-v error -nostdin -ss 1230.000 -i file:/downloads/Film (2024)/film.mkv -frames:v 1 -an -sn -dn \
+             -vf scale=240:-2 -q:v 5 -f mjpeg pipe:1"
+        );
+    }
+
+    #[test]
+    fn a_subtitle_files_name_says_its_format() {
+        let formats = ["a.srt", "a.SSA", "a.en.vtt", "a.sub", "a"].map(subtitle_format);
+        assert_eq!(formats, [Some("srt"), Some("ass"), Some("webvtt"), None, None]);
+    }
+}

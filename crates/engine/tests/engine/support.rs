@@ -7,32 +7,21 @@ use std::time::{Duration, Instant};
 
 use sha1::Digest as _;
 use tempfile::TempDir;
+use torrential_core::{InfoHash, TorrentId};
 use torrential_engine::{
-    AddTorrent, Alert, Config, ConnectionLimits, Dht, InfoHash, Metainfo, PieceSize, Session, TorrentFormat, TorrentId,
-    TorrentSource, TorrentStatus, UploadPolicy, create_torrent,
+    AddTorrent, Alert, Config, Metainfo, PieceSize, Session, TorrentFormat, TorrentSource, TorrentStatus, UploadPolicy,
+    create_torrent,
 };
 
 pub const PIECE: u32 = 16 * 1024;
 pub const TIMEOUT: Duration = Duration::from_secs(20);
-
-pub fn loopback() -> Config {
-    Config {
-        listen: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)],
-        dht: Dht::Off,
-        lsd: false,
-        upnp: false,
-        natpmp: false,
-        connections: ConnectionLimits { multiple_per_ip: true, ..ConnectionLimits::default() },
-        ..Config::default()
-    }
-}
 
 pub fn rate(bytes_per_sec: u32) -> Option<NonZeroU32> {
     NonZeroU32::new(bytes_per_sec)
 }
 
 pub fn upload(policy: UploadPolicy) -> Config {
-    Config { upload: policy, ..loopback() }
+    Config { upload: policy, ..Config::loopback() }
 }
 
 pub struct Node {
@@ -64,6 +53,16 @@ impl Node {
         self.wait_until("seeding", |s| {
             s.status(id).unwrap().progress.verified_selected_bytes() == total_size(metainfo)
         });
+        id
+    }
+
+    /// Adds a torrent that downloads at most `bytes_per_sec`, so a test can catch it mid-download.
+    pub fn add_slowly(&mut self, mut add: AddTorrent, bytes_per_sec: u32) -> TorrentId {
+        add.paused = true;
+        let id = self.add(add);
+        self.session.set_download_limit(id, rate(bytes_per_sec)).unwrap();
+        self.session.resume(id).unwrap();
+        self.wait_for("resumed", |a| matches!(a, Alert::TorrentResumed { .. }));
         id
     }
 
@@ -197,10 +196,9 @@ pub fn expected_hashes(torrent: &[u8]) -> ([u8; 20], [u8; 32]) {
 }
 
 pub fn info_hash(hashes: ([u8; 20], [u8; 32]), format: TorrentFormat) -> InfoHash {
-    let v1 = torrential_engine::InfoHashV1::from_bytes(hashes.0);
     match format {
-        TorrentFormat::V1 => InfoHash::V1(v1),
-        TorrentFormat::Hybrid => InfoHash::Hybrid { v1, v2: torrential_engine::InfoHashV2::from_bytes(hashes.1) },
+        TorrentFormat::V1 => InfoHash::V1(hashes.0),
+        TorrentFormat::Hybrid => InfoHash::Hybrid { v1: hashes.0, v2: hashes.1 },
     }
 }
 

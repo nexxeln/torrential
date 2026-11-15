@@ -1,6 +1,6 @@
 mod academic;
 mod apibay;
-mod archive_org;
+pub(crate) mod archive_org;
 mod archlinux;
 mod debian;
 mod hashes;
@@ -18,19 +18,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use torrential_core::title::Wanted;
 use torrential_core::{Error, ErrorCode, SourceOutcome, text};
-use url::{Url, form_urlencoded};
-
-use sha1::{Digest, Sha1};
+use url::Url;
 
 use crate::http::{FetchError, Http};
-use crate::observation::{Observation, hex};
+use crate::observation::Observation;
+use crate::store::Store;
 use crate::terms::Terms;
 use crate::{SearchConfig, TorznabConfig};
+use torznab::Torznab;
 
 struct Row {
     name: &'static str,
-    default_on: bool,
+    /// Lower leads. A release that several sources list takes its name, size and links from the
+    /// one with the least, and their reports are listed in this order.
+    authority: u16,
     lawful: bool,
     /// It can list films and series, so a title's search asks it.
     video: bool,
@@ -41,7 +44,7 @@ struct Row {
 const BUILTIN: [Row; 8] = [
     Row {
         name: "archlinux",
-        default_on: true,
+        authority: 0,
         lawful: true,
         video: false,
         base: "https://archlinux.org/",
@@ -49,7 +52,7 @@ const BUILTIN: [Row; 8] = [
     },
     Row {
         name: "ubuntu",
-        default_on: true,
+        authority: 1,
         lawful: true,
         video: false,
         base: "https://releases.ubuntu.com/",
@@ -57,7 +60,7 @@ const BUILTIN: [Row; 8] = [
     },
     Row {
         name: "debian",
-        default_on: true,
+        authority: 2,
         lawful: true,
         video: false,
         base: "https://cdimage.debian.org/",
@@ -65,7 +68,7 @@ const BUILTIN: [Row; 8] = [
     },
     Row {
         name: "archive.org",
-        default_on: true,
+        authority: 3,
         lawful: true,
         video: true,
         base: "https://archive.org/",
@@ -73,7 +76,7 @@ const BUILTIN: [Row; 8] = [
     },
     Row {
         name: "academictorrents",
-        default_on: true,
+        authority: 4,
         lawful: true,
         video: false,
         base: "https://academictorrents.com/",
@@ -81,7 +84,7 @@ const BUILTIN: [Row; 8] = [
     },
     Row {
         name: "knaben",
-        default_on: true,
+        authority: 5,
         lawful: false,
         video: true,
         base: "https://api.knaben.org/",
@@ -89,20 +92,13 @@ const BUILTIN: [Row; 8] = [
     },
     Row {
         name: "apibay",
-        default_on: true,
+        authority: 6,
         lawful: false,
         video: true,
         base: "https://apibay.org/",
         adapter: Adapter::Apibay,
     },
-    Row {
-        name: "nyaa",
-        default_on: true,
-        lawful: false,
-        video: true,
-        base: "https://nyaa.si/",
-        adapter: Adapter::Nyaa,
-    },
+    Row { name: "nyaa", authority: 7, lawful: false, video: true, base: "https://nyaa.si/", adapter: Adapter::Nyaa },
 ];
 
 pub(crate) enum Adapter {
@@ -114,7 +110,7 @@ pub(crate) enum Adapter {
     Knaben,
     Apibay,
     Nyaa,
-    Torznab { api_key: Option<String> },
+    Torznab(Torznab),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -129,7 +125,6 @@ pub(crate) struct SourceMeta {
 
 pub(crate) struct Source {
     pub meta: Arc<SourceMeta>,
-    pub default_on: bool,
     /// It can list films and series. A Torznab indexer is assumed to.
     pub video: bool,
     base: Url,
@@ -187,14 +182,17 @@ pub(crate) struct Stores {
     hashes: Arc<hashes::Hashes>,
     academic: academic::Catalog,
     pages: pages::Pages,
+    lists: archive_org::Lists,
 }
 
 impl Stores {
     pub fn new(cache_dir: Option<PathBuf>) -> Stores {
+        let store = cache_dir.clone().map(|dir| Arc::new(Store::Disk(dir)));
         Stores {
-            hashes: Arc::new(hashes::Hashes::new(cache_dir.clone())),
-            academic: academic::Catalog::new(cache_dir.clone()),
-            pages: pages::Pages::new(cache_dir),
+            hashes: Arc::new(hashes::Hashes::new(cache_dir, store.clone())),
+            academic: academic::Catalog::new(store.clone()),
+            pages: pages::Pages::new(store.clone()),
+            lists: archive_org::Lists::new(store),
         }
     }
 
@@ -209,6 +207,10 @@ pub(crate) struct Ctx<'a> {
     pub terms: &'a Terms,
     pub adult: bool,
     pub fresh: bool,
+    /// The title a title's search is for, which ranks its releases by the files a play would open.
+    pub wanted: Option<&'a Wanted>,
+    /// When the search began.
+    pub started: Instant,
     pub deadline: Instant,
     pub partial: AtomicBool,
 }
@@ -220,46 +222,34 @@ impl Ctx<'_> {
 }
 
 impl Source {
+    /// What the answers cached for this source depend on beside the query.
     pub fn scope(&self) -> String {
         match &self.adapter {
-            Adapter::Torznab { api_key: Some(key) } => {
-                format!("{} key:{}", self.base, hex(&Sha1::digest(key.as_bytes())[..8]))
-            }
+            Adapter::Torznab(torznab) => torznab.scope(&self.base),
             _ => self.base.to_string(),
         }
     }
 
+    /// The link at `url` as a later engine keeps it. Only a Torznab source's links are saved.
     pub fn save_link(&self, url: &str) -> Option<SavedLink> {
-        let Adapter::Torznab { api_key } = &self.adapter else { return None };
-        let mut url = Url::parse(url).ok()?;
-        let mut key_params = Vec::new();
-        if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
-            let mut kept = Vec::new();
-            for pair in url.query().unwrap_or_default().split('&') {
-                match form_urlencoded::parse(pair.as_bytes()).next() {
-                    Some((name, value)) if value == key => key_params.push(name.into_owned()),
-                    _ => kept.push(pair),
-                }
-            }
-            let query = kept.join("&");
-            url.set_query((!query.is_empty()).then_some(query.as_str()));
-            if form_urlencoded::parse(url.as_str().as_bytes()).any(|(a, b)| a.contains(key) || b.contains(key)) {
-                return None;
-            }
-        }
-        Some(SavedLink { source: self.meta.name.clone(), url: url.into(), key_params })
+        let Adapter::Torznab(torznab) = &self.adapter else { return None };
+        torznab.save_link(&self.meta.name, url)
     }
 
+    /// A saved link with the key it needs now.
     pub fn link(&self, saved: &SavedLink) -> Option<String> {
-        let mut url = Url::parse(&saved.url).ok()?;
-        if !saved.key_params.is_empty() {
-            let Adapter::Torznab { api_key: Some(key) } = &self.adapter else { return None };
-            let mut pairs = url.query_pairs_mut();
-            for name in &saved.key_params {
-                pairs.append_pair(name, key);
-            }
+        match &self.adapter {
+            Adapter::Torznab(torznab) => torznab.link(saved),
+            _ => saved.key_params.is_empty().then(|| Url::parse(&saved.url).ok().map(String::from))?,
         }
-        Some(url.into())
+    }
+
+    /// The archive.org item whose `.torrent` file is at `url`.
+    pub fn archive_item_of_link(&self, url: &Url) -> Option<archive_org::Item> {
+        match self.adapter {
+            Adapter::ArchiveOrg => archive_org::item_of_link(&self.base, url),
+            _ => None,
+        }
     }
 
     pub fn archive_item(&self, name: &str, web_seeds: &[String]) -> Option<archive_org::Item> {
@@ -280,7 +270,7 @@ impl Source {
             Adapter::Knaben => knaben::search(ctx, base).await,
             Adapter::Apibay => apibay::search(ctx, base).await,
             Adapter::Nyaa => nyaa::search(ctx, base).await,
-            Adapter::Torznab { api_key } => torznab::search(ctx, base, api_key.as_deref()).await,
+            Adapter::Torznab(torznab) => torznab.search(ctx, base).await,
         }
     }
 }
@@ -299,12 +289,11 @@ pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error>
     let mut sources: Vec<Arc<Source>> = Vec::new();
     for row in BUILTIN {
         let base = base_url(row.name, config.endpoints.get(row.name).map_or(row.base, String::as_str))?;
-        let meta = SourceMeta { name: row.name.into(), authority: next(&sources), lawful: row.lawful, public: true };
-        let source =
-            Source { meta: Arc::new(meta), default_on: row.default_on, video: row.video, base, adapter: row.adapter };
+        let meta = SourceMeta { name: row.name.into(), authority: row.authority, lawful: row.lawful, public: true };
+        let source = Source { meta: Arc::new(meta), video: row.video, base, adapter: row.adapter };
         sources.push(Arc::new(source));
     }
-    for TorznabConfig { name, url, api_key } in &config.torznab {
+    for (after, TorznabConfig { name, url, api_key }) in (BUILTIN.len()..).zip(&config.torznab) {
         let valid = !name.is_empty()
             && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b));
         if !valid {
@@ -315,13 +304,14 @@ pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error>
         if sources.iter().any(|s| s.meta.name == *name) {
             return Err(config_error(format!("source name {name:?} is used twice")));
         }
-        let meta = SourceMeta { name: name.clone(), authority: next(&sources), lawful: false, public: false };
+        let authority = u16::try_from(after).unwrap_or(u16::MAX);
+        let meta = SourceMeta { name: name.clone(), authority, lawful: false, public: false };
         let base = url::Url::parse(url)
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .ok_or_else(|| config_error(format!("torznab source {name:?} needs an http or https URL")))?;
-        let adapter = Adapter::Torznab { api_key: api_key.clone() };
-        sources.push(Arc::new(Source { meta: Arc::new(meta), default_on: true, video: true, base, adapter }));
+        let adapter = Adapter::Torznab(Torznab { api_key: api_key.clone() });
+        sources.push(Arc::new(Source { meta: Arc::new(meta), video: true, base, adapter }));
     }
     for name in &config.disabled {
         if !sources.iter().any(|s| s.meta.name == *name) {
@@ -330,10 +320,6 @@ pub(crate) fn registry(config: &SearchConfig) -> Result<Vec<Arc<Source>>, Error>
     }
     sources.retain(|s| !config.disabled.contains(&s.meta.name));
     Ok(sources)
-}
-
-fn next(sources: &[Arc<Source>]) -> u16 {
-    u16::try_from(sources.len()).unwrap_or(u16::MAX)
 }
 
 fn base_url(name: &str, raw: &str) -> Result<Url, Error> {

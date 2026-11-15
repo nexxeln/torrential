@@ -59,6 +59,8 @@ pub(crate) struct AnswerKey {
     pub scope: String,
     pub text: String,
     pub adult: bool,
+    /// A title's search, whose answers also list the items' files.
+    pub title: bool,
 }
 
 impl ResultCache {
@@ -83,11 +85,6 @@ impl ResultCache {
     /// save. `None` when its link is public, or it has none.
     pub fn saved_link(&self, id: &ReleaseId) -> Option<SavedLink> {
         self.lock().recent.get(id)?.saved.clone()
-    }
-
-    /// When the newest answer stops answering. `None` while no answer is kept.
-    pub fn expires(&self) -> Option<Instant> {
-        self.lock().answers.values().map(|(at, _)| *at + TTL).max()
     }
 
     pub(crate) fn answer(&self, key: &AnswerKey, now: Instant) -> Option<Arc<Vec<Observation>>> {
@@ -154,6 +151,7 @@ mod tests {
             scope: "https://api.knaben.org/".into(),
             text: "ubuntu".into(),
             adult: false,
+            title: false,
         };
         let t0 = Instant::now();
         cache.store(key.clone(), rows("Ubuntu 24.04"), t0);

@@ -1,5 +1,7 @@
 // What the app remembers in this browser: where each video stopped, and how the player was set.
 
+import { FINISHED_SHARE, FINISHED_WITHIN } from "../wire";
+
 export interface Position {
   id: string;
   file: number;
@@ -80,7 +82,7 @@ export function positions(): Position[] {
 
 /** The last seconds of a video are credits, so stopping there counts as finishing it. */
 export function isFinished(time: number, duration: number): boolean {
-  return duration > 0 && duration - time <= Math.max(20, duration * 0.03);
+  return duration > 0 && duration - time <= Math.max(FINISHED_WITHIN, duration * FINISHED_SHARE);
 }
 
 export function savePosition(entry: Omit<Position, "finished" | "at">): void {

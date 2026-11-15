@@ -1,6 +1,5 @@
 pub mod format;
 pub mod theme;
-pub mod views;
 
 use serde::Serialize;
 use torrential_core::Error;
@@ -8,8 +7,8 @@ use torrential_core::error::Details;
 use torrential_core::protocol::SCHEMA_VERSION;
 use torrential_core::text::sanitize;
 
-use crate::env::Env;
 use theme::{Token, paint};
+use torrential_daemon::env::Env;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -187,10 +186,40 @@ fn finish_json(map: serde_json::Map<String, serde_json::Value>) -> String {
     text
 }
 
+torrential_core::words! {
+    /// The `type` of each JSON document the command line prints.
+    pub enum DocKind {
+        Cast = "cast",
+        Completions = "completions",
+        Daemon = "daemon",
+        DaemonService = "daemon_service",
+        DaemonStop = "daemon_stop",
+        Devices = "devices",
+        Doctor = "doctor",
+        Error = "error",
+        Files = "files",
+        Get = "get",
+        Play = "play",
+        Progress = "progress",
+        Result = "result",
+        Schema = "schema",
+        Setup = "setup",
+        Skill = "skill",
+        SkillInstall = "skill_install",
+        SkillStatus = "skill_status",
+        SkillUninstall = "skill_uninstall",
+        Sources = "sources",
+        Tvs = "tvs",
+        Update = "update",
+        UpdateCheck = "update_check",
+        Web = "web",
+    }
+}
+
 #[derive(Serialize)]
 pub struct Typed<T: Serialize> {
     #[serde(rename = "type")]
-    pub kind: &'static str,
+    pub kind: DocKind,
     #[serde(flatten)]
     pub body: T,
 }
@@ -206,7 +235,7 @@ pub fn render(mode: Mode, doc: &Doc, payload: &impl Serialize) -> String {
 #[derive(Serialize)]
 struct ErrorDocument<'a> {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: DocKind,
     error: &'a Error,
 }
 
@@ -220,7 +249,7 @@ pub fn error(mode: Mode, error: &Error) -> ErrorOutput {
         Mode::Json => {
             let mut error = error.clone();
             let next = error.next.take();
-            let document = ErrorDocument { kind: "error", error: &error };
+            let document = ErrorDocument { kind: DocKind::Error, error: &error };
             ErrorOutput { stdout: json_document(&document, next.as_deref().map(String::as_str)), stderr: String::new() }
         }
         Mode::Plain => ErrorOutput { stdout: String::new(), stderr: error_text(error, false) },
@@ -249,10 +278,10 @@ fn detail_lines(details: Option<&Details>) -> Vec<String> {
     match details {
         None => Vec::new(),
         Some(Details::Candidates(candidates)) => {
-            candidates.iter().map(|c| format!("{}\t{}\t{}", c.id, sanitize(&c.name), c.kind)).collect()
+            candidates.iter().map(|c| format!("{}\t{}\t{}", c.id, sanitize(&c.name), c.kind.as_str())).collect()
         }
         Some(Details::Sources(reports)) => {
-            reports.iter().map(|r| format!("{}: {}", r.source, views::source_outcome(&r.outcome))).collect()
+            reports.iter().map(|r| format!("{}: {}", r.source, format::source_outcome(&r.outcome))).collect()
         }
         Some(Details::Space { .. }) => Vec::new(),
         Some(Details::Sandbox { signal, harness }) => match harness {

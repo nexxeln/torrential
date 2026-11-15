@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "torrential"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anstream",
  "anstyle",
@@ -3244,12 +3244,45 @@ dependencies = [
  "clap",
  "clap_complete",
  "ctrlc",
+ "flate2",
+ "globset",
+ "httparse",
+ "indicatif",
+ "insta",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "torrential-core",
+ "torrential-daemon",
+ "torrential-engine",
+ "torrential-search",
+ "torrential-tui",
+ "url",
+]
+
+[[package]]
+name = "torrential-core"
+version = "0.5.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
+name = "torrential-daemon"
+version = "0.5.2"
+dependencies = [
+ "clap",
  "dirs",
  "flate2",
  "getrandom 0.3.4",
  "globset",
  "httparse",
- "indicatif",
  "insta",
  "libc",
  "lzma-rust2",
@@ -3270,21 +3303,13 @@ dependencies = [
  "torrential-core",
  "torrential-engine",
  "torrential-search",
- "torrential-tui",
+ "ts-rs",
  "url",
 ]
 
 [[package]]
-name = "torrential-core"
-version = "0.5.1"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "torrential-engine"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cmake",
  "cxx",
@@ -3292,11 +3317,12 @@ dependencies = [
  "sha1 0.10.7",
  "sha2 0.10.9",
  "tempfile",
+ "torrential-core",
 ]
 
 [[package]]
 name = "torrential-search"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "futures-util",
  "percent-encoding",
@@ -3314,11 +3340,12 @@ dependencies = [
 
 [[package]]
 name = "torrential-tui"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "crossterm",
  "insta",
  "ratatui",
+ "serde_json",
  "torrential-core",
 ]
 
@@ -3396,6 +3423,28 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "ts-rs"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
+dependencies = [
+ "thiserror 2.0.21",
+ "ts-rs-macros",
+]
+
+[[package]]
+name = "ts-rs-macros"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d90eea51bc7988ef9e674bf80a85ba6804739e535e9cab48e4bb34a8b652aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "termcolor",
+]
 
 [[package]]
 name = "typenum"

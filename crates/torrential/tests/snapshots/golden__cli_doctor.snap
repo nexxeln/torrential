@@ -1,0 +1,59 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "doctor",
+    "checks": [
+      {
+        "check": "sandbox",
+        "status": "ok",
+        "detail": "no sandbox detected"
+      },
+      {
+        "check": "disk",
+        "status": "ok",
+        "detail": "[redacted]"
+      },
+      {
+        "check": "state",
+        "status": "ok",
+        "detail": "[home]/th/state"
+      },
+      {
+        "check": "engine",
+        "status": "ok",
+        "detail": "running [version] (pid [pid])"
+      },
+      {
+        "check": "skill",
+        "status": "skipped",
+        "detail": "agents missing, claude missing"
+      },
+      {
+        "check": "config",
+        "status": "ok",
+        "detail": "[home]/th/config/config.yaml"
+      },
+      {
+        "check": "sources",
+        "status": "skipped",
+        "detail": "8 enabled; run torrential doctor --network to test each one"
+      },
+      {
+        "check": "profile",
+        "status": "ok",
+        "detail": "this Mac: 1080p screen, HDR, HEVC, arm64, English"
+      },
+      {
+        "check": "ffmpeg",
+        "status": "ok",
+        "detail": "[home]/bin/ffmpeg; the web player converts what the browser cannot read"
+      }
+    ],
+    "next": "torrential skill install"
+  }
+}

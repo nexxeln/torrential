@@ -1,0 +1,510 @@
+//! Films and series: finding one, playing it from the first source that works, and where a
+//! person stopped.
+
+pub mod attempt;
+pub mod catalog_port;
+pub mod follow;
+pub mod watching;
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use torrential_core::catalog::Episode;
+use torrential_core::protocol::{Continue, Home, TitlePage, TitleSources};
+use torrential_core::title::{Wanted, season_episodes, title_name};
+use torrential_core::watching::{next, play_target};
+use torrential_core::{
+    Category, EpisodeInfo, Error, ErrorCode, HexPrefix, Job, Kind, Next, Player, Preferences, Profile, Quality,
+    Release, ReleaseId, SearchQuery, Skip, TitleDetails, TitleId, TorrentId, VideoRef,
+};
+
+use super::ctx::Ctx;
+use super::downloads::search;
+use super::owner::Command;
+use super::shelf::Shelf;
+use catalog_port::CatalogPort;
+
+/// How long a release that failed stays at the back of the line.
+const FAILED_FOR: Duration = Duration::from_secs(6 * 60 * 60);
+/// Ranked releases a play looks at. The rest rarely play better than these.
+const MOST_CONSIDERED: usize = 12;
+/// Titles listed under Continue on the home screens.
+const CONTINUE_MOST: usize = 20;
+
+/// What the engine knows about films and series, beside its downloads.
+pub struct Titles {
+    pub catalog: Arc<dyn CatalogPort>,
+    pub shelf: Arc<Shelf>,
+    pub watching: Arc<watching::Watching>,
+    pub timing: Timing,
+    /// When each release last failed to play, and why. In memory, so a restart gives every one a
+    /// chance.
+    failed: Mutex<HashMap<ReleaseId, (Instant, Skip)>>,
+}
+
+/// Every deadline of a title play, and of the home lists. Tests shrink them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Timing {
+    /// For a source's file list.
+    pub file_list: Duration,
+    /// For the first bytes of the video, from the start of its download.
+    pub first_bytes: Duration,
+    /// For the whole play.
+    pub budget: Duration,
+    /// For the catalog lookups of the home lists, all together. Past it, the copies kept on this
+    /// machine answer.
+    pub home: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            file_list: Duration::from_secs(20),
+            first_bytes: Duration::from_secs(30),
+            budget: Duration::from_secs(180),
+            home: Duration::from_secs(3),
+        }
+    }
+}
+
+impl Titles {
+    pub fn new(catalog: Arc<dyn CatalogPort>, shelf: Arc<Shelf>, timing: Timing) -> Self {
+        Self {
+            catalog,
+            watching: Arc::new(watching::Watching::new(shelf.clone())),
+            shelf,
+            timing,
+            failed: Mutex::default(),
+        }
+    }
+
+    fn failed(&self, release: ReleaseId, why: Skip) {
+        self.failed.lock().unwrap_or_else(PoisonError::into_inner).insert(release, (Instant::now(), why));
+    }
+
+    /// `video`'s sources in the order a play in `player` tries them and a list of sources shows
+    /// them: the downloads in `jobs` that hold it, then the top of `ranked`. A download takes the
+    /// place of the release of `ranked` it was found as. A download on this machine goes ahead of a
+    /// release that is not, when `player` reuses it with `ffmpeg` there or not. Any other download
+    /// that holds it comes after the top of `ranked`. A release that failed lately goes last, with
+    /// why. Releases ranked below the top rarely play better, so neither shows them.
+    pub fn line(
+        &self,
+        jobs: &[Job],
+        video: &VideoRef,
+        ranked: Vec<Release>,
+        player: Player,
+        ffmpeg: bool,
+    ) -> Vec<Release> {
+        let here: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
+        let failed = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
+        let failed_lately = |id: &ReleaseId| failed.get(id).filter(|(at, _)| at.elapsed() < FAILED_FOR);
+        let reused = |release: &Release| {
+            matches!(release.id, ReleaseId::Torrent(id) if here.contains(&id))
+                && player.reuses(Quality::parse(&release.name), ffmpeg)
+        };
+        let mut found_as = HashSet::new();
+        let held: Vec<Release> = jobs
+            .iter()
+            .filter_map(|job| {
+                let (release, found) = holding(job, video, &ranked)?;
+                found_as.extend(found);
+                Some(release)
+            })
+            .collect();
+        let (first, other): (Vec<Release>, Vec<Release>) = held.into_iter().partition(|release| reused(release));
+        let mut seen = HashSet::new();
+        let mut line: Vec<Release> = first
+            .into_iter()
+            .chain(ranked.into_iter().take(MOST_CONSIDERED).filter(|release| !found_as.contains(&release.id)))
+            .chain(other)
+            .filter(|release| seen.insert(release.id))
+            .map(|release| Release { failed: failed_lately(&release.id).map(|(_, why)| why.clone()), ..release })
+            .collect();
+        line.sort_by_key(|release| (release.failed.is_some(), !reused(release)));
+        line
+    }
+
+    /// The film or episode `video` names, from the catalog's details alone. A series without an
+    /// episode is its next episode to watch, or its first when the person has caught up.
+    pub async fn resolve(&self, video: &VideoRef, now: i64) -> Result<Resolved, Error> {
+        let details = self.catalog.title(&video.title).await?;
+        let video = match (details.card.kind, video.episode) {
+            (Kind::Series, None) => next_episode(&details, &self.shelf.watched(&video.title)?, now)?,
+            _ => video.clone(),
+        };
+        let episode = playable(&details, video.episode, now)?.cloned();
+        Ok(Resolved { video, details, episode })
+    }
+
+    /// The search for `title`'s releases, ranked for playing now in `player` with `preferences`.
+    /// It asks the catalog which titles share the name, which takes the catalog's search. So a
+    /// play asks for this only when it is about to search, and a title whose download is here
+    /// plays without it.
+    pub async fn query(
+        &self,
+        title: &Resolved,
+        preferences: Preferences,
+        player: Player,
+    ) -> Result<SearchQuery, Error> {
+        let namesakes = self.catalog.namesakes(&title.details.card).await?;
+        let wanted = Wanted::of(&title.details, &namesakes, title.video.episode)?;
+        let text = wanted.queries().into_iter().next().unwrap_or_else(|| wanted.name.clone());
+        Ok(SearchQuery {
+            category: Some(Category::Video),
+            profile: Profile { preferences, player, ..Profile::default() },
+            wanted: Some(wanted),
+            ..SearchQuery::new(text)
+        })
+    }
+}
+
+/// A film or an episode a person asked for, as the catalog describes it.
+pub struct Resolved {
+    pub video: VideoRef,
+    pub details: TitleDetails,
+    pub episode: Option<EpisodeInfo>,
+}
+
+impl Resolved {
+    /// The film's name and year, or the series' name and the episode, as a person reads it.
+    pub fn name(&self) -> String {
+        torrential_core::title::title_name(&self.details.card, self.video.episode)
+    }
+}
+
+/// A download on this machine that a title play made for `video`'s title and that holds it, as a
+/// release to try, and the ID of the release of `ranked` it was found as. It has that release's
+/// name, sources, and age, but its own ID and size.
+fn holding(job: &Job, video: &VideoRef, ranked: &[Release]) -> Option<(Release, Option<ReleaseId>)> {
+    let link = job.title.as_ref().filter(|link| link.title == video.title && link.span.covers(video.episode))?;
+    let id = ReleaseId::Torrent(job.id);
+    if let Some(found) = ranked.iter().find(|release| release.id == id || link.release == Some(release.id)) {
+        let release = Release { id, size: job.progress.size, span: Some(link.span), failed: None, ..found.clone() };
+        return Some((release, Some(found.id)));
+    }
+    let release = Release {
+        id,
+        name: job.name.clone().unwrap_or_else(|| job.id.to_hex()),
+        size: job.progress.size,
+        seeders: None,
+        leechers: None,
+        published: None,
+        category: Some(Category::Video),
+        flags: BTreeSet::new(),
+        sources: Vec::new(),
+        magnet: None,
+        torrent_url: None,
+        info_url: None,
+        span: Some(link.span),
+        swarm: None,
+        failed: None,
+    };
+    Some((release, None))
+}
+
+/// The episode a series plays next, or its first aired one when the person has caught up.
+fn next_episode(details: &TitleDetails, watched: &[torrential_core::Watched], now: i64) -> Result<VideoRef, Error> {
+    play_target(details, watched, now)
+        .map(|target| target.video)
+        .ok_or_else(|| Error::new(ErrorCode::NotFound, format!("no episode of {} has aired yet", details.card.name)))
+}
+
+/// The film, or the aired episode, that `episode` names of the title `details` describes: `None`
+/// for the film. Refuses an episode of a film, a series without an episode, an episode the series
+/// does not have, and one that has not aired. A title play, its sources and a saved place all ask
+/// here.
+pub fn playable(details: &TitleDetails, episode: Option<Episode>, now: i64) -> Result<Option<&EpisodeInfo>, Error> {
+    season_episodes(details, episode)?;
+    let Some(e) = episode else { return Ok(None) };
+    let info = details.seasons.iter().flat_map(|season| &season.episodes).find(|info| info.episode == e);
+    let info = info.ok_or_else(|| Error::internal("season_episodes found the episode"))?;
+    if info.aired_by(now) {
+        return Ok(Some(info));
+    }
+    let named = format!("{} {e}", details.card.name);
+    Err(match info.aired {
+        Some(aired) => {
+            let day = &torrential_core::units::timestamp(aired)[..10];
+            Error::new(ErrorCode::Usage, format!("{named} has not aired: it airs on {day}"))
+        }
+        None => Error::new(ErrorCode::Usage, format!("{named} has not aired, and has no air date yet")),
+    })
+}
+
+/// One title as the catalog describes it, with where the person stopped, what plays next, and
+/// the downloads made by playing it. The socket's `title` and `GET /api/title` both answer with it.
+pub(super) async fn title_page(ctx: &Ctx, id: TitleId) -> Result<TitlePage, Error> {
+    let now = torrential_core::time::now();
+    let details = ctx.titles.catalog.title(&id).await?;
+    let watched = ctx.titles.shelf.watched(&id)?;
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    Ok(TitlePage {
+        next: next(&details, &watched, now),
+        play_target: play_target(&details, &watched, now),
+        saved: ctx.titles.shelf.is_saved(&id)?,
+        downloads: jobs.into_iter().filter(|job| job.title.as_ref().is_some_and(|link| link.title == id)).collect(),
+        watched,
+        details,
+    })
+}
+
+/// For each title watched lately, its video to go on with, and the saved titles. A finished film,
+/// and a series the person has caught up with, are left out. The catalog lookups share one
+/// deadline, so an unreachable catalog cannot hold the lists up. Past it, each title's details
+/// come from the copy kept on this machine, and a title with none is left out.
+pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
+    let now = torrential_core::time::now();
+    let deadline = tokio::time::Instant::now() + ctx.titles.timing.home;
+    let catalog = &ctx.titles.catalog;
+    let mut going_on = Vec::new();
+    for recent in ctx.titles.shelf.recent(CONTINUE_MOST)? {
+        let id = &recent.video.title;
+        let details = match tokio::time::timeout_at(deadline, catalog.title(id)).await {
+            Ok(looked_up) => looked_up.ok(),
+            Err(_) => catalog.kept(id).await,
+        };
+        let Some(details) = details else { continue };
+        let watched = ctx.titles.shelf.watched(&recent.video.title)?;
+        let Some(Next { video, resume_at }) = next(&details, &watched, now) else { continue };
+        let episode = video
+            .episode
+            .and_then(|e| details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e).cloned());
+        let duration = watched.iter().find(|w| w.video == video).and_then(|w| w.duration);
+        going_on.push(Continue { title: details.card, video, episode, resume_at, duration });
+    }
+    Ok(Home { going_on, saved: ctx.titles.shelf.saved()? })
+}
+
+/// The releases of the film or episode `video` names, in the order a play tries them.
+pub(super) async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
+    let title = ctx.titles.resolve(&video, torrential_core::time::now()).await?;
+    let mut result = search(ctx, ctx.titles.query(&title, (ctx.preferences)(), Player::External).await?).await?;
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    let ffmpeg = ctx.media.ffmpeg.converts();
+    result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);
+    Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
+}
+
+/// The release among `video`'s sources whose ID starts with `prefix`, or that is the download
+/// here of a release whose ID does, as listed before the download started.
+pub(super) async fn pinned(ctx: &Ctx, video: &VideoRef, prefix: &str) -> Result<Release, Error> {
+    let parsed: HexPrefix = prefix.parse()?;
+    let sources = sources(ctx, video.clone()).await?;
+    let name = title_name(&sources.title, sources.video.episode);
+    let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
+    let found_as = |release: &Release| {
+        jobs.iter().any(|job| {
+            ReleaseId::Torrent(job.id) == release.id
+                && job.title.as_ref().and_then(|link| link.release).is_some_and(|found| parsed.matches(&found))
+        })
+    };
+    let matching: Vec<&Release> =
+        sources.result.releases.iter().filter(|r| parsed.matches(&r.id) || found_as(r)).collect();
+    match matching.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(Error::new(ErrorCode::NotFound, format!("no source of {name} has an ID that starts with {prefix}"))
+            .with_hint(format!("run torrential sources {video} to list them"))
+            .with_next(format!("torrential sources {video}"))),
+        many => Err(Error::new(
+            ErrorCode::AmbiguousRef,
+            format!("{prefix} starts the IDs of {} sources of {name}", many.len()),
+        )
+        .with_hint("give more of the ID")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use torrential_core::title::Span;
+    use torrential_core::{InfoHash, JobStatus, Progress, Selection, TitleLink, Watched};
+
+    fn video(text: &str) -> VideoRef {
+        text.parse().unwrap()
+    }
+
+    async fn resolve(titles: &Titles, text: &str) -> Result<String, (ErrorCode, String)> {
+        titles.resolve(&video(text), 1_762_990_000).await.map(|r| r.name()).map_err(|e| (e.code, e.message))
+    }
+
+    fn titles(dir: &tempfile::TempDir) -> Titles {
+        let path = dir.path().join("state.db");
+        let shelf = Shelf::open(&crate::daemon::db::connect(&path).unwrap()).unwrap();
+        Titles::new(Arc::new(catalog_port::Fake::default()), Arc::new(shelf), Timing::default())
+    }
+
+    #[test]
+    fn sources_go_downloads_here_first_then_the_top_twelve_and_those_that_failed_lately_last_with_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let titles = titles(&dir);
+        let release = |n: u8| Release {
+            id: ReleaseId::Torrent(TorrentId::from_bytes([n; 20])),
+            name: format!("release {n}"),
+            size: None,
+            seeders: None,
+            leechers: None,
+            published: None,
+            category: None,
+            flags: BTreeSet::new(),
+            sources: Vec::new(),
+            magnet: None,
+            torrent_url: None,
+            info_url: None,
+            span: None,
+            swarm: None,
+            failed: None,
+        };
+        let film = TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: None };
+        let job = |n: u8, title: Option<TitleLink>| Job {
+            id: TorrentId::from_bytes([n; 20]),
+            info_hash: InfoHash::V1([n; 20]),
+            name: Some(format!("release {n}")),
+            dir: "/downloads".into(),
+            path: None,
+            status: JobStatus::Queued,
+            progress: Progress::default(),
+            selection: Selection::All,
+            added_at: 0,
+            title,
+            place: torrential_core::Place::Folder,
+        };
+        titles.failed(release(2).id, Skip::NoVideo);
+        titles.failed(release(40).id, Skip::NoData { waited_s: 30 });
+        let jobs = [job(3, None), job(40, Some(film))];
+        let line = |jobs: &[Job], video: &str, ranked: &[u8]| -> Vec<(u8, Option<Skip>)> {
+            let ranked = ranked.iter().map(|n| release(*n)).collect();
+            let line = titles.line(jobs, &video.parse().unwrap(), ranked, Player::External, false).into_iter();
+            line.map(|r| (r.name.trim_start_matches("release ").parse().unwrap(), r.failed)).collect()
+        };
+        let fine = |n: u8| (n, None);
+        assert_eq!(line(&[], "tt0063350", &[1, 2, 3]), [fine(1), fine(3), (2, Some(Skip::NoVideo))]);
+        assert_eq!(
+            line(&jobs, "tt0063350", &[1, 2, 3, 4]),
+            [fine(3), fine(1), fine(4), (40, Some(Skip::NoData { waited_s: 30 })), (2, Some(Skip::NoVideo))],
+            "a download here leads, and one that failed lately goes last even when it holds the film"
+        );
+        assert_eq!(line(&jobs, "tt0100258", &[1]), [fine(1)], "a download made for another title holds nothing");
+        let many: Vec<u8> = (1..=20).collect();
+        let top: Vec<(u8, Option<Skip>)> =
+            [1].into_iter().chain(3..=12).map(fine).chain([(2, Some(Skip::NoVideo))]).collect();
+        assert_eq!(line(&[], "tt0063350", &many), top);
+    }
+
+    #[test]
+    fn a_download_here_takes_the_row_of_the_release_it_was_found_as() {
+        let dir = tempfile::tempdir().unwrap();
+        let titles = titles(&dir);
+        let listed = |id: ReleaseId, name: &str, source: &str| Release {
+            id,
+            name: name.into(),
+            size: Some(1_416_157_892),
+            seeders: Some(12),
+            leechers: None,
+            published: Some(1_294_411_507),
+            category: Some(Category::Video),
+            flags: [torrential_core::Flag::PublicDomain].into(),
+            sources: vec![source.into()],
+            magnet: None,
+            torrent_url: None,
+            info_url: None,
+            span: Some(Span::Film),
+            swarm: None,
+            failed: None,
+        };
+        let by_link = ReleaseId::Locator(torrential_core::LocatorId::from_bytes([5; 20]));
+        let by_hash = ReleaseId::Torrent(TorrentId::from_bytes([6; 20]));
+        let ranked = vec![
+            listed(by_link, "Night.of.the.Living.Dead.1968.720p.x264", "knaben"),
+            listed(by_hash, "Night Of The Living Dead (with spanish subtitles)", "archive.org"),
+            listed(
+                ReleaseId::Torrent(TorrentId::from_bytes([7; 20])),
+                "Night of the Living Dead (1968)",
+                "archive.org",
+            ),
+        ];
+        let job = |n: u8, name: &str, release: ReleaseId| Job {
+            id: TorrentId::from_bytes([n; 20]),
+            info_hash: InfoHash::V1([n; 20]),
+            name: Some(name.into()),
+            dir: "/downloads".into(),
+            path: None,
+            status: JobStatus::Queued,
+            progress: Progress { size: Some(734_003_200), ..Progress::default() },
+            selection: Selection::All,
+            added_at: 0,
+            title: Some(TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: Some(release) }),
+            place: torrential_core::Place::Folder,
+        };
+        let jobs =
+            [job(50, "Night.1968.720p", by_link), job(6, "NightOfTheLivingDeadwithSpanishSubtitles_595", by_hash)];
+        let line = titles.line(&jobs, &video("tt0063350"), ranked, Player::External, false);
+        let rows: Vec<_> = line
+            .iter()
+            .map(|r| (r.id.to_ref()[..2].to_string(), r.name.as_str(), r.sources.clone(), r.size, r.published))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "32".into(),
+                    "Night.of.the.Living.Dead.1968.720p.x264",
+                    vec!["knaben".into()],
+                    Some(734_003_200),
+                    Some(1_294_411_507)
+                ),
+                (
+                    "06".into(),
+                    "Night Of The Living Dead (with spanish subtitles)",
+                    vec!["archive.org".into()],
+                    Some(734_003_200),
+                    Some(1_294_411_507)
+                ),
+                (
+                    "07".into(),
+                    "Night of the Living Dead (1968)",
+                    vec!["archive.org".into()],
+                    Some(1_416_157_892),
+                    Some(1_294_411_507)
+                ),
+            ],
+            "each download here once, under the name, source, and age of the release it was found as"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_series_plays_its_next_aired_episode_and_never_one_that_has_not_aired() {
+        let dir = tempfile::tempdir().unwrap();
+        let titles = titles(&dir);
+        assert_eq!(resolve(&titles, "tt9999901").await, Ok("Harbor Lights S01E01".into()));
+        assert_eq!(resolve(&titles, "tt0063350").await, Ok("Night of the Living Dead (1968)".into()));
+        let finished = |text: &str, at| Watched {
+            video: video(text),
+            position: 2630.0,
+            duration: Some(2640.0),
+            release: None,
+            at,
+        };
+        titles.shelf.watch(&finished("tt9999901:1:1", 10)).unwrap();
+        assert_eq!(resolve(&titles, "tt9999901").await, Ok("Harbor Lights S01E02".into()));
+        titles.shelf.watch(&finished("tt9999901:2:1", 20)).unwrap();
+        assert_eq!(
+            resolve(&titles, "tt9999901").await,
+            Ok("Harbor Lights S01E01".into()),
+            "caught up, so from the start"
+        );
+        assert_eq!(
+            resolve(&titles, "tt9999901:2:2").await,
+            Err((ErrorCode::Usage, "Harbor Lights S02E02 has not aired: it airs on 2100-01-01".into()))
+        );
+        assert_eq!(
+            resolve(&titles, "tt9999901:2:3").await,
+            Err((ErrorCode::Usage, "Harbor Lights S02E03 has not aired, and has no air date yet".into()))
+        );
+        assert_eq!(
+            resolve(&titles, "tt9999901:4:1").await,
+            Err((ErrorCode::NotFound, "S04E01 is not an episode of Harbor Lights".into()))
+        );
+    }
+}

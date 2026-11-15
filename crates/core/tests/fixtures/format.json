@@ -1,0 +1,223 @@
+{
+  "about": "How every screen writes sizes, ages, percents and clocks, and when a video counts as finished. cargo test and bun test both read this file. Sizes and ages follow one rule everywhere (decision D2); percents still differ by screen.",
+  "size": [
+    {
+      "bytes": 0,
+      "text": "0 B"
+    },
+    {
+      "bytes": 512,
+      "text": "512 B"
+    },
+    {
+      "bytes": 1023,
+      "text": "1.0 KiB"
+    },
+    {
+      "bytes": 1024,
+      "text": "1.0 KiB"
+    },
+    {
+      "bytes": 1536,
+      "text": "1.5 KiB"
+    },
+    {
+      "bytes": 10240,
+      "text": "10.0 KiB"
+    },
+    {
+      "bytes": 1048576,
+      "text": "1.0 MiB"
+    },
+    {
+      "bytes": 104857600,
+      "text": "100 MiB"
+    },
+    {
+      "bytes": 1072693248,
+      "text": "1.0 GiB"
+    },
+    {
+      "bytes": 1610612736,
+      "text": "1.5 GiB"
+    },
+    {
+      "bytes": 5497558138880,
+      "text": "5.0 TiB"
+    }
+  ],
+  "age": [
+    {
+      "seconds": 0,
+      "text": "now"
+    },
+    {
+      "seconds": 30,
+      "text": "now"
+    },
+    {
+      "seconds": 59,
+      "text": "now"
+    },
+    {
+      "seconds": 60,
+      "text": "1m"
+    },
+    {
+      "seconds": 119,
+      "text": "1m"
+    },
+    {
+      "seconds": 3599,
+      "text": "59m"
+    },
+    {
+      "seconds": 3600,
+      "text": "1h"
+    },
+    {
+      "seconds": 7199,
+      "text": "1h"
+    },
+    {
+      "seconds": 86399,
+      "text": "23h"
+    },
+    {
+      "seconds": 86400,
+      "text": "1d"
+    },
+    {
+      "seconds": 172800,
+      "text": "2d"
+    },
+    {
+      "seconds": 5097600,
+      "text": "59d"
+    },
+    {
+      "seconds": 5184000,
+      "text": "60d"
+    },
+    {
+      "seconds": 31449600,
+      "text": "364d"
+    },
+    {
+      "seconds": 31536000,
+      "text": "1y"
+    },
+    {
+      "seconds": 63072000,
+      "text": "2y"
+    },
+    {
+      "seconds": 94608000,
+      "text": "3y"
+    }
+  ],
+  "percent": [
+    {
+      "done": 0,
+      "size": 1000,
+      "cli": "0.0%",
+      "tui": "0%",
+      "web": "0%"
+    },
+    {
+      "done": 1,
+      "size": 3,
+      "cli": "33.3%",
+      "tui": "33%",
+      "web": "33%"
+    },
+    {
+      "done": 999,
+      "size": 1000,
+      "cli": "99.9%",
+      "tui": "99%",
+      "web": "99%"
+    },
+    {
+      "done": 9999,
+      "size": 10000,
+      "cli": "99.9%",
+      "tui": "99%",
+      "web": "99%"
+    },
+    {
+      "done": 1000,
+      "size": 1000,
+      "cli": "100%",
+      "tui": "100%",
+      "web": "100%"
+    }
+  ],
+  "clock": [
+    {
+      "seconds": 0,
+      "text": "0:00"
+    },
+    {
+      "seconds": 7,
+      "text": "0:07"
+    },
+    {
+      "seconds": 247,
+      "text": "4:07"
+    },
+    {
+      "seconds": 3599,
+      "text": "59:59"
+    },
+    {
+      "seconds": 3600,
+      "text": "1:00:00"
+    },
+    {
+      "seconds": 3847,
+      "text": "1:04:07"
+    },
+    {
+      "seconds": 36000,
+      "text": "10:00:00"
+    }
+  ],
+  "finished": [
+    {
+      "position": 0,
+      "duration": 5400,
+      "finished": false
+    },
+    {
+      "position": 5000,
+      "duration": 5400,
+      "finished": false
+    },
+    {
+      "position": 5250,
+      "duration": 5400,
+      "finished": true
+    },
+    {
+      "position": 5380,
+      "duration": 5400,
+      "finished": true
+    },
+    {
+      "position": 100,
+      "duration": 110,
+      "finished": true
+    },
+    {
+      "position": 80,
+      "duration": 110,
+      "finished": false
+    },
+    {
+      "position": 0,
+      "duration": 0,
+      "finished": false
+    }
+  ]
+}

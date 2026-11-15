@@ -1,0 +1,442 @@
+---
+source: crates/torrential/src/client/tests.rs
+expression: out
+---
+=== usage, exit 2
+error[usage]: invalid value 'soon' for '--timeout <DURATION>': "soon" is not a duration; use a form like 100s, 5m, or 1h30m
+hint: torrential wait --help
+next: torrential wait --help
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "usage",
+    "message": "invalid value 'soon' for '--timeout <DURATION>': \"soon\" is not a duration; use a form like 100s, 5m, or 1h30m",
+    "hint": "torrential wait --help"
+  },
+  "next": "torrential wait --help"
+}
+=== confirmation_required, exit 2
+error[confirmation_required]: deleting files needs confirmation
+hint: add --yes to confirm
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "confirmation_required",
+    "message": "deleting files needs confirmation",
+    "hint": "add --yes to confirm"
+  },
+  "next": null
+}
+=== invalid_ref, exit 3
+error[invalid_ref]: "9b5" is not a torrent reference: an ID is 4 to 40 hex characters, with a leading u for a result that has no infohash
+hint: pass an ID from `torrential search`, a magnet link, a .torrent file, or a .torrent URL
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "invalid_ref",
+    "message": "\"9b5\" is not a torrent reference: an ID is 4 to 40 hex characters, with a leading u for a result that has no infohash",
+    "hint": "pass an ID from `torrential search`, a magnet link, a .torrent file, or a .torrent URL"
+  },
+  "next": null
+}
+=== invalid_torrent, exit 3
+error[invalid_torrent]: not a torrent file: expected value at line 1 column 1
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "invalid_torrent",
+    "message": "not a torrent file: expected value at line 1 column 1"
+  },
+  "next": null
+}
+=== not_found, exit 3
+error[not_found]: no download matches 9b52
+hint: run torrential status to list downloads
+next: torrential status
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "not_found",
+    "message": "no download matches 9b52",
+    "hint": "run torrential status to list downloads"
+  },
+  "next": "torrential status"
+}
+=== ambiguous_ref, exit 3
+error[ambiguous_ref]: e3a1 matches 2 torrents
+  e3a1f0	ubuntu-24.04.5-desktop-amd64.iso	search result
+  e3a1c4	Ubuntu 24.04.5 LTS Desktop (repack)	search result
+hint: use a longer prefix, such as: torrential get e3a1f0
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "ambiguous_ref",
+    "message": "e3a1 matches 2 torrents",
+    "hint": "use a longer prefix, such as: torrential get e3a1f0",
+    "details": {
+      "candidates": [
+        {
+          "id": "e3a1f0",
+          "name": "ubuntu-24.04.5-desktop-amd64.iso",
+          "kind": "search result"
+        },
+        {
+          "id": "e3a1c4",
+          "name": "Ubuntu 24.04.5 LTS Desktop (repack)",
+          "kind": "search result"
+        }
+      ]
+    }
+  },
+  "next": null
+}
+=== job_conflict, exit 4
+error[job_conflict]: d40a19 has no file list yet, so there is nothing to verify
+hint: torrential wait d40a19 --until metadata
+next: torrential wait d40a19 --until metadata
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "job_conflict",
+    "message": "d40a19 has no file list yet, so there is nothing to verify",
+    "hint": "torrential wait d40a19 --until metadata"
+  },
+  "next": "torrential wait d40a19 --until metadata"
+}
+=== path_conflict, exit 4
+error[path_conflict]: 1 file already exists under /Users/ada/Movies/night
+  /Users/ada/Movies/night/Night.mp4
+hint: choose another folder with --dir, or move the conflicting paths; only regular files can be reused
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "path_conflict",
+    "message": "1 file already exists under /Users/ada/Movies/night",
+    "hint": "choose another folder with --dir, or move the conflicting paths; only regular files can be reused",
+    "details": {
+      "paths": [
+        "/Users/ada/Movies/night/Night.mp4"
+      ]
+    }
+  },
+  "next": null
+}
+=== providers_unavailable, exit 5
+error[providers_unavailable]: all sources failed (knaben, apibay)
+  knaben: HTTP 502
+  apibay: timed out
+hint: check the network connection, or retry with a longer --timeout
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "providers_unavailable",
+    "message": "all sources failed (knaben, apibay)",
+    "hint": "check the network connection, or retry with a longer --timeout",
+    "details": {
+      "sources": [
+        {
+          "source": "knaben",
+          "outcome": "http",
+          "status": 502,
+          "elapsed_ms": 300
+        },
+        {
+          "source": "apibay",
+          "outcome": "timeout",
+          "elapsed_ms": 300
+        }
+      ]
+    }
+  },
+  "next": null
+}
+=== metadata_timeout, exit 5
+error[metadata_timeout]: no peer sent the file list for 9b5212 in time
+hint: try again later, or run torrential get 9b5212 to keep trying in the background
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "metadata_timeout",
+    "message": "no peer sent the file list for 9b5212 in time",
+    "hint": "try again later, or run torrential get 9b5212 to keep trying in the background"
+  },
+  "next": null
+}
+=== network_unavailable, exit 5
+error[network_unavailable]: no network route to any DHT node
+hint: check the network connection, then run the command again
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "network_unavailable",
+    "message": "no network route to any DHT node",
+    "hint": "check the network connection, then run the command again"
+  },
+  "next": null
+}
+=== fetch_failed, exit 5
+error[fetch_failed]: could not fetch https://archive.org/download/x/x_archive.torrent: HTTP 404
+hint: try the magnet link instead
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "fetch_failed",
+    "message": "could not fetch https://archive.org/download/x/x_archive.torrent: HTTP 404",
+    "hint": "try the magnet link instead"
+  },
+  "next": null
+}
+=== sandbox_network_blocked, exit 6
+error[sandbox_network_blocked]: this sandbox blocks network access, so torrential cannot reach peers
+  signal: CODEX_SANDBOX_NETWORK_DISABLED=1 (codex)
+hint: in interactive Codex, rerun with sandbox_permissions "require_escalated" and prefix_rule ["torrential"]; unattended Codex (codex exec) has approvals off, so torrential cannot work there
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "sandbox_network_blocked",
+    "message": "this sandbox blocks network access, so torrential cannot reach peers",
+    "hint": "in interactive Codex, rerun with sandbox_permissions \"require_escalated\" and prefix_rule [\"torrential\"]; unattended Codex (codex exec) has approvals off, so torrential cannot work there",
+    "details": {
+      "sandbox": {
+        "signal": "CODEX_SANDBOX_NETWORK_DISABLED=1",
+        "harness": "codex"
+      }
+    }
+  },
+  "next": null
+}
+=== sandbox_write_blocked, exit 6
+error[sandbox_write_blocked]: cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted
+hint: run torrential engine install from a terminal outside any sandbox
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "sandbox_write_blocked",
+    "message": "cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted",
+    "hint": "run torrential engine install from a terminal outside any sandbox"
+  },
+  "next": null
+}
+=== daemon_unavailable, exit 6
+error[daemon_unavailable]: the engine socket path /tmp/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/run/engine.sock is 141 bytes, over the <max>-byte limit
+hint: set TORRENTIAL_HOME to a shorter directory
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "daemon_unavailable",
+    "message": "the engine socket path /tmp/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/run/engine.sock is 141 bytes, over the <max>-byte limit",
+    "hint": "set TORRENTIAL_HOME to a shorter directory"
+  },
+  "next": null
+}
+=== daemon_version, exit 6
+error[daemon_version]: the engine uses protocol version 2, but this client uses 1
+  client 0.1.0, engine 0.2.0
+hint: run torrential engine stop, then run the command again
+next: torrential engine stop
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "daemon_version",
+    "message": "the engine uses protocol version 2, but this client uses 1",
+    "hint": "run torrential engine stop, then run the command again",
+    "details": {
+      "versions": {
+        "client": "0.1.0",
+        "daemon": "0.2.0"
+      }
+    }
+  },
+  "next": "torrential engine stop"
+}
+=== state_corrupt, exit 6
+error[state_corrupt]: the state database /Users/ada/.local/state/torrential/state.db is damaged: file is not a database
+hint: the state is never reset automatically; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "state_corrupt",
+    "message": "the state database /Users/ada/.local/state/torrential/state.db is damaged: file is not a database",
+    "hint": "the state is never reset automatically; move /Users/ada/.local/state/torrential/state.db aside to start fresh, or restore a backup"
+  },
+  "next": null
+}
+=== disk_full, exit 7
+error[disk_full]: needs 70.0 GiB more on this disk, but only 3.0 GiB is free and 2.0 GiB is kept in reserve
+hint: free some space, or choose another disk with --dir
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "disk_full",
+    "message": "needs 70.0 GiB more on this disk, but only 3.0 GiB is free and 2.0 GiB is kept in reserve",
+    "hint": "free some space, or choose another disk with --dir",
+    "details": {
+      "space": {
+        "required": 77309411328,
+        "available": 3221225472
+      }
+    }
+  },
+  "next": null
+}
+=== too_large, exit 7
+error[too_large]: the selection is 70.0 GiB, over the 50 GiB cap
+hint: add --max-size 70GiB to allow it, or pick fewer files with --files
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "too_large",
+    "message": "the selection is 70.0 GiB, over the 50 GiB cap",
+    "hint": "add --max-size 70GiB to allow it, or pick fewer files with --files"
+  },
+  "next": null
+}
+=== no_selection, exit 7
+error[no_selection]: no file in night matches "*.mkv"
+hint: run torrential files 6b6b6b to see the paths
+next: torrential files 6b6b6b
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "no_selection",
+    "message": "no file in night matches \"*.mkv\"",
+    "hint": "run torrential files 6b6b6b to see the paths"
+  },
+  "next": "torrential files 6b6b6b"
+}
+=== storage_error, exit 7
+error[storage_error]: the disk containing /Users/ada/.local/state/torrential/state.db is full
+hint: free some space on that disk
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "storage_error",
+    "message": "the disk containing /Users/ada/.local/state/torrential/state.db is full",
+    "hint": "free some space on that disk"
+  },
+  "next": null
+}
+=== verification_failed, exit 7
+error[verification_failed]: 3 damaged pieces in the selected files
+hint: run torrential verify 6bc1af --repair to download them again
+next: torrential verify 6bc1af --repair
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "verification_failed",
+    "message": "3 damaged pieces in the selected files",
+    "hint": "run torrential verify 6bc1af --repair to download them again"
+  },
+  "next": "torrential verify 6bc1af --repair"
+}
+=== no_source, exit 7
+error[no_source]: no peer or web seed has had the remaining 2 pieces (488.8 KiB) for 20m
+hint: run torrential resume 770e77 to try again; the 33.0 MiB already verified is kept
+next: torrential resume 770e77
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "no_source",
+    "message": "no peer or web seed has had the remaining 2 pieces (488.8 KiB) for 20m",
+    "hint": "run torrential resume 770e77 to try again; the 33.0 MiB already verified is kept"
+  },
+  "next": "torrential resume 770e77"
+}
+=== interrupted, exit 130
+error[interrupted]: interrupted
+hint: run the command again
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "interrupted",
+    "message": "interrupted",
+    "hint": "run the command again"
+  },
+  "next": null
+}
+=== not_paired, exit 6
+error[not_paired]: that is not the code on the Mac, so check it and enter it again
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "not_paired",
+    "message": "that is not the code on the Mac, so check it and enter it again"
+  },
+  "next": null
+}
+=== local_only, exit 6
+error[local_only]: only the Mac running torrential can add or remove devices
+hint: open torrential on the Mac to do it
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "local_only",
+    "message": "only the Mac running torrential can add or remove devices",
+    "hint": "open torrential on the Mac to do it"
+  },
+  "next": null
+}
+=== internal, exit 1
+error[internal]: the engine thread stopped
+--- json
+{
+  "schema": 1,
+  "type": "error",
+  "error": {
+    "code": "internal",
+    "message": "the engine thread stopped"
+  },
+  "next": null
+}

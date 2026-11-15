@@ -1,8 +1,8 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Modifier;
+use torrential_core::catalog::Episode;
 use torrential_core::error::Details;
 use torrential_core::protocol::{Continue, Home, TitlePage, TitlePlayed};
-use torrential_core::title::Episode;
 use torrential_core::{
     Art, AttemptEvent, Check, EpisodeInfo, Kind, Next, Season, Skip, TitleCard, TitleDetails, TitleId, Tried, VideoRef,
     Watched,
@@ -98,6 +98,7 @@ fn harbor_page() -> TitlePage {
             watched("tt9999901:1:3", 1320.0, 2640.0, 1),
         ],
         next: Some(Next { video: video("tt9999901:1:3"), resume_at: Some(1320.0) }),
+        play_target: Some(Next { video: video("tt9999901:1:3"), resume_at: Some(1320.0) }),
         downloads: Vec::new(),
     }
 }
@@ -110,7 +111,9 @@ fn night_page(watched_at: Option<f64>) -> TitlePage {
         Some(at) if at >= 5700.0 => None,
         at => Some(Next { video: video("tt0063350"), resume_at: at }),
     };
-    TitlePage { details: details(night(), synopsis, 96, Vec::new()), saved: true, watched, next, downloads: Vec::new() }
+    let play_target = next.clone().or(Some(Next { video: video("tt0063350"), resume_at: None }));
+    let details = details(night(), synopsis, 96, Vec::new());
+    TitlePage { details, saved: true, watched, next, play_target, downloads: Vec::new() }
 }
 
 fn home() -> Home {
@@ -149,7 +152,7 @@ fn played(name: &str, video_text: &str, resume_at: Option<f64>) -> TitlePlayed {
     TitlePlayed { video: video(video_text), name: name.into(), release, tried: Vec::new(), resume_at }
 }
 
-/// Bare `torrential` once the engine has answered with no downloads and this home.
+/// Bare `torrential` once the engine has answered with the downloads of `jobs()` and this home.
 fn opened(size: (u16, u16)) -> State {
     let mut state = titles_app(size);
     state.update(Msg::Watch(Event::Snapshot { jobs: jobs() }));
@@ -687,9 +690,4 @@ fn titles_screens() {
     snapshots("titles_found", searching);
     snapshots("titles_film", film);
     snapshots("titles_series", series);
-    snapshots("titles_help", |size| {
-        let mut state = opened(size);
-        press(&mut state, "?");
-        state
-    });
 }

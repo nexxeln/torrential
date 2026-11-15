@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use torrential_core::InfoHash;
+
 use crate::error::NativeError;
-use crate::identity::InfoHash;
 use crate::torrent::{ResumeData, TorrentState};
 
 /// A libtorrent event, read with `Session::wait_alerts`. Torrent events carry
@@ -76,18 +77,18 @@ pub enum Alert {
     },
     ListenSucceeded {
         address: SocketAddr,
-        transport: Transport,
+        /// Such as `tcp` or `utp`.
+        transport: String,
     },
     ListenFailed {
         /// The device or address libtorrent tried, such as `lo0`.
         interface: String,
         port: u16,
-        transport: Transport,
+        transport: String,
         operation: String,
         error: NativeError,
     },
     DhtBootstrapped,
-    SessionStats(SessionStats),
 }
 
 impl Alert {
@@ -108,37 +109,7 @@ impl Alert {
             | Alert::HashFailed { torrent, .. }
             | Alert::TorrentRemoved { torrent }
             | Alert::FilePrioritiesApplied { torrent } => Some(*torrent),
-            Alert::ListenSucceeded { .. }
-            | Alert::ListenFailed { .. }
-            | Alert::DhtBootstrapped
-            | Alert::SessionStats(_) => None,
+            Alert::ListenSucceeded { .. } | Alert::ListenFailed { .. } | Alert::DhtBootstrapped => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    Tcp,
-    TcpSsl,
-    Utp,
-    UtpSsl,
-    Socks5,
-    Socks5Ssl,
-    Http,
-    HttpSsl,
-    I2p,
-    Rtc,
-}
-
-/// Byte totals since the session started, and current DHT node and peer
-/// counts, from `Session::post_session_stats`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SessionStats {
-    pub sent_payload_bytes: u64,
-    pub received_payload_bytes: u64,
-    /// Payload plus protocol overhead.
-    pub sent_bytes: u64,
-    pub received_bytes: u64,
-    pub dht_nodes: u64,
-    pub peers_connected: u64,
 }

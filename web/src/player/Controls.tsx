@@ -11,25 +11,14 @@ import {
   TvIcon,
 } from "@heroicons/react/20/solid";
 import { PauseIcon, PlayIcon } from "@heroicons/react/24/solid";
-import { type ButtonHTMLAttributes, type CSSProperties, type ReactNode, useState } from "react";
+import { type CSSProperties, type ReactNode, useState } from "react";
 import type { Chapter } from "../api";
 import { preferences, savePreferences } from "../lib/storage";
+import { ControlButton } from "../ui/ControlButton";
 import type { PlayerActions } from "./actions";
 import { usePlayer } from "./context";
 import { TimeLabel, useChapter } from "./TimeLabel";
 import { useVideo } from "./video";
-
-export function ControlButton({ label, className = "", ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      className={`relative flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/15 aria-expanded:bg-white/15 pointer-coarse:size-11 *:[svg]:size-5 *:[svg]:fill-ink ${className}`}
-      {...rest}
-    />
-  );
-}
 
 function Volume({ actions }: { actions: PlayerActions }) {
   const { video } = usePlayer();
@@ -81,7 +70,6 @@ interface Props {
   nextLabel: string;
   /** Safari can send this video to an AirPlay screen. */
   airPlay: (() => void) | null;
-  /** Play on TV. */
   cast: ReactNode;
   /** The timeline, above the buttons. */
   seekBar: ReactNode;

@@ -1,15 +1,14 @@
-use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use torrential_core::error::Details;
 use torrential_core::{Error, ErrorCode};
 
-use crate::env::Env;
 use crate::output::format;
+use torrential_daemon::env::Env;
+use torrential_daemon::fsutil::{Writes, sha256, temporary, write_atomic};
 
 pub const SKILL: &str = include_str!("../../../skills/torrential/SKILL.md");
 const FILE: &str = "SKILL.md";
@@ -164,9 +163,7 @@ enum Link {
 impl Layout {
     pub fn new(scope: Scope, env: &Env, cwd: &Path) -> Result<Self, Error> {
         let root = match scope {
-            Scope::User => {
-                PathBuf::from(env.var("HOME").ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))?)
-            }
+            Scope::User => env.home().ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))?.to_path_buf(),
             Scope::Project => cwd.to_path_buf(),
         };
         Ok(Self::under(&root))
@@ -193,11 +190,6 @@ impl Layout {
     }
 }
 
-pub struct Writes {
-    pub sandboxed: bool,
-    pub rerun: String,
-}
-
 pub fn command(verb: &str, args: &TargetArgs, force: bool, cwd: &Path) -> String {
     let mut words = vec!["torrential", "skill", verb];
     match args.agent {
@@ -215,26 +207,6 @@ pub fn command(verb: &str, args: &TargetArgs, force: bool, cwd: &Path) -> String
     match args.scope {
         Scope::User => command,
         Scope::Project => format!("cd {} && {command}", format::shell_word(&cwd.display().to_string())),
-    }
-}
-
-impl Writes {
-    pub fn new(env: &Env, rerun: String) -> Self {
-        Self { sandboxed: env.sandbox_harness().is_some(), rerun }
-    }
-
-    pub fn error(&self, path: &Path, e: io::Error) -> Error {
-        let denied = matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES | libc::EROFS));
-        let message = format!("cannot write {}: {e}", path.display());
-        if denied && self.sandboxed {
-            Error::new(ErrorCode::SandboxWriteBlocked, message).with_hint(format!(
-                "the sandbox blocks this write; ask the user to run it in a terminal: {}",
-                self.rerun
-            ))
-        } else {
-            Error::new(ErrorCode::StorageError, message)
-                .with_hint(format!("make sure that folder is writable, then run {}", self.rerun))
-        }
     }
 }
 
@@ -425,34 +397,6 @@ fn replace_with_link(link: &Path, writes: &Writes) -> Result<(), Error> {
     write_link(link, writes)
 }
 
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let kept = std::fs::metadata(path).ok().map(|m| m.permissions());
-    let partial = temporary(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    if let Some(permissions) = &kept {
-        options.mode(permissions.mode());
-    }
-    options
-        .open(&partial)
-        .and_then(|mut file| {
-            // The umask may have narrowed the mode `open` asked for.
-            if let Some(permissions) = kept {
-                file.set_permissions(permissions)?;
-            }
-            file.write_all(bytes)
-        })
-        .and_then(|()| std::fs::rename(&partial, path))
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&partial);
-        })
-}
-
-fn temporary(path: &Path) -> PathBuf {
-    let name = path.file_name().expect("written paths end in a name").to_string_lossy();
-    path.with_file_name(format!(".{name}.{}.partial", std::process::id()))
-}
-
 fn conflict(conflicts: &[(PathBuf, State)], writes: &Writes) -> Error {
     let message = match conflicts {
         [(_, State::Modified)] => "the installed skill was edited after torrential wrote it".to_string(),
@@ -466,10 +410,6 @@ fn conflict(conflicts: &[(PathBuf, State)], writes: &Writes) -> Error {
             writes.rerun,
             it = if conflicts.len() == 1 { "it" } else { "them" }
         ))
-}
-
-pub fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -635,7 +575,7 @@ mod tests {
     #[test]
     fn a_blocked_write_in_a_sandbox_names_the_command_for_the_human() {
         use std::os::unix::fs::PermissionsExt;
-        if crate::paths::uid() == 0 {
+        if torrential_daemon::paths::uid() == 0 {
             return;
         }
         let home = Home::new();

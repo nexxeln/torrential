@@ -2,11 +2,12 @@ import { XMarkIcon } from "@heroicons/react/16/solid";
 import { useState } from "react";
 import type { Job } from "../api";
 import { bytes, clock, percent, rate } from "../lib/format";
-import { useJobs } from "../lib/jobs";
+import { STATE_WORDS, useJobs } from "../lib/jobs";
 import { fileName, readable } from "../lib/release";
 import { forgetPosition, type Position, positions } from "../lib/storage";
 import { Link, watchPath } from "../router";
 import { Meter } from "../ui/Meter";
+import { SHORT_ID } from "../wire";
 
 const SHOWN = 6;
 const ROW = "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 hover:bg-white/5";
@@ -44,22 +45,19 @@ function summary(job: Job): string {
     case "downloading":
       return [share, rate(progress.down_rate)].filter(Boolean).join(" · ");
     case "done":
-      return progress.size ? bytes(progress.size) : "Done";
+      return progress.size ? bytes(progress.size) : STATE_WORDS.done;
     case "paused":
-      return ["Paused", share].filter(Boolean).join(" · ");
+      return [STATE_WORDS.paused, share].filter(Boolean).join(" · ");
     case "error":
-      return "Failed";
     case "metadata":
-      return "Finding peers";
     case "queued":
-      return "Queued";
     case "checking":
-      return "Checking";
+      return STATE_WORDS[job.state];
   }
 }
 
 function Download({ job }: { job: Job }) {
-  const name = readable(job.name ?? job.id.slice(0, 8));
+  const name = readable(job.name ?? job.id.slice(0, SHORT_ID));
   return (
     <li>
       <Link href={watchPath(job.id)} className={ROW}>

@@ -7,8 +7,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Countries, Country};
+use crate::catalog::{self, Countries, Country, Episode, TitleCard, TitleDetails};
 use crate::error::{Error, ErrorCode};
+use crate::filetype::{FileType, Kind};
+use crate::name::{self, year};
 use crate::quality::Quality;
 
 /// A film, or with `episode` one episode of a series.
@@ -21,10 +23,13 @@ pub struct Title {
     pub episode: Option<Episode>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Episode {
-    pub season: u32,
-    pub episode: u32,
+/// A film's name and year, or a series' name and the episode, as `Harbor Lights S01E02`.
+pub fn title_name(card: &TitleCard, episode: Option<Episode>) -> String {
+    match (episode, card.year) {
+        (Some(episode), _) => format!("{} {episode}", card.name),
+        (None, Some(year)) => format!("{} ({year})", card.name),
+        (None, None) => card.name.clone(),
+    }
 }
 
 /// What a file in a torrent is, most likely reading first. `path` is the file's path inside the
@@ -74,6 +79,13 @@ pub fn read(path: &str, torrent: &str) -> Vec<Title> {
         add(Title { name: reading.words.join(" "), year: reading.year, episode: episode(reading) });
     }
     titles
+}
+
+/// How many years a release's or a listing's year may be off the title's: 1 for a film, since a
+/// release can name the year after the premiere, and none for a series, whose year is the year it
+/// began.
+pub const fn year_slack(episode: bool) -> u16 {
+    if episode { 0 } else { 1 }
 }
 
 /// A title as it compares: lowercase, without accents or punctuation, `&` as `and`.
@@ -270,6 +282,30 @@ pub enum Namesakes {
     Shadowed,
 }
 
+/// How many episodes the season of `episode` has, or `None` for a film. Refuses an episode of a
+/// film, a series without an episode, and an episode the series does not have.
+pub fn season_episodes(details: &TitleDetails, episode: Option<Episode>) -> Result<Option<u32>, Error> {
+    let card = &details.card;
+    match (card.kind, episode) {
+        (catalog::Kind::Film, None) => Ok(None),
+        (catalog::Kind::Film, Some(e)) => {
+            Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {e}", card.name))
+                .with_hint(format!("play {} without an episode", card.id)))
+        }
+        (catalog::Kind::Series, None) => {
+            Err(Error::new(ErrorCode::Usage, format!("{} is a series, so name one of its episodes", card.name))
+                .with_hint(format!("name an episode such as {}:1:1", card.id)))
+        }
+        (catalog::Kind::Series, Some(e)) => {
+            let season = details.seasons.iter().find(|s| s.number == e.season);
+            if !season.is_some_and(|s| s.episodes.iter().any(|info| info.episode == e)) {
+                return Err(Error::new(ErrorCode::NotFound, format!("{e} is not an episode of {}", card.name)));
+            }
+            Ok(season.map(|s| s.episodes.len() as u32))
+        }
+    }
+}
+
 /// The film or episode a person wants, as the catalog names it, to tell its releases from others.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Wanted {
@@ -290,6 +326,29 @@ pub struct Wanted {
 }
 
 impl Wanted {
+    /// How to tell the releases of `episode` of the title `details` describes, or of the film,
+    /// from others. `namesakes` are the titles of its kind that share its name, in the catalog's
+    /// order.
+    pub fn of(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<Episode>) -> Result<Wanted, Error> {
+        let card = &details.card;
+        let season_episodes = season_episodes(details, episode)?;
+        let shared = namesakes.iter().any(|other| other.id != card.id);
+        let namesakes = match namesakes.first() {
+            _ if !shared => Namesakes::None,
+            Some(first) if first.id == card.id => Namesakes::Leading,
+            _ => Namesakes::Shadowed,
+        };
+        Ok(Wanted {
+            name: card.name.clone(),
+            year: card.year,
+            episode,
+            namesakes,
+            runtime: details.runtime_min.map(|minutes| Duration::from_secs(u64::from(minutes) * 60)),
+            season_episodes,
+            countries: details.countries,
+        })
+    }
+
     /// The reading of `release` that is this title, or `None`. The name must be the same once
     /// normalized. A film's year may be 1 off the catalog's, since a release can name the year
     /// after the premiere. A series' year must be the year it began. A country code after the
@@ -310,8 +369,7 @@ impl Wanted {
                     self.namesakes != Namesakes::Shadowed || reading.country.is_some() && self.episode.is_some()
                 }
                 (Some(_), None) => true,
-                (Some(named), Some(year)) if self.episode.is_some() => named == year,
-                (Some(named), Some(year)) => named.abs_diff(year) <= 1,
+                (Some(named), Some(year)) => named.abs_diff(year) <= year_slack(self.episode.is_some()),
             };
             country && year && reading.span.covers(self.episode) && normalized(&reading.name) == name
         })
@@ -396,9 +454,6 @@ mod seconds {
     }
 }
 
-const VIDEO_EXTENSIONS: [&str; 12] =
-    ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "m2ts", "wmv", "mpg", "mpeg", "ogv"];
-
 /// Tags that end the title in a release name. Words that are also common in titles, such as
 /// `web` and `extended`, are left out: a resolution or a year almost always comes before them.
 const TAGS: [&str; 44] = [
@@ -410,7 +465,9 @@ const TAGS: [&str; 44] = [
 
 fn stem(name: &str) -> &str {
     match name.rsplit_once('.') {
-        Some((stem, extension)) if VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()) => stem,
+        Some((stem, extension)) if FileType::of_extension(extension).is_some_and(|t| t.kind == Some(Kind::Video)) => {
+            stem
+        }
         _ => name,
     }
 }
@@ -489,8 +546,8 @@ impl Reading {
                 reading.counted = number(0);
             }
         }
-        let year = (1..end).rev().find_map(|i| Some((i, year(&lower[i])?)));
-        match year {
+        let dated = (1..end).rev().find_map(|i| Some((i, year(&lower[i])?)));
+        match dated {
             Some((at, year)) => {
                 reading.year = Some(year);
                 reading.words = words(&tokens[..at]);
@@ -498,7 +555,11 @@ impl Reading {
                     reading.with_year = Some(words(&tokens[..end]));
                 }
             }
-            None => reading.words = words(&tokens[..end]),
+            // A year can follow the tags, as in `Night Of The Living Dead 720p 1968`.
+            None => {
+                reading.words = words(&tokens[..end]);
+                reading.year = lower[end..].iter().find_map(|token| year(token));
+            }
         }
         reading
     }
@@ -509,8 +570,8 @@ impl Reading {
     }
 }
 
-/// The name's words. Dots and underscores separate them, `[...]` is dropped, and `(...)` is
-/// dropped but for the first year in it, as in `(Howard Hawks, 1940)`. Also whether the name
+/// The name's words. Dots, underscores, and bars separate them, `[...]` is dropped, and `(...)`
+/// is dropped but for the first year in it, as in `(Howard Hawks, 1940)`. Also whether the name
 /// starts with a `[Group]`.
 fn tokens(name: &str) -> (Vec<String>, bool) {
     let grouped = name.trim_start().starts_with('[');
@@ -523,7 +584,7 @@ fn tokens(name: &str) -> (Vec<String>, bool) {
             ']' | ')' | '}' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    let dated = held.split(|c: char| !c.is_alphanumeric()).find(|word| year(word).is_some());
+                    let dated = name::words(&held).find(|word| year(word).is_some());
                     if c == ')'
                         && let Some(dated) = dated
                     {
@@ -534,7 +595,7 @@ fn tokens(name: &str) -> (Vec<String>, bool) {
                 }
             }
             c if depth > 0 => held.push(c),
-            '.' | '_' | ',' | ':' => spaced.push(' '),
+            '.' | '_' | ',' | ':' | '|' => spaced.push(' '),
             c => spaced.push(c),
         }
     }
@@ -556,11 +617,6 @@ fn digits(token: &str, min: usize, max: usize) -> Option<u32> {
         _ => token,
     };
     ((min..=max).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_digit())).then(|| token.parse().ok())?
-}
-
-fn year(token: &str) -> Option<u16> {
-    let year: u16 = (token.len() == 4 && token.bytes().all(|b| b.is_ascii_digit())).then(|| token.parse().ok())??;
-    (1900..2100).contains(&year).then_some(year)
 }
 
 /// `s01e02` and `1x02` as season, first, and last episode. The last differs in `s01e02e03`,
@@ -938,6 +994,21 @@ mod tests {
         ]
         .map(|(wanted, release)| wanted.fit(release).map(|n| n.span.to_string()));
         assert_eq!(read, [None, Some("film".into()), Some("s1e1".into())]);
+    }
+
+    #[test]
+    fn a_year_after_a_tag_or_between_bars_is_the_releases_year() {
+        let original = film_named("Night of the Living Dead", 1968, Namesakes::Leading);
+        let remake = film_named("Night of the Living Dead", 1990, Namesakes::Shadowed);
+        let year = |wanted: &Wanted, release| wanted.fit(release).map(|named| named.year);
+        // The first two as archive.org names them in tests/fixtures/archive.org.
+        let rows = [
+            ("Night Of The Living Dead 720p 1968", Some(Some(1968)), None),
+            ("Night of the Living Dead |1968| WebRip US (HD 1080p)", Some(Some(1968)), None),
+            ("Night.of.the.Living.Dead.720p.BluRay.x264.1990", None, Some(Some(1990))),
+        ];
+        let read = rows.map(|(release, ..)| (release, year(&original, release), year(&remake, release)));
+        assert_eq!(read, rows);
     }
 
     #[test]

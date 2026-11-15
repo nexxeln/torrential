@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { addDevice, type ApiError, asApiError, type Device, type DeviceList, devices, type PairingOffer, removeDevice } from "../api";
-import { age, sentence } from "../lib/format";
+import { ago, sentence } from "../lib/format";
 import { Button } from "../ui/Button";
 import { Header } from "../ui/Header";
+import { PAIRING_MINUTES } from "../wire";
 
 /** How often the page asks for the list, so a device that pairs shows up while the code is on screen. */
 const POLL_MS = 2000;
@@ -61,7 +62,7 @@ function Row({ device, now, busy, onRemove }: { device: Device; now: number; bus
       <div className="flex min-w-0 flex-col">
         <p className="truncate text-base font-medium text-ink sm:text-sm">{device.name}</p>
         <p className="text-sm text-pencil tabular-nums">
-          Added {age(device.added_at, now)} ago · last seen {age(device.seen_at, now)} ago
+          Added {ago(device.added_at, now)} · last seen {ago(device.seen_at, now)}
         </p>
       </div>
       <Button variant="quiet" disabled={busy} title="Locks it out at once. Add it again with a new code." onClick={onRemove}>
@@ -145,7 +146,7 @@ export function DevicesPage() {
               <Button variant="primary" size="large" disabled={busy !== null} onClick={() => act("add", addDevice)}>
                 Add a device
               </Button>
-              <p className="text-sm text-pencil">Shows a code that lets one phone or TV in for 5 minutes.</p>
+              <p className="text-sm text-pencil">Shows a code that lets one phone or TV in for {PAIRING_MINUTES} minutes.</p>
             </div>
           ))}
         {problem && (

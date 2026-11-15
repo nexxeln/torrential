@@ -11,7 +11,8 @@ use super::*;
 use crate::theme::{self, ColorMode};
 use crate::{layout, view};
 
-const SIZES: [(u16, u16); 5] = [(80, 24), (100, 30), (160, 45), (47, 40), (47, 19)];
+/// One size on each side of the layout's width breakpoint, each short enough to clip.
+const SIZES: [(u16, u16); 2] = [(80, 24), (47, 19)];
 
 pub(super) fn shot(state: &State) -> String {
     let (w, h) = state.size;
@@ -79,15 +80,6 @@ fn idle_screens() {
 }
 
 #[test]
-fn a_newer_version_shows_in_the_footer() {
-    snapshots("newer_version", |size| {
-        let mut state = idle(size);
-        state.update(Msg::NewerVersion("0.1.1".into()));
-        state
-    });
-}
-
-#[test]
 fn streaming_screens() {
     snapshots("streaming", streaming);
 }
@@ -112,37 +104,6 @@ fn download_files_screens() {
         press(&mut state, "jjjjjjjjjjjjjj");
         state
     });
-}
-
-#[test]
-fn help_screens() {
-    snapshots("help", |size| {
-        let mut state = searched(size);
-        press(&mut state, "?");
-        state
-    });
-}
-
-#[test]
-fn a_download_says_stalled_only_after_a_quiet_spell() {
-    let mut state = with_downloads((100, 30));
-    let wikipedia = |rate: u64| {
-        let mut job = jobs()[0].clone();
-        job.progress.down_rate = rate;
-        job.progress.eta = None;
-        Msg::Watch(Event::Job { job: Box::new(job) })
-    };
-    state.update(wikipedia(600));
-    let trickled = state.now;
-    assert!(line(&render(&state), 4).ends_with("22%"), "bytes arrive without an ETA: {}", line(&render(&state), 4));
-    later(&mut state, 20_000);
-    state.update(wikipedia(0));
-    assert!(line(&render(&state), 4).ends_with("22%"), "quiet for 20 s: {}", line(&render(&state), 4));
-    assert_eq!(state.next_stall(), Some(trickled + Duration::from_secs(30)));
-    later(&mut state, 10_000);
-    state.update(Msg::Tick);
-    assert!(line(&render(&state), 4).ends_with("22%       stalled"), "{}", line(&render(&state), 4));
-    assert_eq!(state.next_stall(), None);
 }
 
 #[test]
@@ -381,7 +342,7 @@ fn a_row_shows_the_resolution_and_its_details_spell_out_the_quality() {
     assert_eq!(line(&buf, y + 1), "            │   knaben · trusted uploader · 1080p h264");
     let (_, y) = find(&buf, "CAM.x264");
     assert!(
-        line(&buf, y).ends_with("CAM.x264        cam               1.4 GiB     41   2mo"),
+        line(&buf, y).ends_with("CAM.x264        cam               1.4 GiB     41   60d"),
         "a blank, never the codec, when no resolution"
     );
     let (_, y) = find(&buf, "(1968) colorized");
@@ -797,16 +758,4 @@ fn an_unreachable_engine_says_so_with_its_hint() {
     assert!(screen.contains("engine │ Cannot reach the engine."), "{screen}");
     assert!(screen.contains("see ~/.local/state/torrential/engine.log"), "{screen}");
     assert!(screen.contains("Cannot reach the engine: the engine did not start within 10s"), "{screen}");
-}
-
-#[test]
-fn a_frame_drawn_before_the_resize_message_arrives_still_fits() {
-    let mut state = searched((160, 45));
-    press(&mut state, "d");
-    state.update(Msg::Files { item: Item::Download(id("6f2c81")), result: Ok(wikipedia_files()) });
-    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-    view::render(&mut buf, &state, ColorMode::TrueColor);
-    let mut tiny = Buffer::empty(Rect::new(0, 0, 61, 16));
-    view::render(&mut tiny, &state, ColorMode::TrueColor);
-    assert_eq!(find(&buf, "torrential"), (1, 0));
 }

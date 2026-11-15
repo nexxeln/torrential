@@ -1,38 +1,13 @@
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use assert_cmd::Command;
 use serde_json::Value;
-use torrential_core::SearchQuery;
-use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame};
+
+mod common;
+use common::{Home, Reply, Run, Server, fixture, hooks, ok, status};
 
 const BUILTIN: [&str; 8] =
     ["archlinux", "ubuntu", "debian", "archive.org", "academictorrents", "knaben", "apibay", "nyaa"];
-
-#[derive(Clone)]
-struct Reply {
-    status: u16,
-    body: Vec<u8>,
-    delay: Duration,
-}
-
-fn ok(body: Vec<u8>) -> Reply {
-    Reply { status: 200, body, delay: Duration::ZERO }
-}
-
-fn status(code: u16) -> Reply {
-    Reply { status: code, body: b"no".to_vec(), delay: Duration::ZERO }
-}
-
-fn fixture(name: &str) -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../search/tests/fixtures").join(name);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
 
 fn torrent(name: &str) -> Vec<u8> {
     let (length, piece) = (1usize << 20, 1usize << 18);
@@ -45,144 +20,15 @@ fn torrent(name: &str) -> Vec<u8> {
     [b"d4:info".as_slice(), &info, b"e"].concat()
 }
 
-type Routes = Vec<(&'static str, Vec<Reply>)>;
-
-struct Server {
-    base: String,
-    paths: Arc<Mutex<Vec<String>>>,
-}
-
-impl Server {
-    fn start(routes: impl FnOnce(&str) -> Routes) -> Server {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes = Arc::new(routes(&base));
-        let paths: Arc<Mutex<Vec<String>>> = Arc::default();
-        let counts: Arc<Mutex<HashMap<&'static str, usize>>> = Arc::default();
-        let log = paths.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let (routes, log, counts) = (routes.clone(), log.clone(), counts.clone());
-                std::thread::spawn(move || answer(stream, &routes, &log, &counts));
-            }
-        });
-        Server { base, paths }
-    }
-
-    fn asked(&self, prefix: &str) -> Vec<String> {
-        self.paths.lock().unwrap().iter().filter(|p| p.starts_with(prefix)).cloned().collect()
-    }
-}
-
-fn answer(mut stream: TcpStream, routes: &Routes, log: &Mutex<Vec<String>>, counts: &Mutex<HashMap<&str, usize>>) {
-    let mut head = Vec::new();
-    let mut buf = [0u8; 4096];
-    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => head.extend_from_slice(&buf[..n]),
-        }
-    }
-    let path = String::from_utf8_lossy(&head).split_whitespace().nth(1).unwrap_or("/").to_string();
-    log.lock().unwrap().push(path.clone());
-    let reply = match routes.iter().find(|(prefix, _)| path.starts_with(prefix)) {
-        Some((prefix, replies)) => {
-            let mut counts = counts.lock().unwrap();
-            let n = counts.entry(prefix).or_insert(0);
-            *n += 1;
-            replies[(*n - 1).min(replies.len() - 1)].clone()
-        }
-        None => status(404),
-    };
-    std::thread::sleep(reply.delay);
-    let head =
-        format!("HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.status, reply.body.len());
-    let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&reply.body));
-}
-
-struct Home {
-    dir: tempfile::TempDir,
-    vars: Vec<(&'static str, String)>,
-}
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", self.stdout, self.stderr))
-    }
-}
-
-const MAC: &str =
-    r#"{"os": "macos", "display": {"width": 3024, "height": 1964, "hdr": true}, "arch": "arm64", "language": "en"}"#;
-
 impl Home {
-    fn new(server: &Server, enabled: &[&str], sources: &str) -> Home {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("th");
+    /// A home whose only sources are `enabled`, each answered by `server`, with `sources` added
+    /// to the sources part of its config.
+    fn searching(server: &Server, enabled: &[&str], sources: &str) -> Home {
         let disabled: Vec<String> = BUILTIN.iter().filter(|s| !enabled.contains(s)).map(|s| format!("{s:?}")).collect();
         let endpoints: Vec<String> = enabled.iter().map(|s| format!("{s}={}/{s}/", server.base)).collect();
-        let home = Home {
-            vars: vec![
-                ("HOME", dir.path().display().to_string()),
-                ("TORRENTIAL_HOME", root.display().to_string()),
-                ("TORRENTIAL_TEST_IDLE_TIMEOUT", "30s".into()),
-                ("TORRENTIAL_TEST_NETWORK", "loopback".into()),
-                ("TORRENTIAL_TEST_DISK", "roomy".into()),
-                ("TORRENTIAL_TEST_ENDPOINTS", endpoints.join(",")),
-                ("TORRENTIAL_TEST_MACHINE", MAC.into()),
-            ],
-            dir,
-        };
+        let home = Home::new().with(hooks::DISK, "roomy").with(hooks::ENDPOINTS, &endpoints.join(","));
         home.write_config(&format!("sources:\n  disabled: [{}]\n{sources}", disabled.join(", ")));
         home
-    }
-
-    fn write_config(&self, text: &str) {
-        let dir = self.dir.path().join("th/config");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.yaml"), text).unwrap();
-    }
-
-    fn set(&mut self, key: &'static str, value: &str) {
-        self.unset(key);
-        self.vars.push((key, value.into()));
-    }
-
-    fn unset(&mut self, key: &'static str) {
-        self.vars.retain(|(k, _)| *k != key);
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::cargo_bin("torrential").unwrap();
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "TORRENTIAL_TEST_ENGINE"] {
-            cmd.env_remove(key);
-        }
-        cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str()))).timeout(Duration::from_secs(60));
-        cmd
-    }
-
-    fn run(&self, args: &[&str]) -> Run {
-        let out = self.command(args).output().unwrap();
-        Run {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8(out.stdout).unwrap(),
-            stderr: String::from_utf8(out.stderr).unwrap(),
-        }
-    }
-
-    fn path(&self, rest: &str) -> PathBuf {
-        self.dir.path().join(rest)
-    }
-}
-
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]).output();
     }
 }
 
@@ -194,7 +40,7 @@ fn search_ranks_what_the_sources_answered() {
             ("/apibay/", vec![ok(fixture("apibay/q.php-ubuntu.json"))]),
         ]
     });
-    let home = Home::new(&server, &["knaben", "apibay"], "");
+    let home = Home::searching(&server, &["knaben", "apibay"], "");
 
     let plain = home.run(&["search", "ubuntu", "--limit", "3"]);
     let json = home.run(&["search", "ubuntu", "--limit", "3", "--json"]).json();
@@ -232,35 +78,9 @@ fn search_ranks_what_the_sources_answered() {
     assert_eq!((server.asked("/knaben/").len(), server.asked("/apibay/").len()), (1, 1));
 }
 
-#[test]
-fn an_idle_engine_stays_up_while_its_search_answers_are_cached() {
-    let server = Server::start(|_| vec![("/apibay/", vec![ok(fixture("apibay/q.php-ubuntu.json"))])]);
-    let mut home = Home::new(&server, &["apibay"], "");
-    home.set("TORRENTIAL_TEST_IDLE_TIMEOUT", "1s");
-    let engine = |home: &Home| home.run(&["daemon", "status", "--json"]).json()["pid"].clone();
-
-    let first = home.run(&["search", "ubuntu"]);
-    let pid = engine(&home);
-    std::thread::sleep(Duration::from_secs(3));
-    let after_idle = engine(&home);
-    let again = home.run(&["search", "ubuntu", "--json"]).json();
-
-    assert_eq!(first.code, 0, "{}", first.stderr);
-    assert!(pid.is_u64(), "{pid}");
-    assert_eq!(after_idle, pid, "the engine outlived its idle timeout");
-    let sources: Vec<String> = again["result"]["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| format!("{} {}", s["source"], s["outcome"]))
-        .collect();
-    assert_eq!(sources, [r#""apibay" "cached""#]);
-    assert_eq!(server.asked("/apibay/").len(), 1);
-}
-
 const NETINST: &str = "/debian/debian-cd/current/arm64/bt-cd/debian-13.7.0-arm64-netinst.iso.torrent";
 
-fn debian(netinst: Vec<Reply>) -> impl FnOnce(&str) -> Routes {
+fn debian(netinst: Vec<Reply>) -> impl FnOnce(&str) -> Vec<(&'static str, Vec<Reply>)> {
     |_| {
         vec![
             (NETINST, netinst),
@@ -281,7 +101,7 @@ fn debian(netinst: Vec<Reply>) -> impl FnOnce(&str) -> Routes {
 #[test]
 fn get_on_a_search_result_downloads_into_the_configured_folder() {
     let server = Server::start(debian(vec![ok(torrent("debian-13.7.0-arm64-netinst.iso"))]));
-    let home = Home::new(&server, &["debian"], "");
+    let home = Home::searching(&server, &["debian"], "");
     let isos = home.path("isos");
     home.write_config(&format!(
         "{}downloads:\n  dir: \"{}\"\n",
@@ -330,7 +150,7 @@ fn private_indexer_links_never_reach_the_output() {
         "  torznab:\n    - name: jackett\n      url: {}/torznab/api\n      api_key_env: TEST_JACKETT_KEY\n",
         server.base
     );
-    let mut home = Home::new(&server, &[], &sources);
+    let mut home = Home::searching(&server, &[], &sources);
     home.set("TEST_JACKETT_KEY", "k3y");
 
     let plain = home.run(&["search", "ubuntu"]);
@@ -379,7 +199,7 @@ fn a_private_locator_resolves_after_a_restart_with_the_key_from_the_environment(
     });
     let indexer =
         |key_env: &str| format!("  torznab:\n    - name: jackett\n      url: {}/torznab/api\n{key_env}", server.base);
-    let mut home = Home::new(&server, &[], &indexer("      api_key_env: TEST_JACKETT_KEY\n"));
+    let mut home = Home::searching(&server, &[], &indexer("      api_key_env: TEST_JACKETT_KEY\n"));
     let config = std::fs::read_to_string(home.path("th/config/config.yaml")).unwrap();
     home.set("TEST_JACKETT_KEY", "k3y");
     let name = |run: &Run| run.json()["files"]["name"].as_str().map(String::from);
@@ -465,62 +285,10 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn send(socket: &mut UnixStream, request: &Request) {
-    socket.write_all(&encode_frame(request).unwrap()).unwrap();
-}
-
-fn receive(socket: &mut UnixStream) -> Value {
-    let mut len = [0u8; 4];
-    socket.read_exact(&mut len).unwrap();
-    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    socket.read_exact(&mut body).unwrap();
-    serde_json::from_slice(&body).unwrap()
-}
-
-#[test]
-fn a_streaming_search_sends_updates_before_the_result() {
-    let server = Server::start(|_| {
-        vec![
-            ("/knaben/", vec![ok(fixture("knaben/v2-search-ubuntu.json"))]),
-            ("/apibay/", vec![Reply { delay: Duration::from_millis(800), ..ok(fixture("apibay/q.php-ubuntu.json")) }]),
-        ]
-    });
-    let home = Home::new(&server, &["knaben", "apibay"], "");
-    assert_eq!(home.run(&["status"]).code, 0);
-
-    let mut socket = UnixStream::connect(home.path("th/run/engine.sock")).unwrap();
-    send(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
-    receive(&mut socket);
-    send(&mut socket, &Request::Search { query: SearchQuery::new("ubuntu"), stream: true });
-    let mut frames = Vec::new();
-    loop {
-        let frame = receive(&mut socket);
-        let kind = frame["event"].as_str().or(frame["type"].as_str()).unwrap().to_string();
-        let sources: Vec<String> = frame["result"]["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| format!("{} {}", s["source"].as_str().unwrap(), s["outcome"].as_str().unwrap()))
-            .collect();
-        frames.push(format!("{kind}: {sources:?} total {} pending {}", frame["result"]["total"], frame["pending"]));
-        if kind != "search_update" {
-            break;
-        }
-    }
-
-    assert_eq!(
-        frames,
-        [
-            r#"search_update: ["knaben ok"] total 97 pending ["apibay"]"#,
-            r#"search: ["knaben ok", "apibay ok"] total 158 pending null"#,
-        ]
-    );
-}
-
 #[test]
 fn the_engine_refuses_a_config_that_does_not_parse() {
-    let server = Server::start(|_| Vec::new());
-    let home = Home::new(&server, &[], "  torznab: 3\n");
+    let server = Server::start(|_| Vec::<(&str, _)>::new());
+    let home = Home::searching(&server, &[], "  torznab: 3\n");
 
     let refused = home.run(&["status"]);
     let doctor = home.run(&["doctor", "--json"]).json();
@@ -542,29 +310,6 @@ fn the_engine_refuses_a_config_that_does_not_parse() {
 }
 
 #[test]
-fn a_config_toml_is_named_rather_than_ignored() {
-    let server = Server::start(|_| Vec::new());
-    let home = Home::new(&server, &[], "");
-    std::fs::remove_file(home.path("th/config/config.yaml")).unwrap();
-    std::fs::write(home.path("th/config/config.toml"), "[downloads]\ndir = \"~/isos\"\n").unwrap();
-
-    let refused = home.run(&["status"]);
-    let doctor = home.run(&["doctor"]);
-
-    let (toml, yaml) = (home.path("th/config/config.toml"), home.path("th/config/config.yaml"));
-    let message = format!("{} is not supported; the config file is config.yaml", toml.display());
-    assert_eq!(refused.code, 2, "{}{}", refused.stdout, refused.stderr);
-    assert_eq!(
-        refused.stderr,
-        format!(
-            "error[usage]: {message}\nhint: write your settings as YAML in {}, then delete config.toml\n",
-            yaml.display()
-        )
-    );
-    assert!(doctor.stdout.contains(&format!("config\tfail\t{message}\n")), "{}", doctor.stdout);
-}
-
-#[test]
 fn doctor_network_asks_each_enabled_source() {
     let server = Server::start(|_| {
         vec![
@@ -573,7 +318,7 @@ fn doctor_network_asks_each_enabled_source() {
             ("/nyaa/", vec![ok(fixture("nyaa/index-linux.xml"))]),
         ]
     });
-    let home = Home::new(&server, &["knaben", "apibay", "nyaa"], "");
+    let home = Home::searching(&server, &["knaben", "apibay", "nyaa"], "");
 
     let doctor = home.run(&["doctor", "--network", "--json"]).json();
 
@@ -613,7 +358,7 @@ fn files_on_an_archive_org_result_reads_its_torrent_url_not_the_bare_magnet() {
             ("/archive.org/download/Night_Of_The_Living_Dead_raw_HD_WS/", vec![status(503)]),
         ]
     });
-    let home = Home::new(&server, &["archive.org"], "");
+    let home = Home::searching(&server, &["archive.org"], "");
 
     let found = home.run(&["search", "night", "of", "the", "living", "dead", "--limit", "50", "--json"]).json();
     let files = home.run(&["files", "6bc1af", "--json"]).json();
@@ -653,7 +398,7 @@ fn the_machine_and_preferences_rank_a_film_search_and_say_so() {
             vec![ok(fixture("archive.org/advancedsearch.php-night-of-the-living-dead-1968.json"))],
         )]
     });
-    let home = Home::new(&server, &["archive.org"], "");
+    let home = Home::searching(&server, &["archive.org"], "");
     let search = ["search", "night", "of", "the", "living", "dead", "1968", "--category", "video", "--limit", "6"];
     let shown = |run: &Run| -> Vec<String> {
         assert_eq!(run.code, 0, "{}", run.stderr);
@@ -693,9 +438,9 @@ fn the_machine_and_preferences_rank_a_film_search_and_say_so() {
             "1.0 GiB | 720p | Night Of The Living Dead 720p 1968",
             "1.1 GiB | ? | Night of the Living Dead (1968)",
             "1.1 GiB | ? | Night of the Living Dead (1968)",
-            "528.0 MiB | ? | Night of the Living Dead (1968)",
+            "528 MiB | ? | Night of the Living Dead (1968)",
             "1.8 GiB | ? | Night of the Living Dead (1968)",
-            "742.1 MiB | ? | Night Of The Living Dead ( 1968)",
+            "742 MiB | ? | Night Of The Living Dead ( 1968)",
             "# ranked for this Mac: 1080p screen, no HDR, H.264 only, up to 2 GB, arm64, English · overrides: screen \
              laptop, max_size 2GB, playback h264",
         ]

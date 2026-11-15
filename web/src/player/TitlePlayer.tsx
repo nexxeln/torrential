@@ -1,16 +1,17 @@
 import { type Dispatch, type RefObject, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { artUrl, asApiError, type MediaInfo, type PlayInfo, saveWatched, type TitlePage } from "../api";
+import { artUrl, asApiError, forgetWatched, type MediaInfo, type PlayInfo, saveWatched, type TitlePage } from "../api";
 import { useJob } from "../lib/jobs";
+import { episodeOf, titleOf, videoOf } from "../lib/video";
 import { goBack, navigate, playPath, titlePath } from "../router";
 import { useTitle } from "../titles/useTitle";
-import { episodeCode, episodeName, findEpisode, playingOrder, titleOf, videoOf } from "../titles/words";
+import { episodeCode, episodeName, findEpisode, playingOrder } from "../titles/words";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
-import { FfmpegReadout, PlayingReadout, Readout, TopBar } from "./Chrome";
+import { FfmpegReadout, type Heading, PlayingReadout, Readout, TopBar } from "./Chrome";
 import { usePlayer } from "./context";
 import { readMedia } from "./ffmpeg";
-import { leaveOnBack } from "./keys";
-import { type Heading, type Memory, type Neighbor, Playback, type Titled } from "./Playback";
+import { type Memory, type Neighbor, Playback, type Shown } from "./Playback";
+import { usePlayerPage } from "./page";
 import { type Recovery, type RecoveryEvent, recover, WATCHING } from "./recovery";
 import { type Naming, TitleFailed, TitleStarting } from "./TitleScreens";
 import { attempt, type Started, useTitleSession } from "./titleSession";
@@ -142,7 +143,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
   const back = useCallback(() => goBack(titlePath(id)), [id]);
   const backdrop = page && !page.art.background ? null : artUrl(id, "background");
 
-  const { attempt: heard } = session;
+  const heard = session.progress;
   const playing = session.stage === "reading" || session.stage === "ready" ? session.started.video : heard.video;
   const episode = heard.episode ?? (page && findEpisode(page, playing));
   const name = heard.title?.name ?? page?.name ?? null;
@@ -151,16 +152,14 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     () => ({ title: name, detail: episode ? `${episodeCode(episode)} · ${episodeName(episode)}` : year ? String(year) : null }),
     [name, episode, year],
   );
-  const kind = playing.includes(":") || page?.kind === "series" ? "episode" : "film";
+  const kind = episodeOf(playing) || page?.kind === "series" ? "episode" : "film";
 
-  useEffect(() => {
-    document.title = name ? `${name}${episode ? ` ${episodeCode(episode)}` : ""} · torrential` : "torrential";
-    return () => void (document.title = "torrential");
-  }, [name, episode]);
 
   const [recovery, dispatch] = useReducer(recover, WATCHING);
   const [swapped, setSwapped] = useState<Current | null>(null);
   const [switched, setSwitched] = useState(false);
+  /** This tab, to the engine, which keeps a video's place for the screen that started or resumed it last. */
+  const [tab] = useState(() => Math.random().toString(36).slice(2, 10));
   const element = useRef<HTMLVideoElement | null>(null);
   const first = useMemo<Current | null>(
     () =>
@@ -197,22 +196,26 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     return () => clearTimeout(timer);
   }, [switched]);
 
-  const titled = useMemo<Titled | null>(() => {
+  const shown = useMemo<Shown | null>(() => {
     if (!current) return null;
     const { started } = current;
     const heading: Heading = { title: naming.title ?? "", detail: naming.detail };
-    const duration = current.media.duration;
+    const { video, release } = started;
     const memory: Memory = {
       start: current.start,
       resumed: current.resumed,
-      save: (time, length) => void saveWatched({ video: started.video, position: time, duration: length, release: started.release.id }).catch(() => {}),
-      forget: () => void saveWatched({ video: started.video, position: 0, duration, release: started.release.id }).catch(() => {}),
+      save: (time, length, starts) =>
+        void saveWatched({ video, position: time, duration: length, release: release.id, tab, starts }).catch(() => {}),
+      forget: () => void forgetWatched(video).catch(() => {}),
     };
+    const nowPlaying = kind === "episode" ? { title: heading.detail ?? heading.title, album: heading.title } : { title: heading.title, album: "" };
     return {
       kind,
       video: started.video,
       heading,
+      nowPlaying,
       ...neighbors(page, started.video),
+      videos: [],
       memory,
       cover: current.poster ? null : (
         <TitleStarting attempt={heard} naming={naming} backdrop={backdrop} step={3} readout={<PlayingReadout play={started.play} />} />
@@ -221,24 +224,18 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
       overlay: <StallWatch play={started.play} element={element} dispatch={dispatch} />,
       replacing: switching,
     };
-  }, [current, naming, kind, page, heard, backdrop, switching]);
+  }, [current, naming, kind, page, heard, backdrop, switching, tab]);
 
-  const ready = titled !== null;
-  useEffect(() => {
-    if (ready) return;
-    const pressed = leaveOnBack(back);
-    addEventListener("keydown", pressed);
-    return () => removeEventListener("keydown", pressed);
-  }, [ready, back]);
+  usePlayerPage(name && `${name}${episode ? ` ${episodeCode(episode)}` : ""}`, shown !== null, back);
 
   const reading = session.stage === "reading" ? session.started.play : null;
   const readingJob = useJob(reading?.id ?? null) ?? reading?.job ?? null;
 
   return (
     <main className="fixed inset-0 bg-black text-soft">
-      {current && titled ? (
+      {current && shown ? (
         <>
-          <Playback key={current.started.play.id} play={current.started.play} media={current.media} onReload={onRetry} onBack={back} titled={titled} />
+          <Playback key={current.started.play.id} play={current.started.play} media={current.media} onReload={onRetry} onBack={back} shown={shown} />
           <RecoveryNotice recovery={recovery} switched={switched} onRetry={() => dispatch({ type: "retry", now: performance.now() })} />
         </>
       ) : (
@@ -249,7 +246,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
               backdrop={backdrop}
               kind={kind}
               error={session.error}
-              tried={session.tried}
+              tried={session.progress.passed}
               sources={titlePath(id, { sources: heard.video })}
               unpinned={source ? playPath(video) : null}
               onRetry={onRetry}
@@ -265,7 +262,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
             />
           )}
           <div className="absolute inset-x-0 top-0 z-10">
-            <TopBar name={null} file={null} onBack={back} />
+            <TopBar heading={null} onBack={back} />
           </div>
         </div>
       )}

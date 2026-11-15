@@ -105,36 +105,11 @@ pub fn name(s: &str, max: usize) -> String {
     format!("{head}…{tail}")
 }
 
-pub fn age(published: i64, now: i64) -> String {
-    let secs = (now - published).max(0);
-    let (minute, hour, day) = (60, 3_600, 86_400);
-    match secs {
-        s if s < minute => "now".into(),
-        s if s < hour => format!("{}m", s / minute),
-        s if s < day => format!("{}h", s / hour),
-        s if s < 60 * day => format!("{}d", s / day),
-        s if s < 365 * day => format!("{}mo", s / (30 * day)),
-        s => format!("{}y", s / (365 * day)),
-    }
-}
+pub use torrential_core::units::{format_rate as rate, format_size as size};
 
-pub fn size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value.round() >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    match (unit, value) {
-        (0, v) => format!("{v} B"),
-        (_, v) if v < 99.95 => format!("{v:.1} {}", UNITS[unit]),
-        (_, v) => format!("{v:.0} {}", UNITS[unit]),
-    }
-}
-
-pub fn rate(bytes_per_sec: u64) -> String {
-    format!("{}/s", size(bytes_per_sec))
+/// How long before `now` the Unix time `at` was, by core's rule.
+pub fn age(at: i64, now: i64) -> String {
+    torrential_core::units::age(now.saturating_sub(at).max(0) as u64)
 }
 
 pub fn seeds(n: Option<u32>) -> String {
@@ -177,6 +152,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sizes_ages_and_percents_read_as_the_shared_vectors_say() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../core/tests/fixtures/format.json")).expect("the vectors are JSON");
+        for case in vectors["size"].as_array().unwrap() {
+            assert_eq!(size(case["bytes"].as_u64().unwrap()), case["text"], "{case}");
+        }
+        for case in vectors["age"].as_array().unwrap() {
+            assert_eq!(age(0, case["seconds"].as_i64().unwrap()), case["text"], "{case}");
+        }
+        for case in vectors["percent"].as_array().unwrap() {
+            assert_eq!(percent(case["done"].as_u64().unwrap(), case["size"].as_u64().unwrap()), case["tui"], "{case}");
+        }
+    }
+
+    #[test]
     fn ellipsizes_by_display_width() {
         assert_eq!(ellipsize("archlinux-2026.10.01", 9), "archlinu…");
         assert_eq!(ellipsize("short", 9), "short");
@@ -207,7 +197,7 @@ mod tests {
         let ago = |secs: i64| age(now - secs, now);
         assert_eq!(
             [ago(30), ago(45 * 60), ago(5 * 3_600), ago(17 * 86_400), ago(70 * 86_400), ago(9 * 365 * 86_400)],
-            ["now", "45m", "5h", "17d", "2mo", "9y"]
+            ["now", "45m", "5h", "17d", "70d", "9y"]
         );
     }
 

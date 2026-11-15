@@ -14,7 +14,7 @@ runs:
     - if: runner.os == 'macOS'
       uses: cachix/install-nix-action@v31
     - if: runner.os == 'macOS'
-      uses: nix-community/cache-nix-action@v6
+      uses: nix-community/cache-nix-action@v7
       with:
         primary-key: nix-${{ inputs.target }}-${{ hashFiles('flake.nix', 'flake.lock') }}
         restore-prefixes-first-match: nix-${{ inputs.target }}-
@@ -24,7 +24,7 @@ runs:
       run: nix --extra-experimental-features 'nix-command flakes' develop -c true
     - if: runner.os == 'Linux'
       uses: oven-sh/setup-bun@v2
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/registry

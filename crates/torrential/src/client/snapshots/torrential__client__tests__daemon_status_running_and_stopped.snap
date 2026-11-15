@@ -1,0 +1,41 @@
+---
+source: crates/torrential/src/client/tests.rs
+expression: out
+---
+engine:    running
+pid:       4242
+version:   0.1.0
+downloads: 2
+socket:    /tmp/torrential-501/engine.sock
+log:       /Users/ada/.local/state/torrential/engine.log
+next:      torrential status
+
+--- json
+{
+  "schema": 1,
+  "type": "daemon",
+  "engine": "running",
+  "pid": 4242,
+  "version": "0.1.0",
+  "socket": "/tmp/torrential-501/engine.sock",
+  "log": "/Users/ada/.local/state/torrential/engine.log",
+  "downloads": 2,
+  "next": "torrential status"
+}
+engine: stopped
+socket: /tmp/torrential-501/engine.sock
+log:    /Users/ada/.local/state/torrential/engine.log
+next:   torrential status
+
+--- json
+{
+  "schema": 1,
+  "type": "daemon",
+  "engine": "stopped",
+  "pid": null,
+  "version": null,
+  "socket": "/tmp/torrential-501/engine.sock",
+  "log": "/Users/ada/.local/state/torrential/engine.log",
+  "downloads": null,
+  "next": "torrential status"
+}

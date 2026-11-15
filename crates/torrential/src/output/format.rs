@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use torrential_core::Progress;
-pub use torrential_core::units::count;
+use torrential_core::SourceOutcome;
+use torrential_core::text::sanitize;
+pub use torrential_core::units::{clock, count, elapsed, timestamp};
 use torrential_core::units::{format_duration, format_rate, format_size};
 
 pub const UNKNOWN: &str = "?";
@@ -30,49 +32,13 @@ pub fn eta(seconds: Option<u64>) -> String {
     seconds.map_or_else(|| UNKNOWN.to_string(), |s| format_duration(Duration::from_secs(s)))
 }
 
-pub fn elapsed(d: Duration) -> String {
-    if d.as_secs() < 600 { format!("{}s", d.as_secs()) } else { format_duration(d) }
-}
-
-/// `4:05` or `1:36:12`, as a player shows a time.
-pub fn clock(d: Duration) -> String {
-    let (h, m, s) = (d.as_secs() / 3600, d.as_secs() % 3600 / 60, d.as_secs() % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
-}
-
 pub fn seconds_tenths(ms: u32) -> String {
     format!("{}.{}s", ms / 1000, ms % 1000 / 100)
 }
 
 pub fn age(published: Option<i64>, now: i64) -> String {
     let Some(published) = published else { return UNKNOWN.to_string() };
-    let secs = now.saturating_sub(published).max(0) as u64;
-    match secs {
-        0..3_600 => format!("{}m", secs / 60),
-        3_600..86_400 => format!("{}h", secs / 3_600),
-        86_400..63_072_000 => format!("{}d", secs / 86_400),
-        _ => format!("{}y", secs / 31_536_000),
-    }
-}
-
-pub fn timestamp(unix: i64) -> String {
-    let days = unix.div_euclid(86_400);
-    let secs = unix.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
+    torrential_core::units::age(now.saturating_sub(published).max(0) as u64)
 }
 
 pub fn shell_word(word: &str) -> String {
@@ -80,9 +46,38 @@ pub fn shell_word(word: &str) -> String {
     if plain { word.to_string() } else { format!("'{}'", word.replace('\'', r"'\''")) }
 }
 
+pub fn source_outcome(outcome: &SourceOutcome) -> String {
+    match outcome {
+        SourceOutcome::Ok { results } => count(*results as usize, "result"),
+        SourceOutcome::Cached { results } => format!("{}, cached", count(*results as usize, "result")),
+        SourceOutcome::Timeout => "timed out".to_string(),
+        SourceOutcome::Http { status } => format!("HTTP {status}"),
+        SourceOutcome::Connect { reason } => format!("connection failed ({})", sanitize(reason)),
+        SourceOutcome::BadResponse { reason } => format!("bad response ({})", sanitize(reason)),
+        SourceOutcome::Irrelevant => "no relevant results".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ages_and_percents_read_as_the_shared_vectors_say() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!("../../../core/tests/fixtures/format.json"))
+            .expect("the vectors are JSON");
+        for case in vectors["age"].as_array().unwrap() {
+            assert_eq!(age(Some(0), case["seconds"].as_i64().unwrap()), case["text"], "{case}");
+        }
+        for case in vectors["percent"].as_array().unwrap() {
+            let progress = Progress {
+                verified: case["done"].as_u64().unwrap(),
+                size: case["size"].as_u64(),
+                ..Progress::default()
+            };
+            assert_eq!(percent(&progress), case["cli"], "{case}");
+        }
+    }
 
     #[test]
     fn percent_never_rounds_up_to_done() {

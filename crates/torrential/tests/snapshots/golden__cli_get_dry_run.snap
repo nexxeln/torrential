@@ -1,0 +1,48 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "get",
+    "reply": {
+      "outcome": "planned",
+      "job": {
+        "id": "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "night_of_the_living_dead",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/night_of_the_living_dead",
+        "state": "queued",
+        "progress": {
+          "size": 1432408064,
+          "verified": 0,
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 0,
+          "seeds": 0,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      },
+      "plan": {
+        "selected_files": 5,
+        "total_files": 5,
+        "selected_size": 1432408064,
+        "destination": "[home]/Downloads/torrential/night_of_the_living_dead",
+        "free_space": 562949953421312,
+        "conflicts": [],
+        "max_size": 53687091200
+      }
+    },
+    "next": "torrential get 4c1e9a"
+  }
+}

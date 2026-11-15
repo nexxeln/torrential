@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use torrential_core::protocol::{Event, FilesReply};
+use torrential_core::protocol::{Event, FilesReply, MetadataSource};
 use torrential_core::{
     Arch, Category, Display, Error, ErrorCode, Flag, InfoHash, Job, JobStatus, Language, Machine, Os, Profile,
     Progress, Release, ReleaseId, SearchQuery, SearchResult, Selection, SourceOutcome, SourceReport, TorrentFile,
@@ -261,7 +261,7 @@ pub fn dvd_files() -> FilesReply {
         name: Some("night_of_the_living_dead_1968_dvd".into()),
         total_size: files.iter().map(|(_, s)| s).sum(),
         files: files.iter().map(|(p, s)| file(p, *s, 0, p.ends_with(".exe"))).collect(),
-        metadata_source: "torrent_url".into(),
+        metadata_source: MetadataSource::TorrentUrl,
         elapsed_ms: 12,
     }
 }
@@ -276,7 +276,7 @@ pub fn wikipedia_files() -> FilesReply {
             file("enwiki-20260901-pages-articles-multistream-index.txt.bz2", 254 * MIB, 0, false),
             file("enwiki-20260901-abstract.xml.gz", 1_126 * MIB, 0, false),
         ],
-        metadata_source: "download".into(),
+        metadata_source: MetadataSource::Download,
         elapsed_ms: 1,
     }
 }
@@ -287,7 +287,7 @@ pub fn stackexchange_files() -> FilesReply {
         name: Some("stackexchange".into()),
         total_size: 2_000 * MIB,
         files: (1..=20).map(|i| file(&format!("part{i:02}.7z"), 100 * MIB, i * 5 * MIB, false)).collect(),
-        metadata_source: "download".into(),
+        metadata_source: MetadataSource::Download,
         elapsed_ms: 1,
     }
 }

@@ -1,148 +1,45 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
-use crate::release::SourceReport;
-use crate::watching::Tried;
+use crate::id::ReleaseId;
 
-/// Exit code for a `wait` that hit its timeout while the download is still running.
-/// It is an observation, not an error, so it has no `ErrorCode`.
-pub const EXIT_PENDING: u8 = 8;
-
-/// Every failure torrential reports. The code is the contract; messages are for people.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCode {
-    Usage,
-    ConfirmationRequired,
-    InvalidRef,
-    InvalidTorrent,
-    NotFound,
-    AmbiguousRef,
-    JobConflict,
-    PathConflict,
-    ProvidersUnavailable,
-    MetadataTimeout,
-    NetworkUnavailable,
-    FetchFailed,
-    SandboxNetworkBlocked,
-    SandboxWriteBlocked,
-    DaemonUnavailable,
-    DaemonVersion,
-    StateCorrupt,
-    DiskFull,
-    TooLarge,
-    NoSelection,
-    StorageError,
-    VerificationFailed,
-    /// No connected peer or web seed had the pieces a download still needed, for long enough
-    /// that the engine stopped it.
-    NoSource,
-    Interrupted,
-    /// A browser on the home network that is not one of the paired devices.
-    NotPaired,
-    /// Something only the machine running the engine may do, such as adding a device.
-    LocalOnly,
-    Internal,
-}
-
-impl ErrorCode {
-    pub const ALL: [ErrorCode; 27] = [
-        Self::Usage,
-        Self::ConfirmationRequired,
-        Self::InvalidRef,
-        Self::InvalidTorrent,
-        Self::NotFound,
-        Self::AmbiguousRef,
-        Self::JobConflict,
-        Self::PathConflict,
-        Self::ProvidersUnavailable,
-        Self::MetadataTimeout,
-        Self::NetworkUnavailable,
-        Self::FetchFailed,
-        Self::SandboxNetworkBlocked,
-        Self::SandboxWriteBlocked,
-        Self::DaemonUnavailable,
-        Self::DaemonVersion,
-        Self::StateCorrupt,
-        Self::DiskFull,
-        Self::TooLarge,
-        Self::NoSelection,
-        Self::StorageError,
-        Self::VerificationFailed,
-        Self::NoSource,
-        Self::Interrupted,
-        Self::NotPaired,
-        Self::LocalOnly,
-        Self::Internal,
-    ];
-
-    pub const fn exit_code(self) -> u8 {
-        match self {
-            Self::Internal => 1,
-            Self::Usage | Self::ConfirmationRequired => 2,
-            Self::InvalidRef | Self::InvalidTorrent | Self::NotFound | Self::AmbiguousRef => 3,
-            Self::JobConflict | Self::PathConflict => 4,
-            Self::ProvidersUnavailable | Self::MetadataTimeout | Self::NetworkUnavailable | Self::FetchFailed => 5,
-            Self::SandboxNetworkBlocked
-            | Self::SandboxWriteBlocked
-            | Self::DaemonUnavailable
-            | Self::DaemonVersion
-            | Self::StateCorrupt
-            | Self::NotPaired
-            | Self::LocalOnly => 6,
-            Self::DiskFull
-            | Self::TooLarge
-            | Self::NoSelection
-            | Self::StorageError
-            | Self::VerificationFailed
-            | Self::NoSource => 7,
-            Self::Interrupted => 130,
-        }
-    }
-
-    pub const fn retryable(self) -> bool {
-        matches!(
-            self,
-            Self::ProvidersUnavailable
-                | Self::MetadataTimeout
-                | Self::NetworkUnavailable
-                | Self::FetchFailed
-                | Self::DaemonUnavailable
-                | Self::Interrupted
-        )
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Usage => "usage",
-            Self::ConfirmationRequired => "confirmation_required",
-            Self::InvalidRef => "invalid_ref",
-            Self::InvalidTorrent => "invalid_torrent",
-            Self::NotFound => "not_found",
-            Self::AmbiguousRef => "ambiguous_ref",
-            Self::JobConflict => "job_conflict",
-            Self::PathConflict => "path_conflict",
-            Self::ProvidersUnavailable => "providers_unavailable",
-            Self::MetadataTimeout => "metadata_timeout",
-            Self::NetworkUnavailable => "network_unavailable",
-            Self::FetchFailed => "fetch_failed",
-            Self::SandboxNetworkBlocked => "sandbox_network_blocked",
-            Self::SandboxWriteBlocked => "sandbox_write_blocked",
-            Self::DaemonUnavailable => "daemon_unavailable",
-            Self::DaemonVersion => "daemon_version",
-            Self::StateCorrupt => "state_corrupt",
-            Self::DiskFull => "disk_full",
-            Self::TooLarge => "too_large",
-            Self::NoSelection => "no_selection",
-            Self::StorageError => "storage_error",
-            Self::VerificationFailed => "verification_failed",
-            Self::NoSource => "no_source",
-            Self::Interrupted => "interrupted",
-            Self::NotPaired => "not_paired",
-            Self::LocalOnly => "local_only",
-            Self::Internal => "internal",
-        }
+crate::words! {
+    /// Every failure torrential reports. The code is the contract; messages are for people.
+    #[derive(Hash)]
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum ErrorCode {
+        Usage = "usage",
+        ConfirmationRequired = "confirmation_required",
+        InvalidRef = "invalid_ref",
+        InvalidTorrent = "invalid_torrent",
+        NotFound = "not_found",
+        AmbiguousRef = "ambiguous_ref",
+        JobConflict = "job_conflict",
+        PathConflict = "path_conflict",
+        ProvidersUnavailable = "providers_unavailable",
+        MetadataTimeout = "metadata_timeout",
+        NetworkUnavailable = "network_unavailable",
+        FetchFailed = "fetch_failed",
+        SandboxNetworkBlocked = "sandbox_network_blocked",
+        SandboxWriteBlocked = "sandbox_write_blocked",
+        DaemonUnavailable = "daemon_unavailable",
+        DaemonVersion = "daemon_version",
+        StateCorrupt = "state_corrupt",
+        DiskFull = "disk_full",
+        TooLarge = "too_large",
+        NoSelection = "no_selection",
+        StorageError = "storage_error",
+        VerificationFailed = "verification_failed",
+        /// No connected peer or web seed had the pieces a download still needed, for long enough
+        /// that the engine stopped it.
+        NoSource = "no_source",
+        Interrupted = "interrupted",
+        /// A browser on the home network that is not one of the paired devices.
+        NotPaired = "not_paired",
+        /// Something only the machine running the engine may do, such as adding a device.
+        LocalOnly = "local_only",
+        Internal = "internal",
     }
 }
 
@@ -154,16 +51,26 @@ impl fmt::Display for ErrorCode {
 
 /// One candidate listed by an `ambiguous_ref` error.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Candidate {
     pub id: String,
     pub name: String,
-    /// `download` or `search result`.
-    pub kind: String,
+    pub kind: CandidateKind,
+}
+
+crate::words! {
+    /// What an `ambiguous_ref` candidate is.
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum CandidateKind {
+        Download = "download",
+        SearchResult = "search result",
+    }
 }
 
 /// Structured context that lets an agent act on an error without parsing its message.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Details {
     Candidates(Vec<Candidate>),
     Sources(Vec<SourceReport>),
@@ -185,6 +92,7 @@ pub enum Details {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,
@@ -229,6 +137,130 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum SourceOutcome {
+    Ok {
+        results: u32,
+    },
+    Cached {
+        results: u32,
+    },
+    Timeout,
+    Http {
+        status: u16,
+    },
+    Connect {
+        reason: String,
+    },
+    /// A response that did not parse.
+    BadResponse {
+        reason: String,
+    },
+    /// Most rows matched no query word, as when an API returns its latest uploads.
+    Irrelevant,
+}
+
+impl SourceOutcome {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. } | Self::Cached { .. })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SourceReport {
+    pub source: String,
+    #[serde(flatten)]
+    pub outcome: SourceOutcome,
+    pub elapsed_ms: u32,
+}
+
+/// Why a play moved past a source.
+#[derive(Clone, PartialEq, Debug, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+pub enum Skip {
+    NoFileList {
+        waited_s: u32,
+    },
+    /// No file reads as this film or episode, or the largest is a sample.
+    NoVideo,
+    /// The video plays in a browser, ffmpeg is missing, and the file is not MP4, M4V, MOV, or WebM.
+    Unplayable {
+        container: String,
+    },
+    /// The video plays on a TV, which does not take its container.
+    NotOnTv {
+        container: String,
+    },
+    TooLarge {
+        error: Error,
+    },
+    NoData {
+        waited_s: u32,
+    },
+    Stalled,
+    Failed {
+        error: Error,
+    },
+}
+
+/// Why a play moved past a source, as it goes on the wire: with `text`, which says it in plain
+/// words. A read leaves the text out.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Skip"))]
+pub(crate) enum SkipWire<'a> {
+    NoFileList { waited_s: u32, text: String },
+    NoVideo { text: String },
+    Unplayable { container: &'a str, text: String },
+    NotOnTv { container: &'a str, text: String },
+    TooLarge { error: &'a Error, text: String },
+    NoData { waited_s: u32, text: String },
+    Stalled { text: String },
+    Failed { error: &'a Error, text: String },
+}
+
+impl Serialize for Skip {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = self.to_string();
+        let wire = match self {
+            Skip::NoFileList { waited_s } => SkipWire::NoFileList { waited_s: *waited_s, text },
+            Skip::NoVideo => SkipWire::NoVideo { text },
+            Skip::Unplayable { container } => SkipWire::Unplayable { container, text },
+            Skip::NotOnTv { container } => SkipWire::NotOnTv { container, text },
+            Skip::TooLarge { error } => SkipWire::TooLarge { error, text },
+            Skip::NoData { waited_s } => SkipWire::NoData { waited_s: *waited_s, text },
+            Skip::Stalled => SkipWire::Stalled { text },
+            Skip::Failed { error } => SkipWire::Failed { error, text },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+/// Why a play moved past a source, in plain words.
+impl fmt::Display for Skip {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Skip::NoFileList { waited_s } => write!(f, "no peer sent its file list in {waited_s}s"),
+            Skip::NoVideo => f.write_str("none of its files is the video"),
+            Skip::Unplayable { container } => write!(f, "its .{container} file needs ffmpeg, which is not installed"),
+            Skip::NotOnTv { container } => write!(f, "the TV does not play its .{container} file"),
+            Skip::TooLarge { error } | Skip::Failed { error } => f.write_str(&crate::text::sanitize(&error.message)),
+            Skip::NoData { waited_s } => write!(f, "no data arrived in {waited_s}s"),
+            Skip::Stalled => f.write_str("it stalled"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Tried {
+    pub release: ReleaseId,
+    pub reason: Skip,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,16 +271,6 @@ mod tests {
             let json = serde_json::to_string(&code).unwrap();
             assert_eq!(json, format!("\"{}\"", code.as_str()));
         }
-    }
-
-    #[test]
-    fn exit_codes_follow_the_documented_classes() {
-        assert_eq!(ErrorCode::AmbiguousRef.exit_code(), 3);
-        assert_eq!(ErrorCode::PathConflict.exit_code(), 4);
-        assert_eq!(ErrorCode::ProvidersUnavailable.exit_code(), 5);
-        assert_eq!(ErrorCode::SandboxNetworkBlocked.exit_code(), 6);
-        assert_eq!(ErrorCode::DiskFull.exit_code(), 7);
-        assert!(ErrorCode::ALL.iter().all(|c| c.exit_code() != EXIT_PENDING));
     }
 
     #[test]

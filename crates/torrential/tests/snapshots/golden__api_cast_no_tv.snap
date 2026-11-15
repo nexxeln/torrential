@@ -1,0 +1,16 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "404 Not Found",
+  "type": "application/json",
+  "body": {
+    "error": {
+      "code": "not_found",
+      "message": "no TV named nowhere answered",
+      "hint": "run torrential tv to list the TVs on the network",
+      "next": "torrential tv"
+    }
+  }
+}

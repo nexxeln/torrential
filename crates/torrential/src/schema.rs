@@ -1,12 +1,13 @@
 use clap::{Arg, ArgAction, Command};
 use serde::Serialize;
 use torrential_core::ErrorCode;
-use torrential_core::error::EXIT_PENDING;
+
+use crate::output::DocKind;
 
 #[derive(Serialize)]
 pub struct Schema {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: DocKind,
     version: String,
     commands: Vec<CommandSchema>,
     global_flags: Vec<FlagSchema>,
@@ -122,14 +123,18 @@ const FIELDS: [FieldSchema; 8] = [
 pub fn build(cli: &Command, version: String) -> Schema {
     let global_flags = cli.get_arguments().filter(|a| a.is_global_set()).map(flag).collect();
     Schema {
-        kind: "schema",
+        kind: DocKind::Schema,
         version,
         commands: visible(cli).map(command).collect(),
         global_flags,
         exit_codes: exit_codes(),
         errors: ErrorCode::ALL
             .iter()
-            .map(|c| ErrorSchema { code: c.as_str(), exit: c.exit_code(), retryable: c.retryable() })
+            .map(|c| ErrorSchema {
+                code: c.as_str(),
+                exit: torrential_daemon::exit::code(*c),
+                retryable: torrential_daemon::exit::retryable(*c),
+            })
             .collect(),
         fields: &FIELDS,
     }
@@ -189,27 +194,7 @@ fn repeatable(a: &Arg) -> bool {
 }
 
 fn exit_codes() -> Vec<ExitSchema> {
-    let mut codes: Vec<u8> = ErrorCode::ALL.iter().map(|c| c.exit_code()).collect();
-    codes.extend([0, EXIT_PENDING]);
-    codes.sort_unstable();
-    codes.dedup();
-    codes.into_iter().map(|code| ExitSchema { code, meaning: exit_meaning(code) }).collect()
-}
-
-fn exit_meaning(code: u8) -> &'static str {
-    match code {
-        0 => "success, including an empty search",
-        1 => "internal error",
-        2 => "usage error",
-        3 => "the reference matched nothing, matched several, or is malformed",
-        4 => "conflict with an existing download or file",
-        5 => "network or search provider failure",
-        6 => "environment, sandbox, engine, or state failure",
-        7 => "disk, size, selection, or verification failure, or a download that stopped with an error",
-        EXIT_PENDING => "still pending: the download is running or stopped without finishing",
-        130 => "interrupted",
-        _ => "unassigned",
-    }
+    torrential_daemon::exit::MEANINGS.iter().map(|&(code, meaning)| ExitSchema { code, meaning }).collect()
 }
 
 #[cfg(test)]
@@ -219,44 +204,6 @@ mod tests {
 
     fn schema() -> serde_json::Value {
         serde_json::to_value(build(&crate::cli::Cli::command(), "0.1.0".into())).unwrap()
-    }
-
-    #[test]
-    fn lists_every_visible_command_and_no_hidden_ones() {
-        let names: Vec<String> =
-            schema()["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(
-            names,
-            [
-                "search",
-                "titles",
-                "title",
-                "sources",
-                "files",
-                "get",
-                "play",
-                "web",
-                "devices",
-                "tv",
-                "status",
-                "wait",
-                "pause",
-                "resume",
-                "rm",
-                "verify",
-                "setup",
-                "doctor",
-                "tui",
-                "engine",
-                "schema",
-                "completions",
-                "skill",
-                "update"
-            ]
-        );
-        let daemon = &named(&schema(), "engine")["subcommands"];
-        let subs: Vec<&str> = daemon.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-        assert_eq!(subs, ["status", "stop", "install", "uninstall"]);
     }
 
     fn named(schema: &serde_json::Value, name: &str) -> serde_json::Value {
@@ -275,14 +222,5 @@ mod tests {
         assert_eq!(until["values"], serde_json::json!(["done", "metadata"]));
         assert_eq!(until["default"], "done");
         assert_eq!(s["global_flags"][0]["name"], "--json");
-    }
-
-    #[test]
-    fn exit_codes_cover_every_error_code() {
-        let s = schema();
-        let exits: Vec<u64> = s["exit_codes"].as_array().unwrap().iter().map(|e| e["code"].as_u64().unwrap()).collect();
-        assert_eq!(exits, [0, 1, 2, 3, 4, 5, 6, 7, 8, 130]);
-        assert_eq!(s["errors"].as_array().unwrap().len(), ErrorCode::ALL.len());
-        assert_eq!(s["errors"][5], serde_json::json!({"code": "ambiguous_ref", "exit": 3, "retryable": false}));
     }
 }

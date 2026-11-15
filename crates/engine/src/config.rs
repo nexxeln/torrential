@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 
 /// Everything a session is created with. Settings cannot change after
@@ -10,12 +10,9 @@ pub struct Config {
     /// choose. `Session::listen_port` reports the port it got.
     pub listen: Vec<SocketAddr>,
     pub dht: Dht,
-    /// Local service discovery (BEP 14).
-    pub lsd: bool,
-    pub upnp: bool,
-    pub natpmp: bool,
-    /// Bytes per second across all torrents. `None` is unlimited.
-    pub download_limit: Option<NonZeroU32>,
+    /// Find peers on the local network (BEP 14), and ask the router to forward the listen port
+    /// with UPnP and NAT-PMP.
+    pub local_network: bool,
     pub upload: UploadPolicy,
     pub connections: ConnectionLimits,
     pub client: ClientIdentity,
@@ -23,20 +20,16 @@ pub struct Config {
     pub dht_state: Option<DhtState>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl Config {
+    /// Peers on this machine only: 127.0.0.1 on a port the OS chooses, no DHT, nothing on the
+    /// local network, and any number of connections from 127.0.0.1.
+    pub fn loopback() -> Self {
         Config {
-            listen: vec![
-                SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 6881),
-                SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 6881),
-            ],
-            dht: Dht::On { bootstrap_nodes: vec!["dht.libtorrent.org:25401".to_owned()] },
-            lsd: true,
-            upnp: true,
-            natpmp: true,
-            download_limit: None,
+            listen: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)],
+            dht: Dht::Off,
+            local_network: false,
             upload: UploadPolicy::Normal,
-            connections: ConnectionLimits::default(),
+            connections: ConnectionLimits { multiple_per_ip: true, ..ConnectionLimits::default() },
             client: ClientIdentity::default(),
             dht_state: None,
         }

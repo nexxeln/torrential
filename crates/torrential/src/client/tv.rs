@@ -3,28 +3,22 @@
 use std::path::Path;
 use std::time::Duration;
 
-use torrential_core::protocol::{Request, Response};
+use torrential_core::protocol::Request;
 use torrential_core::units::count;
 use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode, Target, Tv, TvList};
 
-use super::connect::{self, Conn};
-use super::{answer, emit, titles};
+use super::connect::Conn;
+use super::{emit, titles};
 use crate::cli::{TvCommand, TvPlayArgs};
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
-
-/// The longest a cast of a torrent takes to reach the TV: its file list, then the TV starting.
-const CAST_WITHIN: Duration = Duration::from_secs(240);
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 
 pub fn run(mut conn: Conn, command: Option<TvCommand>, mode: Mode, cwd: &Path) -> Result<u8, Error> {
     let (tv, action) = match command {
         None | Some(TvCommand::List) => {
-            let list = match answer(conn.call(&Request::Tvs { fresh: true })?)? {
-                Response::Tvs { list } => list,
-                other => return Err(connect::unexpected(&other)),
-            };
-            return Ok(emit(mode, &list_doc(&list), &Typed { kind: "tvs", body: &list }));
+            let list: TvList = conn.ask(&Request::Tvs { fresh: true })?;
+            return Ok(emit(mode, &list_doc(&list), &Typed { kind: DocKind::Tvs, body: &list }));
         }
         Some(TvCommand::Play(args)) => return play(conn, args, mode, cwd),
         Some(TvCommand::Pause(args)) => (args.tv, CastAction::Pause),
@@ -33,10 +27,8 @@ pub fn run(mut conn: Conn, command: Option<TvCommand>, mode: Mode, cwd: &Path) -
         Some(TvCommand::Volume { level, tv }) => (tv.tv, CastAction::Volume { level }),
         Some(TvCommand::Stop(args)) => (args.tv, CastAction::Stop),
     };
-    match answer(conn.call(&Request::CastControl { tv, action })?)? {
-        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: "cast", body: &*cast })),
-        other => Err(connect::unexpected(&other)),
-    }
+    let cast: Box<Cast> = conn.ask(&Request::CastControl { tv, action })?;
+    Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast }))
 }
 
 fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, Error> {
@@ -52,21 +44,18 @@ fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, 
     };
     match (&video, &source, file) {
         (None, Some(_), _) => return Err(titles::for_a_title("--source")),
-        (Some(video), _, Some(_)) => return Err(torrential_core::id::not_a_torrent(video, "--file")),
+        (Some(video), _, Some(_)) => return Err(torrential_core::target::not_a_torrent(video, "--file")),
         _ => {}
     }
     let request = Request::Cast(CastRequest { tv, target, source, file, video: None, subtitle, start_at: at });
-    let reply = match &video {
+    let cast: Box<Cast> = match &video {
         Some(video) => {
             let shown = titles::Shown::new(mode);
             titles::steps(&mut conn, &request, video, |step| shown.step(step, "Casting"))?
         }
-        None => answer(conn.call_within(&request, CAST_WITHIN)?)?,
+        None => conn.ask(&request)?,
     };
-    match reply {
-        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: "cast", body: &*cast })),
-        other => Err(connect::unexpected(&other)),
-    }
+    Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast }))
 }
 
 fn list_doc(list: &TvList) -> Doc {
@@ -147,7 +136,10 @@ fn cast_doc(cast: &Cast) -> Doc {
         fields.push(("subtitle", Cell::new(subtitle)));
     }
     if let (Some(download), Some(file)) = (&cast.download, cast.file) {
-        fields.push(("download", Cell::new(format!("{} file {file}", &download[..download.len().min(8)]))));
+        fields.push((
+            "download",
+            Cell::new(format!("{} file {file}", &download[..download.len().min(torrential_core::id::SHORT_ID)])),
+        ));
     }
     let summary = match &cast.state {
         CastState::Ended { error: Some(error) } => vec![error.message.clone()],
@@ -226,7 +218,7 @@ mod tests {
              at:       4:05 / 14:48\n\
              volume:   12\n\
              subtitle: Sintel/Sintel.en.srt\n\
-             download: 6bc1af0e file 0\n\
+             download: 6bc1af file 0\n\
              next:     torrential tv resume\n"
         );
         let lost = Error::new(ErrorCode::NetworkUnavailable, "[LG] webOS TV OLED55C1 stopped answering");
@@ -237,7 +229,7 @@ mod tests {
             "tv:       [LG] webOS TV OLED55C1\n\
              video:    Sintel (2010)\n\
              state:    failed\n\
-             download: 6bc1af0e file 0\n\
+             download: 6bc1af file 0\n\
              # [LG] webOS TV OLED55C1 stopped answering\n"
         );
     }

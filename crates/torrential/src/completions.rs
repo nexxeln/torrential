@@ -1,17 +1,18 @@
 use clap_complete::engine::CompletionCandidate;
-use torrential_core::protocol::{Request, Response};
+use torrential_core::Job;
+use torrential_core::protocol::Request;
 
 use crate::cli::Shell;
 use crate::client::connect;
-use crate::env::Env;
-use crate::output::views::short_ids;
-use crate::paths::Paths;
+use crate::client::rows::short_ids;
+use torrential_daemon::env::Env;
+use torrential_daemon::paths::Paths;
 
 pub fn complete_download_ids() -> Vec<CompletionCandidate> {
     let env = Env::from_process();
     let Ok(paths) = Paths::from_process(&env) else { return Vec::new() };
     let Ok(Some(mut conn)) = connect::existing(&paths, &env) else { return Vec::new() };
-    let Ok(Response::Jobs { jobs }) = conn.call(&Request::Status { refs: Vec::new() }) else { return Vec::new() };
+    let Ok(jobs) = conn.ask::<Vec<Job>>(&Request::Status { refs: Vec::new() }) else { return Vec::new() };
     let ids = short_ids(&jobs.iter().map(|j| j.id).collect::<Vec<_>>());
     jobs.iter()
         .zip(ids)

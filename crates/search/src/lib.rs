@@ -11,22 +11,26 @@ pub mod catalog;
 mod classify;
 mod dates;
 mod http;
+mod imdb;
 mod metainfo;
 mod observation;
+pub mod rank;
 mod redirect;
 mod sources;
+mod store;
 pub mod subtitles;
 mod terms;
+mod web_seeds;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::future::Either;
+use futures_util::future::{BoxFuture, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -38,9 +42,10 @@ use crate::assemble::{Answer, Linked, Run, assemble, merged, vet};
 use crate::cache::AnswerKey;
 pub use crate::cache::ResultCache;
 use crate::http::{FetchError, Http, Retry};
-use crate::sources::{Ctx, Failure, Source, Stores};
+use crate::sources::{Ctx, Failure, Source, Stores, archive_org};
 pub use crate::sources::{SavedLink, lawful};
 use crate::terms::Terms;
+pub use crate::web_seeds::WebSeeds;
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -82,8 +87,6 @@ impl fmt::Debug for TorznabConfig {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct SourceInfo {
     pub name: String,
-    /// Searched when a query names no sources.
-    pub default_on: bool,
     /// A catalog of content its publishers share, ranked ahead of general indexes.
     pub lawful: bool,
 }
@@ -104,25 +107,52 @@ pub struct Search {
 
 struct Inner {
     http: Http,
+    /// For the redirects of a torrent's web seeds, which must not lead inside.
+    seeds: Http,
     sources: Vec<Arc<Source>>,
     disabled: Vec<String>,
     stores: Stores,
     cache: ResultCache,
+    /// archive.org's answers about an item's servers, asked for as its `.torrent` file was fetched,
+    /// so a download of it starts from those servers.
+    servers: Mutex<VecDeque<Servers>>,
 }
+
+type Lookup = Shared<BoxFuture<'static, Result<Vec<String>, Error>>>;
+
+/// One item's lookup of its servers, begun at `asked`.
+struct Servers {
+    identifier: String,
+    asked: Instant,
+    lookup: Lookup,
+}
+
+/// Lookups begun with a `.torrent` fetch whose download has not started yet.
+const SERVERS_KEPT: usize = 8;
+/// How long a lookup's answer is used for a download that starts after it.
+const SERVERS_FOR: Duration = Duration::from_secs(60);
 
 impl Search {
     /// Fails with `usage` when the config names an unknown source or a bad URL.
     pub fn new(config: &SearchConfig, cache: ResultCache) -> Result<Search, Error> {
-        Inner::new(config, cache, false).map(|inner| Search { inner: Arc::new(inner) })
+        let http = Http::new().map_err(no_client)?;
+        Inner::new(config, cache, http).map(|inner| Search { inner: Arc::new(inner) })
+    }
+
+    /// The results this search keeps for later lookups by ID.
+    pub fn cache(&self) -> &ResultCache {
+        &self.inner.cache
+    }
+
+    /// The web-seed lookup for downloads. It shares this search's lookups, so the servers of an
+    /// archive.org item asked for with its `.torrent` are not asked for again.
+    pub fn web_seeds(&self) -> WebSeeds {
+        WebSeeds(self.inner.clone())
     }
 
     /// Every enabled source, most authoritative first.
     pub fn sources(&self) -> Vec<SourceInfo> {
-        self.inner
-            .sources
-            .iter()
-            .map(|s| SourceInfo { name: s.meta.name.clone(), default_on: s.default_on, lawful: s.meta.lawful })
-            .collect()
+        self.inner.sources.iter().map(|s| SourceInfo { name: s.meta.name.clone(), lawful: s.meta.lawful }).collect()
     }
 
     /// Returns by the query's deadline, ranked for the query's profile. A source that has
@@ -169,13 +199,14 @@ impl Search {
                 scope: source.scope(),
                 text: terms.text().to_string(),
                 adult: query.adult,
+                title: query.wanted.is_some(),
             };
             let cached = if query.fresh { None } else { cache.answer(&key, std::time::Instant::now()) };
             async move {
                 if let Some(rows) = cached {
                     return (index, Run { source: source.meta.clone(), answer: Answer::Cached(rows), elapsed_ms: 0 });
                 }
-                let (answer, complete) = AssertUnwindSafe(self.inner.run(source, terms, query, deadline))
+                let (answer, complete) = AssertUnwindSafe(self.inner.run(source, terms, query, started, deadline))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| {
@@ -255,6 +286,9 @@ impl Search {
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .ok_or_else(|| Error::new(ErrorCode::InvalidRef, "a .torrent URL must start with http:// or https://"))?;
+        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item_of_link(&url)) {
+            self.inner.ask_servers(item);
+        }
         // A private tracker may count each request for a .torrent as a grab.
         let body = self.inner.http.fetch(&url, CAP, Instant::now() + WITHIN, Retry::Never).await;
         body.map_err(|e| {
@@ -263,32 +297,10 @@ impl Search {
         })
     }
 
-    /// Web seeds that serve every file of a torrent, to add to its own. A web seed can answer each
-    /// file with a redirect to a server that holds it, as archive.org's download URL does, and
-    /// libtorrent turns each redirect into a web seed that has only that file, so a piece that
-    /// spans two files has no source. archive.org names the servers of a torrent that downloads
-    /// from it, unless the archive.org source is disabled. For any other torrent, the seeds are the
-    /// folders its web seeds redirect `file` to, where `file` is one of its several files as a path
-    /// that starts with the torrent's name. `None` when there is nothing to ask.
-    pub fn mirrors(
-        &self,
-        name: &str,
-        file: Option<&Path>,
-        web_seeds: &[String],
-    ) -> Option<impl Future<Output = Result<Vec<String>, Error>> + Send + 'static> {
-        let inner = self.inner.clone();
-        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item(name, web_seeds)) {
-            return Some(Either::Left(async move { item.mirrors(&inner.http).await }));
-        }
-        let file = file.filter(|file| web_seeds.iter().any(|seed| redirect::request(seed, file).is_some()))?;
-        let (file, web_seeds) = (file.to_path_buf(), web_seeds.to_vec());
-        Some(Either::Right(async move { Ok(redirect::roots(&inner.http, &file, &web_seeds).await) }))
-    }
-
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {
         let all = &self.inner.sources;
         if names.is_empty() {
-            return Ok(all.iter().filter(|s| s.default_on).cloned().collect());
+            return Ok(all.clone());
         }
         let mut chosen: Vec<Arc<Source>> = Vec::new();
         for name in names {
@@ -310,11 +322,33 @@ impl Search {
 }
 
 impl Inner {
-    fn new(config: &SearchConfig, cache: ResultCache, record: bool) -> Result<Inner, Error> {
-        let http = Http::new(record).map_err(|e| Error::internal(format!("cannot build the HTTP client: {e}")))?;
+    fn new(config: &SearchConfig, cache: ResultCache, http: Http) -> Result<Inner, Error> {
+        let seeds = Http::public(http::USER_AGENT, redirect::policy()).map_err(no_client)?;
         let sources = sources::registry(config)?;
         let disabled = config.disabled.clone();
-        Ok(Inner { http, sources, disabled, stores: Stores::new(config.cache_dir.clone()), cache })
+        let stores = Stores::new(config.cache_dir.clone());
+        Ok(Inner { http, seeds, sources, disabled, stores, cache, servers: Mutex::default() })
+    }
+
+    /// Starts asking archive.org for `item`'s servers, for a download of it that may start soon.
+    fn ask_servers(&self, item: archive_org::Item) {
+        let identifier = item.identifier().to_string();
+        let lookup = servers(&self.http, item);
+        let mut kept = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        kept.retain(|s| s.identifier != identifier);
+        if kept.len() == SERVERS_KEPT {
+            kept.pop_front();
+        }
+        kept.push_back(Servers { identifier, asked: Instant::now(), lookup });
+    }
+
+    /// The lookup of `item`'s servers begun lately with its `.torrent` fetch, taken so a later
+    /// download asks again.
+    fn asked_servers(&self, item: &archive_org::Item) -> Option<Lookup> {
+        let mut kept = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        let at = kept.iter().position(|s| s.identifier == item.identifier())?;
+        let taken = kept.remove(at)?;
+        (taken.asked.elapsed() < SERVERS_FOR).then_some(taken.lookup)
     }
 
     fn saved_links(&self, linked: Vec<Linked>) -> Vec<(Release, Option<SavedLink>)> {
@@ -330,13 +364,22 @@ impl Inner {
             .collect()
     }
 
-    async fn run(&self, source: &Source, terms: &Terms, query: &SearchQuery, deadline: Instant) -> (Answer, bool) {
+    async fn run(
+        &self,
+        source: &Source,
+        terms: &Terms,
+        query: &SearchQuery,
+        started: Instant,
+        deadline: Instant,
+    ) -> (Answer, bool) {
         let ctx = Ctx {
             http: &self.http,
             stores: &self.stores,
             terms,
             adult: query.adult,
             fresh: query.fresh,
+            wanted: query.wanted.as_ref(),
+            started,
             deadline,
             partial: AtomicBool::new(false),
         };
@@ -365,12 +408,25 @@ fn millis(d: Duration) -> u32 {
     u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
 }
 
+/// Asks archive.org for `item`'s servers on a task of its own, so the answer comes however long the
+/// caller takes to wait for it.
+fn servers(http: &Http, item: archive_org::Item) -> Lookup {
+    let http = http.detached();
+    let task = tokio::spawn(async move { item.mirrors(&http).await });
+    let joined = task.map(|joined| joined.unwrap_or_else(|e| Err(Error::internal(format!("the lookup stopped: {e}")))));
+    joined.boxed().shared()
+}
+
+fn no_client(e: reqwest::Error) -> Error {
+    Error::internal(format!("cannot build the HTTP client: {e}"))
+}
+
 /// Runs one source the way a search does, with a 60-second deadline, and returns
 /// every response body it received by URL, plus how the source fared. The
 /// `record` example writes these as test fixtures.
 #[doc(hidden)]
 pub async fn record(config: &SearchConfig, source: &str, query: &str) -> Result<(String, http::Recorded), Error> {
-    let inner = Inner::new(config, ResultCache::new(), true)?;
+    let inner = Inner::new(config, ResultCache::new(), Http::recording().map_err(no_client)?)?;
     let source = inner
         .sources
         .iter()
@@ -383,6 +439,8 @@ pub async fn record(config: &SearchConfig, source: &str, query: &str) -> Result<
         terms: &terms,
         adult: false,
         fresh: true,
+        wanted: None,
+        started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(60),
         partial: AtomicBool::new(false),
     };

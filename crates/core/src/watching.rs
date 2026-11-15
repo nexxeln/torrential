@@ -1,15 +1,17 @@
 //! Where a person stopped each film and episode, what of a title to play next, and the steps a
 //! title play reports.
 
-use std::fmt;
+use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::catalog::Episode;
 use crate::catalog::{EpisodeInfo, Kind, TitleCard, TitleDetails, TitleId, VideoRef};
-use crate::error::Error;
+use crate::error::SourceReport;
+use crate::error::{Error, Skip, Tried};
 use crate::id::{ReleaseId, TorrentId};
-use crate::release::{Release, SourceReport};
-use crate::title::{Episode, Span};
+use crate::release::Release;
+use crate::title::Span;
 
 /// Where a person stopped one film or episode. Whether it is finished follows from the position.
 #[derive(Clone, PartialEq, Debug)]
@@ -25,26 +27,39 @@ pub struct Watched {
     pub at: i64,
 }
 
+/// The share of a video at its end that counts as credits.
+pub const FINISHED_SHARE: f64 = 0.03;
+/// Seconds at the end of a video that count as credits, when that is more than the share.
+pub const FINISHED_WITHIN: f64 = 20.0;
+/// Seconds at the start of a video too few to keep: a place there plays from the beginning.
+pub const WORTH_SAVING: f64 = 5.0;
+/// How often a screen that plays a video saves where it is.
+pub const SAVE_EVERY: Duration = Duration::from_secs(5);
+
 impl Watched {
-    /// The last 20 seconds, or the last 3% when that is longer, are credits, so stopping there
-    /// finishes the video.
+    /// Stopping in the credits finishes the video.
     pub fn finished(&self) -> bool {
-        self.duration.is_some_and(|duration| duration > 0.0 && duration - self.position <= (duration * 0.03).max(20.0))
+        self.duration.is_some_and(|duration| {
+            duration > 0.0 && duration - self.position <= (duration * FINISHED_SHARE).max(FINISHED_WITHIN)
+        })
     }
+}
+
+/// Where a person stopped, as it goes on the wire: whether they finished, and not the release.
+#[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Watched"))]
+pub(crate) struct WatchedWire<'a> {
+    video: &'a VideoRef,
+    position: f64,
+    duration: Option<f64>,
+    finished: bool,
+    at: i64,
 }
 
 impl Serialize for Watched {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Fields<'a> {
-            video: &'a VideoRef,
-            position: f64,
-            duration: Option<f64>,
-            finished: bool,
-            at: i64,
-        }
         let Watched { video, position, duration, release: _, at } = self;
-        Fields { video, position: *position, duration: *duration, finished: self.finished(), at: *at }
+        WatchedWire { video, position: *position, duration: *duration, finished: self.finished(), at: *at }
             .serialize(serializer)
     }
 }
@@ -66,10 +81,43 @@ impl<'de> Deserialize<'de> for Watched {
 
 /// What Play on a title page plays.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Next {
     pub video: VideoRef,
     /// Seconds to resume at, or `None` to start from the beginning.
     pub resume_at: Option<f64>,
+}
+
+impl Watched {
+    /// Where to resume the video: the place, unless the person finished it or stopped too near
+    /// the start to keep.
+    pub fn resume_at(&self) -> Option<f64> {
+        Some(self.position).filter(|at| *at > WORTH_SAVING && !self.finished())
+    }
+}
+
+/// Where the person stopped `video`, of what they `watched`, unless they finished it.
+pub fn resume_at(watched: &[Watched], video: &VideoRef) -> Option<f64> {
+    watched.iter().find(|w| w.video == *video)?.resume_at()
+}
+
+/// What Play on a title page plays: what comes `next`, or else the film or the first aired
+/// episode from the start. `None` while no episode of a series has aired.
+pub fn play_target(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Next> {
+    if let Some(next) = next(details, watched, now) {
+        return Some(next);
+    }
+    let episode = match details.card.kind {
+        Kind::Film => None,
+        Kind::Series => Some(first_aired(details, now)?),
+    };
+    Some(Next { video: VideoRef { title: details.card.id.clone(), episode }, resume_at: None })
+}
+
+/// A series' first aired episode outside the specials.
+pub fn first_aired(details: &TitleDetails, now: i64) -> Option<Episode> {
+    let regular = details.seasons.iter().filter(|season| season.number > 0);
+    regular.flat_map(|season| &season.episodes).filter(|e| e.aired_by(now)).map(|e| e.episode).min()
 }
 
 /// What of a title to play: an unfinished film or episode to resume, or else the first aired
@@ -78,7 +126,7 @@ pub struct Next {
 /// catalog does not list, or that has not aired, counts as never watched.
 pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Next> {
     let title = &details.card.id;
-    let resume = |w: &Watched| Next { video: w.video.clone(), resume_at: Some(w.position) };
+    let resume = |w: &Watched| Next { video: w.video.clone(), resume_at: w.resume_at() };
     let at = |episode: Option<Episode>| VideoRef { title: title.clone(), episode };
     let entry = |video: &VideoRef| watched.iter().find(|w| w.video == *video);
     if details.card.kind == Kind::Film {
@@ -93,7 +141,7 @@ pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Nex
         .seasons
         .iter()
         .flat_map(|season| &season.episodes)
-        .filter(|e| e.aired.is_some_and(|aired| aired <= now))
+        .filter(|e| e.aired_by(now))
         .map(|e| e.episode)
         .collect();
     aired.sort();
@@ -115,6 +163,7 @@ pub fn next(details: &TitleDetails, watched: &[Watched], now: i64) -> Option<Nex
 
 /// The title a download was made for, and what of it the download holds.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TitleLink {
     pub title: TitleId,
     pub span: Span,
@@ -126,6 +175,7 @@ pub struct TitleLink {
 /// or `failed`.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum AttemptEvent {
     Resolved {
         video: VideoRef,
@@ -165,60 +215,11 @@ pub enum AttemptEvent {
 /// What a play waits for from the source under test.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Check {
     FileList,
     Start,
     FirstBytes,
-}
-
-/// Why a play moved past a source.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "reason")]
-pub enum Skip {
-    NoFileList {
-        waited_s: u32,
-    },
-    /// No file reads as this film or episode, or the largest is a sample.
-    NoVideo,
-    /// The video plays in a browser, ffmpeg is missing, and the file is not MP4, M4V, MOV, or WebM.
-    Unplayable {
-        container: String,
-    },
-    /// The video plays on a TV, which does not take its container.
-    NotOnTv {
-        container: String,
-    },
-    TooLarge {
-        error: Error,
-    },
-    NoData {
-        waited_s: u32,
-    },
-    Stalled,
-    Failed {
-        error: Error,
-    },
-}
-
-/// Why a play moved past a source, in plain words.
-impl fmt::Display for Skip {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Skip::NoFileList { waited_s } => write!(f, "no peer sent its file list in {waited_s}s"),
-            Skip::NoVideo => f.write_str("none of its files is the video"),
-            Skip::Unplayable { container } => write!(f, "its .{container} file needs ffmpeg, which is not installed"),
-            Skip::NotOnTv { container } => write!(f, "the TV does not play its .{container} file"),
-            Skip::TooLarge { error } | Skip::Failed { error } => f.write_str(&crate::text::sanitize(&error.message)),
-            Skip::NoData { waited_s } => write!(f, "no data arrived in {waited_s}s"),
-            Skip::Stalled => f.write_str("it stalled"),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Tried {
-    pub release: ReleaseId,
-    pub reason: Skip,
 }
 
 #[cfg(test)]
@@ -228,9 +229,26 @@ mod tests {
     use super::*;
     use crate::catalog::{Art, Season};
     use crate::error::ErrorCode;
-    use crate::release::{Category, SourceOutcome};
+    use crate::error::SourceOutcome;
+    use crate::release::Category;
 
     const HASH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
+
+    #[test]
+    fn a_video_is_finished_where_the_shared_vectors_say() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/format.json")).expect("the vectors are JSON");
+        for case in vectors["finished"].as_array().unwrap() {
+            let watched = Watched {
+                video: video("tt0063350"),
+                position: case["position"].as_f64().unwrap(),
+                duration: Some(case["duration"].as_f64().unwrap()),
+                release: None,
+                at: 0,
+            };
+            assert_eq!(watched.finished(), case["finished"], "{case}");
+        }
+    }
 
     fn video(text: &str) -> VideoRef {
         text.parse().unwrap()
@@ -312,6 +330,9 @@ mod tests {
         let halfway = [watched("tt0063350", 1834.2, Some(5760.0), 10), watched("tt0100258", 10.0, None, 20)];
         assert_eq!(next(&halfway), Some(Next { video: video("tt0063350"), resume_at: Some(1834.2) }));
         assert_eq!(next(&[watched("tt0063350", 5750.0, Some(5760.0), 10)]), None);
+        let near_the_start = [watched("tt0063350", WORTH_SAVING, Some(5760.0), 10)];
+        assert_eq!(next(&near_the_start), Some(Next { video: video("tt0063350"), resume_at: None }));
+        assert_eq!(resume_at(&near_the_start, &video("tt0063350")), None);
     }
 
     /// Breaking Bad with one special, two episodes in season 1, and in season 2 one aired, one
@@ -348,6 +369,25 @@ mod tests {
             "an older unfinished episode before the last one stays behind"
         );
         assert_eq!(next(&[watched("tt0063350", 10.0, None, 99)]), Some(("tt0903747:1:1".into(), None)));
+    }
+
+    #[test]
+    fn play_starts_a_finished_film_or_a_caught_up_series_over_from_its_first_aired_episode() {
+        let film = details(card("tt0063350", Kind::Film, "Night of the Living Dead", 1968), Vec::new());
+        let finished = [watched("tt0063350", 5750.0, Some(5760.0), 10)];
+        assert_eq!(play_target(&film, &finished, NOW), Some(Next { video: video("tt0063350"), resume_at: None }));
+        let series = breaking_bad();
+        let caught_up = [watched("tt0903747:2:1", 2810.0, Some(2820.0), 30)];
+        assert_eq!(
+            play_target(&series, &caught_up, NOW),
+            Some(Next { video: video("tt0903747:1:1"), resume_at: None }),
+            "the first episode, not the special"
+        );
+        let halfway = [watched("tt0903747:1:2", 600.0, Some(2820.0), 20)];
+        assert_eq!(play_target(&series, &halfway, NOW), next(&series, &halfway, NOW));
+        let upcoming =
+            details(card("tt9999902", Kind::Series, "Upcoming", 2027), vec![season(1, &[Some(NOW + 86_400)])]);
+        assert_eq!(play_target(&upcoming, &[], NOW), None);
     }
 
     #[test]
@@ -443,9 +483,9 @@ mod tests {
                 r#"{"type":"searched","found":5,"sources":[{"source":"archive.org","outcome":"ok","results":2,"elapsed_ms":812}]}"#.to_string(),
                 format!(r#"{{"type":"trying","rank":1,"of":5,"release":{RELEASE}}}"#),
                 r#"{"type":"check","check":"file_list"}"#.to_string(),
-                format!(r#"{{"type":"skipped","release":"{HASH}","reason":{{"reason":"no_file_list","waited_s":20}}}}"#),
+                format!(r#"{{"type":"skipped","release":"{HASH}","reason":{{"reason":"no_file_list","waited_s":20,"text":"no peer sent its file list in 20s"}}}}"#),
                 format!(r#"{{"type":"playing","video":"tt0903747:3:5","release":{RELEASE},"job":"{HASH}","file":4,"resume_at":1834.2}}"#),
-                format!(r#"{{"type":"failed","error":{{"code":"no_source","message":"No source of Night of the Living Dead (1968) plays now"}},"tried":[{{"release":"{HASH}","reason":{{"reason":"no_data","waited_s":30}}}}]}}"#),
+                format!(r#"{{"type":"failed","error":{{"code":"no_source","message":"No source of Night of the Living Dead (1968) plays now"}},"tried":[{{"release":"{HASH}","reason":{{"reason":"no_data","waited_s":30,"text":"no data arrived in 30s"}}}}]}}"#),
             ]
         );
         let read: Vec<AttemptEvent> = written.iter().map(|line| serde_json::from_str(line).unwrap()).collect();
@@ -455,7 +495,7 @@ mod tests {
         assert_eq!(checks, [r#""file_list""#, r#""start""#, r#""first_bytes""#]);
 
         let full = error(ErrorCode::DiskFull, "not enough space");
-        let skips = [
+        let reasons = [
             Skip::NoFileList { waited_s: 20 },
             Skip::NoVideo,
             Skip::Unplayable { container: "avi".into() },
@@ -463,20 +503,22 @@ mod tests {
             Skip::NoData { waited_s: 30 },
             Skip::Stalled,
             Skip::Failed { error: error(ErrorCode::StorageError, "cannot write") },
-        ]
-        .map(|skip| serde_json::to_string(&skip).unwrap());
+        ];
+        let skips = reasons.clone().map(|skip| serde_json::to_string(&skip).unwrap());
         assert_eq!(
             skips,
             [
-                r#"{"reason":"no_file_list","waited_s":20}"#,
-                r#"{"reason":"no_video"}"#,
-                r#"{"reason":"unplayable","container":"avi"}"#,
-                r#"{"reason":"too_large","error":{"code":"disk_full","message":"not enough space"}}"#,
-                r#"{"reason":"no_data","waited_s":30}"#,
-                r#"{"reason":"stalled"}"#,
-                r#"{"reason":"failed","error":{"code":"storage_error","message":"cannot write"}}"#,
+                r#"{"reason":"no_file_list","waited_s":20,"text":"no peer sent its file list in 20s"}"#,
+                r#"{"reason":"no_video","text":"none of its files is the video"}"#,
+                r#"{"reason":"unplayable","container":"avi","text":"its .avi file needs ffmpeg, which is not installed"}"#,
+                r#"{"reason":"too_large","error":{"code":"disk_full","message":"not enough space"},"text":"not enough space"}"#,
+                r#"{"reason":"no_data","waited_s":30,"text":"no data arrived in 30s"}"#,
+                r#"{"reason":"stalled","text":"it stalled"}"#,
+                r#"{"reason":"failed","error":{"code":"storage_error","message":"cannot write"},"text":"cannot write"}"#,
             ]
         );
+        let read: Vec<Skip> = skips.iter().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(read, reasons, "a read leaves the text out");
     }
 
     #[test]

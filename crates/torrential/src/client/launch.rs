@@ -5,14 +5,14 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use torrential_core::error::Details;
 use torrential_core::{Error, ErrorCode};
 
 use super::connect::{self, Conn};
-use crate::env::{Agent, Env};
-use crate::paths::Paths;
+use torrential_daemon::env::{Agent, Env};
+use torrential_daemon::paths::Paths;
 
 const START_WITHIN: Duration = Duration::from_secs(10);
 const MAX_LOG: u64 = 10 * 1024 * 1024;
@@ -82,7 +82,7 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         .make_state()
         .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot create {}: {e}", paths.state.display())))?;
     let _ = std::fs::remove_file(paths.startup_error());
-    let exe = std::env::current_exe().map_err(|e| unavailable(format!("cannot find the torrential binary: {e}")))?;
+    let exe = env.executable().map_err(|e| unavailable(e.message))?;
     let mut launcher = Command::new(exe);
     launcher.args(["daemon", "launch"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     // SAFETY: setsid is async-signal-safe, the only kind of call allowed between fork and exec.
@@ -97,38 +97,18 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         Ok(pid) if status.success() => pid,
         _ => return Err(unavailable(format!("the engine launcher failed: {}", out.trim()))),
     };
-    let started = poll(START_WITHIN, || {
+    let started = connect::poll(START_WITHIN, || {
         if let Some(conn) = connect::existing(paths, env)? {
             return Ok(Some(conn));
         }
         if !connect::alive(pid)
-            && let Ok(bytes) = std::fs::read(paths.startup_error())
+            && let Some(recorded) = paths.recorded_startup_error()
         {
-            return Err(
-                serde_json::from_slice(&bytes).unwrap_or_else(|_| unavailable("the engine failed to start".into()))
-            );
+            return Err(recorded.unwrap_or_else(|_| unavailable("the engine failed to start".into())));
         }
         Ok(None)
     })?;
     started.ok_or_else(|| unavailable(format!("the engine did not start within {}s", START_WITHIN.as_secs())))
-}
-
-fn poll<T>(within: Duration, mut ready: impl FnMut() -> Result<Option<T>, Error>) -> Result<Option<T>, Error> {
-    let started = Instant::now();
-    loop {
-        if let Some(found) = ready()? {
-            return Ok(Some(found));
-        }
-        let waited = started.elapsed();
-        if waited > within {
-            return Ok(None);
-        }
-        std::thread::sleep(pause(waited));
-    }
-}
-
-fn pause(waited: Duration) -> Duration {
-    (waited / 10).clamp(Duration::from_millis(2), Duration::from_millis(20))
 }
 
 pub fn launch_stage(env: &Env) -> u8 {
@@ -137,10 +117,10 @@ pub fn launch_stage(env: &Env) -> u8 {
         let paths = Paths::from_process(env).map_err(|e| e.message)?;
         let log_path = paths.log();
         if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > MAX_LOG) {
-            let _ = std::fs::rename(&log_path, paths.state.join("engine.log.1"));
+            let _ = std::fs::rename(&log_path, paths.previous_log());
         }
         let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| e.to_string())?;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = env.executable().map_err(|e| e.message)?;
         let engine = Command::new(exe)
             .args(["daemon", "run"])
             .stdin(Stdio::null())
@@ -157,7 +137,7 @@ pub fn launch_stage(env: &Env) -> u8 {
         }
         Err(e) => {
             println!("{e}");
-            ErrorCode::DaemonUnavailable.exit_code()
+            torrential_daemon::exit::code(ErrorCode::DaemonUnavailable)
         }
     }
 }
@@ -200,32 +180,18 @@ mod tests {
     }
 
     #[test]
-    fn the_wait_for_the_engine_asks_often_at_first_and_less_later() {
-        let ms = Duration::from_millis;
-        let pauses = [ms(0), ms(25), ms(100), ms(10_000)].map(pause);
-        assert_eq!(pauses, [ms(2), Duration::from_micros(2_500), ms(10), ms(20)]);
-    }
-
-    #[test]
-    fn the_wait_for_the_engine_ends_when_it_answers_fails_or_runs_out() {
-        let mut asked = 0;
-        let answered = poll(Duration::from_secs(10), || {
-            asked += 1;
-            Ok((asked == 3).then_some("conn"))
-        });
-        let failed = poll(Duration::from_secs(10), || Err::<Option<()>, _>(Error::internal("startup failed")));
-        let started = Instant::now();
-        let mut idle_asks = 0;
-        let ran_out = poll(Duration::from_millis(300), || {
-            idle_asks += 1;
-            Ok(None::<()>)
-        });
-
-        assert_eq!((answered.unwrap(), asked), (Some("conn"), 3));
-        assert_eq!(failed.unwrap_err().message, "startup failed");
-        assert_eq!(ran_out.unwrap(), None);
-        assert!(started.elapsed() >= Duration::from_millis(300));
-        assert!(idle_asks < 60, "asked {idle_asks} times in 300 ms");
+    fn the_engine_starts_from_the_binary_this_process_started_from() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("torrential");
+        std::fs::write(&installed, "#!/bin/sh\necho \"asked to $*\"\nexit 1\n").unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("th");
+        let env = env(&[("TORRENTIAL_HOME", home.to_str().unwrap())]).with_executable(&installed);
+        let Err(error) = start(&Paths::from_process(&env).unwrap(), &env) else {
+            panic!("the stand-in started an engine")
+        };
+        assert_eq!(error.message, "the engine launcher failed: asked to daemon launch");
     }
 
     #[test]

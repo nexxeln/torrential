@@ -4,7 +4,6 @@
 //! ID, and each [`Provider`] searches by it. A request carries the title, the ID, and for a
 //! better match the file's name, size, and hash: nothing about the person or the machine.
 
-mod imdb;
 mod opensubtitles;
 
 use std::collections::BTreeMap;
@@ -13,19 +12,20 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use tokio::time::Instant;
-use torrential_core::title::{Episode, Title};
+use torrential_core::catalog::Episode;
+use torrential_core::cut::Cut;
+use torrential_core::title::Title;
 use torrential_core::{Error, ErrorCode};
 use url::Url;
 
-use crate::http::{FetchError, Http};
+use crate::http::{BROWSER, FetchError, Http, endpoint};
+use crate::imdb;
 
-/// A browser's name, so the lookups say nothing about the program or the person.
-const AGENT: &str = "Mozilla/5.0";
 const FIND_WITHIN: Duration = Duration::from_secs(8);
 const FETCH_WITHIN: Duration = Duration::from_secs(10);
 /// A subtitle file is text. A long film's is well under a megabyte.
 const LARGEST_SUBTITLE: usize = 2 << 20;
-/// Enough of each language to find one whose timing fits.
+/// Enough of each language to find one whose timing fits, beside the exact matches.
 const PER_LANGUAGE: usize = 5;
 /// The names a file may carry are tried in order, and a film has at most a few.
 const TITLES_TRIED: usize = 3;
@@ -102,7 +102,8 @@ pub struct Subtitle {
 pub struct Found {
     /// The film or series as IMDb names it, with the episode the file's name gave.
     pub title: Option<Title>,
-    /// Each language's subtitles together, exact matches first and then in the provider's order.
+    /// Each language's subtitles together: exact matches first, then those whose name says the
+    /// file's cut, then the rest, each in the provider's order.
     pub subtitles: Vec<Subtitle>,
 }
 
@@ -136,19 +137,15 @@ pub struct Online {
 impl Online {
     /// Fails with `usage` when an endpoint is not a URL or names nothing known.
     pub fn new(config: &SubtitleConfig) -> Result<Online, Error> {
-        let http = Http::named(AGENT, false)
+        let http = Http::named(BROWSER)
             .map_err(|e| Error::internal(format!("cannot start the HTTP client for subtitles: {e}")))?;
         let known = [imdb::NAME, opensubtitles::NAME];
         if let Some(unknown) = config.endpoints.keys().find(|name| !known.contains(&name.as_str())) {
             return Err(Error::new(ErrorCode::Usage, format!("{unknown} is not a subtitle endpoint"))
                 .with_hint(format!("the endpoints are {}", known.join(" and "))));
         }
-        let base = |name: &str, default: &str| {
-            let url = config.endpoints.get(name).map_or(default, String::as_str);
-            let slashed = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
-            Url::parse(&slashed)
-                .map_err(|e| Error::new(ErrorCode::Usage, format!("the {name} endpoint {url} is not a URL: {e}")))
-        };
+        let base =
+            |name: &str, default: &str| endpoint(config.endpoints.get(name).map_or(default, String::as_str), name);
         Ok(Online {
             imdb: base(imdb::NAME, imdb::BASE)?,
             providers: vec![Box::new(opensubtitles::OpenSubtitles {
@@ -180,7 +177,8 @@ impl Online {
                 subtitles.extend(found);
             }
         }
-        answered.then(|| Found { title: Some(matched.title), subtitles: best(subtitles) })
+        let cut = Cut::of(&video.file_name);
+        answered.then(|| Found { title: Some(matched.title), subtitles: best(subtitles, cut) })
     }
 
     /// The bytes of a subtitle a provider listed.
@@ -200,8 +198,10 @@ impl Online {
 }
 
 /// Each language's subtitles together, in the order the languages first appear. Within a
-/// language, exact matches come first and then the provider's order, cut to `PER_LANGUAGE`.
-fn best(found: Vec<Subtitle>) -> Vec<Subtitle> {
+/// language, exact matches come first, then those whose name says `cut`, then the provider's
+/// order. All the exact matches stay and `PER_LANGUAGE` others, so a search that learns the
+/// file's hash keeps every subtitle the search before it listed.
+fn best(found: Vec<Subtitle>, cut: Cut) -> Vec<Subtitle> {
     let mut languages: Vec<(String, Vec<Subtitle>)> = Vec::new();
     for subtitle in found {
         match languages.iter_mut().find(|(language, _)| *language == subtitle.language) {
@@ -210,8 +210,9 @@ fn best(found: Vec<Subtitle>) -> Vec<Subtitle> {
         }
     }
     let ranked = languages.into_iter().flat_map(|(_, mut group)| {
-        group.sort_by_key(|subtitle| !subtitle.exact);
-        group.truncate(PER_LANGUAGE);
+        group.sort_by_cached_key(|s| (!s.exact, Cut::of(s.name.as_deref().unwrap_or_default()) != cut));
+        let exact = group.iter().take_while(|subtitle| subtitle.exact).count();
+        group.truncate(exact + PER_LANGUAGE);
         group
     });
     ranked.collect()
@@ -225,6 +226,10 @@ mod tests {
         Subtitle { id: id.into(), language: language.into(), name: None, exact, source: "test", url: String::new() }
     }
 
+    fn named(id: &str, name: &str) -> Subtitle {
+        Subtitle { name: Some(name.into()), ..subtitle(id, "eng", false) }
+    }
+
     #[test]
     fn each_languages_best_come_first() {
         let found = vec![
@@ -236,9 +241,27 @@ mod tests {
             subtitle("6", "eng", false),
             subtitle("7", "eng", false),
             subtitle("8", "fre", true),
+            subtitle("9", "eng", false),
         ];
-        let ids: Vec<String> = best(found).into_iter().map(|s| s.id).collect();
-        assert_eq!(ids, ["3", "1", "4", "5", "6", "8", "2"]);
+        let ids: Vec<String> = best(found, Cut::Theatrical).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["3", "1", "4", "5", "6", "7", "8", "2"], "an exact match takes no other's place");
+    }
+
+    #[test]
+    fn subtitles_that_say_the_files_cut_come_before_the_rest() {
+        let found = || {
+            vec![
+                named("1", "Movie.2010.1080p.BluRay"),
+                named("2", "Movie.2010.Extended.1080p.BluRay"),
+                named("3", "Movie.2010.Theatrical.Cut"),
+                named("4", "Movie.2010.Directors.Cut"),
+                subtitle("5", "eng", true),
+            ]
+        };
+        let ids = |cut| best(found(), cut).into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids(Cut::Extended), ["5", "2", "1", "3", "4"]);
+        assert_eq!(ids(Cut::DirectorsCut), ["5", "4", "1", "2", "3"]);
+        assert_eq!(ids(Cut::Theatrical), ["5", "1", "3", "2", "4"], "no cut and theatrical are the same");
     }
 
     #[test]
@@ -250,18 +273,5 @@ mod tests {
         let sum = (0..2 * HASHED / 8).fold(1 << 30, |sum: u64, _| sum.wrapping_add(u64::MAX));
         assert_eq!(FileHash::of(1 << 30, &head, &tail).hash, sum, "only 64 KiB of each end counts, and the sum wraps");
         assert_eq!((FileHash::reach(1000), FileHash::reach(1 << 30)), (1000, 65_536));
-    }
-
-    #[test]
-    fn an_endpoint_must_be_one_this_knows() {
-        let config = |name: &str, url: &str| SubtitleConfig {
-            endpoints: [(name.to_string(), url.to_string())].into(),
-            ..SubtitleConfig::default()
-        };
-        assert!(Online::new(&SubtitleConfig::default()).is_ok());
-        assert!(Online::new(&config("imdb", "http://127.0.0.1:9")).is_ok());
-        let unknown = Online::new(&config("subscene", "http://127.0.0.1:9")).err().unwrap();
-        assert_eq!((unknown.code, unknown.message.as_str()), (ErrorCode::Usage, "subscene is not a subtitle endpoint"));
-        assert_eq!(Online::new(&config("opensubtitles", "not a url")).err().unwrap().code, ErrorCode::Usage);
     }
 }

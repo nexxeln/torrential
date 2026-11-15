@@ -1,0 +1,61 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 7,
+  "stdout": {
+    "schema": 1,
+    "type": "error",
+    "error": {
+      "code": "no_source",
+      "message": "no source of Night of the Living Dead (1968) plays now",
+      "hint": "try again later, or choose a source",
+      "details": {
+        "tried": [
+          {
+            "release": "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+            "reason": {
+              "reason": "no_data",
+              "waited_s": 1,
+              "text": "no data arrived in 1s"
+            }
+          },
+          {
+            "release": "b7f20d5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+            "reason": {
+              "reason": "no_data",
+              "waited_s": 1,
+              "text": "no data arrived in 1s"
+            }
+          },
+          {
+            "release": "e3a9155d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+            "reason": {
+              "reason": "no_data",
+              "waited_s": 1,
+              "text": "no data arrived in 1s"
+            }
+          },
+          {
+            "release": "09cd475d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+            "reason": {
+              "reason": "no_data",
+              "waited_s": 1,
+              "text": "no data arrived in 1s"
+            }
+          },
+          {
+            "release": "7a0c3f5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+            "reason": {
+              "reason": "no_data",
+              "waited_s": 1,
+              "text": "no data arrived in 1s"
+            }
+          }
+        ]
+      }
+    },
+    "next": "torrential search Night of the Living Dead 1968"
+  }
+}

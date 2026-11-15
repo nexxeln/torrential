@@ -1,4 +1,3 @@
-import { CheckIcon } from "@heroicons/react/16/solid";
 import type { ReactNode } from "react";
 import type { ApiError, Release } from "../api";
 import { bytes, count, sentence } from "../lib/format";
@@ -6,11 +5,12 @@ import { readable } from "../lib/release";
 import { Link } from "../router";
 import { CODECS, RESOLUTIONS } from "../search/ResultRow";
 import { Picture } from "../titles/Picture";
-import { CHECKS, skipReason } from "../titles/words";
+import { CHECKS, skipText } from "../titles/words";
 import { isTv } from "../lib/tv";
 import { Button, buttonClass } from "../ui/Button";
-import { Spinner } from "../ui/Spinner";
+import { READING, type Step, Steps } from "./Chrome";
 import type { Attempt, Passed } from "./titleSession";
+import { SHORT_ID } from "../wire";
 
 /** The title's picture behind the screens before playback, dark enough for text at any point of it. */
 function Backdrop({ src }: { src: string | null }) {
@@ -56,7 +56,7 @@ function about(release: Release): string {
     .join(" · ");
 }
 
-function PassedList({ title, passed, kind }: { title: string; passed: Passed[]; kind: "film" | "series" }) {
+function PassedList({ title, passed }: { title: string; passed: Passed[] }) {
   if (passed.length === 0) return null;
   return (
     <section aria-label={title} className="flex flex-col gap-2">
@@ -72,21 +72,16 @@ function PassedList({ title, passed, kind }: { title: string; passed: Passed[]; 
                     {name.title} <span className="text-pencil">{name.tags}</span>
                   </>
                 ) : (
-                  `Source ${source.release.slice(0, 8)}`
+                  `Source ${source.release.slice(0, SHORT_ID)}`
                 )}
               </p>
-              <p className="text-pretty text-pencil">{skipReason(source.reason, kind)}</p>
+              <p className="text-pretty text-pencil">{skipText(source.reason)}</p>
             </li>
           );
         })}
       </ul>
     </section>
   );
-}
-
-interface Step {
-  title: string;
-  detail: ReactNode;
 }
 
 function steps(attempt: Attempt): Step[] {
@@ -105,8 +100,7 @@ function steps(attempt: Attempt): Step[] {
         </>
       ),
     },
-    { title: "Reading the video", detail: "Downloading its first pieces to see what is inside." },
-    { title: "Getting ready to play", detail: "Buffering the first seconds." },
+    ...READING,
   ];
 }
 
@@ -129,28 +123,9 @@ export function TitleStarting({ attempt, naming, backdrop, step, readout }: Star
       <div className="absolute inset-0 flex items-end overflow-y-auto pt-20 pr-[max(--spacing(6),7vw,env(safe-area-inset-right))] pb-[max(--spacing(8),11vh)] pl-[max(--spacing(6),7vw,env(safe-area-inset-left))]">
         <div className="flex w-full max-w-xl animate-appear flex-col gap-8 motion-reduce:animate-none">
           <Name naming={naming} />
-          <ol role="list" aria-label="Starting" className="flex flex-col gap-3">
-            {steps(attempt).map((stage, at) => (
-              <li
-                key={at}
-                aria-current={at === step ? "step" : undefined}
-                data-state={at < step ? "done" : at === step ? "now" : "next"}
-                className="group/step flex items-start gap-3 text-base text-pencil data-[state=done]:text-soft data-[state=now]:text-ink"
-              >
-                <div className="flex h-lh w-5 shrink-0 items-center justify-center">
-                  {at < step && <CheckIcon className="size-4 fill-action" />}
-                  {at === step && <Spinner className="size-4 text-ink" />}
-                  {at > step && <div className="size-1.5 rounded-full bg-rule" />}
-                </div>
-                <div className="flex min-w-0 flex-col gap-0.5">
-                  <p className="group-data-[state=now]/step:font-medium">{at === 1 && playing ? playing : stage.title}</p>
-                  {at === step && stage.detail && <p className="max-w-[52ch] text-sm text-pretty text-pencil tabular-nums">{stage.detail}</p>}
-                </div>
-              </li>
-            ))}
-          </ol>
+          <Steps steps={steps(attempt).map((stage, at) => (at === 1 && playing ? { ...stage, title: playing } : stage))} step={step} />
           {readout && <div className="min-h-5 text-sm text-soft">{readout}</div>}
-          <PassedList title="Passed over" passed={attempt.passed} kind={attempt.episode ? "series" : "film"} />
+          <PassedList title="Passed over" passed={attempt.passed} />
         </div>
       </div>
     </div>
@@ -184,7 +159,7 @@ export function TitleFailed({ naming, backdrop, kind, error, tried, sources, unp
             <p className="text-base text-pretty text-soft sm:text-sm">{sentence(error.message)}</p>
             {error.hint && <p className="text-base text-pretty text-pencil sm:text-sm">{sentence(error.hint)}</p>}
           </div>
-          <PassedList title="Tried" passed={tried} kind={kind === "film" ? "film" : "series"} />
+          <PassedList title="Tried" passed={tried} />
           <div className="flex flex-wrap gap-2">
             <Button variant="primary" autoFocus={isTv()} onClick={onRetry}>
               Try again

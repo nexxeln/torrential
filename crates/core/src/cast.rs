@@ -6,81 +6,22 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::catalog::VideoRef;
 use crate::error::Error;
-use crate::id::Target;
+use crate::filetype::{Container, FileType};
 use crate::preferences::Playback;
-
-/// A video container, which a TV takes or does not. Its codecs are another matter.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Container {
-    Mkv,
-    Mp4,
-    WebM,
-    Avi,
-    Ts,
-    Mov,
-    Mpeg,
-    Wmv,
-}
-
-/// Each container's name, the extensions its files have, and the MIME types TVs list it by.
-const CONTAINERS: [(Container, &str, &[&str], &[&str]); 8] = [
-    (Container::Mkv, "mkv", &["mkv"], &["video/x-matroska", "video/x-mkv", "video/mkv", "video/matroska"]),
-    (Container::Mp4, "mp4", &["mp4", "m4v"], &["video/mp4", "video/mpeg4", "video/x-m4v"]),
-    (Container::WebM, "webm", &["webm"], &["video/webm"]),
-    (Container::Avi, "avi", &["avi", "divx"], &["video/avi", "video/x-msvideo", "video/x-avi", "video/divx"]),
-    (Container::Ts, "ts", &["ts", "m2ts", "mts"], &["video/mp2t", "video/vnd.dlna.mpeg-tts", "video/x-mpegts"]),
-    (Container::Mov, "mov", &["mov"], &["video/quicktime"]),
-    (Container::Mpeg, "mpeg", &["mpg", "mpeg"], &["video/mpeg"]),
-    (Container::Wmv, "wmv", &["wmv"], &["video/x-ms-wmv"]),
-];
-
-impl Container {
-    fn row(self) -> &'static (Container, &'static str, &'static [&'static str], &'static [&'static str]) {
-        CONTAINERS.iter().find(|row| row.0 == self).expect("every container has a row")
-    }
-
-    pub fn name(self) -> &'static str {
-        self.row().1
-    }
-
-    /// The MIME types a TV may list this container by, the usual one first.
-    pub fn mimes(self) -> &'static [&'static str] {
-        self.row().3
-    }
-
-    /// The container of a file named `path`, by its extension.
-    pub fn of_path(path: &str) -> Option<Container> {
-        let (_, extension) = path.rsplit_once('.')?;
-        let extension = extension.to_ascii_lowercase();
-        CONTAINERS.iter().find(|row| row.2.contains(&extension.as_str())).map(|row| row.0)
-    }
-
-    /// The container a MIME type names, in any case.
-    pub fn of_mime(mime: &str) -> Option<Container> {
-        let mime = mime.trim().to_ascii_lowercase();
-        CONTAINERS.iter().find(|row| row.3.contains(&mime.as_str())).map(|row| row.0)
-    }
-
-    fn of_name(name: &str) -> Option<Container> {
-        CONTAINERS.iter().find(|row| row.1 == name).map(|row| row.0)
-    }
-
-    fn bit(self) -> u16 {
-        1 << CONTAINERS.iter().position(|row| row.0 == self).expect("every container has a row")
-    }
-}
+use crate::quality::Quality;
+use crate::target::Target;
 
 /// The containers a TV takes. Written as their names, such as `["mkv", "mp4"]`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Plays(u16);
+pub struct Containers(u16);
 
-impl Plays {
+impl Containers {
     pub fn contains(self, container: Container) -> bool {
         self.0 & container.bit() != 0
     }
 
     pub fn iter(self) -> impl Iterator<Item = Container> {
-        CONTAINERS.iter().map(|row| row.0).filter(move |c| self.contains(*c))
+        Container::ALL.into_iter().filter(move |c| self.contains(*c))
     }
 
     /// Whether a file named `path` goes to the TV as it is.
@@ -89,19 +30,84 @@ impl Plays {
     }
 }
 
-impl FromIterator<Container> for Plays {
-    fn from_iter<I: IntoIterator<Item = Container>>(containers: I) -> Self {
-        Plays(containers.into_iter().fold(0, |bits, container| bits | container.bit()))
+/// What a screen plays: the files it opens as they are, whether ffmpeg converts the others for it,
+/// and the codec it decodes. A title play judges its sources by it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Plays {
+    pub opens: Opens,
+    /// ffmpeg, when it is here, converts what the screen does not open, as for a browser.
+    pub remux: bool,
+    /// The newest codec it decodes, for a screen that refuses the rest, as a TV does. `None` takes
+    /// any.
+    pub decodes: Option<Playback>,
+}
+
+/// The files a screen opens as they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Opens {
+    /// Any, as mpv, IINA and VLC open, and as a download kept with `get` takes.
+    Any,
+    /// What a browser plays without ffmpeg, by the file-type table.
+    Browser,
+    /// These containers and no other, as a TV lists them.
+    Only(Containers),
+}
+
+impl Plays {
+    /// What mpv, IINA and VLC play, and what a download kept with `get` takes.
+    pub const ANY: Plays = Plays { opens: Opens::Any, remux: false, decodes: None };
+    /// What a browser plays: its own files, and the rest once ffmpeg converts them.
+    pub const BROWSER: Plays = Plays { opens: Opens::Browser, remux: true, decodes: None };
+
+    /// What `tv` plays: the containers it lists, as they are, in the codecs it decodes.
+    pub fn tv(tv: &Tv) -> Plays {
+        Plays { opens: Opens::Only(tv.plays), remux: false, decodes: Some(tv.decodes) }
+    }
+
+    /// Whether a file named `path` plays, with `ffmpeg` here to convert it or not.
+    pub fn opens(self, path: &str, ffmpeg: bool) -> bool {
+        (self.remux && ffmpeg)
+            || match self.opens {
+                Opens::Any => true,
+                Opens::Browser => FileType::of(path).is_some_and(|t| t.browser.is_some()),
+                Opens::Only(containers) => containers.takes(path),
+            }
+    }
+
+    /// Whether it decodes a video of `quality`, as far as a release's name tells.
+    pub fn decodes(self, quality: Quality) -> bool {
+        self.decodes.is_none_or(|playback| playback.plays(quality))
+    }
+
+    /// Of `videos`, each with its `size` and its `path`, the one a play opens: the largest, unless
+    /// one this screen opens as it is comes within a quarter of its size, which then plays without
+    /// being converted. So a browser plays an archive.org film's MP4 rather than its larger Ogg.
+    pub fn preferred<T>(self, videos: &[T], size: impl Fn(&T) -> u64, path: impl Fn(&T) -> &str) -> Option<&T> {
+        let largest = videos.iter().max_by_key(|v| size(v))?;
+        let (keep, of) = AS_IS_WITHIN;
+        let near = |v: &&T| u128::from(size(v)) * u128::from(of) >= u128::from(size(largest)) * u128::from(keep);
+        let as_is = |v: &&T| self.opens(path(v), false);
+        Some(videos.iter().filter(near).filter(as_is).max_by_key(|v| size(v)).unwrap_or(largest))
     }
 }
 
-impl Serialize for Plays {
+/// How much smaller than the largest video a file the screen opens as it is may be and still play
+/// instead: a quarter. Archive.org's derivatives of one film come within it of each other.
+const AS_IS_WITHIN: (u64, u64) = (3, 4);
+
+impl FromIterator<Container> for Containers {
+    fn from_iter<I: IntoIterator<Item = Container>>(containers: I) -> Self {
+        Containers(containers.into_iter().fold(0, |bits, container| bits | container.bit()))
+    }
+}
+
+impl Serialize for Containers {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_seq(self.iter().map(Container::name))
     }
 }
 
-impl<'de> Deserialize<'de> for Plays {
+impl<'de> Deserialize<'de> for Containers {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let names = Vec::<String>::deserialize(d)?;
         Ok(names.iter().filter_map(|name| Container::of_name(name)).collect())
@@ -110,6 +116,7 @@ impl<'de> Deserialize<'de> for Plays {
 
 /// A TV, or another media renderer, that answered a search of the home network.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Tv {
     /// The renderer's UDN and its address, such as `uuid:6a3e…@192.168.1.40`. A device that
     /// copies a TV's UDN from another address is another TV, and so is the TV at a new address.
@@ -119,7 +126,7 @@ pub struct Tv {
     /// Its IP address on the home network.
     pub address: String,
     /// The containers a cast sends it as they are.
-    pub plays: Plays,
+    pub plays: Containers,
     /// The newest video codec it says it decodes, which picks the sources a title cast tries.
     pub decodes: Playback,
     /// Whether torrential can set its volume.
@@ -129,6 +136,7 @@ pub struct Tv {
 /// What plays on a TV now.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum CastState {
     /// Finding a source for the film or episode.
     Finding,
@@ -144,6 +152,7 @@ pub enum CastState {
 
 /// One cast on one TV, from the moment it is asked for until a minute after it ends.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Cast {
     /// The TV's ID.
     pub tv: String,
@@ -176,6 +185,7 @@ impl Cast {
 
 /// The TVs found on the home network, and the casts playing or just ended.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TvList {
     pub tvs: Vec<Tv>,
     pub casts: Vec<Cast>,
@@ -184,6 +194,7 @@ pub struct TvList {
 /// What a remote control asks a cast to do.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum CastAction {
     Pause,
     Resume,
@@ -239,10 +250,10 @@ mod tests {
 
     #[test]
     fn the_containers_a_tv_plays_read_and_write_as_their_names() {
-        let plays: Plays = [Container::Mp4, Container::Mkv].into_iter().collect();
+        let plays: Containers = [Container::Mp4, Container::Mkv].into_iter().collect();
         assert!(plays.takes("film.mkv") && plays.takes("film.MP4") && !plays.takes("film.avi"));
         assert_eq!(serde_json::to_string(&plays).unwrap(), r#"["mkv","mp4"]"#);
-        let read: Plays = serde_json::from_str(r#"["mp4","ogg","mkv"]"#).unwrap();
+        let read: Containers = serde_json::from_str(r#"["mp4","ogg","mkv"]"#).unwrap();
         assert_eq!(read, plays, "a name this version does not know is left out");
     }
 
