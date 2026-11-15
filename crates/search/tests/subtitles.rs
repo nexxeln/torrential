@@ -63,12 +63,14 @@ impl Server {
         Server { base, asked, agents }
     }
 
-    /// What the sources answered for Sintel and for an episode of Breaking Bad.
+    /// What the sources answered for Sintel, for Watchmen, and for an episode of Breaking Bad.
     async fn recorded() -> Server {
         Server::start(vec![
             ("/imdb/suggestion/x/sintel", 200, fixture("imdb/suggestion-sintel.json")),
+            ("/imdb/suggestion/x/watchmen", 200, fixture("imdb/suggestion-watchmen.json")),
             ("/imdb/suggestion/x/breaking%20bad", 200, fixture("imdb/suggestion-breaking-bad.json")),
             (SINTEL, 200, fixture("opensubtitles/subtitles-movie-tt1727587.json")),
+            ("/os/subtitles/movie/tt0409459", 200, fixture("opensubtitles/subtitles-movie-tt0409459.json")),
             ("/os/subtitles/series/tt0903747:3:5", 200, fixture("opensubtitles/subtitles-series-tt0903747-3-5.json")),
             (SINTEL_SRT, 200, fixture("opensubtitles/sintel_en.srt")),
         ])
@@ -93,6 +95,11 @@ fn video(file: &str, hash: Option<FileHash>) -> Video {
 /// Each subtitle as its ID, language, and whether it is exact.
 fn listed(found: &Found) -> Vec<(&str, &str, bool)> {
     found.subtitles.iter().map(|s| (s.id.as_str(), s.language.as_str(), s.exact)).collect()
+}
+
+/// The IDs of the subtitles in `language`.
+fn ids<'a>(found: &'a Found, language: &str) -> Vec<&'a str> {
+    found.subtitles.iter().filter(|s| s.language == language).map(|s| s.id.as_str()).collect()
 }
 
 #[tokio::test]
@@ -150,6 +157,26 @@ async fn a_files_hash_goes_with_the_search_and_its_matches_come_first() {
         "/os/subtitles/movie/tt1727587/videoHash=8e245d9679d31e12&videoSize=12909756&filename=Sintel%20%282010%29%2Emkv.json"
     );
     assert_eq!(listed(&found)[..3], [("4784578", "eng", true), ("3871796", "eng", false), ("6738581", "eng", false)]);
+}
+
+#[tokio::test]
+async fn an_extended_file_picks_the_extended_subtitle_over_theatrical_ones_listed_first() {
+    let server = Server::recorded().await;
+    let online = server.online(true);
+    // The source lists "Watchmen.extended .DVDRip.XviD" seventh and "Watchmen.DC.DVDRip.XviD-HNR" eighth in English.
+    let extended = online.find(&video("Watchmen.2009.Extended.1080p.BluRay.x264.mkv", None)).await.unwrap();
+    assert_eq!(ids(&extended, "eng"), ["3530715", "3530988", "3530449", "3530965", "3530966"]);
+    let directors = online.find(&video("Watchmen.2009.Directors.Cut.1080p.BluRay.x264.mkv", None)).await.unwrap();
+    assert_eq!(ids(&directors, "eng"), ["3531022", "3530988", "3530449", "3530965", "3530966"]);
+    assert_eq!(ids(&directors, "fre"), ["3531023", "3530293", "3530598", "3530238"]);
+}
+
+#[tokio::test]
+async fn a_plain_file_keeps_the_providers_order_of_subtitles_that_say_no_cut() {
+    let server = Server::recorded().await;
+    let found = server.online(true).find(&video("Watchmen.2009.1080p.BluRay.x264.mkv", None)).await.unwrap();
+    assert_eq!(ids(&found, "eng"), ["3530988", "3530449", "3530965", "3530966", "3530963"]);
+    assert_eq!(ids(&found, "fre"), ["3530293", "3530598", "3530238", "3531023"], "the director's cut goes last");
 }
 
 #[tokio::test]

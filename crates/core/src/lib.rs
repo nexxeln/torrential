@@ -1,5 +1,6 @@
 pub mod cast;
 pub mod catalog;
+pub mod cut;
 pub mod device;
 pub mod error;
 pub mod filetype;

@@ -371,7 +371,8 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     if (chosenKey === announced.current) return;
     const first = announced.current === undefined;
     announced.current = chosenKey;
-    if (!first) feedback.note(chosen ? `Subtitles: ${chosen.label}${chosen.source?.kind === "online" ? ", found online" : ""}` : "Subtitles off");
+    const online = chosen?.source?.kind === "online" ? (chosen.exact ? ", timed for this file" : ", found online") : "";
+    if (!first) feedback.note(chosen ? `Subtitles: ${chosen.label}${online}` : "Subtitles off");
     // A track already shifted on an earlier visit needs no telling.
     setHint(loose && subtitleOffset(id, file.index, loose) === 0 ? loose : null);
   }, [chosenKey, chosen, loose, feedback, id, file.index]);
