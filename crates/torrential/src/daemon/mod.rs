@@ -37,6 +37,7 @@ use crate::env::Env;
 use crate::log::log;
 use crate::machine::Detector;
 use crate::paths::{self, Paths};
+use crate::service;
 use crate::update;
 use admission::Disk;
 use engine_port::{EnginePort, ParseTorrent};
@@ -259,34 +260,6 @@ pub fn start(
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
-/// The exit status after which launchd (`KeepAlive` without `SuccessfulExit`) and systemd
-/// (`Restart=on-failure`) start the engine again, from the binary an update installed. Any other
-/// clean stop exits 0, which neither restarts.
-const RESTART: u8 = 75;
-
-/// What an engine that exits for the login service leaves, so `engine stop` waits for the next
-/// engine to stop it too. The next engine removes it once it is up.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Switching {
-    pid: u32,
-    at: i64,
-}
-
-/// How long a stop waits for the login service to start the next engine.
-const SWITCH_WITHIN: i64 = 60;
-
-fn leave_switching(paths: &Paths, at: i64) {
-    let switching = Switching { pid: std::process::id(), at };
-    let _ = crate::skill::write_atomic(&paths.switching(), &serde_json::to_vec(&switching).expect("records serialize"));
-}
-
-/// Whether an engine exited for the login service under a minute before `now`, and no engine has
-/// started since.
-pub fn switching(paths: &Paths, now: i64) -> bool {
-    let Ok(bytes) = std::fs::read(paths.switching()) else { return false };
-    serde_json::from_slice::<Switching>(&bytes).is_ok_and(|switching| now - switching.at < SWITCH_WITHIN)
-}
-
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
 /// systemd started it, a switch to an installed update.
 pub fn run(env: &Env, service: bool) -> u8 {
@@ -295,7 +268,7 @@ pub fn run(env: &Env, service: bool) -> u8 {
         Err(e) => return fail_start(None, &e),
     };
     match serve(env, &paths, service) {
-        Ok(Ended::Restart) if service => RESTART,
+        Ok(Ended::Restart) if service => service::RESTART,
         Ok(_) => 0,
         // The other engine serves this home, so launchd and systemd have nothing to start again.
         Err(Startup::AlreadyRunning(message)) => {
@@ -336,7 +309,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
     };
     let _ = std::fs::remove_file(paths.startup_error());
     prepare_runtime_dir(&paths.runtime)?;
-    match crate::client::service::add_at_start(env, paths) {
+    match service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
         Ok(None) => {}
         Err(e) => log(&format!("cannot add a login service: {}", e.message)),
@@ -394,7 +367,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         running.ctx.news.post(update::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
-            let _ = crate::skill::write_atomic(&paths.http_port(), players.to_string().as_bytes());
+            let _ = crate::fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
         }
         log(&format!(
             "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
@@ -415,7 +388,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
-            leave_switching(paths, torrential_core::time::now());
+            service::leave_switching(paths, torrential_core::time::now());
         }
         accept.abort();
         running.http.abort();

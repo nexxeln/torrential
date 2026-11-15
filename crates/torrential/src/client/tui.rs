@@ -19,8 +19,8 @@ use super::{answer, titles};
 use crate::config::{self, Config};
 use crate::daemon::admission::{Disk, RealDisk};
 use crate::env::Env;
+use crate::fsutil::Writes;
 use crate::paths::Paths;
-use crate::skill::Writes;
 use crate::update::{self, Outcome, Releases};
 use crate::wire;
 

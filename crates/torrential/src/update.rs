@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -16,11 +16,10 @@ use torrential_core::{Error, ErrorCode};
 use crate::daemon::owner;
 use crate::daemon::server::Ctx;
 use crate::env::Env;
+use crate::fsutil::{Writes, sha256, write_atomic};
 use crate::log::log;
 use crate::output::Mode;
-use crate::output::theme::{Token, paint};
 use crate::paths::Paths;
-use crate::skill::{Writes, sha256, write_atomic};
 use crate::wire;
 
 const RELEASES: &str = "https://github.com/nexxeln/torrential/releases";
@@ -835,18 +834,6 @@ pub fn notice(paths: &Paths, env: &Env, audience: Audience, now: i64) -> Option<
     }
     let _ = write_atomic(&file, now.to_string().as_bytes());
     Some(audience.out(&env.version(), latest))
-}
-
-pub fn print_notice(mode: Mode, env: &Env) {
-    let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
-    let Ok(paths) = Paths::from_process(env) else { return };
-    let lines = [crate::client::service::notice(&paths, audience), notice(&paths, env, audience, now())];
-    for line in lines.into_iter().flatten() {
-        match audience {
-            Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),
-            Audience::Agent => eprintln!("{line}"),
-        }
-    }
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {

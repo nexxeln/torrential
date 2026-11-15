@@ -11,6 +11,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
 use super::deleter::Identity;
+use crate::fsutil::open_folder;
 
 /// Where the files of a download in a folder the person chose go when they delete them.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -227,8 +228,7 @@ fn put_in(
 
 /// Opens the folder `name` in `dir`, never through a link.
 fn open(dir: impl rustix::fd::AsFd, name: impl rustix::path::Arg) -> Result<OwnedFd, String> {
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    rustix::fs::openat(dir, name, flags, Mode::empty()).map_err(|_| NO_TRASH.to_string())
+    open_folder(dir, name).map_err(|_| NO_TRASH.to_string())
 }
 
 /// Opens the folder `name` in `dir`, making it, for the person alone, when it is not there.

@@ -19,6 +19,7 @@ use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::store::{Store, Tombstone};
 use super::trash::Trash;
+use crate::fsutil::open_folder;
 use crate::log::log;
 
 /// What happens to a file between the check that it is the file to move to the Trash and the
@@ -94,11 +95,6 @@ fn folder_flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC
 }
 
-/// Opens the folder `name` in `dir`, never through a link.
-fn open_folder(dir: &OwnedFd, name: impl rustix::path::Arg) -> rustix::io::Result<OwnedFd> {
-    rustix::fs::openat(dir, name, folder_flags() | OFlags::NOFOLLOW, Mode::empty())
-}
-
 const MOVED: &str = "the plays folder was moved or replaced since the engine started";
 
 /// The plays folder as the engine opened it when it started.
@@ -113,13 +109,12 @@ impl Root {
     fn open(path: &Path) -> Result<Root, String> {
         let unusable = |why: String| format!("torrential cannot use the plays folder {}: {why}", path.display());
         std::fs::create_dir_all(path).map_err(|e| unusable(e.to_string()))?;
-        let fd =
-            rustix::fs::openat(CWD, path, folder_flags() | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| match e {
-                Errno::LOOP | Errno::NOTDIR => {
-                    unusable("it is a link, and torrential deletes plays only in a folder of its own".into())
-                }
-                e => unusable(io::Error::from(e).to_string()),
-            })?;
+        let fd = open_folder(CWD, path).map_err(|e| match e {
+            Errno::LOOP | Errno::NOTDIR => {
+                unusable("it is a link, and torrential deletes plays only in a folder of its own".into())
+            }
+            e => unusable(io::Error::from(e).to_string()),
+        })?;
         let stat = rustix::fs::fstat(&fd).map_err(|e| unusable(io::Error::from(e).to_string()))?;
         Ok(Root { path: path.to_path_buf(), fd, identity: Identity::of(&stat) })
     }

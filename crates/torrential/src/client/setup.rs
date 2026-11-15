@@ -5,9 +5,9 @@ use torrential_core::{Error, Preferences, Profile};
 use crate::cli::{Limit, PlaybackArg, ScreenArg, SetupArgs};
 use crate::config;
 use crate::env::Env;
+use crate::fsutil::Writes;
 use crate::output::{Mode, Typed, views};
 use crate::paths::Paths;
-use crate::skill::Writes;
 use crate::update::Policy;
 
 #[derive(Serialize)]
