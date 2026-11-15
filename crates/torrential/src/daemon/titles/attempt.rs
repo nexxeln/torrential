@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
+use torrential_core::filetype::{self, FileType};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
@@ -32,8 +33,6 @@ const LOOK_AHEAD: usize = 2;
 const ANSWER_WITHIN: Duration = Duration::from_millis(100);
 /// How often a trial looks for the first bytes of its video.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
-/// What a browser plays without ffmpeg remuxing it.
-const BROWSER_PLAYS: [&str; 4] = ["mp4", "m4v", "mov", "webm"];
 /// How long a title's search runs before a strong swarm from any index may go first. The quick
 /// indexes have answered by then, and a lawful catalog among them would lead.
 const STRONG_AFTER: Duration = Duration::from_millis(2500);
@@ -110,10 +109,9 @@ pub enum Containers {
 impl Containers {
     /// Whether the file at `path` opens, when ffmpeg is there to `remux` it or not.
     fn open(self, path: &str, remux: bool) -> bool {
-        let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase());
         match self {
             Containers::Any => true,
-            Containers::Browser => remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str())),
+            Containers::Browser => remux || FileType::of(path).is_some_and(|t| t.browser.is_some()),
             Containers::Tv(plays) => plays.takes(path),
         }
     }
@@ -537,7 +535,7 @@ fn video_of(
     if containers.open(path, remux) {
         Ok(playable)
     } else {
-        let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
+        let container = filetype::extension(path);
         let skip = match containers {
             Containers::Tv(_) => Skip::NotOnTv { container },
             Containers::Browser | Containers::Any => Skip::Unplayable { container },

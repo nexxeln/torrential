@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use torrential_core::filetype::extension;
 use torrential_core::text::sanitize;
 use torrential_core::time::now;
 use torrential_core::title::Span;
@@ -64,6 +65,8 @@ const FAILING_FOR: Duration = Duration::from_secs(60);
 const ENDED_KEPT: Duration = Duration::from_secs(60);
 /// How long the engine waits to be reachable on the home network before it gives up on a cast.
 const REACHABLE_WITHIN: Duration = Duration::from_secs(5);
+/// Where the engine answers with its word, for anyone who asks.
+pub const HELLO: &str = "/.well-known/torrential";
 /// Tries at the seek that resumes a video, since some TVs refuse one while they start.
 const RESUME_TRIES: u32 = 3;
 /// How long a TV that took the seek that resumes a video may take to get there. Until then the
@@ -75,6 +78,9 @@ pub struct Casts {
     ctx: Weak<Ctx>,
     find: Find,
     http: reqwest::Client,
+    /// A random word the engine answers at `HELLO`, so a cast can tell this engine from another
+    /// program on the same port.
+    hello: String,
     state: Mutex<State>,
     /// Held while a search runs, so requests that arrive meanwhile take its answer.
     searching: tokio::sync::Mutex<()>,
@@ -182,7 +188,14 @@ impl Casts {
             .connect_timeout(Duration::from_secs(3))
             .build()
             .expect("a plain HTTP client builds");
-        Self { ctx, find, http, state: Mutex::default(), searching: tokio::sync::Mutex::new(()) }
+        let mut word = [0u8; 16];
+        getrandom::fill(&mut word).expect("the system gives random bytes");
+        let hello = word.iter().map(|b| format!("{b:02x}")).collect();
+        Self { ctx, find, http, hello, state: Mutex::default(), searching: tokio::sync::Mutex::new(()) }
+    }
+
+    pub fn hello(&self) -> &str {
+        &self.hello
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -1054,10 +1067,6 @@ fn refused(tv: &Tv, path: &str) -> Error {
         .with_hint("play it on this Mac, or choose a source in a format the TV plays")
 }
 
-fn extension(path: &str) -> String {
-    path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase()
-}
-
 fn file_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
@@ -1073,11 +1082,13 @@ fn facing(address: &str) -> Result<IpAddr, Error> {
     Ok(socket.local_addr().map_err(unreachable)?.ip())
 }
 
-/// Waits until the engine takes connections at `host`, as the TV will make them. The engine
-/// listens on the home network once a grant is live.
+/// Waits until this engine answers at `host`, where the TV will ask for the video. The engine
+/// listens on the home network once a grant is live, and until then, or while another program
+/// holds the port there, something else may answer, so only the engine's own word counts.
 async fn reachable(ctx: &Ctx, host: IpAddr) -> Result<(), Error> {
+    let url = format!("http://{}{HELLO}", std::net::SocketAddr::new(host, ctx.http_port));
     let deadline = Instant::now() + REACHABLE_WITHIN;
-    while tokio::net::TcpStream::connect((host, ctx.http_port)).await.is_err() {
+    while !ours(&ctx.casts, &url).await {
         if Instant::now() >= deadline {
             let why = ctx.devices.list(ctx.http_port).unreachable;
             return Err(Error::new(
@@ -1088,6 +1099,13 @@ async fn reachable(ctx: &Ctx, host: IpAddr) -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Ok(())
+}
+
+/// Whether what answers at `url` is this engine, by the word it gives.
+async fn ours(casts: &Casts, url: &str) -> bool {
+    let Ok(answer) = casts.http.get(url).timeout(Duration::from_secs(1)).send().await else { return false };
+    let hello = casts.hello.as_bytes();
+    answer.content_length() == Some(hello.len() as u64) && answer.bytes().await.is_ok_and(|body| body == hello)
 }
 
 /// The files a cast serves, listed for the HTTP server until it is dropped.

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Countries, Country, TitleCard};
 use crate::error::{Error, ErrorCode};
+use crate::filetype::{FileType, Kind};
 use crate::quality::Quality;
 
 /// A film, or with `episode` one episode of a series.
@@ -412,9 +413,6 @@ mod seconds {
     }
 }
 
-const VIDEO_EXTENSIONS: [&str; 12] =
-    ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "m2ts", "wmv", "mpg", "mpeg", "ogv"];
-
 /// Tags that end the title in a release name. Words that are also common in titles, such as
 /// `web` and `extended`, are left out: a resolution or a year almost always comes before them.
 const TAGS: [&str; 44] = [
@@ -426,7 +424,9 @@ const TAGS: [&str; 44] = [
 
 fn stem(name: &str) -> &str {
     match name.rsplit_once('.') {
-        Some((stem, extension)) if VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()) => stem,
+        Some((stem, extension)) if FileType::of_extension(extension).is_some_and(|t| t.kind == Some(Kind::Video)) => {
+            stem
+        }
         _ => name,
     }
 }
