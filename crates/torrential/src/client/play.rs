@@ -27,9 +27,6 @@ use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 use crate::player::{self, Launch, Player};
 
-/// Bytes read from each end of the video for its runtime: Matroska and fast-start MP4 keep it in
-/// the head, and other MP4s in the tail.
-const PROBE: u64 = 2 * 1024 * 1024;
 const TICK: Duration = Duration::from_millis(500);
 /// The countdown plans with the mean rate over this long, since the rate a moment reports swings as
 /// pieces and peers come and go.
@@ -327,8 +324,9 @@ fn countdown(conn: &mut Conn, playing: &Playing) -> Result<Runtime, Error> {
 /// Reads the runtime from the ends of the video. Asking for those bytes also makes the engine
 /// fetch them first, and the player needs them before anything else.
 fn read_runtime(url: &str) -> Option<Duration> {
-    let head = fetch(url, &format!("bytes=0-{}", PROBE - 1)).ok()?;
-    media::duration(&head, &[]).or_else(|| media::duration(&head, &fetch(url, &format!("bytes=-{PROBE}")).ok()?))
+    let head = fetch(url, &format!("bytes=0-{}", media::RUNTIME_BYTES - 1)).ok()?;
+    media::duration(&head, &[])
+        .or_else(|| media::duration(&head, &fetch(url, &format!("bytes=-{}", media::RUNTIME_BYTES)).ok()?))
 }
 
 fn fetch(url: &str, range: &str) -> std::io::Result<Vec<u8>> {

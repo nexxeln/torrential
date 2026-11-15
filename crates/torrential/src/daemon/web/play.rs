@@ -1,18 +1,15 @@
 //! `POST /api/play`: starts or joins a download and fetches one video first, in playing order.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use torrential_core::stream::{self, Playable};
+use torrential_core::stream::Playable;
 use torrential_core::text::sanitize;
-use torrential_core::{Error, ErrorCode, Job, Target, TorrentFile, TorrentId};
+use torrential_core::{Error, ErrorCode, Job, TorrentFile, TorrentId};
 
 use super::super::ctx::Ctx;
 use super::super::downloads::{self, Served, served};
-use super::super::engine_port::Metainfo;
-use super::super::owner::plays::Destination;
-use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
+use super::super::owner::{Command, FilesInfo, MetaTarget};
 use torrential_core::protocol::METADATA_WAIT;
 
 #[derive(Deserialize)]
@@ -38,63 +35,17 @@ pub struct Playing {
 
 pub async fn play(ctx: &Ctx, request: Play) -> Result<Playing, Error> {
     let deadline = Instant::now() + METADATA_WAIT;
-    let (source, _, playable) = prepare(ctx, super::target(&request.reference)?, request.file, deadline).await?;
-    let (job, info) = begin(ctx, source, &playable, deadline).await?;
+    let (source, _, playable) =
+        downloads::prepare(ctx, super::target(&request.reference)?, request.file, deadline).await?;
+    let (job, info) = downloads::begin(ctx, source, &playable, deadline).await?;
     Ok(playing(ctx, job, &info, &playable).await)
-}
-
-/// The torrent `target` names, its files, and the video to watch in it with its subtitles: file
-/// `file`, or the main video.
-pub async fn prepare(
-    ctx: &Ctx,
-    target: Target,
-    file: Option<u32>,
-    deadline: Instant,
-) -> Result<(Source, Arc<Metainfo>, Playable), Error> {
-    let (source, metainfo) = match downloads::resolve(ctx, target, "play").await? {
-        Source::Download(id) => {
-            let info = downloads::metadata(ctx, MetaTarget::Job(id), deadline).await?;
-            (Source::Download(id), info.metainfo)
-        }
-        Source::Magnet(magnet) => {
-            let info = downloads::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
-            let source = match info.download {
-                Some(_) => Source::Download(info.id),
-                None => Source::Torrent { metainfo: (*info.metainfo).clone(), origin: Origin::Peers },
-            };
-            (source, info.metainfo)
-        }
-        Source::Torrent { metainfo, origin } => {
-            let shared = Arc::new(metainfo.clone());
-            (Source::Torrent { metainfo, origin }, shared)
-        }
-    };
-    let playable = choose(&metainfo, file)?;
-    Ok((source, metainfo, playable))
-}
-
-/// Starts or joins the download of `playable`'s video and subtitles, which come first and in
-/// playing order.
-pub async fn begin(
-    ctx: &Ctx,
-    source: Source,
-    playable: &Playable,
-    deadline: Instant,
-) -> Result<(Job, FilesInfo), Error> {
-    let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
-    let setup_max_size = (ctx.preferences)().max_size;
-    let to = Destination::Plays;
-    let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
-    let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
-    let info = downloads::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
-    Ok((job, info))
 }
 
 /// How the web player plays `file` of a download that is already playing, as a title play
 /// answers once a source starts.
 pub async fn playing_file(ctx: &Ctx, id: TorrentId, file: u32) -> Result<Playing, Error> {
     let info = downloads::metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
-    let playable = choose(&info.metainfo, Some(file))?;
+    let playable = downloads::choose(&info.metainfo, Some(file))?;
     let mut jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
     let job = jobs.pop().ok_or_else(|| Error::new(ErrorCode::NotFound, "the download that played is gone"))?;
     Ok(playing(ctx, job, &info, &playable).await)
@@ -113,23 +64,5 @@ async fn playing(ctx: &Ctx, job: Job, info: &FilesInfo, playable: &Playable) -> 
         video: streamed(playable.video),
         subtitles: playable.subtitles.iter().map(|&index| streamed(index)).collect(),
         job,
-    }
-}
-
-/// The file to watch and its subtitles: the one the page chose, or the torrent's main video.
-pub fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable, Error> {
-    let listing = metainfo.listing();
-    let name = sanitize(&metainfo.name);
-    match file {
-        Some(index) => stream::around(&listing, index).ok_or_else(|| {
-            let count = listing.len();
-            let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
-            Error::new(ErrorCode::Usage, format!("{name} has {files}, so it has no file {index}"))
-        }),
-        None => stream::pick(&listing).ok_or_else(|| {
-            let id = metainfo.info_hash.id().to_hex();
-            Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
-                .with_hint(format!("run torrential files {} to list its files", &id[..8]))
-        }),
     }
 }

@@ -2,6 +2,10 @@ use std::time::Duration;
 
 const LONGEST: Duration = Duration::from_secs(48 * 3600);
 
+/// Bytes read from each end of a video for its runtime: Matroska and fast-start MP4 keep it in
+/// the head, and other MP4s in the tail.
+pub const RUNTIME_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Box types that open an MP4 or QuickTime file.
 const FIRST_BOXES: [&[u8]; 7] = [b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide", b"pnot"];
 

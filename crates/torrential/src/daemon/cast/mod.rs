@@ -24,14 +24,14 @@ use torrential_core::{
 };
 
 use super::ctx::Ctx;
-use super::devices::names::Names;
 use super::downloads;
+use super::media;
+use super::names::Names;
 use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::playing::Open;
 use super::titles;
 use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
-use super::web::{play, watch as web_watch};
 use crate::log::log;
 pub use ssdp::Find;
 use ssdp::Heard;
@@ -559,7 +559,7 @@ impl Run {
         }
         let _serving = Serving::new(&ctx.casts, served);
         let _keeping = found.video.as_ref().map(|video| Keeping::new(&ctx.casts, video, self.id));
-        let duration = web_watch::probed(ctx, found.id, found.file).and_then(|media| media.duration);
+        let duration = media::probed(ctx, found.id, found.file).and_then(|media| media.duration);
         let film = found.video.as_ref().is_some_and(|video| video.episode.is_none());
         let kind = found.subtitle.as_ref().map(|(_, path)| extension(path));
         let metadata = didl::didl(&didl::Item {
@@ -572,8 +572,7 @@ impl Run {
             caption: caption_url.as_deref().zip(kind.as_deref()).map(|(url, kind)| didl::Caption { url, kind }),
         });
         self.send(&url, &metadata).await?;
-        let token = video.path().trim_start_matches(super::devices::CAST).split('/').next().unwrap_or_default();
-        self.follow(found, token, duration, control).await
+        self.follow(found, video.token(), duration, control).await
     }
 
     /// Tells the TV to play `url`. A TV that refuses a new video while it plays one gets a Stop
@@ -986,12 +985,12 @@ async fn find(
         }
         target => {
             let deadline = std::time::Instant::now() + METADATA_WAIT;
-            let (source, metainfo, playable) = play::prepare(ctx, target.clone(), request.file, deadline).await?;
+            let (source, metainfo, playable) = downloads::prepare(ctx, target.clone(), request.file, deadline).await?;
             let path = sanitize(&metainfo.files[playable.video as usize].path);
             if !tv.tv.plays.takes(&path) {
                 return Err(refused(&tv.tv, &path));
             }
-            let (job, _) = play::begin(ctx, source, &playable, deadline).await?;
+            let (job, _) = downloads::begin(ctx, source, &playable, deadline).await?;
             let video = request.video.clone().or_else(|| job.title.as_ref().and_then(video_of));
             let release = job.title.as_ref().and_then(|link| link.release);
             let resume_at = match &video {
@@ -1020,7 +1019,7 @@ async fn find(
     let subtitle = match request.subtitle {
         None => None,
         Some(index) => {
-            let playable = play::choose(&info.metainfo, Some(file))?;
+            let playable = downloads::choose(&info.metainfo, Some(file))?;
             if !playable.subtitles.contains(&index) {
                 return Err(Error::new(
                     ErrorCode::Usage,

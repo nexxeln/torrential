@@ -4,7 +4,7 @@ use std::path::Path;
 
 use torrential_core::filetype::{FileType, Kind};
 
-use super::media::Media;
+use super::Media;
 
 /// Keeps the file's own timestamps in the fragments, so a stream that starts at 50 minutes says so.
 /// `frag_discont` writes them, and `-copyts` with `-avoid_negative_ts disabled` keeps ffmpeg from
@@ -147,7 +147,7 @@ fn strings(args: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::media::{Audio, Video};
+    use super::super::tracks::{Audio, Video};
     use super::*;
     use crate::ffmpeg::fetch::Readiness;
 

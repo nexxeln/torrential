@@ -1,37 +1,24 @@
-//! What the web player asks for while a video plays: the file's tracks, the video converted to
-//! what the browser decodes, its subtitles, and the progress of every download.
+//! What the web player asks for while a video plays: the video converted to what the browser
+//! decodes, its subtitles, and the progress of every download.
 
 use std::io;
-use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use torrential_core::protocol::Event;
-use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
+use torrential_core::{Error, ErrorCode};
 
 use super::super::ctx::Ctx;
 use super::super::downloads::JobEvents;
-use super::super::http::{self, Connection, Request};
-use super::super::owner::{Command, StreamFile};
-use super::ffmpeg::{self, Encoder, Picture};
-use super::media::Media;
+use super::super::http::{Connection, Request};
+use super::super::media::ffmpeg::Picture;
+use super::super::media::{self, Conversion};
 use super::{fail, file_of, number};
-use crate::ffmpeg::fetch::Found;
 use crate::log::log;
 
-/// Bytes read from each end of a video for its runtime when ffprobe is not installed, as `play` reads.
-const HEADER: u64 = 2 * 1024 * 1024;
-/// A subtitle file is text. Anything larger is something else with a subtitle's name.
-const LARGEST_SUBTITLE_FILE: u64 = 16 * 1024 * 1024;
 const PIPE: usize = 64 * 1024;
 /// How much of what ffmpeg prints about a failure the engine keeps.
 const COMPLAINT: usize = 4 * 1024;
-/// How many runs `pieces` cuts a file into. The player's seek bar draws one mark for each.
-pub(super) const RUNS: u32 = 200;
-
-/// A program to run, its arguments, and what to write to its stdin.
-type Conversion = (PathBuf, Vec<String>, Option<Vec<u8>>);
 
 /// Follows every download as server-sent events. The first is a snapshot.
 pub async fn events(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
@@ -56,77 +43,6 @@ pub async fn events(conn: &mut Connection<'_>, request: &Request) -> io::Result<
 async fn send(conn: &mut Connection<'_>, event: &Event) -> io::Result<()> {
     let json = serde_json::to_string(event).map_err(io::Error::other)?;
     conn.chunk(format!("data: {json}\n\n").as_bytes()).await
-}
-
-/// What is inside file `index` of a download. ffprobe reads the file from the engine's own HTTP
-/// server, which fetches the pieces it asks for first.
-pub async fn media(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Media>, Error> {
-    let cached = ctx.web.probes.lock().expect("no holder panics").get(&(id, index)).cloned();
-    if let Some(media) = cached {
-        return Ok(media);
-    }
-    let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
-    let name = name(&file);
-    let ffprobe = match ctx.web.ffmpeg.found() {
-        Found::Installed(programs) | Found::Fetched(programs) => programs.ffprobe,
-        missing => {
-            let end = file.size.min(HEADER);
-            let head = http::read(ctx, id, index, &file, 0, end).await.unwrap_or_default();
-            let tail = http::read(ctx, id, index, &file, file.size - end, file.size).await.unwrap_or_default();
-            let duration = torrential_core::media::duration(&head, &tail).map(|d| d.as_secs_f64());
-            return Ok(Arc::new(Media::without_ffprobe(&name, duration, missing.readiness())));
-        }
-    };
-    let url = http::url(ctx.http_port, id, index, &name);
-    let output = tokio::process::Command::new(&ffprobe)
-        .args(ffmpeg::probe(&url))
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|e| Error::internal(format!("cannot run {}: {e}", ffprobe.display())))?;
-    if !output.status.success() {
-        let complaint = crate::ffmpeg::complaint(&String::from_utf8_lossy(&output.stderr));
-        return Err(Error::internal(format!("ffprobe cannot read {name}: {complaint}"))
-            .with_hint("the file may not be a video, or its download may be damaged"));
-    }
-    let media = Arc::new(Media::from_ffprobe(&output.stdout, &name)?);
-    ctx.web.probes.lock().expect("no holder panics").insert((id, index), media.clone());
-    Ok(media)
-}
-
-/// What `media` has already read about the file, without reading it now.
-pub fn probed(ctx: &Ctx, id: TorrentId, index: u32) -> Option<Arc<Media>> {
-    ctx.web.probes.lock().expect("no holder panics").get(&(id, index)).cloned()
-}
-
-/// `GET /api/pieces`: which parts of one file are on disk, as `RUNS` characters of `0` to `8`.
-pub async fn pieces(ctx: &Ctx, id: TorrentId, index: u32) -> Result<String, Error> {
-    let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
-    if file.complete || file.size == 0 {
-        return Ok("8".repeat(RUNS as usize));
-    }
-    let runs = match ctx.engine.written(id, index, 0, file.size, RUNS).await {
-        Ok(runs) => runs,
-        // The engine does not hold a download that just finished, one that is stopped, or one that
-        // has not started yet.
-        Err(_) => {
-            let jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
-            if jobs.first().is_some_and(|job| matches!(job.status, JobStatus::Done { .. })) {
-                return Ok("8".repeat(RUNS as usize));
-            }
-            if jobs.first().is_none_or(|job| job.status.is_stopped()) {
-                let name = name(&file);
-                return Err(Error::new(
-                    ErrorCode::NotFound,
-                    format!("{name} is not downloading now, so what has arrived of it is not known"),
-                )
-                .with_hint("resume the download, or play the file again"));
-            }
-            return Ok("0".repeat(RUNS as usize));
-        }
-    };
-    Ok(runs.into_iter().map(|run| run.symbol()).collect())
 }
 
 /// The video as a fragmented MP4 from `t` seconds on, converted by ffmpeg as the browser reads it.
@@ -155,21 +71,7 @@ async fn stream_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion, E
         Some("h264") => Picture::H264,
         Some(other) => return Err(Error::new(ErrorCode::Usage, format!("video={other} is not copy or h264"))),
     };
-    let program = ctx.web.ffmpeg.now()?.ffmpeg;
-    let media = media(ctx, id, index).await?;
-    let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
-    let name = name(&file);
-    if media.video.is_none() {
-        return Err(Error::new(ErrorCode::NoSelection, format!("{name} has no video track")));
-    }
-    if audio.is_some() && media.audio_track(audio).is_none() {
-        return Err(Error::new(
-            ErrorCode::Usage,
-            format!("{name} has no audio track at stream {}", audio.unwrap_or(0)),
-        ));
-    }
-    let url = http::url(ctx.http_port, id, index, &name);
-    Ok((program, ffmpeg::stream(&url, &media, t, audio, picture, Encoder::of_host()), None))
+    media::stream(ctx, id, index, t, audio, picture).await
 }
 
 /// WebVTT of a subtitle track inside a video, or of a subtitle file of the torrent.
@@ -187,33 +89,9 @@ pub async fn subtitles(conn: &mut Connection<'_>, request: &Request) -> io::Resu
 
 async fn subtitle_conversion(ctx: &Ctx, request: &Request) -> Result<Conversion, Error> {
     let (id, index) = file_of(request)?;
-    let program = ctx.web.ffmpeg.now()?.ffmpeg;
-    let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
-    let name = name(&file);
-    let Some(stream) = number::<u32>(request, "stream")? else {
-        if file.size > LARGEST_SUBTITLE_FILE {
-            return Err(Error::new(ErrorCode::Usage, format!("{name} is too large to be a subtitle file")));
-        }
-        let bytes = http::read(ctx, id, index, &file, 0, file.size)
-            .await
-            .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot read {name}: {e}")))?;
-        let text = torrential_core::subtitle::decode(&bytes).into_bytes();
-        return Ok((program, ffmpeg::subtitle_file(ffmpeg::subtitle_format(&name)), Some(text)));
-    };
+    let stream = number::<u32>(request, "stream")?;
     let t = number::<f64>(request, "t")?.unwrap_or(0.0);
-    let media = media(ctx, id, index).await?;
-    match media.subtitles.iter().find(|track| track.stream == stream) {
-        None => {
-            return Err(Error::new(ErrorCode::NotFound, format!("{name} has no subtitle track at stream {stream}")));
-        }
-        Some(track) if !track.text => {
-            return Err(Error::new(ErrorCode::Usage, format!("stream {stream} of {name} holds pictures, not text"))
-                .with_hint("picture subtitles cannot be shown in the web player yet"));
-        }
-        Some(_) => {}
-    }
-    let url = http::url(ctx.http_port, id, index, &name);
-    Ok((program, ffmpeg::embedded_subtitles(&url, stream, t), None))
+    media::subtitles(ctx, id, index, stream, t).await
 }
 
 /// Runs a conversion and sends what it writes as it writes it. The program stops when the browser
@@ -284,9 +162,4 @@ async fn pipe(
             conn.json("502 Bad Gateway", &super::ErrorBody { error: &error }, request).await
         }
     }
-}
-
-/// The file's name, which gives ffmpeg its extension.
-pub fn name(file: &StreamFile) -> String {
-    Path::new(&file.path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }

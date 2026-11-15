@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 use torrential_core::protocol::{Change, Event, FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
+use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::{
-    Error, ErrorCode, HexPrefix, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile, TorrentId,
+    Error, ErrorCode, HexPrefix, Job, JobStatus, Release, ReleaseId, SearchQuery, SearchResult, Target, TorrentFile,
+    TorrentId,
 };
 
 use super::ctx::Ctx;
@@ -366,4 +368,101 @@ pub(super) async fn listed(ctx: &Ctx, info: &FilesInfo) -> Vec<TorrentFile> {
             risk: risks[i],
         })
         .collect()
+}
+
+/// How many runs `pieces` cuts a file into. The player's seek bar draws one mark for each.
+pub(super) const PIECE_RUNS: u32 = 200;
+
+/// Which parts of one file are on disk, as `PIECE_PIECE_RUNS` characters of `0` to `8`.
+pub async fn pieces(ctx: &Ctx, id: TorrentId, index: u32) -> Result<String, Error> {
+    let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
+    if file.complete || file.size == 0 {
+        return Ok("8".repeat(PIECE_RUNS as usize));
+    }
+    let runs = match ctx.engine.written(id, index, 0, file.size, PIECE_RUNS).await {
+        Ok(runs) => runs,
+        // The engine does not hold a download that just finished, one that is stopped, or one that
+        // has not started yet.
+        Err(_) => {
+            let jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
+            if jobs.first().is_some_and(|job| matches!(job.status, JobStatus::Done { .. })) {
+                return Ok("8".repeat(PIECE_RUNS as usize));
+            }
+            if jobs.first().is_none_or(|job| job.status.is_stopped()) {
+                let name = super::media::name(&file);
+                return Err(Error::new(
+                    ErrorCode::NotFound,
+                    format!("{name} is not downloading now, so what has arrived of it is not known"),
+                )
+                .with_hint("resume the download, or play the file again"));
+            }
+            return Ok("0".repeat(PIECE_RUNS as usize));
+        }
+    };
+    Ok(runs.into_iter().map(|run| run.symbol()).collect())
+}
+
+/// The torrent `target` names, its files, and the video to watch in it with its subtitles: file
+/// `file`, or the main video.
+pub(super) async fn prepare(
+    ctx: &Ctx,
+    target: Target,
+    file: Option<u32>,
+    deadline: Instant,
+) -> Result<(Source, Arc<Metainfo>, Playable), Error> {
+    let (source, metainfo) = match resolve(ctx, target, "play").await? {
+        Source::Download(id) => {
+            let info = metadata(ctx, MetaTarget::Job(id), deadline).await?;
+            (Source::Download(id), info.metainfo)
+        }
+        Source::Magnet(magnet) => {
+            let info = metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
+            let source = match info.download {
+                Some(_) => Source::Download(info.id),
+                None => Source::Torrent { metainfo: (*info.metainfo).clone(), origin: Origin::Peers },
+            };
+            (source, info.metainfo)
+        }
+        Source::Torrent { metainfo, origin } => {
+            let shared = Arc::new(metainfo.clone());
+            (Source::Torrent { metainfo, origin }, shared)
+        }
+    };
+    let playable = choose(&metainfo, file)?;
+    Ok((source, metainfo, playable))
+}
+
+/// Starts or joins the download of `playable`'s video and subtitles, which come first and in
+/// playing order.
+pub(super) async fn begin(
+    ctx: &Ctx,
+    source: Source,
+    playable: &Playable,
+    deadline: Instant,
+) -> Result<(Job, FilesInfo), Error> {
+    let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
+    let setup_max_size = (ctx.preferences)().max_size;
+    let to = Destination::Plays;
+    let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
+    let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
+    let info = metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
+    Ok((job, info))
+}
+
+/// The file to watch and its subtitles: the one the page chose, or the torrent's main video.
+pub(super) fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable, Error> {
+    let listing = metainfo.listing();
+    let name = sanitize(&metainfo.name);
+    match file {
+        Some(index) => stream::around(&listing, index).ok_or_else(|| {
+            let count = listing.len();
+            let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+            Error::new(ErrorCode::Usage, format!("{name} has {files}, so it has no file {index}"))
+        }),
+        None => stream::pick(&listing).ok_or_else(|| {
+            let id = metainfo.info_hash.id().to_hex();
+            Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
+                .with_hint(format!("run torrential files {} to list its files", &id[..8]))
+        }),
+    }
 }

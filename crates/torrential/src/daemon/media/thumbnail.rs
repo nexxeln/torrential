@@ -7,9 +7,8 @@ use std::time::Duration;
 use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::ctx::Ctx;
-use super::super::http::Request;
 use super::super::owner::{Command, StreamFile};
-use super::{ffmpeg, file_of, number, watch};
+use super::{ffmpeg, name, probed};
 
 /// How many ffmpeg processes make thumbnails at once. A seek bar asks for many in a row.
 pub const AT_ONCE: usize = 2;
@@ -19,29 +18,26 @@ const DECODE_WITHIN: Duration = Duration::from_secs(10);
 const MIB: u64 = 1024 * 1024;
 /// A film's bitrate varies, so the bytes of a second can be this far from where an even bitrate
 /// would put them: 8 MiB, or 2% of a large file.
-pub(super) const MARGIN: u64 = 8 * MIB;
-pub(super) const MARGIN_SHARE: u64 = 50;
+pub const MARGIN: u64 = 8 * MIB;
+pub const MARGIN_SHARE: u64 = 50;
 /// Seconds of video one thumbnail stands for. The seek bar asks for one at the start of each.
-pub(super) const EVERY: u32 = 10;
+pub const EVERY: u32 = 10;
 
-/// `GET /api/thumbnail`: a JPEG of the frame at `t` seconds. Only from bytes already on disk: a
-/// picture is never worth fetching pieces ahead of the ones being watched.
-pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
-    let (id, index) = file_of(request)?;
-    let t = number::<f64>(request, "t")?.filter(|t| t.is_finite() && *t >= 0.0);
-    let t = t.ok_or_else(|| Error::new(ErrorCode::Usage, "the request has no t parameter of zero or more seconds"))?;
-    let program = ctx.web.ffmpeg.now()?.ffmpeg;
+/// A JPEG of the frame at `t` seconds of file `index` of a download. Only from bytes already on
+/// disk: a picture is never worth fetching pieces ahead of the ones being watched.
+pub async fn jpeg(ctx: &Ctx, id: TorrentId, index: u32, t: f64) -> Result<Arc<Vec<u8>>, Error> {
+    let program = ctx.media.ffmpeg.now()?.ffmpeg;
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
-    let name = watch::name(&file);
+    let name = name(&file);
     let none = |why: &str| Error::new(ErrorCode::NotFound, format!("no picture of {name} at {t} s: {why}"));
     // The player reads the file's tracks before it draws a seek bar. Reading them here could fetch pieces.
-    let media = watch::probed(ctx, id, index).ok_or_else(|| none("its tracks have not been read yet"))?;
+    let media = probed(ctx, id, index).ok_or_else(|| none("its tracks have not been read yet"))?;
     let duration = media.duration.filter(|d| *d > 0.0).ok_or_else(|| none("its length is not known"))?;
     if media.video.is_none() || t >= duration {
         return Err(none("the video has no frame there"));
     }
     let key = (id, index, t as u32 / EVERY * EVERY);
-    let kept = ctx.web.thumbnails.lock().expect("no holder panics").get(&key);
+    let kept = ctx.media.thumbnails.lock().expect("no holder panics").get(&key);
     if let Some(jpeg) = kept {
         return Ok(jpeg);
     }
@@ -56,7 +52,7 @@ pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
         Error::new(ErrorCode::DaemonUnavailable, "the engine is busy making other thumbnails")
             .with_hint("ask again in a moment")
     };
-    let turn = tokio::time::timeout(QUEUE_FOR, ctx.web.thumbnailing.acquire()).await;
+    let turn = tokio::time::timeout(QUEUE_FOR, ctx.media.thumbnailing.acquire()).await;
     let _turn = turn.map_err(|_| busy())?.map_err(|_| busy())?;
     let mut command = tokio::process::Command::new(&program);
     command.args(ffmpeg::thumbnail(&file.path, t)).stdin(Stdio::null()).kill_on_drop(true);
@@ -68,7 +64,7 @@ pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
         return Err(none("ffmpeg could not read a frame there"));
     }
     let jpeg = Arc::new(output.stdout);
-    ctx.web.thumbnails.lock().expect("no holder panics").put(key, jpeg.clone());
+    ctx.media.thumbnails.lock().expect("no holder panics").put(key, jpeg.clone());
     Ok(jpeg)
 }
 

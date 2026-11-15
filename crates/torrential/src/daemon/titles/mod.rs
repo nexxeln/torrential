@@ -276,7 +276,7 @@ pub(super) async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, 
     let title = ctx.titles.resolve(&video, torrential_core::time::now()).await?;
     let mut result = search(ctx, ctx.titles.query(&title, (ctx.preferences)(), Player::External).await?).await?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-    let ffmpeg = ctx.web.ffmpeg.converts();
+    let ffmpeg = ctx.media.ffmpeg.converts();
     result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);
     Ok(TitleSources { video: title.video, title: title.details.card, episode: title.episode, result })
 }
