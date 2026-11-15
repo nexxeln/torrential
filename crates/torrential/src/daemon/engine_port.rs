@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use crate::log::log;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Slice, TorrentId};
+use torrential_core::text::sanitize;
+use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Slice, TorrentFile, TorrentId};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Metainfo {
@@ -43,6 +44,22 @@ impl Metainfo {
 
     pub fn total(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
+    }
+
+    /// Its files with sanitized paths, nothing selected and nothing verified, for choosing what
+    /// to play.
+    pub fn listing(&self) -> Vec<TorrentFile> {
+        (0..)
+            .zip(&self.files)
+            .map(|(index, f)| TorrentFile {
+                index,
+                path: sanitize(&f.path),
+                size: f.size,
+                selected: false,
+                verified: 0,
+                risk: None,
+            })
+            .collect()
     }
 }
 
