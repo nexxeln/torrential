@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use torrential_core::{Error, ErrorCode, TorrentId};
 
+use super::super::ctx::Ctx;
 use super::super::http::Request;
 use super::super::owner::{Command, StreamFile};
-use super::super::server::Ctx;
 use super::{ffmpeg, file_of, number, watch};
 
 /// How many ffmpeg processes make thumbnails at once. A seek bar asks for many in a row.

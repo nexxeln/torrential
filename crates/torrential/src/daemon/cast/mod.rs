@@ -22,10 +22,12 @@ use torrential_core::{
     Resolution, Target, TitleLink, TorrentId, Tv, TvList, VideoRef, Viewer, Watched,
 };
 
+use super::ctx::Ctx;
 use super::devices::names::Names;
+use super::downloads;
 use super::owner::{Command, Finish, MetaTarget};
 use super::playing::Open;
-use super::server::{self, Ctx};
+use super::titles;
 use super::titles::attempt::{self, Containers, PlayTitle};
 use super::web::{play, watch as web_watch};
 use crate::log::log;
@@ -932,7 +934,7 @@ async fn find(
         Target::Title(video) => {
             let pin = match &request.source {
                 Some(prefix) => {
-                    let release = server::pinned(ctx, video, prefix).await?;
+                    let release = titles::pinned(ctx, video, prefix).await?;
                     if !tv.tv.decodes.plays(Quality::parse(&release.name)) {
                         return Err(Error::new(
                             ErrorCode::Usage,
@@ -1003,7 +1005,7 @@ async fn find(
             (job.id, playable.video, name, video, release, resume_at)
         }
     };
-    let info = server::metadata(ctx, MetaTarget::Job(id), std::time::Instant::now() + METADATA_WAIT).await?;
+    let info = downloads::metadata(ctx, MetaTarget::Job(id), std::time::Instant::now() + METADATA_WAIT).await?;
     let entry = info
         .metainfo
         .files

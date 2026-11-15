@@ -8,9 +8,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use torrential_core::{Error, ErrorCode, TorrentId, subtitle, title};
 use torrential_search::subtitles::{FileHash, Found, Video};
 
+use super::super::ctx::Ctx;
 use super::super::http::Request;
 use super::super::owner::{Command, StreamFile};
-use super::super::server::Ctx;
 use super::{file_of, required, watch};
 
 /// `GET /api/subtitles/online`: what the engine found for the file, by the names in its torrent.
