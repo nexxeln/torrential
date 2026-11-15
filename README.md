@@ -1,6 +1,6 @@
 <h1 align="center">torrential</h1>
 
-<p align="center">Your Mac is the library, and every screen in the house plays from it. Find a film or a show, press Play, and watch it while it downloads.</p>
+<p align="center">Find films and shows, and watch them on your Mac, phone, or TV while they download.</p>
 
 <p align="center">
   <img src="docs/home.webp" alt="The web app's home page on a Mac, with two titles to continue watching and four saved titles" width="560">
