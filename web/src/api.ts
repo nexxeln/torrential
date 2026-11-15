@@ -113,6 +113,7 @@ import type {
   Viewer,
   Watched,
 } from "./wire";
+import { THUMBNAIL_EVERY } from "./wire";
 
 export type {
   AudioTrack,
@@ -329,12 +330,12 @@ export function onlineSubtitleUrl(id: string, file: number, subtitle: string): s
 }
 
 /**
- * A JPEG of the frame at `t` seconds, 240 pixels wide. Ask only for whole multiples of 10 seconds,
- * so answers are shared, and only where the file has downloaded: the engine answers 404 rather
- * than fetch pieces for a picture.
+ * A JPEG of the frame at the start of the `THUMBNAIL_EVERY` seconds that hold `t`, 240 pixels wide.
+ * Ask only where the file has downloaded: the engine answers 404 rather than fetch pieces for a picture.
  */
 export function thumbnailUrl(id: string, file: number, t: number): string {
-  return `/api/thumbnail?${new URLSearchParams({ id, file: String(file), t: String(Math.floor(t / 10) * 10) })}`;
+  const at = Math.floor(t / THUMBNAIL_EVERY) * THUMBNAIL_EVERY;
+  return `/api/thumbnail?${new URLSearchParams({ id, file: String(file), t: String(at) })}`;
 }
 
 export function pieces(id: string, file: number, signal?: AbortSignal): Promise<FilePieces> {

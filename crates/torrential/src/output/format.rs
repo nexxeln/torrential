@@ -69,6 +69,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ages_and_percents_read_as_the_shared_vectors_say() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!("../../../core/tests/fixtures/format.json"))
+            .expect("the vectors are JSON");
+        for case in vectors["age"].as_array().unwrap() {
+            assert_eq!(age(Some(0), case["seconds"].as_i64().unwrap()), case["cli"], "{case}");
+        }
+        for case in vectors["percent"].as_array().unwrap() {
+            let progress = Progress {
+                verified: case["done"].as_u64().unwrap(),
+                size: case["size"].as_u64(),
+                ..Progress::default()
+            };
+            assert_eq!(percent(&progress), case["cli"], "{case}");
+        }
+    }
+
+    #[test]
     fn percent_never_rounds_up_to_done() {
         let p = |verified, size| Progress { verified, size, ..Progress::default() };
         assert_eq!(percent(&p(341, Some(1000))), "34.1%");

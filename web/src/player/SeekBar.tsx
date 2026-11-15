@@ -6,6 +6,7 @@ import { usePlayer } from "./context";
 import { type Downloaded, isDownloaded, useDownloaded } from "./downloaded";
 import { useFrame } from "./frame";
 import { useThumbnail } from "./thumbnails";
+import { PIECE_RUNS, THUMBNAIL_MARGIN_BYTES, THUMBNAIL_MARGIN_SHARE } from "../wire";
 
 interface Props {
   play: PlayInfo;
@@ -205,11 +206,11 @@ interface PreviewProps {
 }
 
 /**
- * How much of the file must be on disk each side of a frame, as a share of it. The engine asks for
- * 8 MiB or 2% of the file, whichever is more, and this adds a run of the map for its rounding.
+ * How much of the file must be on disk each side of a frame, as a share of it: what the engine
+ * asks for, and a run of the map for its rounding.
  */
 function frameMargin(size: number): number {
-  return Math.max((8 * 1024 * 1024) / size, 0.02) + 0.005;
+  return Math.max(THUMBNAIL_MARGIN_BYTES / size, THUMBNAIL_MARGIN_SHARE) + 1 / PIECE_RUNS;
 }
 
 /** What is under the pointer: the time, the chapter, and the picture where the file has it. */
