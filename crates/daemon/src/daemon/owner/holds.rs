@@ -72,7 +72,6 @@ pub(super) enum Before {
     /// Not on this machine. The play made it.
     Absent,
     Paused,
-    /// Stopped on this error.
     Failed(Error),
     /// Running or done, which a play leaves as it is.
     Kept,

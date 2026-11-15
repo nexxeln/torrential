@@ -143,10 +143,8 @@ pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
     }
 }
 
-/// Why a client stops the engine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stop {
-    /// The person asked.
     Asked,
     /// The engine is older than this client, which starts its own version once the engine stops.
     /// The engine stays while a film plays.

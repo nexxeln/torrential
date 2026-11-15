@@ -152,7 +152,7 @@ fn played(name: &str, video_text: &str, resume_at: Option<f64>) -> TitlePlayed {
     TitlePlayed { video: video(video_text), name: name.into(), release, tried: Vec::new(), resume_at }
 }
 
-/// Bare `torrential` once the engine has answered with no downloads and this home.
+/// Bare `torrential` once the engine has answered with the downloads of `jobs()` and this home.
 fn opened(size: (u16, u16)) -> State {
     let mut state = titles_app(size);
     state.update(Msg::Watch(Event::Snapshot { jobs: jobs() }));

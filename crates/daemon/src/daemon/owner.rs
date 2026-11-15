@@ -138,7 +138,6 @@ pub struct PlayCommand {
 
 /// A title play's test of one source.
 pub struct TitlePlay {
-    /// The title it is for.
     pub link: TitleLink,
     pub hold: Hold,
 }
@@ -213,7 +212,6 @@ pub enum Command {
     Restart { reply: Reply<()> },
 }
 
-/// How the owner's run ended.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ended {
     Stopped,
@@ -1910,7 +1908,6 @@ impl Owner {
     }
 }
 
-/// Who asked the engine to stop.
 enum Stopper {
     /// A person, a signal, or the idle timeout. The engine stops whatever the last saves did.
     Exit(Option<oneshot::Sender<()>>),

@@ -206,7 +206,6 @@ function Stage({ element, frame, play, media, onReload, onBack, shown }: Playbac
   timeline.current = { duration, fps: media.video?.fps ?? null, chapters: media.chapters };
   const actions = useMemo(() => new PlayerActions(element, feedback, () => timeline.current), [element, feedback]);
 
-  // Which way the file reaches the element.
   const [audio, setAudio] = useState<number | null>(null);
   const [directWorks, setDirectWorks] = useState(true);
   const how = useMemo(() => plan(media, audio, directWorks), [media, audio, directWorks]);

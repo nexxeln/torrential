@@ -27,7 +27,6 @@ struct UpdateReport<'a> {
 }
 
 torrential_core::words! {
-    /// What `update` did.
     enum Installed {
         Updated = "updated",
         UpToDate = "up_to_date",

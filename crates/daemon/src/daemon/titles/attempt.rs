@@ -55,7 +55,6 @@ pub struct PlayTitle {
     pub to: Destination,
 }
 
-/// How a title play ended.
 pub enum Outcome {
     Played(Box<Played>),
     Failed { error: Error, tried: Vec<Tried> },

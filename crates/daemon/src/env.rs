@@ -51,7 +51,6 @@ impl Env {
         Self { executable: Ok(path.to_path_buf()), ..self }
     }
 
-    /// This environment with `key` set to `value`.
     pub fn with(mut self, key: &str, value: &str) -> Self {
         self.vars.insert(key.to_string(), value.to_string());
         self
