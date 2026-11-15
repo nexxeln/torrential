@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use torrential_core::time::now;
 use torrential_core::title::Episode;
 use torrential_core::{
-    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, Release, ReleaseId, TitleCard, TitleDetails,
-    TitleId, TorrentId, VideoRef, Viewer, Watched,
+    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, Plays, Release, ReleaseId, TitleCard,
+    TitleDetails, TitleId, TorrentId, VideoRef, Viewer, Watched,
 };
 
 use super::super::ctx::Ctx;
@@ -19,7 +19,7 @@ use super::super::http::{Connection, Request};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Shelving};
 use super::super::titles;
-use super::super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
+use super::super::titles::attempt::{self, Outcome, PlayTitle, Played};
 use super::{NDJSON, fail, line, number, required, value};
 use torrential_core::title::title_name;
 
@@ -174,8 +174,10 @@ fn player(viewer: Option<Viewer>, playback: Option<Playback>, asker: &Asker) -> 
 }
 
 fn playback(text: &str) -> Result<Playback, Error> {
-    serde_json::from_value(Value::String(text.to_string()))
-        .map_err(|_| Error::new(ErrorCode::Usage, format!("{text} is not a playback: use h264, hevc, or hevc-hdr")))
+    serde_json::from_value(Value::String(text.to_string())).map_err(|_| {
+        let words: Vec<&str> = Playback::ALL.iter().map(|playback| playback.as_str()).collect();
+        Error::new(ErrorCode::Usage, format!("{text} is not a playback: use {}", words.join(", ")))
+    })
 }
 
 #[derive(Deserialize)]
@@ -203,7 +205,7 @@ pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -
     };
     let ask = super::body::<Play>(request).and_then(|Play { video, viewer, playback, source, replace }| {
         let player = player(viewer.map(Measured::viewer).transpose()?, playback, asker);
-        Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, to: Destination::Plays })
+        Ok(PlayTitle { video, pin: source, replace, player, plays: Plays::BROWSER, to: Destination::Plays })
     });
     let ask = match ask {
         Ok(ask) => ask,
