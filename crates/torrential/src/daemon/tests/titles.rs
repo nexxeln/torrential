@@ -1130,8 +1130,9 @@ async fn replace_skips_a_release_whose_torrent_file_turns_out_to_be_the_stalled_
     h.swarm.publish(stalled.clone());
     h.swarm.publish(other.clone());
     h.swarm.set_rate(100 * MIB);
-    let first = h.play_title("tt0063350", None, None).await;
-    assert_eq!(first.last().unwrap(), "playing tt0063350 e1e1e1 file 0 at null");
+    // Played for the film by its torrent, so no listing names it until its .torrent file is read.
+    h.play_for(&stalled, &[0], Some("tt0063350")).await.unwrap();
+    h.played(&stalled).await;
     assert_eq!(
         h.play_title("tt0063350", None, Some(stalled.info_hash.id())).await,
         [
@@ -1150,6 +1151,45 @@ async fn replace_skips_a_release_whose_torrent_file_turns_out_to_be_the_stalled_
     let states: Vec<(String, &str)> =
         h.status().await.iter().map(|j| (j.id.to_hex()[..6].to_string(), j.status.name())).collect();
     assert_eq!(states, [("e1e1e1".to_string(), "paused"), ("e2e2e2".to_string(), "downloading")]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_found_by_its_torrent_link_is_listed_once_and_still_answers_to_that_id() {
+    let night = torrent(0xe3, "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &[("Night.1968.1080p.mp4", 2 * GIB)]);
+    let url = "https://index.example/night.torrent";
+    let by_link = Release {
+        id: ReleaseId::Locator(LocatorId::from_bytes([0xed; 20])),
+        magnet: None,
+        torrent_url: Some(url.into()),
+        ..listed(&night, "knaben", Some(40))
+    };
+    let script = vec![FakeSource::answers("knaben", 0)];
+    let torrents = BTreeMap::from([(url.to_string(), night.bytes())]);
+    let h = Harness::with_search(search_port::Fake::scripted(vec![by_link], script, torrents));
+    h.swarm.publish(night.clone());
+    h.swarm.set_rate(100 * MIB);
+    let first = h.play_title("tt0063350", None, None).await;
+    assert_eq!(first.last().unwrap(), "playing tt0063350 e3e3e3 file 0 at null");
+
+    let Response::Sources { sources } = h.ask(Request::Sources { video: "tt0063350".parse().unwrap() }).await else {
+        panic!("not a list of sources")
+    };
+    let rows: Vec<(String, &str, &[String])> = sources
+        .result
+        .releases
+        .iter()
+        .map(|r| (r.id.to_ref()[..6].to_string(), r.name.as_str(), r.sources.as_slice()))
+        .collect();
+    assert_eq!(
+        rows,
+        [("e3e3e3".to_string(), "Night.of.the.Living.Dead.1968.1080p.WEB.x264", &["knaben".to_string()][..])]
+    );
+
+    let ask = TitleRequest { video: "tt0063350".parse().unwrap(), source: Some("uededed".into()) };
+    let Response::PlayTitle { reply, .. } = h.ask(Request::PlayTitle(ask)).await else {
+        panic!("a source named by the ID it was listed under before its download plays")
+    };
+    assert_eq!(reply.job.id, night.info_hash.id());
 }
 
 #[tokio::test(flavor = "multi_thread")]

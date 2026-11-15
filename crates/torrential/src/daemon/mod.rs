@@ -34,6 +34,7 @@ use torrential_core::{Error, ErrorCode, Preferences};
 
 use crate::config::Config;
 use crate::env::Env;
+use crate::log::log;
 use crate::machine::Detector;
 use crate::paths::{self, Paths};
 use crate::update;
@@ -108,7 +109,7 @@ impl Ports {
             return Ok(Self {
                 engine: Box::new(engine_port::Fake::new(swarm)),
                 parse: engine_port::parse_fake,
-                search: Arc::new(fixture::search(owner::now())),
+                search: Arc::new(fixture::search(torrential_core::time::now())),
                 disk: Box::new(admission::RoomyDisk),
                 machine: Detector::start(env, settings.downloads_dir(paths), Box::new(admission::RoomyDisk)),
                 preferences,
@@ -219,7 +220,7 @@ pub fn start(
     version: String,
     http_ports: &[u16],
 ) -> Result<Running, Error> {
-    ports.search.restore(store.results(owner::now())?);
+    ports.search.restore(store.results(torrential_core::time::now())?);
     let devices = Arc::new(devices::Devices::open(store.path())?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
@@ -256,10 +257,6 @@ pub fn start(
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
-}
-
-pub fn log(message: &str) {
-    eprintln!("{} {message}", crate::output::format::timestamp(owner::now()));
 }
 
 /// The exit status after which launchd (`KeepAlive` without `SuccessfulExit`) and systemd
@@ -348,7 +345,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
     let mut store = Store::open(&paths.database())?;
     let default_dir = settings.downloads_dir(paths);
     if seed {
-        fixture::seed(&mut store, &default_dir, owner::now())?;
+        fixture::seed(&mut store, &default_dir, torrential_core::time::now())?;
     }
     let save_resume_every = env
         .var("TORRENTIAL_TEST_SAVE_RESUME_EVERY")
@@ -418,7 +415,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
-            leave_switching(paths, owner::now());
+            leave_switching(paths, torrential_core::time::now());
         }
         accept.abort();
         running.http.abort();

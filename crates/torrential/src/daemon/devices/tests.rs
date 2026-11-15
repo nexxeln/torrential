@@ -96,7 +96,7 @@ async fn a_code_closes_five_minutes_after_it_opens_even_when_the_clock_is_set_ba
     let home = Home::new();
     let reach = home.devices.reach();
     // The Mac's clock ran an hour fast when the code opened, and was put right after.
-    let fast = crate::daemon::owner::now() + 3600;
+    let fast = torrential_core::time::now() + 3600;
     home.devices.add(PORT, fast).unwrap();
     tokio::time::sleep(Duration::from_secs(299)).await;
     assert_eq!(*reach.borrow(), Reach::Network, "the code is still open");

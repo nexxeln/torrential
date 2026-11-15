@@ -6,7 +6,6 @@ use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
@@ -268,7 +267,7 @@ fn escape(path: &Path) -> String {
 
 /// Now in local time, as YYYY-MM-DDThh:mm:ss.
 fn deletion_date() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+    let now = torrential_core::time::now() as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // localtime_r only reads `now` and writes `tm`.
     unsafe { libc::localtime_r(&now, &mut tm) };

@@ -4,6 +4,7 @@ mod completions;
 mod config;
 mod daemon;
 mod env;
+mod log;
 mod machine;
 mod output;
 mod paths;

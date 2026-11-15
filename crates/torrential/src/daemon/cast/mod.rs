@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use torrential_core::text::sanitize;
+use torrential_core::time::now;
 use torrential_core::title::Span;
 use torrential_core::{
     AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, Player, Quality, ReleaseId,
@@ -22,11 +23,12 @@ use torrential_core::{
 };
 
 use super::devices::names::Names;
-use super::owner::{Command, Finish, MetaTarget, now};
+use super::owner::{Command, Finish, MetaTarget};
 use super::playing::Open;
 use super::server::{self, Ctx, METADATA_WAIT};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use super::web::{play, watch as web_watch};
+use crate::log::log;
 use crate::output::views::title_name;
 pub use ssdp::Find;
 use ssdp::Heard;
@@ -494,7 +496,7 @@ impl Run {
             }
         };
         if let Some(error) = &error {
-            super::log(&format!("the cast to {} ended: {error}", self.tv.tv.name));
+            log(&format!("the cast to {} ended: {error}", self.tv.tv.name));
         }
         // A cast that takes the TV from this one waits for this end, so it must mean the cast
         // before has ended too.
@@ -690,7 +692,7 @@ impl Run {
             CastAction::Stop => {
                 // A TV that has gone has stopped too.
                 if let Err(Failed::Refused(_, error)) = self.transport("Stop", &[("InstanceID", "0")]).await {
-                    super::log(&format!("{} refused to stop: {error}", tv.name));
+                    log(&format!("{} refused to stop: {error}", tv.name));
                 }
             }
             CastAction::Volume { level } => {
@@ -762,7 +764,7 @@ impl Run {
             at: now(),
         };
         if let Err(error) = self.ctx.titles.shelf.watch(&watched) {
-            super::log(&format!("cannot keep where {} stopped: {error}", found.name));
+            log(&format!("cannot keep where {} stopped: {error}", found.name));
         }
     }
 }

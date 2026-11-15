@@ -6,6 +6,7 @@ use std::io;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use torrential_core::time::now;
 use torrential_core::title::Episode;
 use torrential_core::{
     ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, ReleaseId, TitleDetails, TitleId, TorrentId,
@@ -14,7 +15,7 @@ use torrential_core::{
 
 use super::super::devices::Asker;
 use super::super::http::{Connection, Request};
-use super::super::owner::{Command, Finish, Shelving, now};
+use super::super::owner::{Command, Finish, Shelving};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
 use super::super::titles::catalog_port::label;

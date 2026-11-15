@@ -83,7 +83,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     if let Some(id) = ask.replace {
         ctx.titles.failed(ReleaseId::Torrent(id), Skip::Stalled);
     }
-    let title = match ctx.titles.resolve(&ask.video, super::super::owner::now()).await {
+    let title = match ctx.titles.resolve(&ask.video, torrential_core::time::now()).await {
         Ok(title) => title,
         Err(error) => return report(AttemptEvent::Failed { error, tried: Vec::new() }),
     };

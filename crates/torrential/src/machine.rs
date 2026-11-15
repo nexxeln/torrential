@@ -9,6 +9,7 @@ use torrential_core::{Arch, Display, Error, ErrorCode, Language, Machine, Os, Pl
 
 use crate::daemon::admission::{Disk, reserve};
 use crate::env::Env;
+use crate::log::log;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -25,10 +26,10 @@ impl Detector {
         std::thread::spawn(move || match detect(&env) {
             Ok(machine) => {
                 let profile = Profile { detected: Some(machine.clone()), ..Profile::default() };
-                crate::daemon::log(&format!("ranking for {}", profile.describe()));
+                log(&format!("ranking for {}", profile.describe()));
                 let _ = filling.machine.set(machine);
             }
-            Err(error) => crate::daemon::log(&format!("cannot detect this machine: {}", error.message)),
+            Err(error) => log(&format!("cannot detect this machine: {}", error.message)),
         });
         detector
     }

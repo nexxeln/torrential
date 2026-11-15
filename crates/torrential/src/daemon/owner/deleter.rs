@@ -17,9 +17,9 @@ use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use torrential_core::{Error, ErrorCode, TorrentId};
 
-use super::super::log;
 use super::super::store::{Store, Tombstone};
 use super::trash::Trash;
+use crate::log::log;
 
 /// What happens to a file between the check that it is the file to move to the Trash and the
 /// move: nothing, except in a test that changes the file in between.

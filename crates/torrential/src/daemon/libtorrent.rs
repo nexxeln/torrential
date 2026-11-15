@@ -12,6 +12,7 @@ use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineEvent, EnginePort, MetaFile, Metainfo, Missing, Stats,
 };
 use super::search_port::{BoxFuture, SearchPort};
+use crate::log::log;
 
 const BOOTSTRAP_NODES: [&str; 4] = [
     "router.bittorrent.com:6881",
@@ -109,7 +110,7 @@ impl Libtorrent {
         let saved = dht_state.as_deref().and_then(|p| std::fs::read(p).ok()).map(lt::DhtState::from_bytes);
         let session = match lt::Session::new(lt::Config { dht_state: saved.clone(), ..config.clone() }) {
             Err(e) if saved.is_some() && e.kind() == lt::ErrorKind::InvalidInput => {
-                super::log(&format!("starting with an empty DHT table, because the saved one is unreadable: {e}"));
+                log(&format!("starting with an empty DHT table, because the saved one is unreadable: {e}"));
                 lt::Session::new(config)
             }
             started => started,
@@ -197,7 +198,7 @@ impl Libtorrent {
         match (alert, id) {
             (A::MetadataReceived { .. }, Some(id)) => self.metadata(id),
             (A::MetadataFailed { error, .. }, Some(id)) => {
-                super::log(&format!("{} sent metadata that failed its hash check: {error}", short(id)));
+                log(&format!("{} sent metadata that failed its hash check: {error}", short(id)));
             }
             (A::TorrentFinished { .. }, Some(id)) => self.report_if_finished(id),
             (A::TorrentPaused { .. }, Some(id)) => {
@@ -226,7 +227,7 @@ impl Libtorrent {
                 self.fail(id, error);
             }
             (A::FileError { file, operation, error, .. }, Some(id)) => {
-                super::log(&format!("{} {operation} failed on {}: {error}", short(id), file.display()));
+                log(&format!("{} {operation} failed on {}: {error}", short(id), file.display()));
                 let error = storage_error(id, Some(&file), &error);
                 self.fail(id, error);
             }
@@ -236,16 +237,16 @@ impl Libtorrent {
                 self.report_if_finished(id);
             }
             (A::ListenSucceeded { address, transport }, _) => {
-                super::log(&format!("listening on {address} ({})", transport_name(transport)));
+                log(&format!("listening on {address} ({})", transport_name(transport)));
             }
             (A::ListenFailed { interface, port, transport, operation, error }, _) => {
                 let transport = transport_name(transport);
-                super::log(&format!("cannot listen on {interface} port {port} ({transport}): {operation}: {error}"));
+                log(&format!("cannot listen on {interface} port {port} ({transport}): {operation}: {error}"));
             }
             (A::DhtBootstrapped, _) => {
                 if !self.dht_bootstrapped {
                     self.dht_bootstrapped = true;
-                    super::log("the DHT is bootstrapped");
+                    log("the DHT is bootstrapped");
                 }
                 // A torrent added before the bootstrap announced to an empty routing table, and
                 // libtorrent would wait 15 minutes to announce it again.
@@ -270,13 +271,13 @@ impl Libtorrent {
             Ok(seeds) if !seeds.is_empty() && self.torrents.contains_key(&id) => {
                 for seed in &seeds {
                     if let Err(e) = self.session.add_web_seed(engine_id(id), seed) {
-                        super::log(&format!("{} cannot add the web seed {seed}: {e}", short(id)));
+                        log(&format!("{} cannot add the web seed {seed}: {e}", short(id)));
                     }
                 }
-                super::log(&format!("{} also downloads from {}", short(id), seeds.join(", ")));
+                log(&format!("{} also downloads from {}", short(id), seeds.join(", ")));
             }
             Ok(_) => {}
-            Err(error) => super::log(&format!("{} keeps the torrent's own web seeds: {}", short(id), error.message)),
+            Err(error) => log(&format!("{} keeps the torrent's own web seeds: {}", short(id), error.message)),
         }
     }
 
@@ -401,7 +402,7 @@ impl Libtorrent {
         let Some(path) = &self.dht_state else { return };
         let saved = self.session.save_state().map_err(|e| e.to_string());
         if let Err(e) = saved.and_then(|state| write_atomic(path, state.as_bytes()).map_err(|e| e.to_string())) {
-            super::log(&format!("cannot save the DHT table to {}: {e}", path.display()));
+            log(&format!("cannot save the DHT table to {}: {e}", path.display()));
         }
     }
 }
@@ -430,7 +431,7 @@ impl EnginePort for Libtorrent {
         let source = match resume_data.map(lt::ResumeData::from_bytes) {
             Some(Ok(resume)) => lt::TorrentSource::Resume(resume),
             Some(Err(e)) => {
-                super::log(&format!("{} has unreadable resume data, so libtorrent hashes its files: {e}", short(id)));
+                log(&format!("{} has unreadable resume data, so libtorrent hashes its files: {e}", short(id)));
                 fallback
             }
             None => fallback,
@@ -548,7 +549,7 @@ impl EnginePort for Libtorrent {
         let wait = if self.events.is_empty() { max_wait } else { Duration::ZERO };
         match self.session.wait_alerts(wait) {
             Ok(alerts) => alerts.into_iter().for_each(|alert| self.alert(alert)),
-            Err(e) => super::log(&format!("cannot read libtorrent alerts: {e}")),
+            Err(e) => log(&format!("cannot read libtorrent alerts: {e}")),
         }
         let answered: Vec<Found> = self.mirrors.found.try_iter().collect();
         for (id, found) in answered {

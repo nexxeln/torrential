@@ -13,6 +13,7 @@ pub mod release;
 pub mod stream;
 pub mod subtitle;
 pub mod text;
+pub mod time;
 pub mod title;
 pub mod units;
 pub mod watching;

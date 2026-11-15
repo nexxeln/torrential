@@ -21,6 +21,7 @@ use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, Lease, StreamFile};
 use super::server::Ctx;
 use super::web;
+use crate::log::log;
 
 /// Fixed so a file's URL stays the same across engine runs. Players remember where playback
 /// stopped by URL.
@@ -138,7 +139,7 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
                 Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset) => {}
                 // Out of file descriptors or memory, which connections give back as they end.
                 Err(e) => {
-                    super::log(&format!("cannot take a connection: {e}"));
+                    log(&format!("cannot take a connection: {e}"));
                     tokio::time::sleep(BACKOFF).await;
                 }
             },
@@ -276,7 +277,7 @@ async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: 
         match open(address(reach)) {
             Ok(listener) => {
                 devices.refused(None);
-                super::log(&match reach {
+                log(&match reach {
                     Reach::Network => format!("listening on the home network on port {port}"),
                     Reach::Loopback => format!("listening on 127.0.0.1 only on port {port}"),
                 });
@@ -287,7 +288,7 @@ async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: 
                 // is logged once.
                 let new = reach == Reach::Loopback || devices.refused(Some(e.kind()));
                 if new {
-                    super::log(&format!("cannot listen on {}:{port}: {e}", address(reach)));
+                    log(&format!("cannot listen on {}:{port}: {e}", address(reach)));
                 }
             }
         }
@@ -373,8 +374,9 @@ impl Connection<'_> {
                         return Ok(());
                     }
                     let (ctx, peer) = (self.ctx, self.peer);
-                    let ask_now =
-                        |request: &Request| ask(peer, request, ctx.http_port, &ctx.devices, super::owner::now());
+                    let ask_now = |request: &Request| {
+                        ask(peer, request, ctx.http_port, &ctx.devices, torrential_core::time::now())
+                    };
                     // Before the body, so strangers that come while a slow body arrives cannot
                     // close a paired device's connection.
                     if let Ok(Asker::Device(_) | Asker::Cast(_)) = ask_now(&request)
