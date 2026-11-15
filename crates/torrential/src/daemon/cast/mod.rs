@@ -1026,7 +1026,10 @@ async fn find(
                     ErrorCode::Usage,
                     format!("file {index} is not a subtitle of {}", file_name(&path)),
                 )
-                .with_hint(format!("run torrential files {} to list its files", &id.to_hex()[..8])));
+                .with_hint(format!(
+                    "run torrential files {} to list its files",
+                    &id.to_hex()[..torrential_core::id::SHORT_ID]
+                )));
             }
             Some((index, sanitize(&info.metainfo.files[index as usize].path)))
         }

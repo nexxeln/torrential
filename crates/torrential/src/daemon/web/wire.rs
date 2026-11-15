@@ -53,8 +53,9 @@ fn declarations(cfg: &Config) -> Vec<String> {
 }
 
 /// Numbers the web app and the engine must agree on: each name, what it is, and its value.
-fn constants() -> [(&'static str, &'static str, String); 9] {
+fn constants() -> [(&'static str, &'static str, String); 10] {
     [
+        ("SHORT_ID", "Hex digits every screen shows of an ID.", torrential_core::id::SHORT_ID.to_string()),
         ("SLICES", "Equal runs of a torrent's pieces in `Progress.piece_map`.", PieceMap::SLICES.to_string()),
         ("PIECE_RUNS", "Equal runs of a file's bytes in `GET /api/pieces`.", super::watch::RUNS.to_string()),
         ("SEARCH_LIMIT", "Results `POST /api/search` answers when it names no limit.", super::SEARCH_LIMIT.to_string()),

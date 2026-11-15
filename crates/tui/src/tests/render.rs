@@ -381,7 +381,7 @@ fn a_row_shows_the_resolution_and_its_details_spell_out_the_quality() {
     assert_eq!(line(&buf, y + 1), "            │   knaben · trusted uploader · 1080p h264");
     let (_, y) = find(&buf, "CAM.x264");
     assert!(
-        line(&buf, y).ends_with("CAM.x264        cam               1.4 GiB     41   2mo"),
+        line(&buf, y).ends_with("CAM.x264        cam               1.4 GiB     41   60d"),
         "a blank, never the codec, when no resolution"
     );
     let (_, y) = find(&buf, "(1968) colorized");

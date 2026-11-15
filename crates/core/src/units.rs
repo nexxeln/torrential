@@ -24,18 +24,44 @@ pub fn parse_size(input: &str) -> Option<u64> {
 }
 
 /// Formats bytes with IEC units and one decimal: `1.5 GiB`, `568.8 MiB`, `912 B`.
+/// A size in at most three figures, in binary units: `512 B`, `1.5 GiB`, `100 MiB`.
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    while value.round() >= 1000.0 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
-    format!("{value:.1} {}", UNITS[unit])
+    match (unit, value) {
+        (0, value) => format!("{value} B"),
+        (_, value) if value < 99.95 => format!("{value:.1} {}", UNITS[unit]),
+        (_, value) => format!("{value:.0} {}", UNITS[unit]),
+    }
+}
+
+/// How long ago something happened, in its largest unit: `now` under a minute, then `5m`, `3h`,
+/// `40d`, and `2y` from a year.
+pub fn age(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const YEAR: u64 = 365 * DAY;
+    match seconds {
+        0..MINUTE => "now".into(),
+        MINUTE..HOUR => format!("{}m", seconds / MINUTE),
+        HOUR..DAY => format!("{}h", seconds / HOUR),
+        DAY..YEAR => format!("{}d", seconds / DAY),
+        _ => format!("{}y", seconds / YEAR),
+    }
+}
+
+/// `age` as a phrase: `just now`, or `5m ago`.
+pub fn ago(seconds: u64) -> String {
+    match seconds {
+        0..60 => "just now".into(),
+        _ => format!("{} ago", age(seconds)),
+    }
 }
 
 /// A limit as people type it: `8 GB` or `50 GiB` when it is a whole number of one unit,
@@ -174,10 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn sizes_and_clocks_read_as_the_shared_vectors_say() {
+    fn sizes_ages_and_clocks_read_as_the_shared_vectors_say() {
         let vectors = vectors();
         for case in vectors["size"].as_array().unwrap() {
-            assert_eq!(format_size(case["bytes"].as_u64().unwrap()), case["cli"], "{case}");
+            assert_eq!(format_size(case["bytes"].as_u64().unwrap()), case["text"], "{case}");
+        }
+        for case in vectors["age"].as_array().unwrap() {
+            assert_eq!(age(case["seconds"].as_u64().unwrap()), case["text"], "{case}");
         }
         for case in vectors["clock"].as_array().unwrap() {
             assert_eq!(clock(Duration::from_secs(case["seconds"].as_u64().unwrap())), case["text"], "{case}");
@@ -197,7 +226,7 @@ mod tests {
     fn formats_sizes_and_rates() {
         assert_eq!(format_size(912), "912 B");
         assert_eq!(format_size(1_640_497_152), "1.5 GiB");
-        assert_eq!(format_size(596_399_542), "568.8 MiB");
+        assert_eq!(format_size(596_399_542), "569 MiB");
         assert_eq!(format_rate(40_265_318), "38.4 MiB/s");
     }
 

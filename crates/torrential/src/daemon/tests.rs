@@ -1143,7 +1143,7 @@ async fn a_download_whose_missing_pieces_have_no_source_stops_and_resume_looks_a
         (
             ErrorCode::NoSource,
             "no peer or web seed has had the remaining 2 pieces (4.0 MiB) for 1s",
-            Some("run torrential resume 222222 to try again; the 1020.0 MiB already verified is kept")
+            Some("run torrential resume 222222 to try again; the 1.0 GiB already verified is kept")
         )
     );
     let verify = || h.changes(Request::Verify { reference: prefix(&film), repair: false });

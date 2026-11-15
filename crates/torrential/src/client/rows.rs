@@ -8,7 +8,7 @@ use crate::output::Cell;
 use crate::output::format::{self, NONE};
 use crate::output::theme::Token;
 
-pub const SHORT_ID: usize = 6;
+pub use torrential_core::id::SHORT_ID;
 
 pub fn short_ids(ids: &[TorrentId]) -> Vec<String> {
     ids.iter().map(|id| shortest_unique_prefix(id, ids, SHORT_ID)).collect()

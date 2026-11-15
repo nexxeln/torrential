@@ -292,6 +292,9 @@ pub fn parse_full_infohash(s: &str) -> Option<InfoHash> {
     }
 }
 
+/// How many hex digits every screen shows of an ID, unless more tell two apart.
+pub const SHORT_ID: usize = 6;
+
 /// The shortest prefix of `id`, at least `min` characters, that no ID in `others` shares.
 pub fn shortest_unique_prefix<'a>(
     id: &TorrentId,

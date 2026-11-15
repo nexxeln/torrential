@@ -106,10 +106,10 @@ fn failed_lines(sheet: &mut Sheet, error: &Error, room: usize) {
     }
 }
 
-/// A release's ID as the lists show it: its first six hex digits, after the `u` of a locator.
+/// A release's ID as the lists show it: its first hex digits, after the `u` of a locator.
 fn short(release: &ReleaseId) -> String {
     let id = release.to_ref();
-    let shown = if id.starts_with('u') { 7 } else { 6 };
+    let shown = torrential_core::id::SHORT_ID + usize::from(id.starts_with('u'));
     id.chars().take(shown).collect()
 }
 

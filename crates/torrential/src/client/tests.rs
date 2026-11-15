@@ -258,7 +258,7 @@ fn a_match_summary_counts_the_matches_and_their_size() {
     let doc = files(&reply, Some(&matched));
     assert_eq!(
         doc.summary,
-        ["1 of 4 files in night_of_the_living_dead_dvd match · 568.8 MiB · file list from the .torrent URL in 0.4s"]
+        ["1 of 4 files in night_of_the_living_dead_dvd match · 569 MiB · file list from the .torrent URL in 0.4s"]
     );
     assert_eq!(doc.next.as_deref(), Some("torrential get 6bc1af --files night.mp4"));
     let mut reply = film_files();
@@ -361,9 +361,9 @@ fn a_dry_run_shows_the_size_cap_beside_the_size_and_free_space() {
     assert_eq!(
         fields,
         [
-            "files: all (2 of 255, 568.8 MiB)",
+            "files: all (2 of 255, 569 MiB)",
             "path: /Users/ada/Downloads/torrential/night_of_the_living_dead_dvd",
-            "free: 410.0 GiB",
+            "free: 410 GiB",
             "cap: 8 GiB",
             "conflicts: none"
         ]
@@ -1035,11 +1035,11 @@ fn play_shows_the_files_it_plays_and_the_runtime_once_known() {
     assert_eq!(
         out,
         [
-            "6bc1af Night of the Living Dead (1968)\nvideo:     Night.mp4 (568.8 MiB)\nsubtitles: Night.asr.srt\n\
+            "6bc1af Night of the Living Dead (1968)\nvideo:     Night.mp4 (569 MiB)\nsubtitles: Night.asr.srt\n\
              runtime:   1:36:12\nnext:      torrential status 6bc1af\n",
-            "6bc1af night_of_the_living_dead_dvd\nvideo: VTS_01_1.mp4 (250.5 MiB)\nnext:  torrential status 6bc1af\n",
+            "6bc1af night_of_the_living_dead_dvd\nvideo: VTS_01_1.mp4 (250 MiB)\nnext:  torrential status 6bc1af\n",
             "6bc1af Night of the Living Dead (1968)\nsource: Night of the Living Dead (1968) [DVD]\nvideo:  VTS_01_1.mp4 \
-             (250.5 MiB)\nnext:   torrential status 6bc1af\n",
+             (250 MiB)\nnext:   torrential status 6bc1af\n",
         ]
     );
     assert_eq!(

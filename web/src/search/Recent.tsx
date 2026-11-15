@@ -7,6 +7,7 @@ import { fileName, readable } from "../lib/release";
 import { forgetPosition, type Position, positions } from "../lib/storage";
 import { Link, watchPath } from "../router";
 import { Meter } from "../ui/Meter";
+import { SHORT_ID } from "../wire";
 
 const SHOWN = 6;
 const ROW = "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 hover:bg-white/5";
@@ -56,7 +57,7 @@ function summary(job: Job): string {
 }
 
 function Download({ job }: { job: Job }) {
-  const name = readable(job.name ?? job.id.slice(0, 8));
+  const name = readable(job.name ?? job.id.slice(0, SHORT_ID));
   return (
     <li>
       <Link href={watchPath(job.id)} className={ROW}>

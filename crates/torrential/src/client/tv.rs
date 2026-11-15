@@ -136,7 +136,10 @@ fn cast_doc(cast: &Cast) -> Doc {
         fields.push(("subtitle", Cell::new(subtitle)));
     }
     if let (Some(download), Some(file)) = (&cast.download, cast.file) {
-        fields.push(("download", Cell::new(format!("{} file {file}", &download[..download.len().min(8)]))));
+        fields.push((
+            "download",
+            Cell::new(format!("{} file {file}", &download[..download.len().min(torrential_core::id::SHORT_ID)])),
+        ));
     }
     let summary = match &cast.state {
         CastState::Ended { error: Some(error) } => vec![error.message.clone()],
@@ -215,7 +218,7 @@ mod tests {
              at:       4:05 / 14:48\n\
              volume:   12\n\
              subtitle: Sintel/Sintel.en.srt\n\
-             download: 6bc1af0e file 0\n\
+             download: 6bc1af file 0\n\
              next:     torrential tv resume\n"
         );
         let lost = Error::new(ErrorCode::NetworkUnavailable, "[LG] webOS TV OLED55C1 stopped answering");
@@ -226,7 +229,7 @@ mod tests {
             "tv:       [LG] webOS TV OLED55C1\n\
              video:    Sintel (2010)\n\
              state:    failed\n\
-             download: 6bc1af0e file 0\n\
+             download: 6bc1af file 0\n\
              # [LG] webOS TV OLED55C1 stopped answering\n"
         );
     }

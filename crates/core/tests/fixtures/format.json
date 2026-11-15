@@ -1,175 +1,119 @@
 {
-  "about": "How each screen writes sizes, ages, percents and clocks, and when a video counts as finished. cargo test and bun test both read this file. Where cli, tui and web differ, decision D2 (PR34) picks one rule.",
+  "about": "How every screen writes sizes, ages, percents and clocks, and when a video counts as finished. cargo test and bun test both read this file. Sizes and ages follow one rule everywhere (decision D2); percents still differ by screen.",
   "size": [
     {
       "bytes": 0,
-      "cli": "0 B",
-      "tui": "0 B",
-      "web": "0 B"
+      "text": "0 B"
     },
     {
       "bytes": 512,
-      "cli": "512 B",
-      "tui": "512 B",
-      "web": "512 B"
+      "text": "512 B"
     },
     {
       "bytes": 1023,
-      "cli": "1023 B",
-      "tui": "1.0 KiB",
-      "web": "1023 B"
+      "text": "1.0 KiB"
     },
     {
       "bytes": 1024,
-      "cli": "1.0 KiB",
-      "tui": "1.0 KiB",
-      "web": "1.00 KiB"
+      "text": "1.0 KiB"
     },
     {
       "bytes": 1536,
-      "cli": "1.5 KiB",
-      "tui": "1.5 KiB",
-      "web": "1.50 KiB"
+      "text": "1.5 KiB"
     },
     {
       "bytes": 10240,
-      "cli": "10.0 KiB",
-      "tui": "10.0 KiB",
-      "web": "10.0 KiB"
+      "text": "10.0 KiB"
     },
     {
       "bytes": 1048576,
-      "cli": "1.0 MiB",
-      "tui": "1.0 MiB",
-      "web": "1.00 MiB"
+      "text": "1.0 MiB"
     },
     {
       "bytes": 104857600,
-      "cli": "100.0 MiB",
-      "tui": "100 MiB",
-      "web": "100 MiB"
+      "text": "100 MiB"
     },
     {
       "bytes": 1072693248,
-      "cli": "1023.0 MiB",
-      "tui": "1.0 GiB",
-      "web": "1023 MiB"
+      "text": "1.0 GiB"
     },
     {
       "bytes": 1610612736,
-      "cli": "1.5 GiB",
-      "tui": "1.5 GiB",
-      "web": "1.50 GiB"
+      "text": "1.5 GiB"
     },
     {
       "bytes": 5497558138880,
-      "cli": "5.0 TiB",
-      "tui": "5.0 TiB",
-      "web": "5.00 TiB"
+      "text": "5.0 TiB"
     }
   ],
   "age": [
     {
       "seconds": 0,
-      "cli": "0m",
-      "tui": "now",
-      "web": "1m"
+      "text": "now"
     },
     {
       "seconds": 30,
-      "cli": "0m",
-      "tui": "now",
-      "web": "1m"
+      "text": "now"
     },
     {
       "seconds": 59,
-      "cli": "0m",
-      "tui": "now",
-      "web": "1m"
+      "text": "now"
     },
     {
       "seconds": 60,
-      "cli": "1m",
-      "tui": "1m",
-      "web": "1m"
+      "text": "1m"
     },
     {
       "seconds": 119,
-      "cli": "1m",
-      "tui": "1m",
-      "web": "1m"
+      "text": "1m"
     },
     {
       "seconds": 3599,
-      "cli": "59m",
-      "tui": "59m",
-      "web": "59m"
+      "text": "59m"
     },
     {
       "seconds": 3600,
-      "cli": "1h",
-      "tui": "1h",
-      "web": "1h"
+      "text": "1h"
     },
     {
       "seconds": 7199,
-      "cli": "1h",
-      "tui": "1h",
-      "web": "1h"
+      "text": "1h"
     },
     {
       "seconds": 86399,
-      "cli": "23h",
-      "tui": "23h",
-      "web": "23h"
+      "text": "23h"
     },
     {
       "seconds": 86400,
-      "cli": "1d",
-      "tui": "1d",
-      "web": "1d"
+      "text": "1d"
     },
     {
       "seconds": 172800,
-      "cli": "2d",
-      "tui": "2d",
-      "web": "2d"
+      "text": "2d"
     },
     {
       "seconds": 5097600,
-      "cli": "59d",
-      "tui": "59d",
-      "web": "59d"
+      "text": "59d"
     },
     {
       "seconds": 5184000,
-      "cli": "60d",
-      "tui": "2mo",
-      "web": "60d"
+      "text": "60d"
     },
     {
       "seconds": 31449600,
-      "cli": "364d",
-      "tui": "12mo",
-      "web": "364d"
+      "text": "364d"
     },
     {
       "seconds": 31536000,
-      "cli": "365d",
-      "tui": "1y",
-      "web": "1y"
+      "text": "1y"
     },
     {
       "seconds": 63072000,
-      "cli": "2y",
-      "tui": "2y",
-      "web": "2y"
+      "text": "2y"
     },
     {
       "seconds": 94608000,
-      "cli": "3y",
-      "tui": "3y",
-      "web": "3y"
+      "text": "3y"
     }
   ],
   "percent": [
