@@ -31,17 +31,17 @@ pub struct Asset {
     pub cache: &'static str,
 }
 
-/// The file at `path`. A path that names no file is a page of the app, which index.html renders.
+/// The file at `path`. A path under `/assets/` that names no file is missing; any other path that
+/// names no file is a page of the app, which index.html renders.
 pub fn find(path: &str) -> Option<Asset> {
     find_in(FILES, path)
 }
 
 fn find_in(files: &'static [(&'static str, &'static [u8])], path: &str) -> Option<Asset> {
     let file = |path: &str| files.iter().find(|(route, _)| *route == path).copied();
-    let name = path.rsplit('/').next().unwrap_or_default();
     let (route, bytes) = match file(path) {
         Some(found) => found,
-        None if path.starts_with(HASHED) || name.contains('.') => return None,
+        None if path.starts_with(HASHED) => return None,
         None => file(INDEX)?,
     };
     let extension = route.rsplit_once('.').map_or("", |(_, extension)| extension);
@@ -63,6 +63,8 @@ mod tests {
         let page = Some((&b"page"[..], "text/html; charset=utf-8", "no-cache"));
         assert_eq!(read("/"), page);
         assert_eq!(read("/watch/9b5212"), page);
+        assert_eq!(read("/watch/https%3A%2F%2Farchive.org%2Fdownload%2FSintel%2FSintel_archive.torrent"), page);
+        assert_eq!(read("/watch/Sintel.2010.1080p.mkv"), page);
         assert_eq!(read("/downloads"), page);
         assert_eq!(read("/index.html"), page);
         assert_eq!(
@@ -71,7 +73,7 @@ mod tests {
         );
         assert_eq!(read("/favicon.svg"), Some((&b"svg"[..], "image/svg+xml", "no-cache")));
         assert_eq!(read("/assets/index-old.js"), None, "a stale script must not get the page");
-        assert_eq!(read("/robots.txt"), None);
+        assert_eq!(read("/assets/x"), None);
     }
 
     #[test]
