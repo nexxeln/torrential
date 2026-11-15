@@ -294,7 +294,7 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     if let Some(paths) = paths {
         paths.record_startup_error(error);
     }
-    error.code.exit_code()
+    crate::exit::code(error.code)
 }
 
 fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Result<Ended, Startup> {

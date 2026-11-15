@@ -418,8 +418,8 @@ impl WaitEnd {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Done | Self::Metadata => 0,
-            Self::Timeout | Self::Stopped { .. } => torrential_core::error::EXIT_PENDING,
-            Self::Failed { .. } => 7,
+            Self::Timeout | Self::Stopped { .. } => crate::exit::PENDING,
+            Self::Failed { .. } => crate::exit::DOWNLOAD,
         }
     }
 
