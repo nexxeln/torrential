@@ -60,6 +60,16 @@ pub enum Kind {
     Series,
 }
 
+impl Kind {
+    /// `film` or `series`, as a person reads it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Film => "film",
+            Self::Series => "series",
+        }
+    }
+}
+
 /// What plays: a film, or one episode of a series. A series ID alone names the series, and
 /// whoever plays it chooses the episode. The text form is `tt0063350` or `tt0903747:3:5`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]

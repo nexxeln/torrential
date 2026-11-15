@@ -171,7 +171,7 @@ pub(super) fn steps(
         match conn.read_within::<TitleFrame>(STEP_WITHIN)? {
             TitleFrame::Step { step } => {
                 if let AttemptEvent::Resolved { video, title, .. } = &*step {
-                    search = Some(views::search_for(&views::title_name(title, video.episode)));
+                    search = Some(views::search_for(&torrential_core::title::title_name(title, video.episode)));
                 }
                 each(&step);
             }

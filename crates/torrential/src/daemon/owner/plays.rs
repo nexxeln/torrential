@@ -324,7 +324,7 @@ impl Owner {
             })
             .map(JobEntry::id)
             .collect();
-        let after = crate::output::format::elapsed(idle_after);
+        let after = torrential_core::units::elapsed(idle_after);
         for id in idle {
             log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
             self.pause(vec![id.to_hex()], oneshot::channel().0);
@@ -409,7 +409,7 @@ impl Owner {
             return;
         }
         self.tending.refused = None;
-        let max = crate::output::format::size(Some(self.config.plays.max));
+        let max = torrential_core::units::format_size(self.config.plays.max);
         for id in &leaving {
             log(&format!("{} is leaving the plays folder to keep it under {max}", self.named(*id)));
         }
