@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { type ApiError, asApiError, title, type TitlePage } from "../api";
+import { useState } from "react";
+import { type ApiError, title, type TitlePage } from "../api";
+import { useLatest } from "../lib/useLatest";
 
 export type TitleState = { kind: "loading" } | { kind: "ready"; page: TitlePage } | { kind: "failed"; error: ApiError };
 
@@ -13,19 +14,15 @@ export function useTitle(id: string): [TitleState, (page: TitlePage) => void] {
     return page ? { kind: "ready", page } : { kind: "loading" };
   });
 
-  useEffect(() => {
-    const stop = new AbortController();
-    title(id, stop.signal).then(
-      (page) => {
-        kept.set(id, page);
-        setState({ kind: "ready", page });
-      },
-      (thrown) => {
-        if (!stop.signal.aborted) setState((before) => (before.kind === "ready" ? before : { kind: "failed", error: asApiError(thrown) }));
-      },
-    );
-    return () => stop.abort();
-  }, [id]);
+  useLatest(
+    (signal) => title(id, signal),
+    (page) => {
+      kept.set(id, page);
+      setState({ kind: "ready", page });
+    },
+    (error) => setState((before) => (before.kind === "ready" ? before : { kind: "failed", error })),
+    [id],
+  );
 
   const update = (page: TitlePage) => {
     kept.set(id, page);

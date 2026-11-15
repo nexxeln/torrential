@@ -25,11 +25,12 @@ export function getCommand(release: Release): string {
 
 interface Props {
   release: Release;
-  selected: boolean;
+  /** The search page moves a selection through its rows by keyboard. A title's sources have none. */
+  selected?: boolean;
   /** The row was copied by keyboard a moment ago. */
-  copied: boolean;
-  onPoint: () => void;
-  onCopy: () => void;
+  copied?: boolean;
+  onPoint?: () => void;
+  onCopy?: () => void;
   /** Where a video release plays. Its own download by default. */
   href?: string;
   /** The release a title's Play tries first. */
@@ -43,7 +44,7 @@ interface Props {
 const ROW =
   "grid w-full min-w-0 grid-cols-1 items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 text-left hover:bg-white/5 data-selected:bg-white/8 sm:grid-cols-[minmax(0,1fr)_auto]";
 
-export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pick, failed, action }: Props) {
+export function ResultRow({ release, selected = false, copied = false, onPoint, onCopy, href, pick, failed, action }: Props) {
   const row = useRef<HTMLLIElement>(null);
   useEffect(() => {
     if (selected) row.current?.scrollIntoView({ block: "nearest" });

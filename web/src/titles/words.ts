@@ -1,5 +1,6 @@
 import type { Check, EpisodeInfo, Kind, Skip, TitleCard, TitlePage } from "../api";
 import { sentence } from "../lib/format";
+import { episodeOf } from "../lib/video";
 
 /** A film's year, or a series' first year and that it is one. */
 export function cardFacts(card: TitleCard): string {
@@ -19,19 +20,10 @@ export function seasonName(number: number): string {
   return number === 0 ? "Specials" : `Season ${number}`;
 }
 
-/** The video ID of a film, or of one episode of a series: `tt0903747:3:5`. */
-export function videoOf(id: string, episode?: { season: number; episode: number } | null): string {
-  return episode ? `${id}:${episode.season}:${episode.episode}` : id;
-}
-
-export function titleOf(video: string): string {
-  return video.split(":")[0]!;
-}
-
 export function findEpisode(page: Pick<TitlePage, "seasons">, video: string): EpisodeInfo | null {
-  const [, season, number] = video.split(":").map(Number);
-  if (season === undefined) return null;
-  return page.seasons.find((s) => s.number === season)?.episodes.find((e) => e.episode === number) ?? null;
+  const wanted = episodeOf(video);
+  if (!wanted) return null;
+  return page.seasons.find((s) => s.number === wanted.season)?.episodes.find((e) => e.episode === wanted.episode) ?? null;
 }
 
 /** An episode can play once its air date has passed. One with no date announced has not aired. */

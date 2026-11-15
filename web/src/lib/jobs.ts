@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { type Job, type JobEvent, watchJobs } from "../api";
+import { type Job, type JobEvent, type JobState, watchJobs } from "../api";
 
 export interface JobsView {
   /** `lost` while the engine cannot be reached. The browser keeps trying, and a snapshot follows when it answers. */
@@ -69,6 +69,17 @@ function find(id: string | null): Job | null {
 export function useJob(id: string | null): Job | null {
   return useSyncExternalStore(subscribe, () => find(id));
 }
+
+/** What each state of a download is called on a page. */
+export const STATE_WORDS: Record<JobState, string> = {
+  queued: "Queued",
+  metadata: "Finding peers",
+  checking: "Checking files",
+  downloading: "Downloading",
+  paused: "Paused",
+  done: "Done",
+  error: "Failed",
+};
 
 export function isActive(job: Job): boolean {
   return job.state === "downloading" || job.state === "metadata" || job.state === "checking" || job.state === "queued";

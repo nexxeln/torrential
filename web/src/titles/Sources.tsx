@@ -85,10 +85,6 @@ export function Sources({ video, label, kind, open: opened }: Props) {
                 <ResultRow
                   key={release.id}
                   release={release}
-                  selected={false}
-                  copied={false}
-                  onPoint={() => {}}
-                  onCopy={() => {}}
                   href={playPath(video, release.id)}
                   pick={at === 0}
                   failed={release.failed && skipReason(release.failed, kind === "film" ? "film" : "series")}

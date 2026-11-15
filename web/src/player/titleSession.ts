@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   type ApiError,
   asApiError,
+  ENGINE_UNREACHABLE,
   type Check,
   type EpisodeInfo,
   type MediaInfo,
@@ -91,7 +92,7 @@ export function heard(attempt: Attempt, message: PlayMessage): Attempt {
 
 /** A play stream that closed before it said how the play went. */
 const CUT_OFF: ApiError = {
-  code: "engine_unreachable",
+  code: ENGINE_UNREACHABLE,
   message: "The engine stopped answering before a source played.",
   hint: "Make sure torrential web is still running, then try again.",
 };

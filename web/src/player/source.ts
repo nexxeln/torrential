@@ -1,4 +1,4 @@
-import { type ApiError, streamUrl } from "../api";
+import { type ApiError, errorOf, mediaErrorCode, STREAM_ENDED_EARLY, STREAM_FAILED, streamUrl } from "../api";
 import { mediaSourceClass } from "./plan";
 
 export type SourceState = { kind: "streaming" } | { kind: "failed"; error: ApiError };
@@ -21,7 +21,7 @@ const MEDIA_ERRORS: Record<number, string> = {
 
 function mediaError(element: HTMLVideoElement): ApiError {
   const code = element.error?.code ?? 0;
-  return { code: `media_error_${code}`, message: MEDIA_ERRORS[code] ?? "The video stopped with an unknown error." };
+  return { code: mediaErrorCode(code), message: MEDIA_ERRORS[code] ?? "The video stopped with an unknown error." };
 }
 
 /**
@@ -321,10 +321,7 @@ export class RemuxSource implements Source {
       }
       const { id, file, video, audio } = this.options;
       const response = await fetch(streamUrl(id, file, { t: at, video, audio }), { signal: request.signal });
-      if (!response.ok || !response.body) {
-        const body = (await response.json().catch(() => null)) as { error?: ApiError } | null;
-        throw body?.error ?? { code: "internal", message: `The engine answered ${response.status} for the video stream.` };
-      }
+      if (!response.ok || !response.body) throw await errorOf(response);
       const reader = response.body.getReader();
       for (;;) {
         while (current() && this.aheadNow() > this.ahead) await sleep(250);
@@ -344,7 +341,7 @@ export class RemuxSource implements Source {
       this.fail(
         known
           ? (error as ApiError)
-          : { code: "stream_failed", message: "The video stream from the engine stopped.", hint: String(error) },
+          : { code: STREAM_FAILED, message: "The video stream from the engine stopped.", hint: String(error) },
       );
     }
   }
@@ -414,7 +411,7 @@ export class RemuxSource implements Source {
     const nearEnd = duration !== null && end >= duration - Math.max(60, duration * 0.02);
     if (!complete && !nearEnd) {
       this.shortfall = {
-        code: "stream_ended_early",
+        code: STREAM_ENDED_EARLY,
         message: "The video stream stopped before the end of the file.",
         hint: "The file may be damaged, or ffmpeg cannot read past this point.",
       };

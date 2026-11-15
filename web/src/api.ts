@@ -176,8 +176,20 @@ export type {
 /** A failed request's error: the engine's, or one this app names when the engine cannot answer. */
 export type ApiError = Omit<Error, "code"> & { code: ErrorCode | AppErrorCode };
 
+/** The engine did not answer, or a proxy in front of it answered for it. */
+export const ENGINE_UNREACHABLE = "engine_unreachable";
+/** The video stream from the engine broke off. */
+export const STREAM_FAILED = "stream_failed";
+/** The video stream ended before the end of the file. */
+export const STREAM_ENDED_EARLY = "stream_ended_early";
+
+/** The code of a media element's error: 3 is a decode failure, 4 a file the browser cannot play. */
+export function mediaErrorCode(code: number): `media_error_${number}` {
+  return `media_error_${code}`;
+}
+
 /** The codes this app gives what fails in the browser, beside the engine's. */
-type AppErrorCode = "engine_unreachable" | "stream_failed" | "stream_ended_early" | `media_error_${number}`;
+type AppErrorCode = typeof ENGINE_UNREACHABLE | typeof STREAM_FAILED | typeof STREAM_ENDED_EARLY | `media_error_${number}`;
 
 /** One line of the /api/search stream. `update` repeats with the results so far as each source answers. */
 export type SearchMessage = Exclude<EngineSearchMessage, { type: "error" }> | { type: "error"; error: ApiError };
@@ -203,7 +215,7 @@ export class EngineError extends Error {
 }
 
 const UNREACHABLE: ApiError = {
-  code: "engine_unreachable",
+  code: ENGINE_UNREACHABLE,
   message: "Cannot reach the torrential engine.",
   hint: "Run torrential web in a terminal to start it, then try again.",
 };
@@ -213,15 +225,39 @@ export function asApiError(thrown: unknown): ApiError {
   return thrown instanceof EngineError ? thrown.error : UNREACHABLE;
 }
 
-/** A body that stops arriving, as when its request is aborted, rejects instead of answering null. */
-async function json<T>(response: Response): Promise<T> {
-  if (response.ok) return response.json() as Promise<T>;
-  // A phone or TV that was removed on the Mac goes to the page that pairs it again.
+/** A phone or TV that was removed on the Mac goes to the page that pairs it again. */
+function leaveIfUnpaired(response: Response): void {
   if (response.status === 401) location.assign("/pair");
-  const body = await response.json().catch(() => null);
-  // The engine names every failure. A server error without a name is a proxy in front of an engine that is not running.
-  const unnamed = response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
-  throw new EngineError(body?.error ?? unnamed, response.status);
+}
+
+/**
+ * The error a failed response carries. The engine names every failure, so a server error without a
+ * name is a proxy in front of an engine that is not running.
+ */
+export async function errorOf(response: Response): Promise<ApiError> {
+  leaveIfUnpaired(response);
+  const body = (await response.json().catch(() => null)) as { error?: ApiError } | null;
+  const unnamed: ApiError =
+    response.status >= 500 ? UNREACHABLE : { code: "internal", message: `the engine answered ${response.status}` };
+  return body?.error ?? unnamed;
+}
+
+/** Fetches a response with a body, or throws the error the engine answered with. */
+async function answered(path: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(path, init);
+  if (!response.ok || !response.body) throw new EngineError(await errorOf(response), response.status);
+  return response;
+}
+
+/** The JSON a request answers. A body that stops arriving, as when its request is aborted, rejects instead of answering null. */
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await answered(path, init)).json() as Promise<T>;
+}
+
+/** Sends a phone or TV the Mac removed to the page that pairs it again. */
+export async function checkPaired(): Promise<void> {
+  const response = await fetch("/api/me").catch(() => null);
+  if (response) leaveIfUnpaired(response);
 }
 
 /** The JSON values of an NDJSON body, one per line, as they arrive. */
@@ -249,15 +285,14 @@ async function* lines<T>(response: Response): AsyncGenerator<T> {
 async function* searchMessages(path: string, init: RequestInit): AsyncGenerator<SearchMessage> {
   const response = await fetch(path, init);
   if (!response.ok || !response.body) {
-    yield { type: "error", error: await json<never>(response).catch((e: EngineError) => e.error) };
+    yield { type: "error", error: await errorOf(response) };
     return;
   }
   yield* lines<SearchMessage>(response);
 }
 
 function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal };
-  return fetch(path, init).then(json<T>);
+  return request<T>(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
 }
 
 /** Yields the results so far each time a source answers. The last message is `done` or `error`. */
@@ -280,14 +315,13 @@ export function play(ref: string, file?: number, signal?: AbortSignal): Promise<
 }
 
 export function media(id: string, file: number, signal?: AbortSignal): Promise<MediaInfo> {
-  return fetch(`/api/media?id=${id}&file=${file}`, { signal }).then(json<MediaInfo>);
+  return request<MediaInfo>(`/api/media?id=${id}&file=${file}`, { signal });
 }
 
 /** Has the engine fetch ffmpeg, saying how far the download is. The fetch carries on when this stops. */
 export async function* fetchFfmpeg(signal?: AbortSignal): AsyncGenerator<FfmpegMessage> {
   const init = { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal };
-  const response = await fetch("/api/ffmpeg", init);
-  if (!response.ok || !response.body) await json<never>(response);
+  const response = await answered("/api/ffmpeg", init);
   yield* lines<FfmpegMessage>(response);
 }
 
@@ -321,7 +355,7 @@ export function subtitleUrl(id: string, file: number, embedded?: { stream: numbe
 }
 
 export function onlineSubtitles(id: string, file: number, signal?: AbortSignal): Promise<OnlineSubtitles> {
-  return fetch(`/api/subtitles/online?id=${id}&file=${file}`, { signal }).then(json<OnlineSubtitles>);
+  return request<OnlineSubtitles>(`/api/subtitles/online?id=${id}&file=${file}`, { signal });
 }
 
 /** WebVTT of one OnlineSubtitle of video `file`, whole. */
@@ -339,13 +373,11 @@ export function thumbnailUrl(id: string, file: number, t: number): string {
 }
 
 export function pieces(id: string, file: number, signal?: AbortSignal): Promise<FilePieces> {
-  return fetch(`/api/pieces?id=${id}&file=${file}`, { signal }).then(json<FilePieces>);
+  return request<FilePieces>(`/api/pieces?id=${id}&file=${file}`, { signal });
 }
 
 export function jobs(signal?: AbortSignal): Promise<Job[]> {
-  return fetch("/api/jobs", { signal })
-    .then(json<{ jobs: Job[] }>)
-    .then((body) => body.jobs);
+  return request<{ jobs: Job[] }>("/api/jobs", { signal }).then((body) => body.jobs);
 }
 
 export function files(ref: string, signal?: AbortSignal): Promise<FilesReply> {
@@ -353,11 +385,11 @@ export function files(ref: string, signal?: AbortSignal): Promise<FilesReply> {
 }
 
 export function me(): Promise<Me> {
-  return fetch("/api/me").then(json<Me>);
+  return request<Me>("/api/me");
 }
 
 export function devices(): Promise<DeviceList> {
-  return fetch("/api/devices").then(json<DeviceList>);
+  return request<DeviceList>("/api/devices");
 }
 
 /** Opens a new code in place of any open one. */
@@ -386,17 +418,17 @@ export function watchJobs(onEvent: (event: JobEvent) => void, onConnection?: (co
   source.onerror = () => {
     onConnection?.(false);
     // The browser gives up on a stream the engine refused, which it does once a device is removed.
-    if (source.readyState === EventSource.CLOSED) void me().catch(() => {});
+    if (source.readyState === EventSource.CLOSED) void checkPaired();
   };
   return () => source.close();
 }
 
 export function titles(query: string, signal?: AbortSignal): Promise<TitleSearch> {
-  return fetch(`/api/titles?${new URLSearchParams({ q: query })}`, { signal }).then(json<TitleSearch>);
+  return request<TitleSearch>(`/api/titles?${new URLSearchParams({ q: query })}`, { signal });
 }
 
 export function title(id: string, signal?: AbortSignal): Promise<TitlePage> {
-  return fetch(`/api/title?${new URLSearchParams({ id })}`, { signal }).then(json<TitlePage>);
+  return request<TitlePage>(`/api/title?${new URLSearchParams({ id })}`, { signal });
 }
 
 /** A same-origin image URL. Answers 404 when the catalog has no such picture. */
@@ -421,17 +453,14 @@ export async function* sources(video: string, viewer?: Viewer, signal?: AbortSig
  */
 export async function* playTitle(request: PlayTitle, signal?: AbortSignal): AsyncGenerator<PlayMessage> {
   const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal };
-  const response = await fetch("/api/title/play", init);
-  if (!response.ok || !response.body) await json<never>(response);
+  const response = await answered("/api/title/play", init);
   yield* lines<PlayMessage>(response);
 }
 
 /** Kept alive past the page, since the player saves when the page hides. */
 export function saveWatched(entry: { video: string; position: number; duration: number | null; release?: string }): Promise<Watched> {
   const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(entry), keepalive: true };
-  return fetch("/api/watched", init)
-    .then(json<{ watched: Watched }>)
-    .then((body) => body.watched);
+  return request<{ watched: Watched }>("/api/watched", init).then((body) => body.watched);
 }
 
 export function setSaved(title: string, saved: boolean): Promise<boolean> {
@@ -439,15 +468,15 @@ export function setSaved(title: string, saved: boolean): Promise<boolean> {
 }
 
 export function home(signal?: AbortSignal): Promise<Home> {
-  return fetch("/api/home", { signal }).then(json<Home>);
+  return request<Home>("/api/home", { signal });
 }
 
 export function version(signal?: AbortSignal): Promise<Version> {
-  return fetch("/api/version", { signal }).then(json<Version>);
+  return request<Version>("/api/version", { signal });
 }
 
 export function tvs(signal?: AbortSignal): Promise<TvList> {
-  return fetch("/api/tvs", { signal }).then(json<TvList>);
+  return request<TvList>("/api/tvs", { signal });
 }
 
 /** Searches the home network for TVs, unless a search ran in the last 30 seconds and `fresh` is not set. */

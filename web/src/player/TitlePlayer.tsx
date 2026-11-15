@@ -1,9 +1,10 @@
 import { type Dispatch, type RefObject, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { artUrl, asApiError, type MediaInfo, type PlayInfo, saveWatched, type TitlePage } from "../api";
 import { useJob } from "../lib/jobs";
+import { episodeOf, titleOf, videoOf } from "../lib/video";
 import { goBack, navigate, playPath, titlePath } from "../router";
 import { useTitle } from "../titles/useTitle";
-import { episodeCode, episodeName, findEpisode, playingOrder, titleOf, videoOf } from "../titles/words";
+import { episodeCode, episodeName, findEpisode, playingOrder } from "../titles/words";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { FfmpegReadout, PlayingReadout, Readout, TopBar } from "./Chrome";
@@ -151,7 +152,7 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
     () => ({ title: name, detail: episode ? `${episodeCode(episode)} · ${episodeName(episode)}` : year ? String(year) : null }),
     [name, episode, year],
   );
-  const kind = playing.includes(":") || page?.kind === "series" ? "episode" : "film";
+  const kind = episodeOf(playing) || page?.kind === "series" ? "episode" : "film";
 
   useEffect(() => {
     document.title = name ? `${name}${episode ? ` ${episodeCode(episode)}` : ""} · torrential` : "torrential";

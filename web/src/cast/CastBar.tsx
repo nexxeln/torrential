@@ -3,7 +3,7 @@ import { PauseIcon, PlayIcon } from "@heroicons/react/24/solid";
 import { type CSSProperties, useState } from "react";
 import { asApiError, type Cast, type CastAction, controlCast } from "../api";
 import { clock, sentence } from "../lib/format";
-import { ControlButton } from "../player/Controls";
+import { ControlButton } from "../ui/ControlButton";
 import { useRoute } from "../router";
 import { Spinner } from "../ui/Spinner";
 import { changed, useTvList } from "./casts";

@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { type ApiError, asApiError, type Cast, type CastStart, findTvs, startCast, type Tv } from "../api";
 import { sentence } from "../lib/format";
 import { isBack } from "../lib/tv";
-import { ControlButton } from "../player/Controls";
+import { ControlButton } from "../ui/ControlButton";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { changed, heard, useTvList } from "./casts";

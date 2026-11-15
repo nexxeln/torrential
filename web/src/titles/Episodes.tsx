@@ -1,10 +1,11 @@
 import { CheckIcon } from "@heroicons/react/16/solid";
 import { artUrl, type EpisodeInfo, type TitlePage, type Watched } from "../api";
-import { day, minutes } from "../lib/format";
+import { day, minutesLeft } from "../lib/format";
+import { videoOf } from "../lib/video";
 import { Link, playPath } from "../router";
 import { Meter } from "../ui/Meter";
 import { Blank, Picture } from "./Picture";
-import { episodeName, hasAired, seasonName, videoOf } from "./words";
+import { episodeName, hasAired, seasonName } from "./words";
 
 /** The regular seasons in order, then the specials. */
 export function seasonOrder(page: TitlePage): number[] {
@@ -14,7 +15,7 @@ export function seasonOrder(page: TitlePage): number[] {
 
 function facts(episode: EpisodeInfo, watched: Watched | undefined, next: boolean): string {
   if (!hasAired(episode)) return episode.aired === null ? "Not announced yet" : `Airs ${day(episode.aired)}`;
-  const left = watched && !watched.finished && watched.duration ? `${minutes((watched.duration - watched.position) / 60)} left` : null;
+  const left = watched && !watched.finished && watched.duration ? minutesLeft(watched.position, watched.duration) : null;
   return [day(episode.aired!), left, next ? "Up next" : null].filter(Boolean).join(" · ");
 }
 
