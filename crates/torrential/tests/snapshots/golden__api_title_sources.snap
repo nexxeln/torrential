@@ -1,0 +1,232 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/x-ndjson",
+  "body": {
+    "type": "done",
+    "result": {
+      "query": {
+        "text": "Night of the Living Dead 1968",
+        "sources": [],
+        "category": "video",
+        "min_seeds": null,
+        "max_size": null,
+        "sort": "relevance",
+        "limit": 10,
+        "timeout_ms": 6000,
+        "adult": false,
+        "fresh": false,
+        "profile": {
+          "screen": {
+            "value": "1080p",
+            "source": "detected"
+          },
+          "playback": {
+            "value": "hevc-hdr",
+            "source": "detected"
+          },
+          "max_size": null,
+          "room": 562939216003072,
+          "arch": "arm64",
+          "language": "en",
+          "detected": {
+            "os": "macos",
+            "display": {
+              "width": 3024,
+              "height": 1964,
+              "hdr": true
+            },
+            "arch": "arm64",
+            "language": "en"
+          },
+          "preferences": {
+            "screen": null,
+            "max_size": null,
+            "playback": null
+          }
+        },
+        "wanted": {
+          "name": "Night of the Living Dead",
+          "year": 1968,
+          "episode": null,
+          "namesakes": "leading",
+          "runtime_s": 5760,
+          "season_episodes": null,
+          "countries": [
+            "US"
+          ]
+        }
+      },
+      "releases": [
+        {
+          "id": "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+          "name": "Night of the Living Dead (1968)",
+          "size": 1432408064,
+          "seeders": null,
+          "leechers": null,
+          "published": "[redacted]",
+          "category": "video",
+          "quality": {
+            "resolution": null,
+            "codec": null,
+            "hdr": false
+          },
+          "flags": [
+            "public_domain"
+          ],
+          "sources": [
+            "archive.org"
+          ],
+          "magnet": "magnet:?xt=urn:btih:4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c&dn=night_of_the_living_dead",
+          "torrent_url": "https://archive.org/download/night_of_the_living_dead/night_of_the_living_dead_archive.torrent",
+          "info_url": "https://archive.org/details/night_of_the_living_dead",
+          "span": "film",
+          "swarm": "strong"
+        },
+        {
+          "id": "b7f20d5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+          "name": "Night of the Living Dead (1968) [DVD]",
+          "size": 3640912101,
+          "seeders": null,
+          "leechers": null,
+          "published": "[redacted]",
+          "category": "video",
+          "quality": {
+            "resolution": null,
+            "codec": null,
+            "hdr": false
+          },
+          "flags": [
+            "public_domain"
+          ],
+          "sources": [
+            "archive.org"
+          ],
+          "magnet": "magnet:?xt=urn:btih:b7f20d5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c&dn=night_of_the_living_dead_1968_dvd",
+          "torrent_url": "https://archive.org/download/night_of_the_living_dead_1968_dvd/night_of_the_living_dead_1968_dvd_archive.torrent",
+          "info_url": "https://archive.org/details/night_of_the_living_dead_1968_dvd",
+          "span": "film",
+          "swarm": "strong"
+        },
+        {
+          "id": "e3a9155d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+          "name": "Night.of.the.Living.Dead.1968.1080p.BluRay.x264",
+          "size": 8375251149,
+          "seeders": 214,
+          "leechers": 71,
+          "published": "[redacted]",
+          "category": "video",
+          "quality": {
+            "resolution": "1080p",
+            "codec": "h264",
+            "hdr": false
+          },
+          "flags": [
+            "trusted"
+          ],
+          "sources": [
+            "knaben"
+          ],
+          "magnet": "magnet:?xt=urn:btih:e3a9155d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c&dn=Night.of.the.Living.Dead.1968.1080p.BluRay.x264",
+          "torrent_url": null,
+          "info_url": null,
+          "span": "film",
+          "swarm": "strong"
+        },
+        {
+          "id": "09cd475d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+          "name": "Night of the Living Dead 4K Restoration",
+          "size": 22872331878,
+          "seeders": 88,
+          "leechers": 29,
+          "published": "[redacted]",
+          "category": "video",
+          "quality": {
+            "resolution": "2160p",
+            "codec": null,
+            "hdr": false
+          },
+          "flags": [
+            "official"
+          ],
+          "sources": [
+            "knaben"
+          ],
+          "magnet": "magnet:?xt=urn:btih:09cd475d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c&dn=Night of the Living Dead 4K Restoration",
+          "torrent_url": null,
+          "info_url": null,
+          "span": "film",
+          "swarm": "strong"
+        },
+        {
+          "id": "7a0c3f5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+          "name": "Night of the Living Dead (1968) colorized",
+          "size": 769703833,
+          "seeders": null,
+          "leechers": null,
+          "published": "[redacted]",
+          "category": "video",
+          "quality": {
+            "resolution": null,
+            "codec": null,
+            "hdr": false
+          },
+          "flags": [
+            "public_domain"
+          ],
+          "sources": [
+            "archive.org"
+          ],
+          "magnet": "magnet:?xt=urn:btih:7a0c3f5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c&dn=night_of_the_living_dead_colorized",
+          "torrent_url": "https://archive.org/download/night_of_the_living_dead_colorized/night_of_the_living_dead_colorized_archive.torrent",
+          "info_url": "https://archive.org/details/night_of_the_living_dead_colorized",
+          "span": "film",
+          "swarm": "strong"
+        }
+      ],
+      "total": 5,
+      "hidden_adult": 0,
+      "sources": [
+        {
+          "source": "archlinux.org",
+          "outcome": "ok",
+          "results": 0,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "archive.org",
+          "outcome": "ok",
+          "results": 3,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "apibay",
+          "outcome": "http",
+          "status": 503,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "knaben",
+          "outcome": "ok",
+          "results": 2,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "torrents-csv",
+          "outcome": "ok",
+          "results": 0,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "nyaa",
+          "outcome": "timeout",
+          "elapsed_ms": "[redacted]"
+        }
+      ],
+      "elapsed_ms": "[redacted]"
+    }
+  }
+}

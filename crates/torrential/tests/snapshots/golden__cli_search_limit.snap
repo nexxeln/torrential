@@ -1,0 +1,118 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "search",
+    "result": {
+      "query": {
+        "text": "ubuntu",
+        "sources": [],
+        "category": null,
+        "min_seeds": null,
+        "max_size": null,
+        "sort": "relevance",
+        "limit": 3,
+        "timeout_ms": 6000,
+        "adult": false,
+        "fresh": false,
+        "profile": {
+          "screen": {
+            "value": "1080p",
+            "source": "detected"
+          },
+          "playback": {
+            "value": "hevc-hdr",
+            "source": "detected"
+          },
+          "max_size": null,
+          "room": 562939216003072,
+          "arch": "arm64",
+          "language": "en",
+          "detected": {
+            "os": "macos",
+            "display": {
+              "width": 3024,
+              "height": 1964,
+              "hdr": true
+            },
+            "arch": "arm64",
+            "language": "en"
+          },
+          "preferences": {
+            "screen": null,
+            "max_size": null,
+            "playback": null
+          }
+        }
+      },
+      "releases": [
+        {
+          "id": "e3a1f06d2b1c8a4f5e6d7c8b9a0f1e2d3c4b5a69",
+          "name": "ubuntu-24.04.5-desktop-amd64.iso",
+          "size": 6345887744,
+          "seeders": 1873,
+          "leechers": null,
+          "published": null,
+          "category": "software",
+          "quality": {
+            "resolution": null,
+            "codec": null,
+            "hdr": false
+          },
+          "flags": [],
+          "sources": [
+            "knaben"
+          ],
+          "magnet": "magnet:?xt=urn:btih:e3a1f06d2b1c8a4f5e6d7c8b9a0f1e2d3c4b5a69&dn=ubuntu-24.04.5-desktop-amd64.iso&xl=6345887744",
+          "torrent_url": null,
+          "info_url": null
+        }
+      ],
+      "total": 1,
+      "hidden_adult": 0,
+      "sources": [
+        {
+          "source": "archlinux.org",
+          "outcome": "ok",
+          "results": 0,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "archive.org",
+          "outcome": "ok",
+          "results": 0,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "apibay",
+          "outcome": "http",
+          "status": 503,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "knaben",
+          "outcome": "ok",
+          "results": 1,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "torrents-csv",
+          "outcome": "ok",
+          "results": 0,
+          "elapsed_ms": "[redacted]"
+        },
+        {
+          "source": "nyaa",
+          "outcome": "timeout",
+          "elapsed_ms": "[redacted]"
+        }
+      ],
+      "elapsed_ms": "[redacted]"
+    },
+    "next": "torrential files e3a1f0"
+  }
+}

@@ -1,0 +1,73 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": [
+    {
+      "schema": 1,
+      "type": "progress",
+      "elapsed": 0,
+      "job": {
+        "id": "5e02c85d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "5e02c85d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "big_buck_bunny_1080p_h264.mov",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/big_buck_bunny_1080p_h264.mov",
+        "state": "done",
+        "finished_at": "[redacted]",
+        "progress": {
+          "size": 725106140,
+          "verified": 725106140,
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 0,
+          "seeds": 0,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      }
+    },
+    {
+      "schema": 1,
+      "type": "result",
+      "outcome": "done",
+      "elapsed": 0,
+      "jobs": [
+        {
+          "id": "5e02c85d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+          "info_hash": {
+            "v1": "5e02c85d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+          },
+          "name": "big_buck_bunny_1080p_h264.mov",
+          "dir": "[home]/Downloads/torrential",
+          "path": "[home]/Downloads/torrential/big_buck_bunny_1080p_h264.mov",
+          "state": "done",
+          "finished_at": "[redacted]",
+          "progress": {
+            "size": 725106140,
+            "verified": 725106140,
+            "down_rate": 0,
+            "up_rate": 0,
+            "peers": 0,
+            "seeds": 0,
+            "eta": null
+          },
+          "selection": {
+            "kind": "all"
+          },
+          "added_at": "[redacted]",
+          "place": "folder"
+        }
+      ],
+      "next": null
+    }
+  ]
+}

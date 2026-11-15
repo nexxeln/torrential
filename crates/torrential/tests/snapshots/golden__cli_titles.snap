@@ -1,0 +1,28 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "titles",
+    "titles": [
+      {
+        "id": "tt0063350",
+        "kind": "film",
+        "name": "Night of the Living Dead",
+        "year": 1968,
+        "rating": 7.8
+      },
+      {
+        "id": "tt0100258",
+        "kind": "film",
+        "name": "Night of the Living Dead",
+        "year": 1990,
+        "rating": 6.9
+      }
+    ],
+    "next": "torrential title tt0063350"
+  }
+}

@@ -1,0 +1,12 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "version": "[version]",
+    "notice": null
+  }
+}

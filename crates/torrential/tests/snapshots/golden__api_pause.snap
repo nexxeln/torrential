@@ -1,0 +1,17 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "changes": [
+      {
+        "id": "6f2c815d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "name": "wikipedia-en-2026-09-text",
+        "result": "paused"
+      }
+    ]
+  }
+}

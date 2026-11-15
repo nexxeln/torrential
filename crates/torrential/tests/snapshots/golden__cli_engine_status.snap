@@ -1,0 +1,18 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "daemon",
+    "engine": "running",
+    "pid": "[redacted]",
+    "version": "[version]",
+    "socket": "[home]/th/run/engine.sock",
+    "log": "[home]/th/state/engine.log",
+    "downloads": 4,
+    "next": "torrential status"
+  }
+}

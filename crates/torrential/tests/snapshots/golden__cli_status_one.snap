@@ -1,0 +1,39 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "jobs",
+    "jobs": [
+      {
+        "id": "6f2c815d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "6f2c815d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "wikipedia-en-2026-09-text",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/wikipedia-en-2026-09-text",
+        "state": "downloading",
+        "progress": {
+          "size": 24961671577,
+          "verified": 5728508755,
+          "piece_map": "0424200220022846042000244240244244402220022022020240000024220002",
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 3,
+          "seeds": 2,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      }
+    ],
+    "next": "torrential wait 6f2c81"
+  }
+}

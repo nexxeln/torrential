@@ -1,0 +1,142 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "jobs": [
+      {
+        "id": "c7b9e35d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "c7b9e35d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "archlinux-2026.09.01-x86_64.iso",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/archlinux-2026.09.01-x86_64.iso",
+        "state": "done",
+        "finished_at": "[redacted]",
+        "progress": {
+          "size": 1438646272,
+          "verified": 1438646272,
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 0,
+          "seeds": 0,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      },
+      {
+        "id": "5e02c85d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "5e02c85d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "big_buck_bunny_1080p_h264.mov",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/big_buck_bunny_1080p_h264.mov",
+        "state": "done",
+        "finished_at": "[redacted]",
+        "progress": {
+          "size": 725106140,
+          "verified": 725106140,
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 0,
+          "seeds": 0,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      },
+      {
+        "id": "91fd3b5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "91fd3b5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "stackexchange",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/stackexchange",
+        "state": "paused",
+        "progress": {
+          "size": 41232480762,
+          "verified": 14012601060,
+          "piece_map": "4602402002240824022040422426242022242426424620464442044244202442",
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 0,
+          "seeds": 0,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      },
+      {
+        "id": "a90d445d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "a90d445d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "openwebtext-2019",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/openwebtext-2019",
+        "state": "error",
+        "error": {
+          "code": "storage_error",
+          "message": "cannot write openwebtext-2019/urlsf_subset07.tar: permission denied",
+          "hint": "check that the download folder is writable, then press p to resume"
+        },
+        "progress": {
+          "size": 13275015167,
+          "verified": 4900347396,
+          "piece_map": "6204624006464260244064222420064284024424262400626402404244203620",
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 0,
+          "seeds": 0,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      },
+      {
+        "id": "6f2c815d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "info_hash": {
+          "v1": "6f2c815d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c"
+        },
+        "name": "wikipedia-en-2026-09-text",
+        "dir": "[home]/Downloads/torrential",
+        "path": "[home]/Downloads/torrential/wikipedia-en-2026-09-text",
+        "state": "downloading",
+        "progress": {
+          "size": 24961671577,
+          "verified": 5728508755,
+          "piece_map": "0424200220022846042000244240244244402220022022020240000024220002",
+          "down_rate": 0,
+          "up_rate": 0,
+          "peers": 3,
+          "seeds": 2,
+          "eta": null
+        },
+        "selection": {
+          "kind": "all"
+        },
+        "added_at": "[redacted]",
+        "place": "folder"
+      }
+    ]
+  }
+}

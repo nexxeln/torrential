@@ -1,0 +1,17 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 3,
+  "stdout": {
+    "schema": 1,
+    "type": "error",
+    "error": {
+      "code": "not_found",
+      "message": "no download matches ffffff",
+      "hint": "run torrential status to list downloads"
+    },
+    "next": "torrential status"
+  }
+}
