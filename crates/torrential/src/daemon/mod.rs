@@ -1,8 +1,10 @@
 pub mod admission;
 pub mod book;
 pub mod cast;
+pub mod ctx;
 mod detector;
 pub mod devices;
+pub mod downloads;
 pub mod engine_port;
 pub mod fake;
 pub mod files;
@@ -40,12 +42,12 @@ use crate::log::log;
 use crate::paths::{self, Paths};
 use crate::service;
 use crate::update;
+use ctx::{Ctx, OwnerHandle};
 use detector::Detector;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
 use owner::{Ended, Owner, OwnerConfig};
 use search_port::SearchPort;
-use server::{Ctx, OwnerHandle};
 use store::Store;
 
 const SAVE_RESUME_EVERY: Duration = Duration::from_secs(5 * 60);
@@ -216,7 +218,7 @@ pub fn start(
 }
 
 /// Installs updates as `update::watch` finds them, then switches to the release it installed.
-async fn follow_updates(env: Env, paths: Paths, ctx: Arc<server::Ctx>, service: bool) {
+async fn follow_updates(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
     let to = update::watch(env, paths, &ctx.news).await;
     switch(&ctx, to, service).await
 }
@@ -226,7 +228,7 @@ const SWITCH_RETRY: Duration = Duration::from_secs(60);
 
 /// Stops the engine for the login service to start release `to` once nothing plays and every
 /// download is saved. An engine without a login service keeps running until it next starts.
-async fn switch(ctx: &server::Ctx, to: update::Version, service: bool) {
+async fn switch(ctx: &Ctx, to: update::Version, service: bool) {
     if !service {
         log(&format!("torrential {to} starts the next time the engine starts"));
         ctx.news.post(Some(update::News::Installed { latest: to }));

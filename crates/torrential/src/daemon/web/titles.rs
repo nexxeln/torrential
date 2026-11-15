@@ -13,11 +13,13 @@ use torrential_core::{
     VideoRef, Viewer, Watched,
 };
 
+use super::super::ctx::Ctx;
 use super::super::devices::Asker;
 use super::super::http::{Connection, Request};
-use super::super::owner::{Command, Finish, Shelving};
-use super::super::server::{self, Ctx};
-use super::super::titles::attempt::{self, Containers, PlayTitle};
+use super::super::owner::plays::Destination;
+use super::super::owner::{Command, Shelving};
+use super::super::titles;
+use super::super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
 use super::{NDJSON, fail, line, number, required};
 use torrential_core::title::title_name;
 
@@ -37,7 +39,7 @@ pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
 /// `GET /api/title?id=`.
 pub async fn page(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     let id: TitleId = required(request, "id")?.parse()?;
-    super::value(server::title_page(ctx, id).await?)
+    super::value(titles::title_page(ctx, id).await?)
 }
 
 /// `GET /api/title/art?id=&kind=[&season=&episode=]`: a picture, which the browser keeps.
@@ -184,7 +186,7 @@ pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -
     let ctx = conn.ctx;
     let ask = super::body::<Play>(request).and_then(|Play { video, viewer, playback, source, replace }| {
         let player = player(viewer.map(Measured::viewer).transpose()?, playback, asker);
-        Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, finish: Finish::Stream })
+        Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, to: Destination::Plays })
     });
     let ask = match ask {
         Ok(ask) => ask,
@@ -192,36 +194,46 @@ pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -
     };
     conn.begin(NDJSON, request).await?;
     let (events_tx, mut events) = mpsc::unbounded_channel();
+    // The last line comes from how the play ended.
     let attempt = attempt::run(ctx, ask, move |event| {
-        let _ = events_tx.send(event);
+        if !matches!(event, AttemptEvent::Playing { .. } | AttemptEvent::Failed { .. }) {
+            let _ = events_tx.send(event);
+        }
     });
     tokio::pin!(attempt);
-    loop {
+    let outcome = loop {
         tokio::select! {
             biased;
-            Some(event) = events.recv() => line(conn, &step(ctx, event).await).await?,
-            () = &mut attempt => break,
+            Some(event) = events.recv() => line(conn, &serde_json::to_value(event).expect("steps serialize")).await?,
+            outcome = &mut attempt => break outcome,
             gone = conn.gone() => return Err(gone),
         }
-    }
+    };
     while let Ok(event) = events.try_recv() {
-        line(conn, &step(ctx, event).await).await?;
+        line(conn, &serde_json::to_value(event).expect("steps serialize")).await?;
     }
+    line(conn, &last(ctx, outcome).await).await?;
     conn.end().await
 }
 
-/// A step as the web app reads it. The player gets where the video is served in place of the
-/// download and file that play.
-async fn step(ctx: &Ctx, event: AttemptEvent) -> Value {
-    let AttemptEvent::Playing { video, release, job, file, resume_at } = event else {
-        return serde_json::to_value(event).expect("steps serialize");
-    };
-    match super::play::playing_file(ctx, job, file).await {
-        Ok(play) => {
-            json!({ "type": "playing", "video": video, "release": release, "play": play, "resume_at": resume_at })
+/// The last line of a title play as the web app reads it. Once a source plays, the player gets
+/// where the video is served in place of the download and file that play.
+pub(in crate::daemon) async fn last(ctx: &Ctx, outcome: Outcome) -> Value {
+    let (error, tried) = match outcome {
+        Outcome::Played(played) => {
+            let Played { video, release, job, file, resume_at, tried, .. } = *played;
+            match super::play::playing_file(ctx, job, file).await {
+                Ok(play) => {
+                    return json!({
+                        "type": "playing", "video": video, "release": release, "play": play, "resume_at": resume_at
+                    });
+                }
+                Err(error) => (error, tried),
+            }
         }
-        Err(error) => json!({ "type": "failed", "error": error, "tried": [] }),
-    }
+        Outcome::Failed { error, tried } => (error, tried),
+    };
+    serde_json::to_value(AttemptEvent::Failed { error, tried }).expect("steps serialize")
 }
 
 #[derive(Deserialize)]
@@ -305,5 +317,5 @@ pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
 
 /// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.
 pub async fn home(ctx: &Ctx) -> Result<Value, Error> {
-    super::value(server::home(ctx).await?)
+    super::value(titles::home(ctx).await?)
 }

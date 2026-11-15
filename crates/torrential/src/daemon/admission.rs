@@ -51,7 +51,7 @@ pub fn plan(metainfo: &Metainfo, selection: &Selection, dir: &Path, disk: &dyn D
         .zip(&wanted)
         .filter(|(_, w)| **w)
         .filter_map(|(file, _)| {
-            let path = dir.join(files::relative(metainfo, file));
+            let path = files::path(metainfo, file, dir);
             let untouched_link = file.size == 0 && disk.is_link(&path);
             (disk.exists(&path) && disk.allocated_file_bytes(&path).is_none() && !untouched_link).then_some(path)
         })
@@ -61,7 +61,8 @@ pub fn plan(metainfo: &Metainfo, selection: &Selection, dir: &Path, disk: &dyn D
         Error::new(ErrorCode::StorageError, format!("cannot read free space at {}: {e}", dir.display()))
     })?;
     let links = links(metainfo, dir, &wanted, disk);
-    Ok(Plan { wanted, selected_size, allocated_size, destination: dir.join(&metainfo.name), links, conflicts, space })
+    let destination = files::root(dir, &metainfo.name);
+    Ok(Plan { wanted, selected_size, allocated_size, destination, links, conflicts, space })
 }
 
 pub fn allocated_bytes(metainfo: &Metainfo, dir: &Path, wanted: &[bool], disk: &dyn Disk) -> u64 {
@@ -70,9 +71,7 @@ pub fn allocated_bytes(metainfo: &Metainfo, dir: &Path, wanted: &[bool], disk: &
         .iter()
         .zip(wanted)
         .filter(|(_, w)| **w)
-        .map(|(file, _)| {
-            disk.allocated_file_bytes(&dir.join(files::relative(metainfo, file))).unwrap_or(0).min(file.size)
-        })
+        .map(|(file, _)| disk.allocated_file_bytes(&files::path(metainfo, file, dir)).unwrap_or(0).min(file.size))
         .sum()
 }
 
@@ -86,7 +85,7 @@ pub fn links(metainfo: &Metainfo, dir: &Path, wanted: &[bool], disk: &dyn Disk) 
         if file.size == 0 {
             parts.pop();
         }
-        let mut path = dir.to_path_buf();
+        let mut path = files::on_disk(dir);
         for part in parts {
             path.push(part);
             if disk.is_link(&path) {

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use torrential_core::filetype::{self, FileType};
 use torrential_core::text::sanitize;
 use torrential_core::{Error, FileRisk, InfoHash, Selection};
+pub use torrential_engine::on_disk;
 
 use super::engine_port::{MetaFile, Metainfo};
 use crate::selection::{compile, some_match};
@@ -18,17 +20,31 @@ pub fn wanted(metainfo: &Metainfo, selection: &Selection) -> Result<Vec<bool>, E
 }
 
 pub fn targets(metainfo: &Metainfo, dir: &Path, wanted: &[bool]) -> Vec<PathBuf> {
-    metainfo.files.iter().zip(wanted).filter(|(_, w)| **w).map(|(f, _)| dir.join(relative(metainfo, f))).collect()
+    metainfo.files.iter().zip(wanted).filter(|(_, w)| **w).map(|(f, _)| path(metainfo, f, dir)).collect()
 }
 
+/// Where `file` of a download in `dir` is on disk, as libtorrent names the folder and the file.
+pub fn path(metainfo: &Metainfo, file: &MetaFile, dir: &Path) -> PathBuf {
+    on_disk(dir).join(relative(metainfo, file))
+}
+
+/// Where `file` is inside the download's folder, as libtorrent names it on disk, which can differ
+/// from the name the torrent lists.
 pub fn relative(metainfo: &Metainfo, file: &MetaFile) -> PathBuf {
-    if metainfo.single_file { PathBuf::from(&metainfo.name) } else { Path::new(&metainfo.name).join(&file.path) }
+    let listed =
+        if metainfo.single_file { PathBuf::from(&metainfo.name) } else { Path::new(&metainfo.name).join(&file.path) };
+    on_disk(&listed)
+}
+
+/// The torrent's folder or single file in `dir`, as libtorrent names it on disk.
+pub fn root(dir: &Path, name: &str) -> PathBuf {
+    on_disk(&dir.join(name))
 }
 
 /// Where a download writes in `dir`: at or below the torrent's folder or single file, and to the
 /// parts file where libtorrent keeps pieces a selected file shares with one that is not selected.
 pub fn footprint(metainfo: &Metainfo, dir: &Path) -> [PathBuf; 2] {
-    [dir.join(&metainfo.name), dir.join(parts_file(&metainfo.info_hash))]
+    [root(dir, &metainfo.name), on_disk(&dir.join(parts_file(&metainfo.info_hash)))]
 }
 
 /// libtorrent names the parts file after the torrent's v2 hash cut to 20 bytes, or after its v1
@@ -46,20 +62,13 @@ const EXECUTABLE: [&str; 25] = [
     "exe", "msi", "bat", "cmd", "com", "scr", "pif", "ps1", "vbs", "vbe", "js", "jse", "wsf", "hta", "jar", "sh",
     "command", "app", "dmg", "pkg", "apk", "lnk", "cpl", "run", "reg",
 ];
-const MEDIA: [&str; 22] = [
-    "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "m2ts", "mp3", "flac", "aac", "ogg",
-    "opus", "wav", "m4a", "wma", "srt", "ass",
-];
-
-fn extension(path: &str) -> Option<String> {
-    Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase())
-}
 
 pub fn risks(metainfo: &Metainfo) -> Vec<Option<FileRisk>> {
-    let is = |list: &[&str], path: &str| extension(path).is_some_and(|e| list.contains(&e.as_str()));
-    let media: u64 = metainfo.files.iter().filter(|f| is(&MEDIA, &f.path)).map(|f| f.size).sum();
+    let media: u64 =
+        metainfo.files.iter().filter(|f| FileType::of(&f.path).is_some_and(|t| t.media)).map(|f| f.size).sum();
     let mostly_media = media * 2 > metainfo.total();
-    metainfo.files.iter().map(|f| (mostly_media && is(&EXECUTABLE, &f.path)).then_some(FileRisk::Executable)).collect()
+    let executable = |path: &str| EXECUTABLE.contains(&filetype::extension(path).as_str());
+    metainfo.files.iter().map(|f| (mostly_media && executable(&f.path)).then_some(FileRisk::Executable)).collect()
 }
 
 #[cfg(test)]

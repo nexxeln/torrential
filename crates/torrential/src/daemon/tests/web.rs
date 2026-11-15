@@ -1349,6 +1349,28 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_whose_download_goes_before_its_video_is_served_fails_with_the_sources_it_tried() {
+    use super::super::owner::plays::Destination;
+    use super::super::titles::attempt::{self, Containers, PlayTitle};
+    use torrential_core::Player;
+    use torrential_core::protocol::Request;
+    let (h, night) = titles::night();
+    let ask = PlayTitle {
+        video: "tt0063350".parse().unwrap(),
+        pin: None,
+        replace: None,
+        player: Player::External,
+        containers: Containers::Browser,
+        to: Destination::Plays,
+    };
+    let outcome = attempt::run(&h.running.ctx, ask, |_| {}).await;
+    h.changes(Request::Remove { refs: vec![prefix(&night[3])], delete: false }).await.unwrap();
+    let line = super::super::web::titles::last(&h.running.ctx, outcome).await;
+    let tried: Vec<Value> = line["tried"].as_array().unwrap().iter().map(|t| t["reason"]["reason"].clone()).collect();
+    assert_eq!(json!([line["type"], tried]), json!(["failed", ["no_file_list", "no_video", "no_data"]]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn closing_the_connection_while_a_source_sends_nothing_pauses_its_download_and_keeps_what_it_wrote() {
     let (h, night) = titles::night();
     let third = h.play_folder(&night[2]).join("Night.of.the.Living.Dead.1968.1080p.WEB.x264");

@@ -13,6 +13,7 @@ mod dates;
 mod http;
 mod metainfo;
 mod observation;
+pub mod rank;
 mod redirect;
 mod sources;
 pub mod subtitles;

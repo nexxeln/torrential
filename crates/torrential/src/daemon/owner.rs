@@ -505,7 +505,7 @@ impl Owner {
             let metainfo = job.metainfo.as_deref()?;
             let file = metainfo.files.get(index as usize)?;
             job.wanted()?[index as usize].then(|| StreamFile {
-                path: job.record.dir.join(files::relative(metainfo, file)),
+                path: files::path(metainfo, file, &job.record.dir),
                 torrent: metainfo.name.clone(),
                 inside: file.path.clone(),
                 size: file.size,
@@ -837,7 +837,7 @@ impl Owner {
         let Some(metainfo) = job.metainfo.as_deref() else { return false };
         let Ok(wanted) = super::files::wanted(metainfo, &job.record.selection) else { return false };
         metainfo.files.iter().zip(wanted).filter(|(_, wanted)| *wanted).any(|(file, _)| {
-            let path = job.record.dir.join(super::files::relative(metainfo, file));
+            let path = super::files::path(metainfo, file, &job.record.dir);
             self.disk.allocated_file_bytes(&path) != Some(file.size)
         })
     }
@@ -1770,7 +1770,7 @@ impl Owner {
                 .filter_map(|p| paths.get(&claim_key(p)).cloned())
                 .collect();
             if !taken.is_empty() {
-                let destination = dir.join(&metainfo.name);
+                let destination = files::root(dir, &metainfo.name);
                 return Err(admission::claimed(&destination, job.id(), &theirs.name, &taken, retry));
             }
         }

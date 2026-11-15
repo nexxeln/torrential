@@ -13,7 +13,7 @@ pub mod media;
 mod online;
 pub mod play;
 mod thumbnail;
-mod titles;
+pub(super) mod titles;
 pub mod watch;
 
 use std::collections::{HashMap, VecDeque};
@@ -28,11 +28,12 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, Release, SearchQuery, Target, TorrentId};
 
+use super::ctx::Ctx;
 use super::devices::Asker;
+use super::downloads;
 use super::http::{Connection, Method, Request};
 use super::owner::Command;
 use super::search_port::Progress;
-use super::server::{self, Ctx};
 use super::subtitle_port::SubtitlePort;
 use crate::ffmpeg::fetch::{Fetching, Ffmpeg, Stage};
 use media::Media;
@@ -190,7 +191,7 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         }
         (Method::Post, "files") => {
             let Ref { reference } = body(request)?;
-            value(server::files(ctx, target(&reference)?, METADATA_WAIT).await?)
+            value(downloads::files(ctx, target(&reference)?, METADATA_WAIT).await?)
         }
         (Method::Post, "pause" | "resume" | "remove") => {
             let Refs { refs, delete } = body(request)?;
@@ -343,7 +344,7 @@ async fn results(
         tokio::select! {
             biased;
             Some(Progress { mut result, pending }) = progress.recv() => {
-                server::record(ctx, &mut result);
+                downloads::record(ctx, &mut result);
                 result.releases = order(result.releases);
                 line(conn, &json!({ "type": "update", "result": result, "pending": pending })).await?;
             }
@@ -353,7 +354,7 @@ async fn results(
     };
     let last = match result {
         Ok(mut result) => {
-            server::record(ctx, &mut result);
+            downloads::record(ctx, &mut result);
             result.releases = order(result.releases);
             json!({ "type": "done", "result": result })
         }

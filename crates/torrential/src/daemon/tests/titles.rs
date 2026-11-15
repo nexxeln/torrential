@@ -182,7 +182,7 @@ impl Harness {
             replace,
             player: Player::External,
             containers: Containers::Browser,
-            finish: Finish::Stream,
+            to: Destination::Plays,
         };
         let mut steps = Vec::new();
         attempt::run(&self.running.ctx, ask, |event| steps.push(step(&serde_json::to_value(event).unwrap()))).await;
@@ -198,7 +198,7 @@ impl Harness {
             replace: None,
             player: Player::External,
             containers: Containers::Browser,
-            finish: Finish::Keep,
+            to: Destination::Folder(None),
         };
         let mut steps = Vec::new();
         attempt::run(&self.running.ctx, ask, |event| steps.push(serde_json::to_value(event).unwrap())).await;
@@ -710,12 +710,12 @@ async fn testing(h: &Harness, source: &fake::TorrentFile) -> tokio::task::JoinHa
         replace: None,
         player: Player::External,
         containers: Containers::Browser,
-        finish: Finish::Stream,
+        to: Destination::Plays,
     };
     let (told, mut steps) = tokio::sync::mpsc::unbounded_channel();
     let play = tokio::spawn(async move {
         let report = move |event| drop(told.send(event));
-        attempt::run(&ctx, ask, report).await
+        attempt::run(&ctx, ask, report).await;
     });
     while let Some(event) = steps.recv().await {
         if matches!(event, AttemptEvent::Check { check: Check::FirstBytes }) {

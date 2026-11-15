@@ -143,7 +143,7 @@ impl Owner {
                 let (metainfo, wanted) = (job.metainfo.as_deref()?, job.wanted()?);
                 let chosen = metainfo.files.iter().zip(wanted).filter(|(_, wanted)| *wanted);
                 let files = chosen.map(|(file, _)| files::relative(metainfo, file)).collect();
-                Some(Doom::Files { dir: job.record.dir.clone(), files })
+                Some(Doom::Files { dir: files::on_disk(&job.record.dir), files })
             }
             Home::Folder => None,
         }
@@ -281,7 +281,7 @@ impl Owner {
             .as_deref()
             .zip(job.wanted())
             .map(|(metainfo, wanted)| files::targets(metainfo, &job.record.dir, &wanted));
-        (job.record.dir.clone(), targets.unwrap_or_default())
+        (files::on_disk(&job.record.dir), targets.unwrap_or_default())
     }
 
     /// What the downloads on the list, and those the engine has yet to let go of, write, found by

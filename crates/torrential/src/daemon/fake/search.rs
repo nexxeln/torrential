@@ -6,8 +6,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult, SourceOutcome, SourceReport,
-    Swarm,
 };
+use torrential_search::rank;
 
 use crate::daemon::search_port::{BoxFuture, Progress, RankFor, SavedLink, SearchPort};
 
@@ -111,7 +111,7 @@ fn compose(
     let found = |r: &Release| match &query.wanted {
         Some(wanted) => {
             let span = Some(wanted.fit(&r.name)?.span);
-            let swarm = Some(Swarm::of(r.seeders, r.sources.iter().any(|s| torrential_search::lawful(s)))?);
+            let swarm = Some(rank::swarm(r.seeders, r.sources.iter().any(|s| torrential_search::lawful(s)))?);
             Some(Release { span, swarm, ..r.clone() })
         }
         None => words.iter().all(|w| r.name.to_lowercase().contains(w.as_str())).then(|| r.clone()),

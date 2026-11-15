@@ -2,6 +2,7 @@ pub mod cast;
 pub mod catalog;
 pub mod device;
 pub mod error;
+pub mod filetype;
 pub mod id;
 pub mod job;
 pub mod media;
