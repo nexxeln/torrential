@@ -1,43 +1,42 @@
 import { expect, test } from "bun:test";
-import { type Chance, Unsaved } from "./saving";
+import { type Chance, type Save, Unsaved } from "./saving";
 
-type Step = { moved: boolean } | Chance;
+type Step = { moved: boolean } | "resumed" | Chance;
 
-const SEEN: Chance = { seen: true, cast: false };
-const CASTING: Chance = { seen: true, cast: true };
-const HIDDEN: Chance = { seen: false, cast: false };
+const SEEN: Chance = { seen: true };
+const HIDDEN: Chance = { seen: false };
+const SAVES: Save = { starts: false };
+const STARTS: Save = { starts: true };
 
-/** Whether each chance in `steps` saves. A `moved` step is the video reaching a time, playing or not. */
-function run(steps: Step[]): boolean[] {
+/** What each chance in `steps` saves. A `moved` step is the video reaching a time, playing or not. */
+function run(steps: Step[]): (Save | null)[] {
   const unsaved = new Unsaved();
-  const saved: boolean[] = [];
+  const saved: (Save | null)[] = [];
   for (const step of steps) {
-    if ("moved" in step) unsaved.moved(step.moved);
+    if (step === "resumed") unsaved.resume();
+    else if ("moved" in step) unsaved.moved(step.moved);
     else saved.push(unsaved.take(step));
   }
   return saved;
 }
 
 test("a playing tab saves at every chance", () => {
-  expect(run([{ moved: true }, SEEN, { moved: true }, SEEN])).toEqual([true, true]);
+  expect(run([{ moved: true }, SEEN, { moved: true }, SEEN])).toEqual([SAVES, SAVES]);
 });
 
-test("a paused tab saves where it paused, then nothing during or after a cast of its video", () => {
-  expect(run([{ moved: true }, SEEN, CASTING, CASTING, SEEN, SEEN])).toEqual([true, false, false, false, false]);
+test("a paused tab saves where it paused, then nothing until it plays again", () => {
+  expect(run([{ moved: true }, SEEN, SEEN, SEEN])).toEqual([SAVES, null, null]);
 });
 
-test("a tab that pauses while a TV plays its video saves nothing once the cast ends", () => {
-  expect(run([{ moved: true }, CASTING, SEEN])).toEqual([false, false]);
-});
-
-test("a tab that plays after the cast ended saves as before", () => {
-  expect(run([{ moved: true }, CASTING, SEEN, { moved: true }, SEEN])).toEqual([false, false, true]);
+test("a start or a resume takes the place at once, even on a hidden page", () => {
+  expect(run(["resumed", HIDDEN, { moved: true }, SEEN])).toEqual([STARTS, SAVES]);
+  expect(run([{ moved: true }, SEEN, "resumed", { moved: true }, SEEN, SEEN])).toEqual([SAVES, STARTS, null]);
 });
 
 test("a seek while paused is not playing, so it saves nothing", () => {
-  expect(run([{ moved: false }, SEEN])).toEqual([false]);
+  expect(run([{ moved: false }, SEEN])).toEqual([null]);
 });
 
 test("a hidden tab saves nothing, even once it shows again paused", () => {
-  expect(run([{ moved: true }, HIDDEN, { moved: true }, HIDDEN, SEEN])).toEqual([false, false, false]);
+  expect(run([{ moved: true }, HIDDEN, { moved: true }, HIDDEN, SEEN])).toEqual([null, null, null]);
 });

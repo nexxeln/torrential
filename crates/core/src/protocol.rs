@@ -16,7 +16,7 @@ use crate::cast::{Cast, CastAction, CastRequest, TvList};
 use crate::catalog::{EpisodeInfo, TitleCard, TitleDetails, TitleId, VideoRef};
 use crate::device::DeviceList;
 use crate::error::Error;
-use crate::id::Target;
+use crate::id::{ReleaseId, Target};
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::watching::{AttemptEvent, Next, Tried, Watched};
@@ -29,7 +29,7 @@ pub const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
 pub const STEP_WITHIN: Duration = Duration::from_secs(240);
 const REPLY_WITHIN: Duration = Duration::from_secs(30);
 
-pub const WIRE_VERSION: u32 = 9;
+pub const WIRE_VERSION: u32 = 10;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -132,6 +132,13 @@ pub enum Request {
     },
     /// The films and episodes to go on with, and the saved titles.
     Home,
+    /// Follows the player `torrential play` opened for `video` through the player's socket, and
+    /// keeps where it is in the watch history as a browser tab or a TV keeps theirs.
+    Follow {
+        video: VideoRef,
+        release: Option<ReleaseId>,
+        socket: PathBuf,
+    },
 }
 
 impl Request {
@@ -641,6 +648,8 @@ mod tests {
         (8, &["tvs", "cast", "cast_control"]),
         // `get` and `play` stopped carrying the max size: the engine reads config.yaml itself.
         (9, &[]),
+        // The engine follows the player `torrential play` opens, to keep its place.
+        (10, &["follow"]),
     ];
 
     #[test]

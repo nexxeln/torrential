@@ -56,6 +56,8 @@ pub struct Launch<'a> {
     /// Where to start, as a person resumes a video. Players get whole seconds, since VLC may read
     /// a fraction in the system's locale.
     pub start: Option<Duration>,
+    /// Where the player opens a socket that says where it is, for a player that opens one.
+    pub socket: Option<&'a Path>,
 }
 
 impl Player {
@@ -66,6 +68,20 @@ impl Player {
             Kind::Vlc => "VLC".into(),
             Kind::Opener => "the default player".into(),
             Kind::Program => self.program.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Whether the player opens a socket that says where it is: mpv and IINA do.
+    pub fn says_where(&self) -> bool {
+        socket_flag(self.acts_as(), Path::new("")).is_some()
+    }
+
+    /// The known player this one takes the flags of. A program named as a known player is that
+    /// player.
+    fn acts_as(&self) -> Kind {
+        match self.kind {
+            Kind::Program => named(&self.program).unwrap_or(Kind::Program),
+            kind => kind,
         }
     }
 
@@ -189,11 +205,9 @@ fn command(player: &Player, launch: &Launch) -> (PathBuf, Vec<String>) {
         }
         Kind::Opener | Kind::Program => {}
     }
-    let starts_as = match player.kind {
-        Kind::Program => named(&player.program).unwrap_or(Kind::Program),
-        kind => kind,
-    };
-    args.extend(launch.start.and_then(|at| start_flag(starts_as, at)));
+    let acts_as = player.acts_as();
+    args.extend(launch.start.and_then(|at| start_flag(acts_as, at)));
+    args.extend(launch.socket.and_then(|path| socket_flag(acts_as, path)));
     args.push(launch.video.to_string());
     (player.program.clone(), args)
 }
@@ -220,6 +234,16 @@ fn start_flag(kind: Kind, at: Duration) -> Option<String> {
     }
 }
 
+/// The argument that has a player of `kind` open a socket at `path` that says where it is, for
+/// the players that have one.
+fn socket_flag(kind: Kind, path: &Path) -> Option<String> {
+    match kind {
+        Kind::Iina => Some(format!("--mpv-input-ipc-server={}", path.display())),
+        Kind::Mpv => Some(format!("--input-ipc-server={}", path.display())),
+        Kind::Vlc | Kind::Opener | Kind::Program => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,8 +254,14 @@ mod tests {
 
     fn argv(kind: Kind, program: &str, subtitles: Vec<&str>, language: Option<&str>) -> Vec<String> {
         let player = Player { kind, program: program.into() };
-        let launch =
-            Launch { video: VIDEO, subtitles, language, title: "Night of the Living Dead (1968)", start: None };
+        let launch = Launch {
+            video: VIDEO,
+            subtitles,
+            language,
+            title: "Night of the Living Dead (1968)",
+            start: None,
+            socket: None,
+        };
         let (program, args) = command(&player, &launch);
         [program.display().to_string()].into_iter().chain(args).collect()
     }
@@ -295,7 +325,9 @@ mod tests {
         let started = |kind, program: &str| {
             let player = Player { kind, program: program.into() };
             let start = Some(Duration::from_secs_f64(200.9));
-            command(&player, &Launch { video: VIDEO, subtitles: vec![], language: None, title: "Night", start }).1
+            let launch =
+                Launch { video: VIDEO, subtitles: vec![], language: None, title: "Night", start, socket: None };
+            command(&player, &launch).1
         };
         assert_eq!(
             [
@@ -316,13 +348,20 @@ mod tests {
     }
 
     #[test]
-    fn a_program_given_as_a_path_starts_where_a_person_stopped_when_its_name_is_a_known_players() {
+    fn a_program_given_as_a_path_starts_where_a_person_stopped_and_says_where_it_is_as_the_known_player_it_is_named() {
         let started = |program: &str| {
             let player = Player { kind: Kind::Program, program: program.into() };
             let start = Some(Duration::from_secs_f64(200.9));
-            let launch = Launch { video: VIDEO, subtitles: vec![ENGLISH], language: Some("en"), title: "Night", start };
-            command(&player, &launch).1
+            let socket = Some(Path::new("/tmp/th/run/player-1.sock"));
+            let launch =
+                Launch { video: VIDEO, subtitles: vec![ENGLISH], language: Some("en"), title: "Night", start, socket };
+            (player.says_where(), command(&player, &launch).1)
         };
+        let args = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let mpv = (true, args(&["--start=200", "--input-ipc-server=/tmp/th/run/player-1.sock", VIDEO]));
+        let iina = (true, args(&["--mpv-start=200", "--mpv-input-ipc-server=/tmp/th/run/player-1.sock", VIDEO]));
+        let vlc = (false, args(&["--start-time=200", VIDEO]));
+        let other = (false, args(&[VIDEO]));
         let programs = [
             "/opt/homebrew/bin/mpv",
             "/usr/local/bin/MPV",
@@ -336,17 +375,7 @@ mod tests {
         ];
         assert_eq!(
             programs.map(started),
-            [
-                vec!["--start=200", VIDEO],
-                vec!["--start=200", VIDEO],
-                vec!["--mpv-start=200", VIDEO],
-                vec!["--mpv-start=200", VIDEO],
-                vec!["--mpv-start=200", VIDEO],
-                vec!["--start-time=200", VIDEO],
-                vec!["--start-time=200", VIDEO],
-                vec![VIDEO],
-                vec![VIDEO],
-            ]
+            [mpv.clone(), mpv, iina.clone(), iina.clone(), iina, vlc.clone(), vlc, other.clone(), other]
         );
     }
 

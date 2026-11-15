@@ -3,14 +3,14 @@
 use std::path::Path;
 
 use torrential_core::PieceMap;
-use torrential_core::watching::{FINISHED_SHARE, FINISHED_WITHIN};
+use torrential_core::watching::{FINISHED_SHARE, FINISHED_WITHIN, SAVE_EVERY, WORTH_SAVING};
 use ts_rs::{Config, TS};
 
 use super::cast::Start;
 use super::devices::{Me, Offer, Shown};
 use super::online::{Listed, Named, Online};
 use super::play::Playing;
-use super::titles::{Found, Measured, Play, PlayingLine, Saved};
+use super::titles::{Forget, Found, Measured, Play, PlayingLine, Position, Saved};
 use super::{FfmpegLine, Pieces, SearchLine, VersionReply};
 use crate::daemon::devices::OFFER;
 use crate::daemon::downloads::{PIECE_RUNS, Served};
@@ -44,7 +44,9 @@ fn declarations(cfg: &Config) -> Vec<String> {
         Measured::decl(cfg),
         Play::decl(cfg),
         PlayingLine::decl(cfg),
+        Position::decl(cfg),
         Saved::decl(cfg),
+        Forget::decl(cfg),
         Offer::decl(cfg),
         Shown::decl(cfg),
         Me::decl(cfg),
@@ -54,7 +56,7 @@ fn declarations(cfg: &Config) -> Vec<String> {
 }
 
 /// Numbers the web app and the engine must agree on: each name, what it is, and its value.
-fn constants() -> [(&'static str, &'static str, String); 10] {
+fn constants() -> [(&'static str, &'static str, String); 12] {
     [
         ("SHORT_ID", "Hex digits every screen shows of an ID.", torrential_core::id::SHORT_ID.to_string()),
         ("SLICES", "Equal runs of a torrent's pieces in `Progress.piece_map`.", PieceMap::SLICES.to_string()),
@@ -74,6 +76,8 @@ fn constants() -> [(&'static str, &'static str, String); 10] {
         ),
         ("FINISHED_SHARE", "The share of a video at its end that counts as credits.", FINISHED_SHARE.to_string()),
         ("FINISHED_WITHIN", "Seconds at the end of a video that count as credits.", FINISHED_WITHIN.to_string()),
+        ("WORTH_SAVING", "Seconds at the start of a video too few to keep a place at.", WORTH_SAVING.to_string()),
+        ("SAVE_EVERY_MS", "How often a player saves where it is.", SAVE_EVERY.as_millis().to_string()),
     ]
 }
 

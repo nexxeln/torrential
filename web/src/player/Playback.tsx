@@ -14,7 +14,6 @@ import {
 } from "react";
 import { type MediaInfo, mediaErrorCode, type PlayInfo } from "../api";
 import { CastButton } from "../cast/CastButton";
-import { useCasting } from "../cast/casts";
 import { clock } from "../lib/format";
 import { fileName, isVideoFile, readable } from "../lib/release";
 import {
@@ -29,6 +28,7 @@ import {
 } from "../lib/storage";
 import { isTv } from "../lib/tv";
 import { navigate, watchPath } from "../router";
+import { SAVE_EVERY_MS, WORTH_SAVING } from "../wire";
 import { Button } from "../ui/Button";
 import { ControlButton } from "../ui/ControlButton";
 import { PlayerActions } from "./actions";
@@ -55,8 +55,6 @@ import { useVideo, VideoStore } from "./video";
 /** The controls hide after this long without input while the video plays. */
 const IDLE_MS = 2500;
 /** A stored position this early is not worth resuming. */
-const WORTH_RESUMING = 10;
-const SAVE_EVERY_MS = 5000;
 /** A click waits this long for a second one before it plays or pauses, so a double click only toggles fullscreen. */
 const DOUBLE_MS = 220;
 /** Scroll-wheel distance for one 5% step of volume. */
@@ -82,7 +80,8 @@ export interface Memory {
   start: number;
   /** Starting at `start` picks up an earlier visit, which the player says, with a way to start over. */
   resumed: boolean;
-  save: (time: number, duration: number) => void;
+  /** Where the video is. `starts` when it started or resumed here since the last save, which takes the place from other screens. */
+  save: (time: number, duration: number | null, starts: boolean) => void;
   forget: () => void;
 }
 
@@ -186,11 +185,13 @@ function episodeName(path: string, release: string): string {
 function torrentMemory(play: PlayInfo): Memory {
   const { id, name, video: file } = play;
   const stored = position(id, file.index);
-  const start = stored && !stored.finished && stored.time > WORTH_RESUMING ? stored.time : 0;
+  const start = stored && !stored.finished && stored.time > WORTH_SAVING ? stored.time : 0;
   return {
     start,
     resumed: start > 0,
-    save: (time, duration) => savePosition({ id, file: file.index, name, path: file.path, time, duration }),
+    save: (time, duration) => {
+      if (duration && time > WORTH_SAVING) savePosition({ id, file: file.index, name, path: file.path, time, duration });
+    },
     forget: () => forgetPosition(id, file.index),
   };
 }
@@ -283,14 +284,13 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     if (failure && howKind === "direct" && converts && [mediaErrorCode(3), mediaErrorCode(4)].some((code) => code === failure.code)) setDirectWorks(false);
   }, [failure, howKind, converts]);
 
-  // Where playback is, remembered for the next visit while it plays here.
+  // Where playback is, remembered for the next visit while it plays here. The engine keeps a title's place for the
+  // screen that started or resumed it last.
   const [unsaved] = useState(() => new Unsaved());
-  const casting = useRef(false);
-  casting.current = useCasting(titled?.video);
   const remember = useCallback(
     (seen: boolean) => {
-      if (!unsaved.take({ seen, cast: casting.current }) || !duration || lastTime.current <= WORTH_RESUMING / 2) return;
-      memory.save(lastTime.current, duration);
+      const save = unsaved.take({ seen });
+      if (save) memory.save(lastTime.current, duration || null, save.starts);
     },
     [unsaved, memory, duration],
   );
@@ -303,7 +303,12 @@ function Stage({ element, frame, play, media, onReload, onBack, titled }: Props 
     const now = () => remember(!document.hidden);
     // The page was in view until it hid, so where it got to is still worth saving.
     const hide = () => remember(true);
+    const resume = () => {
+      unsaved.resume();
+      now();
+    };
     const stop = new AbortController();
+    element.addEventListener("play", resume, { signal: stop.signal });
     for (const name of ["timeupdate", "ended"]) element.addEventListener(name, follow, { signal: stop.signal });
     for (const name of ["pause", "ended"]) element.addEventListener(name, now, { signal: stop.signal });
     document.addEventListener("visibilitychange", () => document.hidden && hide(), { signal: stop.signal });

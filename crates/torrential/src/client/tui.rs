@@ -90,7 +90,7 @@ impl torrential_tui::Backend for EngineBackend {
         let reply = play::start(&mut conn, target, &listing, None)?;
         let player = play::player(&config, &self.paths, &self.env, &reply.streams[0].url)?;
         let name = listing.name.unwrap_or_else(|| super::rows::short_ref(&listing.id));
-        play::open(&player, &Playing { name, reply, title: None }, &self.env)?;
+        play::open(&mut conn, &player, &Playing { name, reply, title: None }, &self.env, &self.paths)?;
         Ok(player.name())
     }
 
@@ -178,7 +178,8 @@ impl torrential_tui::Backend for EngineBackend {
         let request = TitleRequest { video: video.clone(), source: None };
         let (reply, title) = titles::play_each(&mut conn, request, |event| step(event.clone()))?;
         let player = play::player(&config, &self.paths, &self.env, &reply.streams[0].url)?;
-        play::open(&player, &Playing { name: title.name.clone(), reply, title: Some(title.clone()) }, &self.env)?;
+        let playing = Playing { name: title.name.clone(), reply, title: Some(title.clone()) };
+        play::open(&mut conn, &player, &playing, &self.env, &self.paths)?;
         Ok((player.name(), title))
     }
 }

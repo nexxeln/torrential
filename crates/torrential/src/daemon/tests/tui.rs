@@ -63,7 +63,8 @@ impl Tui {
 
     /// Plays `video` as Enter or P on a film, an episode, or a title's Play row does. Answers the
     /// player's name, where the engine said to resume, and the player's arguments, one a line,
-    /// with the stream port as PORT.
+    /// with the stream port as PORT and the socket the engine follows the player through as
+    /// SOCKET.
     async fn play(&self, video: &str) -> (String, Option<f64>, String) {
         let backend = self.backend.clone();
         let video: VideoRef = video.parse().unwrap();
@@ -77,6 +78,11 @@ impl Tui {
         }
         let handed = std::fs::read_to_string(&argv).unwrap();
         std::fs::remove_file(&argv).unwrap();
+        let socket = |line: &str| match line.starts_with("--input-ipc-server=") {
+            true => "--input-ipc-server=SOCKET\n".to_string(),
+            false => format!("{line}\n"),
+        };
+        let handed: String = handed.lines().map(socket).collect();
         (player, played.resume_at, handed.replace(&format!("127.0.0.1:{}/", self.port), "127.0.0.1:PORT/"))
     }
 }
@@ -118,7 +124,7 @@ async fn a_play_from_the_terminal_ui_starts_the_player_where_the_person_stopped(
             Some(200.5),
             format!(
                 "--sub-file=http://127.0.0.1:PORT/{a4}/1/night_of_the_living_dead.srt\n\
-                 --force-media-title=Night of the Living Dead (1968)\n--start=200\n\
+                 --force-media-title=Night of the Living Dead (1968)\n--start=200\n--input-ipc-server=SOCKET\n\
                  http://127.0.0.1:PORT/{a4}/0/night_of_the_living_dead.mp4\n"
             )
         )
@@ -137,7 +143,7 @@ async fn a_play_from_the_terminal_ui_of_a_finished_film_or_a_caught_up_series_st
             None,
             format!(
                 "--sub-file=http://127.0.0.1:PORT/{a4}/1/night_of_the_living_dead.srt\n\
-                 --force-media-title=Night of the Living Dead (1968)\n\
+                 --force-media-title=Night of the Living Dead (1968)\n--input-ipc-server=SOCKET\n\
                  http://127.0.0.1:PORT/{a4}/0/night_of_the_living_dead.mp4\n"
             )
         )
@@ -168,7 +174,7 @@ async fn a_play_from_the_terminal_ui_of_a_finished_film_or_a_caught_up_series_st
             "mpv".to_string(),
             None,
             format!(
-                "--force-media-title=Harbor Lights S01E01\n\
+                "--force-media-title=Harbor Lights S01E01\n--input-ipc-server=SOCKET\n\
                  http://127.0.0.1:PORT/{b1}/0/Harbor.Lights.S01E01.1080p.WEB.x264.mp4\n"
             )
         ),

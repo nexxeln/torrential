@@ -1001,6 +1001,35 @@ async fn a_tab_cannot_move_the_place_of_a_video_a_tv_plays_until_the_cast_ends()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_tab_that_resumes_a_video_a_tv_plays_keeps_its_place_until_the_tv_resumes() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, fake::Search::new(Vec::new()));
+    let film = torrent(99, "Night", &[("Night.mkv", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let tab = |position: f64, starts: bool| serde_json::json!({ "video": "tt0063350", "position": position, "duration": 5760.0, "tab": "a1", "starts": starts });
+
+    cast(&h, CastRequest { video: Some(night()), ..by_hand(Target::Prefix(prefix(&film))) }).await.unwrap();
+    tv.set(|screen| screen.position = 600.0);
+    until(&h, "ten minutes in", |cast| cast.position == Some(600.0)).await;
+    let (status, saved) = post(&h, "/api/watched", tab(100.0, true)).await;
+    assert_eq!((status, &saved["kept"]), (200, &serde_json::json!(true)));
+    control(&h, CastAction::Pause).await.unwrap();
+    assert_eq!(kept(&h), Some((100.0, Some(5_760.0))), "the tab resumed after the TV started");
+
+    control(&h, CastAction::Resume).await.unwrap();
+    tv.set(|screen| screen.position = 1_200.0);
+    until(&h, "twenty minutes in", |cast| cast.position == Some(1_200.0)).await;
+    let (_, saved) = post(&h, "/api/watched", tab(110.0, false)).await;
+    assert_eq!(saved["kept"], serde_json::json!(false));
+    control(&h, CastAction::Stop).await.unwrap();
+    assert_eq!(kept(&h), Some((1_200.0, Some(5_760.0))), "the TV resumed after the tab");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_paused_cast_keeps_its_play_when_another_play_needs_the_room() {
     let ip = lan();
     let tv = FakeTv::start(ip, SINK).await;

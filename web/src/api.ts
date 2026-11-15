@@ -28,7 +28,8 @@
 //   GET  /api/title/art?id=&kind=[&season=&episode=]       an image, see artUrl
 //   GET  /api/title/sources?video=[&width=&height=&scale=&playback=]   NDJSON stream of SearchMessage
 //   POST /api/title/play     PlayTitle                     NDJSON stream of PlayMessage
-//   POST /api/watched        { video, position, duration, release? }   { watched: Watched, kept: boolean }
+//   POST /api/watched        Position                      Saved
+//   POST /api/watched/forget Forget                        {}
 //   POST /api/library        { title, saved }              { saved: boolean }
 //   GET  /api/home                                         Home
 //
@@ -76,6 +77,7 @@ import type {
   FilePieces,
   FilesReply,
   Flag,
+  Forget,
   Home,
   Job,
   Kind,
@@ -90,10 +92,12 @@ import type {
   Playback,
   PlayingLine,
   PlayTitle,
+  Position,
   Progress,
   Quality,
   Release,
   Resolution,
+  Saved,
   SearchMessage as EngineSearchMessage,
   SearchResult,
   Season,
@@ -457,10 +461,19 @@ export async function* playTitle(request: PlayTitle, signal?: AbortSignal): Asyn
   yield* lines<PlayMessage>(response);
 }
 
-/** Kept alive past the page, since the player saves when the page hides. */
-export function saveWatched(entry: { video: string; position: number; duration: number | null; release?: string }): Promise<Watched> {
+/**
+ * Saves where a tab is. `kept` is false while another screen that started or resumed the video since keeps the place.
+ * Kept alive past the page, since the player saves when the page hides.
+ */
+export function saveWatched(entry: Position): Promise<Saved> {
   const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(entry), keepalive: true };
-  return request<{ watched: Watched }>("/api/watched", init).then((body) => body.watched);
+  return request<Saved>("/api/watched", init);
+}
+
+/** Forgets where a film or an episode stopped, so it plays from the beginning. */
+export function forgetWatched(video: string): Promise<void> {
+  const forget: Forget = { video };
+  return post<object>("/api/watched/forget", forget).then(() => {});
 }
 
 export function setSaved(title: string, saved: boolean): Promise<boolean> {
