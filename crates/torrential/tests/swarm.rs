@@ -818,7 +818,6 @@ fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
         target: Target::TorrentFile(fixture.torrent_file().into()),
         dir: Some(home.downloads()),
         files: vec![0],
-        setup_max_size: None,
     };
     let reply = ask(&mut socket, &Request::Play(play));
     let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
@@ -847,7 +846,6 @@ fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
         target: Target::TorrentFile(fixture.torrent_file().into()),
         dir: Some(home.dir.path().join("Téléchargements")),
         files: vec![0],
-        setup_max_size: None,
     };
     let reply = ask(&mut socket, &Request::Play(play));
     let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();

@@ -44,8 +44,7 @@ impl Harness {
     /// Gets `t` into `dir`, as `torrential get --dir` does.
     async fn get_into(&self, t: &fake::TorrentFile, dir: PathBuf) -> Result<(), torrential_core::Error> {
         let target = self.torrent_file(t);
-        let request =
-            GetRequest { target, dir: Some(dir), files: vec![], max_size: None, setup_max_size: None, dry_run: false };
+        let request = GetRequest { target, dir: Some(dir), files: vec![], max_size: None, dry_run: false };
         self.get_with(request).await.map(drop)
     }
 
@@ -82,7 +81,7 @@ async fn get_and_a_play_by_hand_download_into_the_downloads_folder() {
     let (kept, watched) =
         (torrent(0xb1, "kept", &[("kept.iso", MIB)]), torrent(0xb2, "watched", &[("watched.mp4", MIB)]));
     h.get(h.torrent_file(&kept), &[]).await.unwrap();
-    let request = PlayRequest { target: h.torrent_file(&watched), dir: None, files: vec![0], setup_max_size: None };
+    let request = PlayRequest { target: h.torrent_file(&watched), dir: None, files: vec![0] };
     assert!(matches!(h.ask(Request::Play(request)).await, Response::Play { .. }));
     let places: Vec<_> = h.status().await.into_iter().map(|job| (job.dir, job.place)).collect();
     assert_eq!(places, [(h.downloads(), Place::Folder), (h.downloads(), Place::Folder)]);

@@ -61,10 +61,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
     let paths = || Paths::from_process(env);
     let engine = || connect::ensure(&paths()?, env);
     match command {
-        Command::Search(args) => {
-            let preferences = crate::config::preferences(&paths()?)?;
-            search::run(engine()?, args, preferences, mode)
-        }
+        Command::Search(args) => search::run(engine()?, args, mode),
         Command::Titles(args) => titles::titles(engine()?, &args.words, mode),
         Command::Title(args) => {
             let video = titles::video(&args.id, None)?;

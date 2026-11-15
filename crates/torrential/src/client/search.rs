@@ -3,7 +3,7 @@
 use torrential_core::protocol::{Request, Response};
 use torrential_core::text::sanitize;
 use torrential_core::units::size_text;
-use torrential_core::{Arch, Error, Preferences, Profile, SearchQuery, SearchResult, SourceOutcome};
+use torrential_core::{Arch, Error, Profile, SearchQuery, SearchResult, SourceOutcome};
 
 use super::connect::Conn;
 use super::emit;
@@ -12,7 +12,7 @@ use crate::cli::SearchArgs;
 use crate::output::format::{self, source_outcome};
 use crate::output::{Body, Doc, Mode};
 
-pub fn run(mut conn: Conn, args: SearchArgs, preferences: Preferences, mode: Mode) -> Result<u8, Error> {
+pub fn run(mut conn: Conn, args: SearchArgs, mode: Mode) -> Result<u8, Error> {
     let query = SearchQuery {
         text: args.words.join(" "),
         sources: args.source,
@@ -24,7 +24,7 @@ pub fn run(mut conn: Conn, args: SearchArgs, preferences: Preferences, mode: Mod
         timeout_ms: args.timeout.as_millis().min(u128::from(u32::MAX)) as u32,
         adult: args.adult,
         fresh: args.fresh,
-        profile: Profile { preferences, ..Profile::default() },
+        profile: Profile::default(),
         wanted: None,
     };
     let result: SearchResult = conn.ask(&Request::Search { query, stream: false })?;
