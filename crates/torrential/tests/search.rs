@@ -666,9 +666,9 @@ fn the_machine_and_preferences_rank_a_film_search_and_say_so() {
             "1.0 GiB | 720p | Night Of The Living Dead 720p 1968",
             "1.1 GiB | ? | Night of the Living Dead (1968)",
             "1.1 GiB | ? | Night of the Living Dead (1968)",
-            "528.0 MiB | ? | Night of the Living Dead (1968)",
+            "528 MiB | ? | Night of the Living Dead (1968)",
             "1.8 GiB | ? | Night of the Living Dead (1968)",
-            "742.1 MiB | ? | Night Of The Living Dead ( 1968)",
+            "742 MiB | ? | Night Of The Living Dead ( 1968)",
             "# ranked for this Mac: 1080p screen, no HDR, H.264 only, up to 2 GB, arm64, English · overrides: screen \
              laptop, max_size 2GB, playback h264",
         ]

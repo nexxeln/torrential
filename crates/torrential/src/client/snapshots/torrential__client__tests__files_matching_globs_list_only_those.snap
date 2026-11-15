@@ -4,9 +4,9 @@ expression: "both(&doc, &Typed\n{ kind: \"files\", body: Files { files: reply, m
 ---
 SIZE	DONE	PATH
 51.4 KiB	-	Night.asr.srt
-568.8 MiB	-	Night.mp4
-250.5 MiB	-	VTS_01_1.mp4
-# 3 of 4 files in night_of_the_living_dead_dvd match · 819.3 MiB · file list from the .torrent URL in 0.4s
+569 MiB	-	Night.mp4
+250 MiB	-	VTS_01_1.mp4
+# 3 of 4 files in night_of_the_living_dead_dvd match · 819 MiB · file list from the .torrent URL in 0.4s
 next: torrential get 6bc1af --files '*.MP4' --files Night.asr.srt
 
 --- json

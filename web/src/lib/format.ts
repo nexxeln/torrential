@@ -1,14 +1,14 @@
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
 
-/** `1.8 GiB`, in the binary units the CLI prints. */
+/** A size in at most three figures, in binary units: `512 B`, `1.5 GiB`, `100 MiB`. */
 export function bytes(count: number): string {
   let value = count;
   let unit = 0;
-  while (value >= 1024 && unit < UNITS.length - 1) {
+  while (Math.round(value) >= 1000 && unit < UNITS.length - 1) {
     value /= 1024;
     unit += 1;
   }
-  const digits = unit === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  const digits = unit === 0 || value >= 99.95 ? 0 : 1;
   return `${value.toFixed(digits)} ${UNITS[unit]}`;
 }
 
@@ -33,13 +33,20 @@ export function span(seconds: number): string {
   return `${whole}s`;
 }
 
-/** How long ago a Unix time was, in one unit: `5h`, `40d`, `2y`. */
+/** How long ago a Unix time was, in one unit: `now` under a minute, then `5h`, `40d`, `2y`. */
 export function age(unixSeconds: number, now = Date.now() / 1000): string {
   const elapsed = Math.max(0, now - unixSeconds);
-  if (elapsed < 3600) return `${Math.max(1, Math.floor(elapsed / 60))}m`;
+  if (elapsed < 60) return "now";
+  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m`;
   if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h`;
   if (elapsed < 86400 * 365) return `${Math.floor(elapsed / 86400)}d`;
   return `${Math.floor(elapsed / (86400 * 365))}y`;
+}
+
+/** `age` as a phrase: `just now`, or `5m ago`. */
+export function ago(unixSeconds: number, now = Date.now() / 1000): string {
+  const said = age(unixSeconds, now);
+  return said === "now" ? "just now" : `${said} ago`;
 }
 
 export function percent(fraction: number): string {

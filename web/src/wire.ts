@@ -497,6 +497,9 @@ source?: string,
  */
 ref?: string, file?: number, subtitle?: number, start_at?: number, };
 
+/** Hex digits every screen shows of an ID. */
+export const SHORT_ID = 6;
+
 /** Equal runs of a torrent's pieces in `Progress.piece_map`. */
 export const SLICES = 64;
 

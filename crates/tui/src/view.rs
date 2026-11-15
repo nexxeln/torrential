@@ -690,7 +690,8 @@ fn download_detail(buf: &mut Buffer, state: &State, job: &Job, g: &Grid, (y, vie
         (JobStatus::Metadata, _) | (_, None) => facts.push("fetching the file list from peers".to_string()),
         (JobStatus::Done { finished_at }, Some(total)) => {
             facts.push(size(total));
-            facts.push(format!("finished {} ago", age(*finished_at, state.clock)));
+            let ago = torrential_core::units::ago(state.clock.saturating_sub(*finished_at).max(0) as u64);
+            facts.push(format!("finished {ago}"));
         }
         (_, Some(total)) => facts.push(format!("{} of {}", size(p.verified), size(total))),
     }

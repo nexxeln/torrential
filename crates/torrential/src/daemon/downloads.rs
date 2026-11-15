@@ -468,7 +468,7 @@ pub(super) fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable,
         None => stream::pick(&listing).ok_or_else(|| {
             let id = metainfo.info_hash.id().to_hex();
             Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
-                .with_hint(format!("run torrential files {} to list its files", &id[..8]))
+                .with_hint(format!("run torrential files {} to list its files", &id[..torrential_core::id::SHORT_ID]))
         }),
     }
 }

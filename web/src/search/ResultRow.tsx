@@ -6,6 +6,7 @@ import { isVideo, readable } from "../lib/release";
 import { isTv } from "../lib/tv";
 import { Link, watchPath } from "../router";
 import { Chip } from "../ui/Chip";
+import { SHORT_ID } from "../wire";
 
 export const RESOLUTIONS: Record<Resolution, string> = { sd: "SD", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
 export const CODECS: Record<Codec, string> = { h264: "H.264", hevc: "HEVC", av1: "AV1" };
@@ -20,7 +21,7 @@ const FLAGS: Record<Flag, { label: string; tone: "good" | "bad" | "plain"; title
 
 /** The command that downloads a release the player cannot show. */
 export function getCommand(release: Release): string {
-  return `torrential get ${release.id.slice(0, 8)}`;
+  return `torrential get ${release.id.slice(0, SHORT_ID)}`;
 }
 
 interface Props {

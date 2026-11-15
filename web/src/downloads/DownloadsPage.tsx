@@ -8,6 +8,7 @@ import { Button, buttonClass } from "../ui/Button";
 import { Header } from "../ui/Header";
 import { Meter } from "../ui/Meter";
 import { trashed } from "./trashed";
+import { SHORT_ID } from "../wire";
 
 function facts(job: Job): string {
   const { progress } = job;
@@ -31,7 +32,7 @@ function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiErro
   const [busy, setBusy] = useState<Action | null>(null);
   // A download in the person's own folder asks what becomes of its files before it goes.
   const [asking, setAsking] = useState(false);
-  const name = readable(job.name ?? job.id.slice(0, 8));
+  const name = readable(job.name ?? job.id.slice(0, SHORT_ID));
   const { progress } = job;
   const fraction = job.state === "done" ? 1 : progress.size ? progress.verified / progress.size : 0;
   const stopped = job.state === "paused" || job.state === "error";
