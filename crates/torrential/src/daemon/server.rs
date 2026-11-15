@@ -4,20 +4,22 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::error::Details;
 use torrential_core::protocol::{
     Event, GetOutcome, GetReply, METADATA_WAIT, PlayReply, Request, Response, TitleFrame, TitlePlayed, TitleRequest,
     WIRE_VERSION,
 };
-use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, Profile, SearchQuery, TorrentId};
+use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, SearchQuery, TorrentId};
 
 use super::ctx::Ctx;
-use super::downloads::{HEARTBEAT, files, get, listed, metadata, play, record, search, streams};
+use super::downloads::{
+    Answer, JobEvents, Searching, files, get, listed, metadata, pause, play, remove, resume, search, streams,
+};
 use super::owner::plays::Destination;
-use super::owner::{Command, MetaTarget, Update};
+use super::owner::{Command, MetaTarget};
 use super::search_port::Progress;
 use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
 use super::titles::{home, pinned, sources, title_page};
@@ -28,9 +30,11 @@ use crate::wire;
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
     let owner = &ctx.owner;
     let result = match request {
-        Request::Hello { .. } | Request::Watch { .. } => {
-            Err(Error::new(ErrorCode::Usage, "hello and watch are not single requests"))
-        }
+        Request::Hello { .. }
+        | Request::Watch { .. }
+        | Request::PlayTitle(_)
+        | Request::GetTitle(_)
+        | Request::Cast(_) => Err(Error::new(ErrorCode::Usage, "this request streams, so it is not a single request")),
         Request::Search { query, .. } => search(ctx, query).await.map(|result| Response::Search { result }),
         Request::Files { target, timeout_ms } => {
             files(ctx, target, Duration::from_millis(timeout_ms.into())).await.map(|files| Response::Files { files })
@@ -40,16 +44,11 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         Request::Status { refs } => {
             owner.ask(|reply| Command::Status { refs, reply }).await.map(|jobs| Response::Jobs { jobs })
         }
-        Request::Pause { refs } => {
-            owner.ask(|reply| Command::Pause { refs, reply }).await.map(|changes| Response::Changed { changes })
+        Request::Pause { refs } => pause(ctx, refs).await.map(|changes| Response::Changed { changes }),
+        Request::Resume { refs, all } => resume(ctx, refs, all).await.map(|changes| Response::Changed { changes }),
+        Request::Remove { refs, delete } => {
+            remove(ctx, refs, delete).await.map(|changes| Response::Changed { changes })
         }
-        Request::Resume { refs, all } => {
-            owner.ask(|reply| Command::Resume { refs, all, reply }).await.map(|changes| Response::Changed { changes })
-        }
-        Request::Remove { refs, delete } => owner
-            .ask(|reply| Command::Remove { refs, delete, reply })
-            .await
-            .map(|changes| Response::Changed { changes }),
         Request::Verify { reference, repair } => owner
             .ask(|reply| Command::Verify { reference, repair, reply })
             .await
@@ -67,22 +66,12 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         Request::Sources { video } => {
             sources(ctx, video).await.map(|sources| Response::Sources { sources: Box::new(sources) })
         }
-        Request::PlayTitle(request) => play_title(ctx, request, Destination::Plays, mpsc::unbounded_channel().0).await,
-        Request::GetTitle(request) => {
-            play_title(ctx, request, Destination::Folder(None), mpsc::unbounded_channel().0).await
-        }
         Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port) }),
         Request::AddDevice => {
             ctx.devices.add(ctx.http_port, torrential_core::time::now()).map(|list| Response::Devices { list })
         }
         Request::RemoveDevice { id } => ctx.devices.remove(&id, ctx.http_port).map(|list| Response::Devices { list }),
         Request::Tvs { fresh } => Ok(Response::Tvs { list: ctx.casts.search(fresh).await }),
-        Request::Cast(request) => match ctx.casts.start(request).await {
-            Ok((mut view, _)) => {
-                super::cast::playing(&mut view).await.map(|cast| Response::Cast { cast: Box::new(cast) })
-            }
-            Err(error) => Err(error),
-        },
         Request::CastControl { tv, action } => {
             ctx.casts.control(tv.as_deref(), action).await.map(|cast| Response::Cast { cast: Box::new(cast) })
         }
@@ -92,27 +81,15 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
 }
 
 async fn stream_search(ctx: &Ctx, query: SearchQuery, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
-    let (progress_tx, mut progress) = mpsc::unbounded_channel();
-    let Profile { preferences, player, .. } = query.profile;
-    let rank_for = || ctx.machine.profile(preferences, player);
-    let search = ctx.search.search_stream(query, &rank_for, progress_tx);
-    tokio::pin!(search);
-    let result = loop {
-        tokio::select! {
-            biased;
-            Some(Progress { mut result, pending }) = progress.recv() => {
-                record(ctx, &mut result);
+    let mut search = Searching::start(ctx, query);
+    let response = loop {
+        match search.next().await {
+            Answer::SoFar(Progress { result, pending }) => {
                 wire::write_async(wr, &Event::SearchUpdate { result: Box::new(result), pending }).await?;
             }
-            result = &mut search => break result,
+            Answer::Done(Ok(result)) => break Response::Search { result },
+            Answer::Done(Err(error)) => break Response::Error { error },
         }
-    };
-    let response = match result {
-        Ok(mut result) => {
-            record(ctx, &mut result);
-            Response::Search { result }
-        }
-        Err(error) => Response::Error { error },
     };
     wire::write_async(wr, &response).await
 }
@@ -126,6 +103,7 @@ async fn play_title(
     to: Destination,
     steps: mpsc::UnboundedSender<AttemptEvent>,
 ) -> Result<Response, Error> {
+    let _playing = ctx.playing.open()?;
     let TitleRequest { video, source } = request;
     let pin = match source {
         Some(prefix) => Some(pinned(ctx, &video, &prefix).await?.id),
@@ -215,6 +193,16 @@ async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -
     wire::write_async(wr, &reply).await
 }
 
+/// Answers each connection to `listener` from this user, until the listener fails.
+pub async fn accept(listener: UnixListener, ctx: Arc<Ctx>) {
+    let uid = crate::paths::uid();
+    while let Ok((stream, _)) = listener.accept().await {
+        if stream.peer_cred().is_ok_and(|cred| cred.uid() == uid) {
+            tokio::spawn(connection(ctx.clone(), stream));
+        }
+    }
+}
+
 pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
     ctx.owner.tell(Command::Connected);
     let _ = serve(&ctx, stream).await;
@@ -248,16 +236,6 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
             wire::write_async(&mut wr, &Response::Error { error }).await?;
             continue;
         }
-        let _playing = match request {
-            Request::Play(_) | Request::PlayTitle(_) => match ctx.playing.open() {
-                Ok(open) => Some(open),
-                Err(error) => {
-                    wire::write_async(&mut wr, &Response::Error { error }).await?;
-                    continue;
-                }
-            },
-            _ => None,
-        };
         match request {
             Request::Watch { refs } => return watch(ctx, refs, rd, wr).await,
             Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,
@@ -306,38 +284,23 @@ fn older(client: &str, engine: &str) -> bool {
 }
 
 async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {
-    let everything = refs.is_empty();
-    let (jobs, mut updates) = match ctx.owner.ask(|reply| Command::Watch { refs, reply }).await {
-        Ok(watch) => watch,
+    let (mut events, snapshot) = match JobEvents::start(ctx, refs).await {
+        Ok(started) => started,
         Err(error) => return wire::write_async(&mut wr, &Response::Error { error }).await,
     };
-    let watched: Vec<_> = jobs.iter().map(|j| j.id).collect();
-    wire::write_async(&mut wr, &Event::Snapshot { jobs }).await?;
-    let mut heartbeat = tokio::time::interval(HEARTBEAT);
-    heartbeat.tick().await;
+    wire::write_async(&mut wr, &snapshot).await?;
     let mut probe = [0u8; 1];
     loop {
         let event = tokio::select! {
-            update = updates.recv() => match update {
-                Ok(Update::Job(job)) if everything || watched.contains(&job.id) => Event::Job { job },
-                Ok(Update::Removed(id)) if everything || watched.contains(&id) => Event::Removed { id: id.to_hex() },
-                Ok(_) => continue,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let refs = if everything { Vec::new() } else { watched.iter().map(|id| id.to_hex()).collect() };
-                    match ctx.owner.ask(|reply| Command::Status { refs, reply }).await {
-                        Ok(jobs) => Event::Snapshot { jobs },
-                        Err(_) => return Ok(()),
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            event = events.next() => match event {
+                Some(event) => event,
+                None => return Ok(()),
             },
-            _ = heartbeat.tick() => Event::Heartbeat { at: torrential_core::time::now() },
             read = tokio::io::AsyncReadExt::read(&mut rd, &mut probe) => match read {
                 Ok(0) | Err(_) => return Ok(()),
                 Ok(_) => continue,
             },
         };
-        heartbeat.reset();
         wire::write_async(&mut wr, &event).await?;
     }
 }

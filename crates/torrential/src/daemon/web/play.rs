@@ -81,7 +81,7 @@ pub async fn begin(
     deadline: Instant,
 ) -> Result<(Job, FilesInfo), Error> {
     let files = [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect();
-    let setup_max_size = (ctx.web.preferences)().max_size;
+    let setup_max_size = (ctx.preferences)().max_size;
     let to = Destination::Plays;
     let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
     let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;

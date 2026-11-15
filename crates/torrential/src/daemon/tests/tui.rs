@@ -55,12 +55,7 @@ impl Tui {
         let socket = paths.socket();
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let ctx = h.running.ctx.clone();
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(server::connection(ctx.clone(), stream));
-            }
-        });
+        tokio::spawn(server::accept(listener, h.running.ctx.clone()));
         let backend = Arc::new(EngineBackend { paths, downloads: h.downloads(), env });
         Self { backend, dir, port: h.running.ctx.http_port }
     }

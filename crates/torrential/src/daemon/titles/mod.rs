@@ -275,7 +275,7 @@ pub(super) async fn home(ctx: &Ctx) -> Result<Home, Error> {
 /// The releases of the film or episode `video` names, in the order a play tries them.
 pub(super) async fn sources(ctx: &Ctx, video: VideoRef) -> Result<TitleSources, Error> {
     let title = ctx.titles.resolve(&video, torrential_core::time::now()).await?;
-    let mut result = search(ctx, ctx.titles.query(&title, (ctx.web.preferences)(), Player::External).await?).await?;
+    let mut result = search(ctx, ctx.titles.query(&title, (ctx.preferences)(), Player::External).await?).await?;
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let ffmpeg = ctx.web.ffmpeg.converts();
     result.releases = ctx.titles.line(&jobs, &title.video, result.releases, Player::External, ffmpeg);

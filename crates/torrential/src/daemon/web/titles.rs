@@ -92,7 +92,7 @@ pub async fn sources(conn: &mut Connection<'_>, request: &Request, asker: &Asker
         let player = listed_for(request, asker)?;
         let title = ctx.titles.resolve(&video, now()).await?;
         let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-        let query = ctx.titles.query(&title, (ctx.web.preferences)(), player).await?;
+        let query = ctx.titles.query(&title, (ctx.preferences)(), player).await?;
         Ok::<_, Error>((query, title.video, jobs))
     };
     let asked = tokio::select! {
@@ -184,6 +184,10 @@ struct Play {
 /// `failed`. Closing the connection stops the play and gives up the source under test.
 pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -> io::Result<bool> {
     let ctx = conn.ctx;
+    let _playing = match ctx.playing.open() {
+        Ok(open) => open,
+        Err(updating) => return fail(conn, request, &updating).await,
+    };
     let ask = super::body::<Play>(request).and_then(|Play { video, viewer, playback, source, replace }| {
         let player = player(viewer.map(Measured::viewer).transpose()?, playback, asker);
         Ok(PlayTitle { video, pin: source, replace, player, containers: Containers::Browser, to: Destination::Plays })
