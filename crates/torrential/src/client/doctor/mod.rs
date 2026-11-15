@@ -16,7 +16,7 @@ use crate::ffmpeg::Tools;
 use crate::ffmpeg::fetch::{self, Fetch, Ffmpeg, Found};
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 use crate::skill::{self, Installed, State};
 
@@ -41,7 +41,7 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
             return emit(
                 mode,
                 &doctor(&checks, fix.clone()),
-                &Typed { kind: "doctor", body: Checks { checks: &checks } },
+                &Typed { kind: DocKind::Doctor, body: Checks { checks: &checks } },
             );
         }
     };
@@ -92,7 +92,7 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
     checks.extend(probe::checks(&paths, settings, network));
     checks.push(profile);
     checks.push(ffmpeg_check(env, &paths, fetch_ffmpeg));
-    emit(mode, &doctor(&checks, fix), &Typed { kind: "doctor", body: Checks { checks: &checks } })
+    emit(mode, &doctor(&checks, fix), &Typed { kind: DocKind::Doctor, body: Checks { checks: &checks } })
 }
 
 #[derive(Serialize)]

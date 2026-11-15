@@ -96,8 +96,18 @@ pub fn unit(manager: Manager, exe: &Path, log: &Path, torrential_home: Option<&s
     }
 }
 
+torrential_core::words! {
+    /// What `engine install` and `engine uninstall` did to the login service.
+    pub enum Change {
+        Installed = "installed",
+        AlreadyInstalled = "already_installed",
+        Uninstalled = "uninstalled",
+        NotInstalled = "not_installed",
+    }
+}
+
 pub struct Report {
-    pub result: &'static str,
+    pub result: Change,
     pub manager: Manager,
     pub unit: PathBuf,
 }
@@ -174,7 +184,7 @@ pub fn install(env: &Env, paths: &Paths) -> Result<Report, Error> {
     let text = unit(manager, &executable()?, &paths.log(), env.var("TORRENTIAL_HOME"));
     let wrote = put(manager, &path, &text)?;
     activate(env, manager, &path)?;
-    let result = if wrote { "installed" } else { "already_installed" };
+    let result = if wrote { Change::Installed } else { Change::AlreadyInstalled };
     Ok(Report { result, manager, unit: path })
 }
 
@@ -185,7 +195,7 @@ pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
         .and_then(|()| std::fs::write(paths.state.join(DECLINED), b""))
         .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot write {}: {e}", paths.state.display())))?;
     if !path.exists() {
-        return Ok(Report { result: "not_installed", manager, unit: path });
+        return Ok(Report { result: Change::NotInstalled, manager, unit: path });
     }
     match manager {
         Manager::Launchd => {
@@ -199,7 +209,7 @@ pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
     if manager == Manager::Systemd {
         let _ = run(env, "systemctl", &["--user", "daemon-reload"]);
     }
-    Ok(Report { result: "uninstalled", manager, unit: path })
+    Ok(Report { result: Change::Uninstalled, manager, unit: path })
 }
 
 /// Adds the login service the first time the default home's engine starts, unless the person

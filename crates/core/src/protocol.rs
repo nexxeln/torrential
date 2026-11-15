@@ -301,8 +301,7 @@ pub struct FilesReply {
     pub name: Option<String>,
     pub total_size: u64,
     pub files: Vec<TorrentFile>,
-    /// Where the file list came from: `download`, `cache`, `torrent_file`, `torrent_url`, or `peers`.
-    pub metadata_source: String,
+    pub metadata_source: MetadataSource,
     pub elapsed_ms: u32,
 }
 
@@ -361,13 +360,38 @@ pub struct DownloadPlan {
     pub max_size: Option<u64>,
 }
 
+crate::words! {
+    /// Where a torrent's file list came from.
+    pub enum MetadataSource {
+        Download = "download",
+        Cache = "cache",
+        TorrentFile = "torrent_file",
+        TorrentUrl = "torrent_url",
+        Peers = "peers",
+    }
+}
+
+crate::words! {
+    /// What a pause, resume, remove, or verify did to one download.
+    pub enum ChangeResult {
+        Paused = "paused",
+        AlreadyPaused = "already_paused",
+        AlreadyDone = "already_done",
+        AlreadyStopped = "already_stopped",
+        Resumed = "resumed",
+        AlreadyRunning = "already_running",
+        Removed = "removed",
+        AlreadyRemoved = "already_removed",
+        Checking = "checking",
+    }
+}
+
 /// The result of a pause, resume, remove, or verify for one download.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Change {
     pub id: String,
     pub name: Option<String>,
-    /// For example `paused`, `already_paused`, `resumed`, `removed`, `already_removed`, `checking`.
-    pub result: String,
+    pub result: ChangeResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     /// What `rm` deleted from disk: a play's folder.
@@ -379,6 +403,13 @@ pub struct Change {
     /// What `rm` was to delete and left.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<Kept>,
+}
+
+impl Change {
+    /// What happened to download `id`, named `name`, with nothing deleted, moved, or left.
+    pub fn new(id: String, name: Option<String>, result: ChangeResult) -> Self {
+        Self { id, name, result, path: None, deleted: Vec::new(), trashed: Vec::new(), kept: Vec::new() }
+    }
 }
 
 /// A file or folder `rm` was to delete or move to the Trash and left, and why.

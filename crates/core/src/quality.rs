@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::name;
 
@@ -14,29 +14,17 @@ pub struct Quality {
     pub hdr: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Resolution {
-    /// 576 lines or fewer, such as a DVD rip.
-    #[serde(rename = "sd")]
-    Sd,
-    #[serde(rename = "720p")]
-    P720,
-    #[serde(rename = "1080p")]
-    P1080,
-    #[serde(rename = "2160p")]
-    P2160,
+crate::words! {
+    pub enum Resolution {
+        /// 576 lines or fewer, such as a DVD rip.
+        Sd = "sd",
+        P720 = "720p",
+        P1080 = "1080p",
+        P2160 = "2160p",
+    }
 }
 
 impl Resolution {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sd => "sd",
-            Self::P720 => "720p",
-            Self::P1080 => "1080p",
-            Self::P2160 => "2160p",
-        }
-    }
-
     fn from_dimensions(token: &str) -> Option<Resolution> {
         let (width, height) = token.split_once('x')?;
         if width.len() < 3 || height.len() < 3 || !height.bytes().all(|b| b.is_ascii_digit()) {
@@ -51,23 +39,13 @@ impl Resolution {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Codec {
-    /// x264, H.264, or AVC.
-    H264,
-    /// x265, H.265, or HEVC.
-    Hevc,
-    Av1,
-}
-
-impl Codec {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::H264 => "h264",
-            Self::Hevc => "hevc",
-            Self::Av1 => "av1",
-        }
+crate::words! {
+    pub enum Codec {
+        /// x264, H.264, or AVC.
+        H264 = "h264",
+        /// x265, H.265, or HEVC.
+        Hevc = "hevc",
+        Av1 = "av1",
     }
 }
 

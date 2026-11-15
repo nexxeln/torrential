@@ -5,14 +5,14 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use torrential_core::time::now;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer};
 
 use super::super::ctx::Ctx;
 use super::super::devices::{Asker, COOKIE};
 use super::super::http::{Connection, Method, Peer, Request};
-use super::{body, value};
+use super::{ErrorBody, body, value};
 use crate::qr::qr;
 
 /// The page that pairs a phone or TV.
@@ -41,7 +41,7 @@ pub async fn stranger(conn: &mut Connection<'_>, request: &Request, removed: boo
         (Method::Post, "/api/pair") => pair(conn, request).await,
         (_, path) if path.starts_with("/api/") => {
             let error = Error::new(ErrorCode::NotPaired, if removed { REMOVED } else { NOT_PAIRED });
-            conn.json("401 Unauthorized", &json!({ "error": error }), request).await
+            conn.json("401 Unauthorized", &ErrorBody { error: &error }, request).await
         }
         (Method::Get | Method::Head, PAIR) => {
             let page = PAGE.replace("{{lead}}", if removed { REMOVED_LEAD } else { LEAD });
@@ -63,7 +63,7 @@ struct Pair {
 async fn pair(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
     let code = match body::<Pair>(request) {
         Ok(Pair { code }) => code,
-        Err(error) => return conn.json("400 Bad Request", &json!({ "error": error }), request).await,
+        Err(error) => return conn.json("400 Bad Request", &ErrorBody { error: &error }, request).await,
     };
     let from = match conn.peer {
         Peer::Network { remote, .. } => remote,
@@ -71,22 +71,35 @@ async fn pair(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> 
     };
     match conn.ctx.devices.pair(&code, request.agent.as_deref(), from, now()) {
         Ok((device, token)) => {
-            let body = serde_json::to_vec(&json!({ "device": device })).map_err(io::Error::other)?;
+            let body = serde_json::to_vec(&Paired { device }).map_err(io::Error::other)?;
             let headers = format!("Cache-Control: no-store\r\n{}", set_cookie(&token));
             conn.send("200 OK", "application/json", &headers, &body, request).await
         }
         Err(refused) => {
             let status = refused.status();
-            conn.json(status, &json!({ "error": refused.error() }), request).await
+            conn.json(status, &ErrorBody { error: &refused.error() }, request).await
         }
     }
 }
 
+/// `POST /api/pair`: the device a code paired.
+#[derive(Serialize)]
+struct Paired {
+    device: Device,
+}
+
 /// `GET /api/me`: whether the browser asking is this Mac or a paired device.
+#[derive(Serialize)]
+#[serde(tag = "asker", rename_all = "snake_case")]
+enum Me {
+    Device { device: Option<Device> },
+    Mac,
+}
+
 pub fn me(ctx: &Ctx, asker: &Asker) -> Result<Value, Error> {
-    Ok(match asker {
-        Asker::Device(id) => json!({ "asker": "device", "device": ctx.devices.device(id) }),
-        _ => json!({ "asker": "mac" }),
+    value(match asker {
+        Asker::Device(id) => Me::Device { device: ctx.devices.device(id) },
+        _ => Me::Mac,
     })
 }
 

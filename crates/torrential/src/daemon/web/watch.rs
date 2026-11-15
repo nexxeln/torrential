@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use torrential_core::protocol::Event;
 use torrential_core::{Error, ErrorCode, JobStatus, TorrentId};
@@ -282,7 +281,7 @@ async fn pipe(
         }
         (false, false) => {
             let error = Error::internal(format!("ffmpeg cannot convert this file: {complaint}"));
-            conn.json("502 Bad Gateway", &json!({ "error": error }), request).await
+            conn.json("502 Bad Gateway", &super::ErrorBody { error: &error }, request).await
         }
     }
 }

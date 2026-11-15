@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use torrential_core::id::shortest_unique_prefix;
-use torrential_core::protocol::{Change, Request, Response};
+use torrential_core::protocol::{Change, ChangeResult, Request, Response};
 use torrential_core::{Error, TorrentId};
 
 use super::connect::{self, Conn};
@@ -53,25 +53,21 @@ pub fn changes(command: ChangeCommand, changes: &[Change]) -> Doc {
                 ),
                 _ => c.name.as_deref().map_or_else(|| Cell::styled(format::UNKNOWN, Token::Muted), Cell::new),
             };
-            vec![Cell::styled(id.clone(), Token::Accent), Cell::styled(c.result.clone(), Token::Mint), last]
+            vec![Cell::styled(id.clone(), Token::Accent), Cell::styled(c.result.as_str(), Token::Mint), last]
         })
         .collect();
     let header = match command {
         ChangeCommand::Remove => vec!["ID", "RESULT", "PATH"],
         _ => vec!["ID", "RESULT", "NAME"],
     };
-    let (verb, follows): (&str, &[&str]) = match command {
-        ChangeCommand::Pause => ("resume", &["paused", "already_paused"]),
-        ChangeCommand::Resume => ("wait", &["resumed", "already_running"]),
-        ChangeCommand::Verify => ("wait", &["checking"]),
+    let (verb, follows): (&str, &[ChangeResult]) = match command {
+        ChangeCommand::Pause => ("resume", &[ChangeResult::Paused, ChangeResult::AlreadyPaused]),
+        ChangeCommand::Resume => ("wait", &[ChangeResult::Resumed, ChangeResult::AlreadyRunning]),
+        ChangeCommand::Verify => ("wait", &[ChangeResult::Checking]),
         ChangeCommand::Remove => ("", &[]),
     };
-    let next_ids: Vec<&str> = changes
-        .iter()
-        .zip(&ids)
-        .filter(|(c, _)| follows.contains(&c.result.as_str()))
-        .map(|(_, id)| id.as_str())
-        .collect();
+    let next_ids: Vec<&str> =
+        changes.iter().zip(&ids).filter(|(c, _)| follows.contains(&c.result)).map(|(_, id)| id.as_str()).collect();
     let next = (!next_ids.is_empty()).then(|| format!("torrential {verb} {}", next_ids.join(" ")));
     let summary = match command {
         ChangeCommand::Remove => removed_files(changes, &ids),
@@ -84,7 +80,7 @@ pub fn changes(command: ChangeCommand, changes: &[Change]) -> Doc {
 fn removed_files(changes: &[Change], ids: &[String]) -> Vec<String> {
     // Each fate, and the downloads it was, in the order they come.
     let mut fates: Vec<(&str, Vec<&str>)> = Vec::new();
-    for (change, id) in changes.iter().zip(ids).filter(|(c, _)| c.result == "removed") {
+    for (change, id) in changes.iter().zip(ids).filter(|(c, _)| c.result == ChangeResult::Removed) {
         let fate = match (change.deleted.is_empty(), change.trashed.is_empty()) {
             (false, _) => "deleted",
             (true, false) => "moved to the Trash",

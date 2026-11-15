@@ -142,18 +142,15 @@ impl Os {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Arch {
-    #[serde(rename = "x86_64")]
-    X86_64,
-    #[serde(rename = "arm64")]
-    Arm64,
-    /// 32-bit x86: i386 and i686.
-    #[serde(rename = "x86")]
-    X86,
-    /// 32-bit ARM, which Debian calls armhf.
-    #[serde(rename = "arm")]
-    Arm,
+crate::words! {
+    pub enum Arch {
+        X86_64 = "x86_64",
+        Arm64 = "arm64",
+        /// 32-bit x86: i386 and i686.
+        X86 = "x86",
+        /// 32-bit ARM, which Debian calls armhf.
+        Arm = "arm",
+    }
 }
 
 impl Arch {
@@ -164,15 +161,6 @@ impl Arch {
             "x86" => Some(Self::X86),
             "arm" => Some(Self::Arm),
             _ => None,
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::X86_64 => "x86_64",
-            Self::Arm64 => "arm64",
-            Self::X86 => "x86",
-            Self::Arm => "arm",
         }
     }
 

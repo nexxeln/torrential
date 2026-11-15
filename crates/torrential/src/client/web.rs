@@ -11,7 +11,7 @@ use super::emit;
 use crate::cli::WebArgs;
 use crate::env::{Env, hooks};
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 
 #[derive(Serialize)]
 struct Web {
@@ -40,7 +40,7 @@ pub fn run(conn: &Conn, args: WebArgs, mode: Mode, env: &Env) -> Result<u8, Erro
         summary: vec!["the web app works while the engine runs".to_string()],
         next: None,
     };
-    Ok(emit(mode, &doc, &Typed { kind: "web", body: Web { url, opened } }))
+    Ok(emit(mode, &doc, &Typed { kind: DocKind::Web, body: Web { url, opened } }))
 }
 
 /// Opens `url` in the default browser. Tests name a program in `OPENER` to run in its place.

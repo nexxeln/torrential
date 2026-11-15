@@ -23,7 +23,7 @@ use crate::config::{self, Config};
 use crate::env::Env;
 use crate::output::format::{self, shell_word};
 use crate::output::theme::{Token, paint};
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 use crate::player::{self, Launch, Player};
 
@@ -131,7 +131,7 @@ fn torrent(
 fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, config: &Config) -> Result<u8, Error> {
     let doc = play(&playing, None);
     if mode == Mode::Json {
-        return Ok(emit(mode, &doc, &Typed { kind: "play", body: &playing }));
+        return Ok(emit(mode, &doc, &Typed { kind: DocKind::Play, body: &playing }));
     }
     let player = player(config, paths, env, &playing.reply.streams[0].url)?;
     if let Some(at) = resume_at(&playing) {
@@ -140,7 +140,7 @@ fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, c
     if mode == Mode::Plain {
         open(&player, &playing, env)?;
         let summary = vec![format!("playing in {} · the download continues", player.name())];
-        return Ok(emit(mode, &Doc { summary, ..doc }, &Typed { kind: "play", body: &playing }));
+        return Ok(emit(mode, &Doc { summary, ..doc }, &Typed { kind: DocKind::Play, body: &playing }));
     }
     let id = short_ids(&[playing.reply.job.id]).remove(0);
     let _ = ctrlc::set_handler(move || {

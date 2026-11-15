@@ -266,9 +266,10 @@ impl Harness {
 
     async fn changes(&self, request: Request) -> Result<Vec<(String, String)>, Error> {
         match self.ask(request).await {
-            Response::Changed { changes } => {
-                Ok(changes.into_iter().map(|c: Change| (c.id[..6].to_string(), c.result)).collect())
-            }
+            Response::Changed { changes } => Ok(changes
+                .into_iter()
+                .map(|c: Change| (c.id[..6].to_string(), c.result.as_str().to_string()))
+                .collect()),
             Response::Error { error } => Err(error),
             other => panic!("unexpected {other:?}"),
         }
@@ -968,7 +969,7 @@ async fn files_fetch_metadata_from_peers_and_get_reuses_it() {
     let Response::Files { files } = h.ask(Request::Files { target: magnet(&film), timeout_ms: 5_000 }).await else {
         panic!("expected files")
     };
-    assert_eq!(files.metadata_source, "peers");
+    assert_eq!(files.metadata_source.as_str(), "peers");
     let paths: Vec<(&str, bool)> = files.files.iter().map(|f| (f.path.as_str(), f.risk.is_some())).collect();
     assert_eq!(paths, [("film.mkv", false), ("setup.exe", true)]);
     let dry = GetRequest { files: vec!["*.mkv".into()], dry_run: true, ..request(&h, magnet(&film)) };
@@ -1274,7 +1275,7 @@ async fn a_result_with_only_a_torrent_url_is_fetched_once_found() {
     else {
         panic!("expected files")
     };
-    assert_eq!(files.metadata_source, "download");
+    assert_eq!(files.metadata_source.as_str(), "download");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1428,13 +1429,10 @@ async fn every_pause_returns_once_writes_stop_or_fails_when_they_do_not() {
     assert_eq!((first.is_finished(), second.is_finished()), (false, false), "writes have not stopped");
     gate.open();
     let result = |response| match response {
-        Response::Changed { changes } => changes[0].result.clone(),
+        Response::Changed { changes } => changes[0].result.as_str(),
         other => panic!("unexpected {other:?}"),
     };
-    assert_eq!(
-        (result(first.await.unwrap()), result(second.await.unwrap())),
-        ("paused".to_string(), "already_paused".to_string())
-    );
+    assert_eq!((result(first.await.unwrap()), result(second.await.unwrap())), ("paused", "already_paused"));
 
     h.changes(Request::Resume { refs: vec![prefix(&iso)], all: false }).await.unwrap();
     h.until("downloading again", |jobs| jobs[0].status.name() == "downloading").await;

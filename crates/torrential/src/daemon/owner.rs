@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
-use torrential_core::protocol::{Change, GetOutcome, GetReply};
+use torrential_core::protocol::{Change, ChangeResult, GetOutcome, GetReply, MetadataSource};
 use torrential_core::time::now;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, InfoHash, Job, PieceMap, Release, Selection, Target, TitleCard, TitleId, TitleLink,
@@ -70,12 +70,12 @@ pub enum Origin {
 }
 
 impl Origin {
-    pub fn as_str(self) -> &'static str {
+    pub fn source(self) -> MetadataSource {
         match self {
-            Self::File => "torrent_file",
-            Self::Url => "torrent_url",
-            Self::Cache => "cache",
-            Self::Peers => "peers",
+            Self::File => MetadataSource::TorrentFile,
+            Self::Url => MetadataSource::TorrentUrl,
+            Self::Cache => MetadataSource::Cache,
+            Self::Peers => MetadataSource::Peers,
         }
     }
 }
@@ -90,7 +90,7 @@ pub enum Resolved {
 pub struct FilesInfo {
     pub id: TorrentId,
     pub metainfo: Arc<Metainfo>,
-    pub source: &'static str,
+    pub source: MetadataSource,
     pub download: Option<DownloadFiles>,
 }
 
@@ -1032,7 +1032,7 @@ impl Owner {
                     let id = magnet.info_hash.id();
                     if let Some(metainfo) = self.cached(id) {
                         let _ =
-                            reply.send(Ok(FilesInfo { id, metainfo, source: Origin::Cache.as_str(), download: None }));
+                            reply.send(Ok(FilesInfo { id, metainfo, source: MetadataSource::Cache, download: None }));
                         return;
                     }
                     if !self.probes.contains(&id) && !self.draining.contains(&id) {
@@ -1073,7 +1073,7 @@ impl Owner {
             _ => FileBytes::Known(job.record.files_verified.clone().unwrap_or_default()),
         };
         let download = DownloadFiles { wanted, verified };
-        Some(FilesInfo { id, metainfo, source: "download", download: Some(download) })
+        Some(FilesInfo { id, metainfo, source: MetadataSource::Download, download: Some(download) })
     }
 
     fn reply_metadata_waiters(&mut self, id: TorrentId, info: Result<FilesInfo, Error>) {
@@ -1098,9 +1098,9 @@ impl Owner {
         for id in ids {
             let job = &self.jobs[&id];
             let result = match &job.record.intent {
-                Intent::Paused => "already_paused",
-                Intent::Done { .. } => "already_done",
-                Intent::Failed { .. } => "already_stopped",
+                Intent::Paused => ChangeResult::AlreadyPaused,
+                Intent::Done { .. } => ChangeResult::AlreadyDone,
+                Intent::Failed { .. } => ChangeResult::AlreadyStopped,
                 Intent::Running => {
                     if let Err(e) = self.store.set_intent(id, &Intent::Paused) {
                         let _ = reply.send(Err(e));
@@ -1117,7 +1117,7 @@ impl Owner {
                         Observed::Absent => {}
                     }
                     self.publish(id);
-                    "paused"
+                    ChangeResult::Paused
                 }
             };
             if self.jobs[&id].observed == Observed::InEngine(Phase::Pausing) {
@@ -1134,9 +1134,8 @@ impl Owner {
         }
     }
 
-    fn change(&self, id: TorrentId, result: &str) -> Change {
-        let job = &self.jobs[&id];
-        Change { id: id.to_hex(), name: job.record.name.clone(), result: result.to_string(), ..Change::default() }
+    fn change(&self, id: TorrentId, result: ChangeResult) -> Change {
+        Change::new(id.to_hex(), self.jobs[&id].record.name.clone(), result)
     }
 
     fn resume(&mut self, refs: &[String], all: bool) -> Result<Vec<Change>, Error> {
@@ -1157,12 +1156,12 @@ impl Owner {
         for id in ids {
             let job = &self.jobs[&id];
             let result = match (&job.record.intent, job.observed) {
-                (Intent::Done { .. }, _) => "already_done",
-                (Intent::Running, _) => "already_running",
+                (Intent::Done { .. }, _) => ChangeResult::AlreadyDone,
+                (Intent::Running, _) => ChangeResult::AlreadyRunning,
                 (Intent::Paused | Intent::Failed { .. }, _) => {
                     self.store.set_intent(id, &Intent::Running)?;
                     self.jobs.get_mut(&id).expect("resolved above").record.intent = Intent::Running;
-                    "resumed"
+                    ChangeResult::Resumed
                 }
             };
             changes.push(self.change(id, result));
@@ -1196,11 +1195,8 @@ impl Owner {
         for target in targets {
             match target {
                 Err(tomb) => changes.push(Change {
-                    id: tomb.id.to_hex(),
-                    name: tomb.name,
-                    result: "already_removed".into(),
                     path: tomb.path,
-                    ..Change::default()
+                    ..Change::new(tomb.id.to_hex(), tomb.name, ChangeResult::AlreadyRemoved)
                 }),
                 Ok(id) if !self.jobs.contains_key(&id) => {}
                 Ok(id) => {
@@ -1230,11 +1226,8 @@ impl Owner {
                     self.tombstones.push(tomb);
                     let _ = self.updates.send(Update::Removed(id));
                     changes.push(Change {
-                        id: id.to_hex(),
-                        name: job.record.name,
-                        result: "removed".into(),
                         path: view.path,
-                        ..Change::default()
+                        ..Change::new(id.to_hex(), job.record.name, ChangeResult::Removed)
                     });
                 }
             }
@@ -1273,7 +1266,7 @@ impl Owner {
             admission::check_size(size, job.record.cap, Some(id))?;
         }
         if job.verify.is_some() || job.observed == Observed::InEngine(Phase::Checking) {
-            return Ok(vec![self.change(id, "checking")]);
+            return Ok(vec![self.change(id, ChangeResult::Checking)]);
         }
         if matches!(job.observed, Observed::InEngine(Phase::Pausing | Phase::Finishing { .. })) {
             return Err(Error::new(ErrorCode::JobConflict, format!("{short} is busy saving its state"))
@@ -1300,7 +1293,7 @@ impl Owner {
         job.verify = Some(if repair { Verify::Repair } else { Verify::Report });
         job.observed = Observed::InEngine(Phase::Checking);
         self.publish(id);
-        Ok(vec![self.change(id, "checking")])
+        Ok(vec![self.change(id, ChangeResult::Checking)])
     }
 
     fn engine_event(&mut self, event: EngineEvent) {
@@ -1311,7 +1304,7 @@ impl Owner {
                     self.engine.send(EngineCommand::Remove(id));
                     self.draining.insert(id);
                     let info =
-                        FilesInfo { id, metainfo: Arc::new(metainfo), source: Origin::Peers.as_str(), download: None };
+                        FilesInfo { id, metainfo: Arc::new(metainfo), source: MetadataSource::Peers, download: None };
                     self.reply_metadata_waiters(id, Ok(info));
                 } else if self.jobs.get(&id).is_some_and(|j| j.metainfo.is_none()) {
                     self.job_metadata(id, metainfo);
