@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use torrential_core::subtitle;
-use torrential_core::title::{self, Episode, Title};
+use torrential_core::catalog::Episode;
+use torrential_core::title::{self, Title};
 use torrential_search::subtitles::{FileHash, Found, Online, SubtitleConfig, Video};
 
 const SINTEL: &str = "/os/subtitles/movie/tt1727587";
@@ -128,8 +128,7 @@ async fn a_film_is_found_by_its_name_and_its_subtitle_downloads() {
     assert!(found.subtitles.iter().all(|s| s.source == "opensubtitles"));
 
     let srt = online.fetch(&found.subtitles[0]).await.unwrap();
-    let vtt = subtitle::to_vtt(&subtitle::decode(&srt)).unwrap();
-    assert!(vtt.starts_with("WEBVTT\n\n00:01:47.250 --> 00:01:50.500\nThis blade has a dark past.\n\n"), "{vtt}");
+    assert_eq!(String::from_utf8(srt).unwrap(), fixture("opensubtitles/sintel_en.srt"));
     assert_eq!(server.asked().last().map(String::as_str), Some(SINTEL_SRT));
     let agents = server.agents.lock().unwrap().clone();
     assert_eq!(agents, ["mozilla/5.0"; 3], "no request names the program or the machine");

@@ -6,10 +6,10 @@ pub mod view;
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use torrential_core::catalog::Episode;
 use torrential_core::protocol::{
     PlayReply, Reply, Request, Response, TitlePage, TitlePlayed, TitleRequest, TitleSources, TitleStep,
 };
-use torrential_core::title::Episode;
 use torrential_core::{AttemptEvent, Error, ErrorCode, TitleCard, VideoRef};
 
 use super::connect::Conn;

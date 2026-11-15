@@ -44,7 +44,7 @@ fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, 
     };
     match (&video, &source, file) {
         (None, Some(_), _) => return Err(titles::for_a_title("--source")),
-        (Some(video), _, Some(_)) => return Err(torrential_core::id::not_a_torrent(video, "--file")),
+        (Some(video), _, Some(_)) => return Err(torrential_core::target::not_a_torrent(video, "--file")),
         _ => {}
     }
     let request = Request::Cast(CastRequest { tv, target, source, file, video: None, subtitle, start_at: at });

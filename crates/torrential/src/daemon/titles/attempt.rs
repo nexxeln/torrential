@@ -5,11 +5,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::playback::stream::{self, Playable};
 use tokio::sync::oneshot;
+use torrential_core::catalog::Episode;
 use torrential_core::filetype;
-use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
-use torrential_core::title::{Episode, Span};
+use torrential_core::title::Span;
 use torrential_core::{
     AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Opens, Player, Plays, Quality, Release, ReleaseId,
     Skip, SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,

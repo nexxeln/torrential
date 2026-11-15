@@ -6,7 +6,9 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use torrential_core::{Error, ErrorCode, TorrentId, subtitle, title};
+use torrential_core::{Error, ErrorCode, TorrentId, title};
+
+use crate::playback::subtitle;
 use torrential_search::subtitles::{FileHash, Found, Video};
 
 use super::super::ctx::Ctx;

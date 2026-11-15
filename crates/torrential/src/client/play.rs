@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use crate::playback::stream::{self, Start};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
 use torrential_core::Job;
 use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, TitlePage, TitlePlayed, TitleRequest};
-use torrential_core::stream::{self, Start};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
-use torrential_core::{Category, Error, ErrorCode, SearchQuery, SearchResult, Target, VideoRef, media};
+use torrential_core::{Category, Error, ErrorCode, SearchQuery, SearchResult, Target, VideoRef};
+
+use crate::playback::media;
 
 use super::connect::{self, Conn};
 use super::rows::{short_ids, short_ref};
@@ -80,7 +82,7 @@ pub enum Hold {
 pub fn run(args: PlayArgs, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Error> {
     let video = titles::named(&args.words)?;
     match &video {
-        Some(video) if args.dir.is_some() => return Err(torrential_core::id::not_a_torrent(video, "--dir")),
+        Some(video) if args.dir.is_some() => return Err(torrential_core::target::not_a_torrent(video, "--dir")),
         None if args.source.is_some() => return Err(titles::for_a_title("--source")),
         _ => {}
     }

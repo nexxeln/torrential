@@ -115,10 +115,10 @@ pub async fn probe(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Media>, E
     let ffprobe = match ctx.media.ffmpeg.found() {
         Found::Installed(programs) | Found::Fetched(programs) => programs.ffprobe,
         missing => {
-            let end = file.size.min(torrential_core::media::RUNTIME_BYTES);
+            let end = file.size.min(crate::playback::media::RUNTIME_BYTES);
             let head = http::read(ctx, id, index, &file, 0, end).await.unwrap_or_default();
             let tail = http::read(ctx, id, index, &file, file.size - end, file.size).await.unwrap_or_default();
-            let duration = torrential_core::media::duration(&head, &tail).map(|d| d.as_secs_f64());
+            let duration = crate::playback::media::duration(&head, &tail).map(|d| d.as_secs_f64());
             return Ok(Arc::new(Media::without_ffprobe(&name, duration, missing.readiness())));
         }
     };
@@ -186,7 +186,7 @@ pub async fn subtitles(ctx: &Ctx, id: TorrentId, index: u32, stream: Option<u32>
         let bytes = http::read(ctx, id, index, &file, 0, file.size)
             .await
             .map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot read {name}: {e}")))?;
-        let text = torrential_core::subtitle::decode(&bytes).into_bytes();
+        let text = crate::playback::subtitle::decode(&bytes).into_bytes();
         return Ok((program, ffmpeg::subtitle_file(ffmpeg::subtitle_format(&name)), Some(text)));
     };
     let media = probe(ctx, id, index).await?;

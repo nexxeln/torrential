@@ -177,7 +177,7 @@ fn job_refs(references: &[String], cwd: &Path) -> Result<Vec<String>, Error> {
             Target::Magnet(magnet) => Ok(magnet),
             Target::TorrentUrl(_) => Err(not_a_download("a .torrent URL")),
             Target::TorrentFile(_) => Err(not_a_download("a .torrent file")),
-            Target::Title(video) => Err(torrential_core::id::not_a_torrent(&video, "this command")),
+            Target::Title(video) => Err(torrential_core::target::not_a_torrent(&video, "this command")),
         })
         .collect()
 }

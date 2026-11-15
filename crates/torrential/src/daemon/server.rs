@@ -128,7 +128,7 @@ async fn play_title(
     match to {
         Destination::Plays => {
             let info = metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
-            let playable = torrential_core::stream::around(&listed(ctx, &info).await, file)
+            let playable = crate::playback::stream::around(&listed(ctx, &info).await, file)
                 .ok_or_else(|| Error::internal(format!("the download has no file {file}")))?;
             let files = [playable.video].into_iter().chain(playable.subtitles).collect();
             let streams = streams(ctx, id, &info.metainfo, files);

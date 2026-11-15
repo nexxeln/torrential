@@ -16,10 +16,12 @@ use crate::cast::{Cast, CastAction, CastRequest, TvList};
 use crate::catalog::{EpisodeInfo, TitleCard, TitleDetails, TitleId, VideoRef};
 use crate::device::DeviceList;
 use crate::error::Error;
-use crate::id::{ReleaseId, Target};
+use crate::error::Tried;
+use crate::id::ReleaseId;
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
-use crate::watching::{AttemptEvent, Next, Tried, Watched};
+use crate::target::Target;
+use crate::watching::{AttemptEvent, Next, Watched};
 
 /// How long the engine waits for a torrent's file list before it gives up.
 pub const METADATA_WAIT: Duration = Duration::from_secs(60);
