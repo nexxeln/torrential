@@ -38,7 +38,7 @@ pub fn run(command: Command, mode: Mode, env: &Env) -> u8 {
         Ok(exit) => exit,
         Err(error) => {
             print_error(mode, &error);
-            error.code.exit_code()
+            crate::exit::code(error.code)
         }
     }
 }

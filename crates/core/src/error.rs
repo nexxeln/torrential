@@ -5,10 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::release::SourceReport;
 use crate::watching::Tried;
 
-/// Exit code for a `wait` that hit its timeout while the download is still running.
-/// It is an observation, not an error, so it has no `ErrorCode`.
-pub const EXIT_PENDING: u8 = 8;
-
 crate::words! {
     /// Every failure torrential reports. The code is the contract; messages are for people.
     #[derive(Hash)]
@@ -45,44 +41,6 @@ crate::words! {
         /// Something only the machine running the engine may do, such as adding a device.
         LocalOnly = "local_only",
         Internal = "internal",
-    }
-}
-
-impl ErrorCode {
-    pub const fn exit_code(self) -> u8 {
-        match self {
-            Self::Internal => 1,
-            Self::Usage | Self::ConfirmationRequired => 2,
-            Self::InvalidRef | Self::InvalidTorrent | Self::NotFound | Self::AmbiguousRef => 3,
-            Self::JobConflict | Self::PathConflict => 4,
-            Self::ProvidersUnavailable | Self::MetadataTimeout | Self::NetworkUnavailable | Self::FetchFailed => 5,
-            Self::SandboxNetworkBlocked
-            | Self::SandboxWriteBlocked
-            | Self::DaemonUnavailable
-            | Self::DaemonVersion
-            | Self::StateCorrupt
-            | Self::NotPaired
-            | Self::LocalOnly => 6,
-            Self::DiskFull
-            | Self::TooLarge
-            | Self::NoSelection
-            | Self::StorageError
-            | Self::VerificationFailed
-            | Self::NoSource => 7,
-            Self::Interrupted => 130,
-        }
-    }
-
-    pub const fn retryable(self) -> bool {
-        matches!(
-            self,
-            Self::ProvidersUnavailable
-                | Self::MetadataTimeout
-                | Self::NetworkUnavailable
-                | Self::FetchFailed
-                | Self::DaemonUnavailable
-                | Self::Interrupted
-        )
     }
 }
 
@@ -190,16 +148,6 @@ mod tests {
             let json = serde_json::to_string(&code).unwrap();
             assert_eq!(json, format!("\"{}\"", code.as_str()));
         }
-    }
-
-    #[test]
-    fn exit_codes_follow_the_documented_classes() {
-        assert_eq!(ErrorCode::AmbiguousRef.exit_code(), 3);
-        assert_eq!(ErrorCode::PathConflict.exit_code(), 4);
-        assert_eq!(ErrorCode::ProvidersUnavailable.exit_code(), 5);
-        assert_eq!(ErrorCode::SandboxNetworkBlocked.exit_code(), 6);
-        assert_eq!(ErrorCode::DiskFull.exit_code(), 7);
-        assert!(ErrorCode::ALL.iter().all(|c| c.exit_code() != EXIT_PENDING));
     }
 
     #[test]

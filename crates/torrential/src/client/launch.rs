@@ -137,7 +137,7 @@ pub fn launch_stage(env: &Env) -> u8 {
         }
         Err(e) => {
             println!("{e}");
-            ErrorCode::DaemonUnavailable.exit_code()
+            crate::exit::code(ErrorCode::DaemonUnavailable)
         }
     }
 }

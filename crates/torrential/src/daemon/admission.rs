@@ -11,7 +11,7 @@ use super::files;
 use crate::disk::{Disk, Space, reserve};
 
 pub const GIB: u64 = 1024 * 1024 * 1024;
-const DEFAULT_MAX_SIZE: u64 = 50 * GIB;
+pub const DEFAULT_MAX_SIZE: u64 = 50 * GIB;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Plan {
