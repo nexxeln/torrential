@@ -100,7 +100,7 @@ export async function attempt(
   let now = beginning(request.video);
   let outcome: { started: Started; attempt: Attempt } | { error: ApiError; tried: Passed[]; attempt: Attempt } | null = null;
   try {
-    for await (const message of playTitle({ ...request, viewer: viewer() }, signal)) {
+    for await (const message of playTitle({ ...request, viewer: await viewer() }, signal)) {
       if (outcome) continue;
       if (message.type === "playing") {
         const started = { video: message.video, release: message.release, play: message.play, resumeAt: message.resume_at };

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::name;
-use crate::preferences::{Playback, Preferences, Screen};
+use crate::preferences::{Decoders, Playback, Preferences, Screen};
 use crate::quality::{Quality, Resolution};
 use crate::units::{format_limit, size_text};
 
@@ -47,6 +47,9 @@ const fn panel_target(width: u32, height: u32) -> Resolution {
 pub struct Viewer {
     pub screen: Resolution,
     pub playback: Playback,
+    /// How its browser decodes each codec, when it reported that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoders: Option<Decoders>,
 }
 
 /// CSS pixels across the shorter side below which a screen is a phone's. Phones measure 320
@@ -62,7 +65,7 @@ impl Viewer {
     pub fn measured(width: u32, height: u32, scale: f64, playback: Playback) -> Viewer {
         let phone = f64::from(width.min(height)) / scale < PHONE_BELOW;
         let screen = if phone { Screen::Phone.target() } else { panel_target(width, height) };
-        Viewer { screen, playback }
+        Viewer { screen, playback, decoders: None }
     }
 }
 
@@ -77,8 +80,15 @@ pub enum Player {
     #[default]
     External,
     /// A browser on this machine. It shows this machine's display, or the screen in config.yaml,
-    /// and plays what it decodes.
-    Browser { playback: Playback },
+    /// and plays what it decodes. On a machine with neither, as a server without a display, it
+    /// shows the screen it measured.
+    Browser {
+        playback: Playback,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        measured: Option<Resolution>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decoders: Option<Decoders>,
+    },
     /// A browser on another device, such as a phone or a TV: the screen and formats it reported.
     Device(Viewer),
 }
@@ -95,8 +105,24 @@ impl Player {
     /// What the player decodes, when it reported that.
     const fn decodes(self) -> Option<Playback> {
         match self {
-            Self::Browser { playback } | Self::Device(Viewer { playback, .. }) => Some(playback),
+            Self::Browser { playback, .. } | Self::Device(Viewer { playback, .. }) => Some(playback),
             Self::External => None,
+        }
+    }
+
+    /// How the player decodes each codec, when its browser reported that.
+    pub const fn decoders(self) -> Option<Decoders> {
+        match self {
+            Self::Browser { decoders, .. } | Self::Device(Viewer { decoders, .. }) => decoders,
+            Self::External => None,
+        }
+    }
+
+    /// The screen a browser on this machine measured, which counts only where nothing else says.
+    const fn measured(self) -> Option<Resolution> {
+        match self {
+            Self::Browser { measured, .. } => measured,
+            Self::External | Self::Device(_) => None,
         }
     }
 
@@ -279,15 +305,16 @@ pub struct Profile {
 
 impl Profile {
     /// The resolution ranking aims for: another device's screen, else the preferred screen's,
-    /// else the detected display's.
+    /// else the detected display's, else the screen a browser here measured.
     pub fn screen(&self) -> Option<Setting<Resolution>> {
         if let Some(screen) = self.player.screen() {
             return Some(Setting { value: screen, source: Source::Viewer });
         }
-        match (self.preferences.screen, self.display()) {
-            (Some(screen), _) => Some(Setting { value: screen.target(), source: Source::Override }),
-            (None, Some(display)) => Some(Setting { value: display.target(), source: Source::Detected }),
-            (None, None) => None,
+        match (self.preferences.screen, self.display(), self.player.measured()) {
+            (Some(screen), ..) => Some(Setting { value: screen.target(), source: Source::Override }),
+            (None, Some(display), _) => Some(Setting { value: display.target(), source: Source::Detected }),
+            (None, None, Some(measured)) => Some(Setting { value: measured, source: Source::Viewer }),
+            (None, None, None) => None,
         }
     }
 
@@ -461,6 +488,18 @@ mod tests {
     }
 
     #[test]
+    fn a_browser_here_shows_the_screen_it_measured_only_on_a_machine_without_a_display() {
+        let browser = Player::Browser { playback: Playback::Hevc, measured: Some(Resolution::Sd), decoders: None };
+        let read = |detected, preferences| {
+            Profile { player: browser, ..profile(detected, preferences) }.screen().map(|s| (s.value, s.source))
+        };
+        let tv = Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() };
+        assert_eq!(read(Some(server()), Preferences::default()), Some((Resolution::Sd, Source::Viewer)), "a server");
+        assert_eq!(read(Some(mac()), Preferences::default()), Some((Resolution::P1080, Source::Detected)), "this Mac");
+        assert_eq!(read(Some(server()), tv), Some((Resolution::P2160, Source::Override)), "a server set to a TV");
+    }
+
+    #[test]
     fn preferences_override_what_was_detected() {
         let tv = Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() };
         let h264 = Preferences { playback: Some(Playback::H264), ..Preferences::default() };
@@ -498,7 +537,7 @@ mod tests {
         let tv_h264 =
             Preferences { screen: Some(Screen::Tv4k), playback: Some(Playback::H264), ..Preferences::default() };
         let read = |p: Profile| (p.screen().map(|s| (s.value, s.source)), p.playback().map(|p| (p.value, p.source)));
-        let browser = |playback| Player::Browser { playback };
+        let browser = |playback| Player::Browser { playback, measured: None, decoders: None };
 
         assert_eq!(
             read(playing_in(Player::External, tv_h264)),

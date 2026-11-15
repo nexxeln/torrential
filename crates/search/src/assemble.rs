@@ -10,7 +10,7 @@ use torrential_core::{
 };
 
 use crate::classify;
-use crate::observation::{Identity, Observation, build_magnet};
+use crate::observation::{Identity, Observation, VideoFile, build_magnet};
 use crate::rank::{self, FAKE_MBPS};
 use crate::sources::{Failure, SourceMeta};
 use crate::terms::{Relevance, Terms};
@@ -137,6 +137,8 @@ pub(crate) struct Candidate {
     pub(crate) languages: Vec<Language>,
     /// Set only in a title's search, for a release of the wanted title.
     pub(crate) title: Option<TitleFit>,
+    /// The video files its catalog lists, in a title's search.
+    pub(crate) videos: Vec<VideoFile>,
 }
 
 /// How a release of the wanted title plays here. Its span is in `release.span`.
@@ -269,6 +271,7 @@ fn combine(id: ReleaseId, group: &[Sighting<'_>], terms: &Terms) -> Candidate {
         arches,
         languages,
         title: None,
+        videos: group.iter().map(|(_, o)| &o.videos).find(|videos| !videos.is_empty()).cloned().unwrap_or_default(),
     }
 }
 

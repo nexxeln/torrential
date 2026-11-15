@@ -199,13 +199,14 @@ impl Search {
                 scope: source.scope(),
                 text: terms.text().to_string(),
                 adult: query.adult,
+                title: query.wanted.is_some(),
             };
             let cached = if query.fresh { None } else { cache.answer(&key, std::time::Instant::now()) };
             async move {
                 if let Some(rows) = cached {
                     return (index, Run { source: source.meta.clone(), answer: Answer::Cached(rows), elapsed_ms: 0 });
                 }
-                let (answer, complete) = AssertUnwindSafe(self.inner.run(source, terms, query, deadline))
+                let (answer, complete) = AssertUnwindSafe(self.inner.run(source, terms, query, started, deadline))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| {
@@ -363,13 +364,22 @@ impl Inner {
             .collect()
     }
 
-    async fn run(&self, source: &Source, terms: &Terms, query: &SearchQuery, deadline: Instant) -> (Answer, bool) {
+    async fn run(
+        &self,
+        source: &Source,
+        terms: &Terms,
+        query: &SearchQuery,
+        started: Instant,
+        deadline: Instant,
+    ) -> (Answer, bool) {
         let ctx = Ctx {
             http: &self.http,
             stores: &self.stores,
             terms,
             adult: query.adult,
             fresh: query.fresh,
+            wanted: query.wanted.as_ref(),
+            started,
             deadline,
             partial: AtomicBool::new(false),
         };
@@ -429,6 +439,8 @@ pub async fn record(config: &SearchConfig, source: &str, query: &str) -> Result<
         terms: &terms,
         adult: false,
         fresh: true,
+        wanted: None,
+        started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(60),
         partial: AtomicBool::new(false),
     };

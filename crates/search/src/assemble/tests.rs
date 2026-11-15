@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use torrential_core::error::Details;
 use torrential_core::{
-    Arch, Category, Display, ErrorCode, Flag, Language, Machine, Os, Playback, Player, Preferences, Profile, Release,
-    ReleaseId, Screen, SearchQuery, Sort, SourceOutcome, SourceReport, Viewer,
+    Arch, Category, Codec, Decoders, Decoding, Display, ErrorCode, Flag, Language, Machine, Os, Playback, Player,
+    Preferences, Profile, Release, ReleaseId, Screen, SearchQuery, Sort, SourceOutcome, SourceReport, Viewer,
 };
 
 use super::*;
-use crate::observation::{Identity, Observation, Peers, infohash};
+use crate::observation::{Identity, Observation, Peers, VideoCodec, VideoFile, infohash};
 
 fn source(name: &str, authority: u16, lawful: bool, public: bool) -> Arc<SourceMeta> {
     Arc::new(SourceMeta { name: name.into(), authority, lawful, public })
@@ -930,6 +930,78 @@ fn a_remux_ranks_after_an_encode_in_its_band() {
 
 fn watching_on(width: u32, height: u32, scale: f64) -> Profile {
     Profile { player: Player::Device(Viewer::measured(width, height, scale, Playback::Hevc)), ..mac() }
+}
+
+/// An archive.org item of Night of the Living Dead with its video files, as `(extension, size,
+/// width, height)`.
+fn archived(byte: u8, videos: &[(&str, u64, u32, u32)]) -> Observation {
+    let mut o = video(byte, "Night of the Living Dead (1968)", None, videos.iter().map(|v| v.1).sum());
+    o.videos = videos
+        .iter()
+        .map(|&(extension, size, width, height)| {
+            let codec = match extension {
+                "mp4" => Some(VideoCodec::Modern(Codec::H264)),
+                "ogv" => Some(VideoCodec::Old),
+                _ => None,
+            };
+            VideoFile { name: format!("night.{extension}"), size, width, height, codec }
+        })
+        .collect();
+    o
+}
+
+#[test]
+fn a_browser_ranks_archive_org_items_by_the_picture_of_the_file_it_would_open() {
+    // The most downloaded item holds a 400x300 Ogg, which a browser cannot decode, and a 320x240 MP4.
+    let theater = archived(
+        0x70,
+        &[("mov", 286_303_405, 320, 240), ("ogv", 469_976_138, 400, 300), ("mp4", 416_743_288, 320, 240)],
+    );
+    let dvd = archived(0x71, &[("mp4", 550_635_511, 854, 480)]);
+    let restored = archived(0x72, &[("mp4", 1_902_907_166, 1024, 768)]);
+    let narrow = archived(0x75, &[("mp4", 598_000_000, 720, 480), ("ogv", 420_000_000, 450, 300)]);
+    let runs = [fresh(&archive(), vec![theater, narrow, dvd, restored])];
+    let night = night(Namesakes::Leading, 1968);
+    let order = |profile: Profile| {
+        let result = search(&for_title(&night, profile), &runs);
+        result.releases.iter().map(|r| r.id.to_ref()[..2].to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(order(watching_on(800, 600, 1.0)), ["71", "75", "70", "72"], "a headless browser's 800x600 screen");
+    let here =
+        Profile { player: Player::Browser { playback: Playback::Hevc, measured: None, decoders: None }, ..mac() };
+    assert_eq!(order(here), ["72", "71", "75", "70"], "this Mac's 1080p display shows the 1024x768 picture best");
+    assert_eq!(order(Profile { player: Player::External, ..mac() })[0], "72", "the player here opens the largest file");
+}
+
+#[test]
+fn a_browser_plays_what_it_decodes_in_hardware_then_in_software_then_old_codecs() {
+    let named = |byte: u8, codec: &str| {
+        video(byte, &format!("Night.of.the.Living.Dead.1968.1080p.WEB.{codec}"), Some(40), 3 * GB)
+    };
+    let runs =
+        [fresh(&knaben(), vec![named(0x80, "XviD"), named(0x81, "AV1"), named(0x82, "x265"), named(0x83, "x264")])];
+    let night = night(Namesakes::Leading, 1968);
+    let order = |profile: Profile| {
+        let result = search(&for_title(&night, profile), &runs);
+        result.releases.iter().map(|r| r.name.rsplit('.').next().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    let reported = Decoders { h264: Decoding::Software, hevc: Decoding::Hardware, av1: Decoding::No };
+    let browser = |decoders| Profile {
+        player: Player::Browser { playback: Playback::HevcHdr, measured: None, decoders },
+        ..mac()
+    };
+    assert_eq!(order(browser(Some(reported))), ["x265", "x264", "AV1", "XviD"]);
+    assert_eq!(order(browser(None))[3], "XviD", "a browser that reported nothing still meets XviD last");
+}
+
+#[test]
+fn a_browser_plays_an_mp4_before_an_ogg_with_the_same_picture() {
+    let ogg = archived(0x73, &[("ogv", 500_000_000, 640, 480), ("mp4", 200_000_000, 320, 240)]);
+    let mp4 = archived(0x74, &[("mp4", 500_000_000, 640, 480)]);
+    let runs = [fresh(&archive(), vec![ogg, mp4])];
+    let result = search(&for_title(&night(Namesakes::Leading, 1968), watching_on(1920, 1080, 1.0)), &runs);
+    let order: Vec<String> = result.releases.iter().map(|r| r.id.to_ref()[..2].to_string()).collect();
+    assert_eq!(order, ["74", "73"], "the Ogg's MP4 is too small to stand in for it");
 }
 
 #[test]

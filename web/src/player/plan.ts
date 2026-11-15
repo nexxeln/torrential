@@ -1,4 +1,4 @@
-import type { AudioTrack, MediaInfo, Playback, Viewer } from "../api";
+import type { AudioTrack, Decoders, Decoding, MediaInfo, Playback, Viewer } from "../api";
 
 /** How a file reaches the video element. */
 export type Plan =
@@ -47,9 +47,35 @@ export function plan(media: MediaInfo, audio: number | null, direct: boolean): P
 }
 
 /** The screen this page plays on and what this browser decodes, for the engine to rank a title's sources by. */
-export function viewer(): Viewer {
+export async function viewer(): Promise<Viewer> {
   const scale = devicePixelRatio;
-  return { width: Math.round(screen.width * scale), height: Math.round(screen.height * scale), scale, playback: playback() };
+  const measured = { width: Math.round(screen.width * scale), height: Math.round(screen.height * scale), scale, playback: playback() };
+  const decoders = await decoding();
+  return decoders ? { ...measured, decoders } : measured;
+}
+
+/** The codec strings this browser is asked about, one for each codec a release's name may give. */
+const PROBES: Record<keyof Decoders, string> = { h264: "avc1.640028", hevc: "hvc1.1.6.L120.90", av1: "av01.0.08M.08" };
+
+let asked: Promise<Decoders | undefined> | undefined;
+
+/** How this browser decodes each codec, asked once: in hardware where decoding a 1080p stream is power efficient. Undefined where the browser cannot say. */
+function decoding(): Promise<Decoders | undefined> {
+  asked ??= ask();
+  return asked;
+}
+
+async function ask(): Promise<Decoders | undefined> {
+  const capabilities = globalThis.navigator?.mediaCapabilities;
+  if (!capabilities) return undefined;
+  const one = async (codec: string): Promise<Decoding> => {
+    const video = { contentType: `video/mp4; codecs="${codec}"`, width: 1920, height: 1080, bitrate: 8_000_000, framerate: 24 };
+    const info = await capabilities.decodingInfo({ type: "media-source", video }).catch(() => null);
+    if (!info?.supported) return "no";
+    return info.powerEfficient ? "hardware" : "software";
+  };
+  const [h264, hevc, av1] = await Promise.all([one(PROBES.h264), one(PROBES.hevc), one(PROBES.av1)]);
+  return { h264, hevc, av1 };
 }
 
 function playback(): Playback {
