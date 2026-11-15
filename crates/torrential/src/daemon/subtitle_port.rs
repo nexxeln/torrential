@@ -3,9 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use torrential_core::Error;
-use torrential_search::subtitles::{Found, Online, Subtitle, SubtitleConfig, Video};
+use torrential_search::subtitles::{Found, Online, Subtitle, Video};
 
-use super::search_port::BoxFuture;
+use super::BoxFuture;
 
 pub trait SubtitlePort: Send + Sync {
     /// Subtitles for `video`. `None` when no source answered, so asking again can do better.
@@ -14,21 +14,13 @@ pub trait SubtitlePort: Send + Sync {
     fn fetch<'a>(&'a self, subtitle: &'a Subtitle) -> BoxFuture<'a, Result<Vec<u8>, Error>>;
 }
 
-pub struct Live(Online);
-
-impl Live {
-    pub fn new(config: &SubtitleConfig) -> Result<Self, Error> {
-        Online::new(config).map(Self)
-    }
-}
-
-impl SubtitlePort for Live {
+impl SubtitlePort for Online {
     fn find<'a>(&'a self, video: &'a Video) -> BoxFuture<'a, Option<Found>> {
-        Box::pin(self.0.find(video))
+        Box::pin(Online::find(self, video))
     }
 
     fn fetch<'a>(&'a self, subtitle: &'a Subtitle) -> BoxFuture<'a, Result<Vec<u8>, Error>> {
-        Box::pin(self.0.fetch(subtitle))
+        Box::pin(Online::fetch(self, subtitle))
     }
 }
 

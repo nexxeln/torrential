@@ -5,63 +5,9 @@ use std::time::Duration;
 
 use crate::log::log;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
-use torrential_core::text::sanitize;
-use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Slice, TorrentFile, TorrentId};
+use torrential_core::{Error, PieceMap, Slice, TorrentId};
 
-#[derive(Clone, PartialEq, Debug)]
-pub struct Metainfo {
-    pub info_hash: InfoHash,
-    pub name: String,
-    pub files: Vec<MetaFile>,
-    pub single_file: bool,
-    pub bytes: Vec<u8>,
-    checked: (),
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MetaFile {
-    pub path: String,
-    pub size: u64,
-}
-
-impl Metainfo {
-    pub fn new(
-        info_hash: InfoHash,
-        name: String,
-        files: Vec<MetaFile>,
-        single_file: bool,
-        bytes: Vec<u8>,
-    ) -> Result<Self, Error> {
-        let escapes = |p: &str| p.is_empty() || p.starts_with('/') || p.split('/').any(|c| c == ".." || c.is_empty());
-        if escapes(&name) || name.contains('/') || files.iter().any(|f| escapes(&f.path)) {
-            return Err(Error::new(ErrorCode::InvalidTorrent, "the torrent has a file path outside its own folder")
-                .with_hint("this torrent is malformed or malicious; do not download it"));
-        }
-        Ok(Self { info_hash, name, files, single_file, bytes, checked: () })
-    }
-
-    pub fn total(&self) -> u64 {
-        self.files.iter().map(|f| f.size).sum()
-    }
-
-    /// Its files with sanitized paths, nothing selected and nothing verified, for choosing what
-    /// to play.
-    pub fn listing(&self) -> Vec<TorrentFile> {
-        (0..)
-            .zip(&self.files)
-            .map(|(index, f)| TorrentFile {
-                index,
-                path: sanitize(&f.path),
-                size: f.size,
-                selected: false,
-                verified: 0,
-                risk: None,
-            })
-            .collect()
-    }
-}
-
-pub type ParseTorrent = fn(&[u8]) -> Result<Metainfo, Error>;
+use super::metainfo::Metainfo;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum AddSource {
@@ -146,6 +92,7 @@ pub enum EngineEvent {
     },
 }
 
+/// What the engine does to downloads, on the engine thread.
 pub trait EnginePort: Send {
     fn add(&mut self, torrent: AddTorrent) -> Result<(), Error>;
     fn select(&mut self, id: TorrentId, wanted: &[bool]) -> Result<(), Error>;
@@ -165,76 +112,81 @@ pub trait EnginePort: Send {
     fn stream(&mut self, id: TorrentId) -> Result<(), Error>;
     /// Caps how fast a download goes, in bytes a second. `None` lifts the cap.
     fn limit(&mut self, id: TorrentId, rate: Option<NonZeroU32>) -> Result<(), Error>;
+    /// Adds web seeds that serve every file of a download the engine has. One it no longer has
+    /// gets none.
+    fn add_web_seeds(&mut self, id: TorrentId, seeds: &[String]);
+}
+
+/// What the engine thread runs: the port each request acts on, and the events it waits for.
+pub trait Engine: Send {
+    fn port(&mut self) -> &mut dyn EnginePort;
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent>;
 }
 
-pub enum EngineCommand {
-    Add(AddTorrent),
-    Select(TorrentId, Vec<bool>),
-    Pause(TorrentId),
-    Resume(TorrentId),
-    Recheck(TorrentId),
-    SaveResume(TorrentId),
-    SaveResumeIfProgressed(TorrentId),
-    Remove(TorrentId),
-    FileProgress(TorrentId, oneshot::Sender<Result<Vec<u64>, Error>>),
-    WantRange(TorrentId, u32, u64, u64, oneshot::Sender<Result<bool, Error>>),
-    Written(TorrentId, u32, u64, u64, u32, oneshot::Sender<Result<Vec<Slice>, Error>>),
-    Stream(TorrentId),
-    Limit(TorrentId, Option<NonZeroU32>),
-}
+type Request = Box<dyn FnOnce(&mut dyn EnginePort) -> Option<EngineEvent> + Send>;
 
 #[derive(Clone)]
 pub struct EngineHandle {
-    commands: mpsc::Sender<EngineCommand>,
+    requests: mpsc::Sender<Request>,
 }
 
 impl EngineHandle {
-    pub fn send(&self, command: EngineCommand) {
-        let _ = self.commands.send(command);
+    /// Has the engine do `act`, whatever comes of it.
+    pub fn run(&self, act: impl FnOnce(&mut dyn EnginePort) + Send + 'static) {
+        self.push(Box::new(move |port| {
+            act(port);
+            None
+        }));
     }
 
-    pub async fn file_progress(&self, id: TorrentId) -> Result<Vec<u64>, Error> {
-        self.ask(|reply| EngineCommand::FileProgress(id, reply)).await
+    /// Has the engine do `act` to download `id`. A failure stops that download with the error.
+    pub fn send(&self, id: TorrentId, act: impl FnOnce(&mut dyn EnginePort) -> Result<(), Error> + Send + 'static) {
+        self.push(Box::new(move |port| act(port).err().map(|error| EngineEvent::Failed { id, error })));
     }
 
-    pub async fn want_range(&self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
-        self.ask(|reply| EngineCommand::WantRange(id, file, offset, length, reply)).await
-    }
-
-    pub async fn written(
+    /// Asks the engine something, and waits for the answer.
+    pub async fn ask<T: Send + 'static>(
         &self,
-        id: TorrentId,
-        file: u32,
-        offset: u64,
-        length: u64,
-        runs: u32,
-    ) -> Result<Vec<Slice>, Error> {
-        self.ask(|reply| EngineCommand::Written(id, file, offset, length, runs, reply)).await
+        ask: impl FnOnce(&mut dyn EnginePort) -> Result<T, Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let (reply, answer) = oneshot::channel();
+        self.push(Box::new(move |port| {
+            let _ = reply.send(ask(port));
+            None
+        }));
+        answer.await.map_err(|_| Error::internal("the engine thread stopped"))?
     }
 
-    async fn ask<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> EngineCommand) -> Result<T, Error> {
-        let (reply, answer) = oneshot::channel();
-        self.send(make(reply));
-        answer.await.map_err(|_| Error::internal("the engine thread stopped"))?
+    /// Changes how fast `id` downloads. A limit the engine cannot set leaves the download running
+    /// as it was, not failed.
+    pub fn limit(&self, id: TorrentId, rate: Option<NonZeroU32>) {
+        self.run(move |port| {
+            if let Err(error) = port.limit(id, rate) {
+                log(&format!("cannot change how fast {id} downloads: {}", error.message));
+            }
+        });
+    }
+
+    fn push(&self, request: Request) {
+        let _ = self.requests.send(request);
     }
 }
 
 const POLL: Duration = Duration::from_millis(50);
 
 pub fn spawn(
-    mut port: Box<dyn EnginePort>,
+    mut engine: Box<dyn Engine>,
     events: tokio_mpsc::UnboundedSender<EngineEvent>,
 ) -> (EngineHandle, std::thread::JoinHandle<()>) {
-    let (commands, inbox) = mpsc::channel::<EngineCommand>();
+    let (requests, inbox) = mpsc::channel::<Request>();
     let thread = std::thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
             loop {
                 loop {
                     match inbox.try_recv() {
-                        Ok(command) => {
-                            if let Some(event) = apply(port.as_mut(), command) {
+                        Ok(request) => {
+                            if let Some(event) = request(engine.port()) {
                                 let _ = events.send(event);
                             }
                         }
@@ -242,7 +194,7 @@ pub fn spawn(
                         Err(mpsc::TryRecvError::Disconnected) => return,
                     }
                 }
-                for event in port.poll(POLL) {
+                for event in engine.poll(POLL) {
                     if events.send(event).is_err() {
                         return;
                     }
@@ -250,59 +202,5 @@ pub fn spawn(
             }
         })
         .expect("spawning the engine thread");
-    (EngineHandle { commands }, thread)
-}
-
-fn apply(port: &mut dyn EnginePort, command: EngineCommand) -> Option<EngineEvent> {
-    let (id, result) = match command {
-        EngineCommand::Add(torrent) => (torrent.id, port.add(torrent)),
-        EngineCommand::Select(id, wanted) => (id, port.select(id, &wanted)),
-        EngineCommand::Pause(id) => (id, port.pause(id)),
-        EngineCommand::Resume(id) => (id, port.resume(id)),
-        EngineCommand::Recheck(id) => (id, port.recheck(id)),
-        EngineCommand::SaveResume(id) => (id, port.save_resume_data(id)),
-        EngineCommand::SaveResumeIfProgressed(id) => (id, port.save_resume_data_if_progressed(id)),
-        EngineCommand::Remove(id) => (id, port.remove(id)),
-        EngineCommand::Stream(id) => (id, port.stream(id)),
-        EngineCommand::Limit(id, rate) => {
-            // A limit the engine cannot set leaves the download running as it was, not failed.
-            if let Err(error) = port.limit(id, rate) {
-                log(&format!("cannot change how fast {id} downloads: {}", error.message));
-            }
-            return None;
-        }
-        EngineCommand::FileProgress(id, reply) => {
-            let _ = reply.send(port.file_progress(id));
-            return None;
-        }
-        EngineCommand::WantRange(id, file, offset, length, reply) => {
-            let _ = reply.send(port.want_range(id, file, offset, length));
-            return None;
-        }
-        EngineCommand::Written(id, file, offset, length, runs, reply) => {
-            let _ = reply.send(port.written(id, file, offset, length, runs));
-            return None;
-        }
-    };
-    result.err().map(|error| EngineEvent::Failed { id, error })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::daemon::fake;
-
-    #[test]
-    fn paths_that_leave_the_folder_are_refused() {
-        let with = |name: &str, path: &str| {
-            fake::TorrentFile { info_hash: InfoHash::V1([1; 20]), name: name.into(), files: vec![(path.into(), 1)] }
-                .metainfo()
-        };
-        assert_eq!(with("set", "a/b.mkv").unwrap().files[0].path, "a/b.mkv");
-        for (name, path) in
-            [("set", "../etc/passwd"), ("set", "/etc/passwd"), ("..", "a"), ("a/b", "c"), ("set", "a//b")]
-        {
-            assert_eq!(with(name, path).unwrap_err().code, ErrorCode::InvalidTorrent, "{name} {path}");
-        }
-    }
+    (EngineHandle { requests }, thread)
 }

@@ -2,16 +2,13 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use torrential_core::{Error, ErrorCode, InfoHash, PieceMap, Slice, TorrentId};
 use torrential_engine as lt;
 
-use super::engine_port::{
-    Activity, AddSource, AddTorrent, EngineEvent, EnginePort, MetaFile, Metainfo, Missing, Stats,
-};
-use super::search_port::{BoxFuture, SearchPort};
+use super::engine_port::{Activity, AddSource, AddTorrent, Engine, EngineEvent, EnginePort, Missing, Stats};
+use super::metainfo::{MetaFile, Metainfo};
 use crate::fsutil::write_atomic;
 use crate::log::log;
 
@@ -42,27 +39,8 @@ pub struct Libtorrent {
     /// libtorrent reports a bootstrap for each listen socket.
     dht_bootstrapped: bool,
     peers: Vec<SocketAddr>,
-    mirrors: Mirrors,
     stats_at: Instant,
     dht_saved_at: Instant,
-}
-
-type Found = (TorrentId, Result<Vec<String>, Error>);
-
-struct Mirrors {
-    search: Arc<dyn SearchPort>,
-    runtime: tokio::runtime::Handle,
-    sender: mpsc::Sender<Found>,
-    found: mpsc::Receiver<Found>,
-}
-
-impl Mirrors {
-    fn spawn(&self, id: TorrentId, lookup: BoxFuture<'static, Result<Vec<String>, Error>>) {
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let _ = sender.send((id, lookup.await));
-        });
-    }
 }
 
 #[derive(Default)]
@@ -91,12 +69,7 @@ enum Check {
 }
 
 impl Libtorrent {
-    pub fn start(
-        state: &Path,
-        network: Network,
-        search: Arc<dyn SearchPort>,
-        runtime: tokio::runtime::Handle,
-    ) -> Result<Self, Error> {
+    pub fn start(state: &Path, network: Network) -> Result<Self, Error> {
         let ip = match network {
             Network::Public => Ipv4Addr::UNSPECIFIED,
             Network::Loopback { .. } => Ipv4Addr::LOCALHOST,
@@ -118,7 +91,6 @@ impl Libtorrent {
         }
         .map_err(|e| Error::internal(format!("libtorrent did not start: {e}")))?;
         let now = Instant::now();
-        let (sender, found) = mpsc::channel();
         Ok(Self {
             session,
             torrents: BTreeMap::new(),
@@ -127,7 +99,6 @@ impl Libtorrent {
             dht_state,
             dht_bootstrapped: false,
             peers,
-            mirrors: Mirrors { search, runtime, sender, found },
             stats_at: now,
             dht_saved_at: now,
         })
@@ -260,21 +231,6 @@ impl Libtorrent {
                 _,
             ) => {}
             (_, None) => {}
-        }
-    }
-
-    fn mirrors_found(&mut self, id: TorrentId, found: Result<Vec<String>, Error>) {
-        match found {
-            Ok(seeds) if !seeds.is_empty() && self.torrents.contains_key(&id) => {
-                for seed in &seeds {
-                    if let Err(e) = self.session.add_web_seed(id, seed) {
-                        log(&format!("{} cannot add the web seed {seed}: {e}", short(id)));
-                    }
-                }
-                log(&format!("{} also downloads from {}", short(id), seeds.join(", ")));
-            }
-            Ok(_) => {}
-            Err(error) => log(&format!("{} keeps the torrent's own web seeds: {}", short(id), error.message)),
         }
     }
 
@@ -411,17 +367,9 @@ impl EnginePort for Libtorrent {
                 lt::TorrentSource::Metainfo(lt::Metainfo::from_bytes(bytes).map_err(engine_error)?)
             }
         };
-        let (files, mirrors) = match &fallback {
-            lt::TorrentSource::Metainfo(m) => {
-                // libtorrent follows the redirect of a torrent's only file to a seed that has all
-                // of it.
-                let file = match m.files() {
-                    [first, _, ..] => Some(first.path.as_path()),
-                    _ => None,
-                };
-                (Some(file_indices(m)), self.mirrors.search.mirrors(m.name(), file, m.web_seeds()))
-            }
-            _ => (None, None),
+        let files = match &fallback {
+            lt::TorrentSource::Metainfo(m) => Some(file_indices(m)),
+            _ => None,
         };
         let source = match resume_data.map(lt::ResumeData::from_bytes) {
             Some(Ok(resume)) => lt::TorrentSource::Resume(resume),
@@ -445,9 +393,6 @@ impl EnginePort for Libtorrent {
             return Err(Error::internal(format!("the engine already has torrent {id}")));
         }
         self.torrents.insert(id, Torrent { files, wanted, ..Torrent::default() });
-        if let Some(lookup) = mirrors {
-            self.mirrors.spawn(id, lookup);
-        }
         Ok(())
     }
 
@@ -540,15 +485,29 @@ impl EnginePort for Libtorrent {
         self.session.set_download_limit(id, rate).map_err(engine_error)
     }
 
+    fn add_web_seeds(&mut self, id: TorrentId, seeds: &[String]) {
+        if !self.torrents.contains_key(&id) {
+            return;
+        }
+        for seed in seeds {
+            if let Err(e) = self.session.add_web_seed(id, seed) {
+                log(&format!("{} cannot add the web seed {seed}: {e}", short(id)));
+            }
+        }
+        log(&format!("{} also downloads from {}", short(id), seeds.join(", ")));
+    }
+}
+
+impl Engine for Libtorrent {
+    fn port(&mut self) -> &mut dyn EnginePort {
+        self
+    }
+
     fn poll(&mut self, max_wait: Duration) -> Vec<EngineEvent> {
         let wait = if self.events.is_empty() { max_wait } else { Duration::ZERO };
         match self.session.wait_alerts(wait) {
             Ok(alerts) => alerts.into_iter().for_each(|alert| self.alert(alert)),
             Err(e) => log(&format!("cannot read libtorrent alerts: {e}")),
-        }
-        let answered: Vec<Found> = self.mirrors.found.try_iter().collect();
-        for (id, found) in answered {
-            self.mirrors_found(id, found);
         }
         if self.stats_at.elapsed() >= STATS_EVERY {
             self.stats_at = Instant::now();
@@ -621,7 +580,8 @@ fn metainfo(m: lt::Metainfo) -> Result<Metainfo, Error> {
         })?;
         files.push(MetaFile { path: path.to_string(), size: f.size });
     }
-    Metainfo::new(m.info_hash(), name, files, single_file, m.into_bytes())
+    let web_seeds = m.web_seeds().to_vec();
+    Ok(Metainfo::new(m.info_hash(), name, files, single_file, m.into_bytes())?.with_web_seeds(web_seeds))
 }
 
 fn file_indices(m: &lt::Metainfo) -> Vec<lt::FileIndex> {

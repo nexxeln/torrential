@@ -106,7 +106,8 @@ pub async fn pieces(ctx: &Ctx, id: TorrentId, index: u32) -> Result<String, Erro
     if file.complete || file.size == 0 {
         return Ok("8".repeat(RUNS as usize));
     }
-    let runs = match ctx.engine.written(id, index, 0, file.size, RUNS).await {
+    let size = file.size;
+    let runs = match ctx.engine.ask(move |e| e.written(id, index, 0, size, RUNS)).await {
         Ok(runs) => runs,
         // The engine does not hold a download that just finished, one that is stopped, or one that
         // has not started yet.

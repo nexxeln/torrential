@@ -6,7 +6,8 @@ use tokio::sync::{mpsc, oneshot};
 use torrential_core::{Error, ErrorCode, Preferences};
 
 use super::detector::Detector;
-use super::engine_port::{EngineHandle, ParseTorrent};
+use super::engine_port::EngineHandle;
+use super::metainfo::ParseTorrent;
 use super::owner::{Command, Reply};
 use super::search_port::SearchPort;
 

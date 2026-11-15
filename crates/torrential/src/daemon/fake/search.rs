@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,7 +8,8 @@ use torrential_core::{
 };
 use torrential_search::rank;
 
-use crate::daemon::search_port::{BoxFuture, Progress, RankFor, SavedLink, SearchPort};
+use crate::daemon::BoxFuture;
+use crate::daemon::search_port::{Progress, RankFor, SavedLink, SearchPort};
 
 /// A search that answers from a fixed catalog, each source after its own delay.
 #[derive(Clone, Default)]
@@ -139,14 +139,6 @@ fn compose(
 }
 
 impl SearchPort for Search {
-    fn search<'a>(&'a self, query: SearchQuery, rank_for: RankFor<'a>) -> BoxFuture<'a, Result<SearchResult, Error>> {
-        Box::pin(async move {
-            let (catalog, script, delay) = self.parts();
-            tokio::time::sleep(delay).await;
-            Ok(self.remember(compose(&catalog, &script, query, rank_for(), delay)))
-        })
-    }
-
     fn search_stream<'a>(
         &'a self,
         query: SearchQuery,
@@ -154,11 +146,13 @@ impl SearchPort for Search {
         progress: mpsc::UnboundedSender<Progress>,
     ) -> BoxFuture<'a, Result<SearchResult, Error>> {
         Box::pin(async move {
-            let (catalog, script, _) = self.parts();
+            let (catalog, script, delay) = self.parts();
+            tokio::time::sleep(delay).await;
             let started = tokio::time::Instant::now();
             for answered in 1..script.len() {
                 tokio::time::sleep_until(started + script[answered - 1].after).await;
-                let partial = compose(&catalog, &script[..answered], query.clone(), rank_for(), started.elapsed());
+                let partial =
+                    compose(&catalog, &script[..answered], query.clone(), rank_for(), delay + started.elapsed());
                 let result = self.remember(partial);
                 let pending = script[answered..].iter().map(|s| s.name.clone()).collect();
                 let _ = progress.send(Progress { result, pending });
@@ -166,7 +160,7 @@ impl SearchPort for Search {
             if let Some(last) = script.last() {
                 tokio::time::sleep_until(started + last.after).await;
             }
-            Ok(self.remember(compose(&catalog, &script, query, rank_for(), started.elapsed())))
+            Ok(self.remember(compose(&catalog, &script, query, rank_for(), delay + started.elapsed())))
         })
     }
 
@@ -177,15 +171,6 @@ impl SearchPort for Search {
                     .with_hint("try the magnet link instead")
             })
         })
-    }
-
-    fn mirrors(
-        &self,
-        _: &str,
-        _: Option<&Path>,
-        _: &[String],
-    ) -> Option<BoxFuture<'static, Result<Vec<String>, Error>>> {
-        None
     }
 
     fn find(&self, prefix: &HexPrefix) -> Vec<Release> {

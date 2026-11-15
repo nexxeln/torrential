@@ -8,7 +8,7 @@ use torrential_core::title::{Episode, Namesakes, Wanted, normalized};
 use torrential_core::{Art, ArtKind, EpisodeInfo, Error, ErrorCode, Kind, Season, TitleCard, TitleDetails, TitleId};
 use torrential_search::catalog::{Catalog, CatalogConfig, ImageFormat, Picture};
 
-use super::super::search_port::BoxFuture;
+use super::super::BoxFuture;
 
 pub trait CatalogPort: Send + Sync {
     /// False when config.yaml turns title lookups off. The catalog then answers only from what it

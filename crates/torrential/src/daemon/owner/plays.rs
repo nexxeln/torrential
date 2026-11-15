@@ -12,7 +12,6 @@ use torrential_core::{Error, TorrentId};
 
 use super::super::admission;
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
-use super::super::engine_port::EngineCommand;
 use super::super::files;
 use super::deleter::{Deleter, Doom, InUse};
 use super::{Finish, Owner, Reply, Shelving, now};
@@ -414,7 +413,7 @@ impl Owner {
             let Some(job) = self.jobs.get_mut(&id) else { continue };
             if job.observed.in_engine() {
                 job.observed = Observed::Absent;
-                self.engine.send(EngineCommand::Remove(id));
+                self.engine.send(id, move |e| e.remove(id));
                 self.draining.insert(id);
                 for pause in &mut self.pauses {
                     pause.waiting.remove(&id);

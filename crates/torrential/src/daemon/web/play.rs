@@ -10,7 +10,7 @@ use torrential_core::{Error, ErrorCode, Job, Target, TorrentFile, TorrentId};
 
 use super::super::ctx::Ctx;
 use super::super::downloads::{self, Served, served};
-use super::super::engine_port::Metainfo;
+use super::super::metainfo::Metainfo;
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
 use torrential_core::protocol::METADATA_WAIT;

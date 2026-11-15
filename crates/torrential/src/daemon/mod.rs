@@ -12,6 +12,7 @@ pub mod files;
 pub mod http;
 pub mod libtorrent;
 pub mod magnet;
+pub mod metainfo;
 pub mod owner;
 pub mod playing;
 pub mod resolve;
@@ -49,8 +50,9 @@ use crate::update;
 use ctx::{Ctx, OwnerHandle};
 use db::Db;
 use detector::Detector;
-use engine_port::{EnginePort, ParseTorrent};
+use engine_port::Engine;
 use libtorrent::{Libtorrent, Network};
+use metainfo::ParseTorrent;
 use owner::{Ended, Owner, OwnerConfig};
 use search_port::SearchPort;
 use store::Store;
@@ -60,8 +62,13 @@ const SAVE_RESUME_EVERY: Duration = Duration::from_secs(5 * 60);
 const STALL_AFTER: Duration = Duration::from_secs(20 * 60);
 pub const MAX_ACTIVE: usize = 3;
 
+/// A future the daemon's ports return, boxed so a trait object can name it.
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 pub struct Ports {
-    pub engine: Box<dyn EnginePort>,
+    pub engine: Box<dyn Engine>,
+    /// Looks up web seeds for the torrents the engine downloads.
+    pub web_seeds: torrential_search::WebSeeds,
     pub parse: ParseTorrent,
     pub search: Arc<dyn SearchPort>,
     pub disk: Box<dyn Disk>,
@@ -77,7 +84,7 @@ pub struct Ports {
 }
 
 impl Ports {
-    fn from_env(env: &Env, paths: &Paths, settings: &Config, runtime: &tokio::runtime::Handle) -> Result<Self, Error> {
+    fn from_env(env: &Env, paths: &Paths, settings: &Config) -> Result<Self, Error> {
         let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> = Arc::new(move || {
             let read = crate::config::preferences(&config);
@@ -92,7 +99,7 @@ impl Ports {
         let subtitles: Arc<dyn subtitle_port::SubtitlePort> = if fake(hooks::SUBTITLES) {
             Arc::new(subtitle_port::Fake::default())
         } else {
-            Arc::new(subtitle_port::Live::new(&settings.subtitles)?)
+            Arc::new(torrential_search::subtitles::Online::new(&settings.subtitles)?)
         };
         let catalog: Arc<dyn titles::catalog_port::CatalogPort> = if fake(hooks::CATALOG) {
             Arc::new(titles::catalog_port::Fake::default())
@@ -115,6 +122,8 @@ impl Ports {
             }
             return Ok(Self {
                 engine: Box::new(fake::Engine::new(swarm)),
+                // The fake engine's torrents list no web seeds, so nothing is looked up.
+                web_seeds: torrential_search::WebSeeds::new(&torrential_search::SearchConfig::default())?,
                 parse: fake::parse,
                 search: Arc::new(fake::fixture::search(torrential_core::time::now())),
                 disk: Box::new(crate::disk::RoomyDisk),
@@ -136,9 +145,13 @@ impl Ports {
         };
         let search =
             torrential_search::SearchConfig { cache_dir: Some(paths.cache.join("search")), ..settings.search.clone() };
-        let search: Arc<dyn SearchPort> = Arc::new(search_port::Live::new(&search)?);
+        let search = torrential_search::Search::new(&search, torrential_search::ResultCache::new())?;
+        // The engine's web-seed lookups share the search's, so servers asked for with a `.torrent` are not asked again.
+        let web_seeds = search.web_seeds();
+        let search: Arc<dyn SearchPort> = Arc::new(search);
         Ok(Self {
-            engine: Box::new(Libtorrent::start(&paths.state, network, search.clone(), runtime.clone())?),
+            engine: Box::new(Libtorrent::start(&paths.state, network)?),
+            web_seeds,
             search,
             parse: libtorrent::parse,
             disk: disk(),
@@ -202,7 +215,16 @@ pub fn start(
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
     let playing = playing::Playing::new();
-    let owner = Owner::new(store, shelf.clone(), engine.clone(), ports.parse, ports.disk, playing.clone(), config)?;
+    let owner = Owner::new(
+        store,
+        shelf.clone(),
+        engine.clone(),
+        ports.web_seeds,
+        ports.parse,
+        ports.disk,
+        playing.clone(),
+        config,
+    )?;
     let (commands_tx, commands) = mpsc::unbounded_channel();
     let task = runtime.spawn(owner.run(commands, events));
     let ctx = Arc::new_cyclic(|ctx| Ctx {
@@ -343,7 +365,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         .build()
         .map_err(|e| Error::internal(format!("cannot start the async runtime: {e}")))?;
     let version = env.version();
-    let ports = Ports::from_env(env, paths, &settings, runtime.handle())?;
+    let ports = Ports::from_env(env, paths, &settings)?;
     let (engine, ended) = runtime.block_on(async {
         let socket = paths.socket();
         let _ = std::fs::remove_file(&socket);
