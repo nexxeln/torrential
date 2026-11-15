@@ -19,7 +19,7 @@ use super::super::cast::Find;
 use super::super::devices::names::Names;
 use super::super::search_port::{self, FakeSource};
 use super::super::web::ffmpeg::Tools;
-use super::devices::listening;
+use super::devices::{listening, squatter};
 use super::titles::listed;
 use super::web::{magnet_link, post};
 use super::{GIB, Harness, MIB, Outside, prefix, torrent, written};
@@ -1063,4 +1063,44 @@ async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest
         )
     );
     assert_eq!(tv.actions(), ["GetProtocolInfo"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cast_never_gives_the_tv_an_address_where_another_program_answers() {
+    let Some(ip) = lan() else { return };
+    let tv = FakeTv::start(ip, SINK).await;
+    let h = harness(&tv, search_port::Fake::new(Vec::new()));
+    let film = torrent(98, "Night", &[("Night.mkv", 2 * MIB)]);
+    written(&h.downloads().join("Night/Night.mkv"), 2 * MIB);
+    h.swarm.set_rate(100 * GIB);
+    h.get(h.torrent_file(&film), &[]).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    let port = h.running.ctx.http_port;
+    let squatter = squatter(ip, port);
+    squatter.set_nonblocking(true).unwrap();
+    let squatter = tokio::net::TcpListener::from_std(squatter).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = squatter.accept().await {
+            tokio::spawn(async move {
+                while request(&mut stream).await.is_some() {
+                    let ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok";
+                    if stream.write_all(ok.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let error = cast(&h, by_hand(Target::Prefix(prefix(&film)))).await.unwrap_err();
+    assert_eq!(
+        (error.code, error.message),
+        (
+            ErrorCode::NetworkUnavailable,
+            format!(
+                "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
+            )
+        )
+    );
+    assert_eq!(tv.actions(), ["GetProtocolInfo"], "the TV is never told to play from the other program");
 }
