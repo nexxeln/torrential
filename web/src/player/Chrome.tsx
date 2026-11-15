@@ -9,8 +9,26 @@ import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { usePlayer } from "./context";
 import type { Fetching } from "./ffmpeg";
-import type { Heading } from "./Playback";
 import { useVideo } from "./video";
+
+/** A name for what plays, over the picture. */
+export interface Heading {
+  title: string;
+  /** Under the title: an episode's number and name, a film's year, or a release's tags. */
+  detail: string | null;
+}
+
+/**
+ * A release by its name, and by `file` when the torrent has several videos. A file of a season reads as the show over
+ * the episode. A single film reads as its title over its tags.
+ */
+export function releaseHeading(name: string, file: string | null): Heading {
+  const release = readable(name);
+  const own = file ? readable(file) : null;
+  const whole = own ? `${own.title} ${own.tags}`.trim() : null;
+  const episode = whole && whole.startsWith(release.title) ? whole.slice(release.title.length).trim() : whole;
+  return { title: release.title, detail: episode || release.tags || null };
+}
 
 /** How the download is doing, in a few words. Nothing once it is done. */
 export function Readout({ job }: { job: Job }) {
@@ -50,26 +68,17 @@ export function PlayingReadout({ play }: { play: PlayInfo }) {
 }
 
 interface TopBarProps {
-  /** The release name, once known. */
-  name: string | null;
-  /** A title's own name, which takes the place of the release name. */
-  heading?: Heading | null;
-  /** The file's name, when the torrent has several videos. */
-  file: string | null;
+  /** What plays, once known. */
+  heading: Heading | null;
   /** How the download is doing, at the right. */
   readout?: ReactNode;
   onBack: () => void;
 }
 
 /** The title at the top left, over a scrim, with the way back and the download's state. */
-export function TopBar({ name, heading, file, readout, onBack }: TopBarProps) {
-  const release = name ? readable(name) : null;
-  const own = file ? readable(file) : null;
-  // A file of a season reads as the show over the episode. A single film reads as its title over its tags.
-  const whole = own ? `${own.title} ${own.tags}`.trim() : null;
-  const episode = whole && release && whole.startsWith(release.title) ? whole.slice(release.title.length).trim() : whole;
-  const title = heading?.title ?? release?.title;
-  const under = heading ? heading.detail : episode || release?.tags;
+export function TopBar({ heading, readout, onBack }: TopBarProps) {
+  const title = heading?.title;
+  const under = heading?.detail;
   return (
     <header className="flex items-start gap-2 bg-linear-to-b from-black/80 via-black/40 to-transparent pt-(--edge-top) pr-(--edge-right) pb-16 pl-(--edge-left)">
       <button
@@ -90,10 +99,48 @@ export function TopBar({ name, heading, file, readout, onBack }: TopBarProps) {
   );
 }
 
-const STEPS = [
-  { title: "Finding the files", detail: "Asking peers what is in this torrent. With few peers this can take up to a minute." },
+/** One step toward playing. */
+export interface Step {
+  title: string;
+  /** Said under the step while it runs. */
+  detail: ReactNode;
+}
+
+/** The steps toward the first frame: those done, the one running, and those to come. */
+export function Steps({ steps, step }: { steps: Step[]; step: number }) {
+  return (
+    <ol role="list" aria-label="Starting" className="flex flex-col gap-3">
+      {steps.map((stage, at) => (
+        <li
+          key={at}
+          aria-current={at === step ? "step" : undefined}
+          data-state={at < step ? "done" : at === step ? "now" : "next"}
+          className="group/step flex items-start gap-3 text-base text-pencil data-[state=done]:text-soft data-[state=now]:text-ink"
+        >
+          <div className="flex h-lh w-5 shrink-0 items-center justify-center">
+            {at < step && <CheckIcon className="size-4 fill-action" />}
+            {at === step && <Spinner className="size-4 text-ink" />}
+            {at > step && <div className="size-1.5 rounded-full bg-rule" />}
+          </div>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <p className="group-data-[state=now]/step:font-medium">{stage.title}</p>
+            {at === step && stage.detail && <p className="max-w-[52ch] text-sm text-pretty text-pencil tabular-nums">{stage.detail}</p>}
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Reading a video once it downloads, then buffering it: the last two steps of every play. */
+export const READING: Step[] = [
   { title: "Reading the video", detail: "Downloading its first pieces to see what is inside." },
   { title: "Getting ready to play", detail: "Buffering the first seconds." },
+];
+
+const STEPS: Step[] = [
+  { title: "Finding the files", detail: "Asking peers what is in this torrent. With few peers this can take up to a minute." },
+  ...READING,
 ];
 
 interface StartingProps {
@@ -104,7 +151,7 @@ interface StartingProps {
   readout: ReactNode;
 }
 
-/** The screen before the first frame: what is being played, and which step toward playing is running. */
+/** The screen before the first frame of a torrent's video: what is being played, and which step toward playing is running. */
 export function Starting({ step, name, readout }: StartingProps) {
   const release = name ? readable(name) : null;
   return (
@@ -116,26 +163,7 @@ export function Starting({ step, name, readout }: StartingProps) {
             {release.tags && <p className="text-sm text-pencil">{release.tags}</p>}
           </div>
         )}
-        <ol role="list" aria-label="Starting" className="flex flex-col gap-3">
-          {STEPS.map((stage, at) => (
-            <li
-              key={stage.title}
-              aria-current={at === step ? "step" : undefined}
-              data-state={at < step ? "done" : at === step ? "now" : "next"}
-              className="group/step flex items-start gap-3 text-base text-pencil data-[state=done]:text-soft data-[state=now]:text-ink"
-            >
-              <div className="flex h-lh w-5 shrink-0 items-center justify-center">
-                {at < step && <CheckIcon className="size-4 fill-action" />}
-                {at === step && <Spinner className="size-4 text-ink" />}
-                {at > step && <div className="size-1.5 rounded-full bg-rule" />}
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <p className="group-data-[state=now]/step:font-medium">{stage.title}</p>
-                {at === step && <p className="max-w-[46ch] text-sm text-pretty text-pencil">{stage.detail}</p>}
-              </div>
-            </li>
-          ))}
-        </ol>
+        <Steps steps={STEPS} step={step} />
         <div className="min-h-5 text-sm text-soft">{readout}</div>
       </div>
     </div>

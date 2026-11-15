@@ -1,11 +1,9 @@
-import { useEffect, useState } from "react";
 import {
   type ApiError,
   asApiError,
   ENGINE_UNREACHABLE,
   type Check,
   type EpisodeInfo,
-  type MediaInfo,
   type PlayInfo,
   type PlayMessage,
   playTitle,
@@ -13,8 +11,8 @@ import {
   type Skip,
   type TitleCard,
 } from "../api";
-import { type Fetching, readMedia } from "./ffmpeg";
 import { viewer } from "./plan";
+import { type Session, useVideoSession } from "./session";
 
 /** A source the engine passed over, with its name when the engine had named it. */
 export interface Passed {
@@ -48,16 +46,8 @@ export interface Started {
   resumeAt: number | null;
 }
 
-/** The steps between asking for a title and having something to play. */
-export type TitleSession =
-  | { stage: "starting"; attempt: Attempt }
-  /**
-   * A source plays. Waiting for its first pieces to see what is in the file, and for ffmpeg while
-   * the engine fetches it to convert the file.
-   */
-  | { stage: "reading"; attempt: Attempt; started: Started; ffmpeg: Fetching | null }
-  | { stage: "ready"; attempt: Attempt; started: Started; media: MediaInfo }
-  | { stage: "failed"; attempt: Attempt; error: ApiError; tried: Passed[] };
+/** The steps between asking for a title and having something to play. Once it fails, `progress.passed` holds the sources tried. */
+export type TitleSession = Session<Attempt, Started>;
 
 export function beginning(video: string): Attempt {
   return { video, title: null, episode: null, found: null, trying: null, passed: [], named: {} };
@@ -131,26 +121,13 @@ export async function attempt(
 
 /** Plays a film or an episode by title and reads its video. */
 export function useTitleSession(video: string, source: string | null): TitleSession {
-  const [session, setSession] = useState<TitleSession>(() => ({ stage: "starting", attempt: beginning(video) }));
-
-  useEffect(() => {
-    const stop = new AbortController();
-    setSession({ stage: "starting", attempt: beginning(video) });
-    (async () => {
-      const ended = await attempt({ video, source: source ?? undefined }, stop.signal, (now) => setSession({ stage: "starting", attempt: now }));
-      if ("error" in ended) return setSession({ stage: "failed", attempt: ended.attempt, error: ended.error, tried: ended.tried });
-      const { started } = ended;
-      setSession({ stage: "reading", attempt: ended.attempt, started, ffmpeg: null });
-      try {
-        const fetching = (ffmpeg: Fetching) => setSession({ stage: "reading", attempt: ended.attempt, started, ffmpeg });
-        const details = await readMedia(started.play.id, started.play.video.index, stop.signal, fetching);
-        setSession({ stage: "ready", attempt: ended.attempt, started, media: details });
-      } catch (thrown) {
-        if (!stop.signal.aborted) setSession({ stage: "failed", attempt: ended.attempt, error: asApiError(thrown), tried: ended.attempt.passed });
-      }
-    })().catch(() => {});
-    return () => stop.abort();
-  }, [video, source]);
-
-  return session;
+  return useVideoSession<Attempt, Started>(
+    beginning(video),
+    async (signal, report) => {
+      const ended = await attempt({ video, source: source ?? undefined }, signal, report);
+      if ("error" in ended) return { error: ended.error, progress: { ...ended.attempt, passed: ended.tried } };
+      return { started: ended.started, progress: ended.attempt };
+    },
+    [video, source],
+  );
 }
