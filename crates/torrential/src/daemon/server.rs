@@ -12,16 +12,14 @@ use torrential_core::protocol::{
     Event, GetOutcome, GetReply, METADATA_WAIT, PlayReply, Request, Response, TitleFrame, TitlePlayed, TitleRequest,
     WIRE_VERSION,
 };
-use torrential_core::title::title_name;
-use torrential_core::{
-    AttemptEvent, CastRequest, Error, ErrorCode, Player, Profile, SearchQuery, TitleCard, TorrentId, Tried,
-};
+use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, Profile, SearchQuery, TorrentId};
 
 use super::ctx::Ctx;
 use super::downloads::{HEARTBEAT, files, get, listed, metadata, play, record, search, streams};
-use super::owner::{Command, Finish, MetaTarget, Update};
+use super::owner::plays::Destination;
+use super::owner::{Command, MetaTarget, Update};
 use super::search_port::Progress;
-use super::titles::attempt::{self, Containers, PlayTitle};
+use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
 use super::titles::{home, pinned, sources, title_page};
 use crate::log::log;
 use crate::update::Version;
@@ -69,8 +67,10 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
         Request::Sources { video } => {
             sources(ctx, video).await.map(|sources| Response::Sources { sources: Box::new(sources) })
         }
-        Request::PlayTitle(request) => play_title(ctx, request, Finish::Stream, mpsc::unbounded_channel().0).await,
-        Request::GetTitle(request) => play_title(ctx, request, Finish::Keep, mpsc::unbounded_channel().0).await,
+        Request::PlayTitle(request) => play_title(ctx, request, Destination::Plays, mpsc::unbounded_channel().0).await,
+        Request::GetTitle(request) => {
+            play_title(ctx, request, Destination::Folder(None), mpsc::unbounded_channel().0).await
+        }
         Request::Devices => Ok(Response::Devices { list: ctx.devices.list(ctx.http_port) }),
         Request::AddDevice => {
             ctx.devices.add(ctx.http_port, torrential_core::time::now()).map(|list| Response::Devices { list })
@@ -117,34 +117,13 @@ async fn stream_search(ctx: &Ctx, query: SearchQuery, wr: &mut OwnedWriteHalf) -
     wire::write_async(wr, &response).await
 }
 
-/// What a title play's steps said that its reply needs.
-#[derive(Default)]
-struct Seen {
-    title: Option<TitleCard>,
-    tried: Vec<Tried>,
-    end: Option<AttemptEvent>,
-}
-
-impl Seen {
-    fn note(&mut self, step: &AttemptEvent) {
-        match step {
-            AttemptEvent::Resolved { title, .. } => self.title = Some(title.clone()),
-            AttemptEvent::Skipped { release, reason } => {
-                self.tried.push(Tried { release: *release, reason: reason.clone() })
-            }
-            AttemptEvent::Playing { .. } | AttemptEvent::Failed { .. } => self.end = Some(step.clone()),
-            AttemptEvent::Searched { .. } | AttemptEvent::Trying { .. } | AttemptEvent::Check { .. } => {}
-        }
-    }
-}
-
-/// Plays a film or an episode from the first of its sources that starts, sending each step to
-/// `steps`. A stream answers where the video and its subtitles are served, as `play` answers, and
-/// a download kept answers as `get` answers.
+/// Plays a film or an episode into `to` from the first of its sources that starts, sending each
+/// step to `steps`. A play into the plays folder answers where the video and its subtitles are
+/// served, as `play` answers, and a play into a folder answers as `get` answers.
 async fn play_title(
     ctx: &Ctx,
     request: TitleRequest,
-    finish: Finish,
+    to: Destination,
     steps: mpsc::UnboundedSender<AttemptEvent>,
 ) -> Result<Response, Error> {
     let TitleRequest { video, source } = request;
@@ -154,26 +133,19 @@ async fn play_title(
     };
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let before: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
-    let mut seen = Seen::default();
-    let ask = PlayTitle { video, pin, replace: None, player: Player::External, containers: Containers::Any, finish };
-    attempt::run(ctx, ask, |step| {
-        seen.note(&step);
-        let _ = steps.send(step);
-    })
-    .await;
-    let (video, release, id, file, resume_at) = match seen.end {
-        Some(AttemptEvent::Playing { video, release, job, file, resume_at }) => (video, release, job, file, resume_at),
-        Some(AttemptEvent::Failed { error, tried }) if tried.is_empty() => return Err(error),
-        Some(AttemptEvent::Failed { error, tried }) => return Err(error.with_details(Details::Tried(tried))),
-        _ => return Err(Error::internal("the title play ended without playing or failing")),
+    let ask =
+        PlayTitle { video, pin, replace: None, player: Player::External, containers: Containers::Any, to: to.clone() };
+    let played = match attempt::run(ctx, ask, |step| drop(steps.send(step))).await {
+        Outcome::Played(played) => *played,
+        Outcome::Failed { error, tried } if tried.is_empty() => return Err(error),
+        Outcome::Failed { error, tried } => return Err(error.with_details(Details::Tried(tried))),
     };
-    let card = seen.title.ok_or_else(|| Error::internal("the title play played before it found the title"))?;
-    let name = title_name(&card, video.episode);
-    let title = Box::new(TitlePlayed { video, name, release, tried: seen.tried, resume_at });
+    let Played { name, video, release, job: id, file, resume_at, tried } = played;
+    let title = Box::new(TitlePlayed { video, name, release, tried, resume_at });
     let mut jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
     let job = jobs.pop().ok_or_else(|| Error::new(ErrorCode::NotFound, "the download that played is gone"))?;
-    match finish {
-        Finish::Stream => {
+    match to {
+        Destination::Plays => {
             let info = metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
             let playable = torrential_core::stream::around(&listed(ctx, &info).await, file)
                 .ok_or_else(|| Error::internal(format!("the download has no file {file}")))?;
@@ -181,7 +153,7 @@ async fn play_title(
             let streams = streams(ctx, id, &info.metainfo, files);
             Ok(Response::PlayTitle { reply: Box::new(PlayReply { job, streams }), title })
         }
-        Finish::Keep => {
+        Destination::Folder(_) => {
             let outcome = if before.contains(&id) { GetOutcome::Existing } else { GetOutcome::Started };
             let reply = GetReply { outcome, job, plan: None, previous_selection: None };
             Ok(Response::GetTitle { reply: Box::new(reply), title })
@@ -194,12 +166,12 @@ async fn play_title(
 async fn title_frames(
     ctx: &Ctx,
     request: TitleRequest,
-    finish: Finish,
+    to: Destination,
     rd: &mut OwnedReadHalf,
     wr: &mut OwnedWriteHalf,
 ) -> std::io::Result<()> {
     let (steps_tx, mut steps) = mpsc::unbounded_channel();
-    let play = play_title(ctx, request, finish, steps_tx);
+    let play = play_title(ctx, request, to, steps_tx);
     tokio::pin!(play);
     let mut probe = [0u8; 1];
     let reply = loop {
@@ -289,8 +261,10 @@ async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
         match request {
             Request::Watch { refs } => return watch(ctx, refs, rd, wr).await,
             Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,
-            Request::PlayTitle(request) => title_frames(ctx, request, Finish::Stream, &mut rd, &mut wr).await?,
-            Request::GetTitle(request) => title_frames(ctx, request, Finish::Keep, &mut rd, &mut wr).await?,
+            Request::PlayTitle(request) => title_frames(ctx, request, Destination::Plays, &mut rd, &mut wr).await?,
+            Request::GetTitle(request) => {
+                title_frames(ctx, request, Destination::Folder(None), &mut rd, &mut wr).await?
+            }
             Request::Cast(request) => cast_frames(ctx, request, &mut wr).await?,
             request => {
                 let response = handle(ctx, request).await;

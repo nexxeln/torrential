@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use torrential_core::filetype::extension;
 use torrential_core::text::sanitize;
 use torrential_core::time::now;
 use torrential_core::title::Span;
@@ -25,10 +26,11 @@ use torrential_core::{
 use super::ctx::Ctx;
 use super::devices::names::Names;
 use super::downloads;
-use super::owner::{Command, Finish, MetaTarget};
+use super::owner::plays::Destination;
+use super::owner::{Command, MetaTarget};
 use super::playing::Open;
 use super::titles;
-use super::titles::attempt::{self, Containers, PlayTitle};
+use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
 use super::web::{play, watch as web_watch};
 use crate::log::log;
 pub use ssdp::Find;
@@ -953,30 +955,21 @@ async fn find(
                 // A TV says what it decodes but not its screen, and 1080p plays well on any TV.
                 player: Player::Device(Viewer { screen: Resolution::P1080, playback: tv.tv.decodes }),
                 containers: Containers::Tv(tv.tv.plays),
-                finish: Finish::Stream,
+                to: Destination::Plays,
             };
-            let (mut card, mut end) = (None, None);
-            attempt::run(ctx, ask, |step| {
-                match &step {
-                    AttemptEvent::Resolved { title, video, .. } => {
-                        view.send_modify(|cast| cast.name = title_name(title, video.episode));
-                        card = Some(title.clone());
-                    }
-                    AttemptEvent::Playing { .. } | AttemptEvent::Failed { .. } => end = Some(step.clone()),
-                    _ => {}
+            let outcome = attempt::run(ctx, ask, |step| {
+                if let AttemptEvent::Resolved { title, video, .. } = &step {
+                    view.send_modify(|cast| cast.name = title_name(title, video.episode));
                 }
                 let _ = steps.send(step);
             })
             .await;
-            match end {
-                Some(AttemptEvent::Playing { video, release, job, file, resume_at }) => {
-                    let card =
-                        card.ok_or_else(|| Error::internal("the title play played before it found the title"))?;
-                    let name = title_name(&card, video.episode);
+            match outcome {
+                Outcome::Played(played) => {
+                    let Played { name, video, release, job, file, resume_at, .. } = *played;
                     (job, file, name, Some(video), Some(release.id), resume_at)
                 }
-                Some(AttemptEvent::Failed { error, .. }) => return Err(error),
-                _ => return Err(Error::internal("the title play ended without playing or failing")),
+                Outcome::Failed { error, .. } => return Err(error),
             }
         }
         target => {
@@ -1060,10 +1053,6 @@ fn refused(tv: &Tv, path: &str) -> Error {
     let plays: Vec<String> = tv.plays.iter().map(|c| c.name().to_ascii_uppercase()).collect();
     Error::new(ErrorCode::Usage, format!("{} does not play {container} files, only {}", tv.name, plays.join(" and ")))
         .with_hint("play it on this Mac, or choose a source in a format the TV plays")
-}
-
-fn extension(path: &str) -> String {
-    path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase()
 }
 
 fn file_name(path: &str) -> String {

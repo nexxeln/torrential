@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
+use torrential_core::filetype::{self, FileType};
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
     AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId,
-    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
+    SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,
 };
 
 use super::super::ctx::{Ctx, OwnerHandle};
@@ -32,8 +33,6 @@ const LOOK_AHEAD: usize = 2;
 const ANSWER_WITHIN: Duration = Duration::from_millis(100);
 /// How often a trial looks for the first bytes of its video.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
-/// What a browser plays without ffmpeg remuxing it.
-const BROWSER_PLAYS: [&str; 4] = ["mp4", "m4v", "mov", "webm"];
 /// How long a title's search runs before a strong swarm from any index may go first. The quick
 /// indexes have answered by then, and a lawful catalog among them would lead.
 const STRONG_AFTER: Duration = Duration::from_millis(2500);
@@ -48,7 +47,52 @@ pub struct PlayTitle {
     /// What the title plays in, which its sources are ranked for.
     pub player: Player,
     pub containers: Containers,
-    pub finish: Finish,
+    /// Where its download goes. A title played into the plays folder downloads in playing order
+    /// to be watched; one played into a folder downloads as `get` downloads, to be kept.
+    pub to: Destination,
+}
+
+/// How a title play ended.
+pub enum Outcome {
+    Played(Box<Played>),
+    Failed { error: Error, tried: Vec<Tried> },
+}
+
+/// The source a title plays from, and the sources tried before it.
+pub struct Played {
+    /// The film's name and year, or the series' name and the episode.
+    pub name: String,
+    pub video: VideoRef,
+    pub release: Release,
+    pub job: TorrentId,
+    /// The index of the video in the download.
+    pub file: u32,
+    /// Seconds into the video where the person stopped, unless they finished it.
+    pub resume_at: Option<f64>,
+    /// The sources that did not play, in the order they were tried.
+    pub tried: Vec<Tried>,
+}
+
+impl Outcome {
+    /// The play's last step, which says how it ended.
+    fn step(&self) -> AttemptEvent {
+        match self {
+            Outcome::Played(played) => AttemptEvent::Playing {
+                video: played.video.clone(),
+                release: played.release.clone(),
+                job: played.job,
+                file: played.file,
+                resume_at: played.resume_at,
+            },
+            Outcome::Failed { error, tried } => AttemptEvent::Failed { error: error.clone(), tried: tried.clone() },
+        }
+    }
+}
+
+/// Reports `outcome` as the play's last step, and answers it.
+fn ended(report: &mut impl FnMut(AttemptEvent), outcome: Outcome) -> Outcome {
+    report(outcome.step());
+    outcome
 }
 
 /// The containers a caller's player opens.
@@ -65,28 +109,27 @@ pub enum Containers {
 impl Containers {
     /// Whether the file at `path` opens, when ffmpeg is there to `remux` it or not.
     fn open(self, path: &str, remux: bool) -> bool {
-        let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase());
         match self {
             Containers::Any => true,
-            Containers::Browser => remux || extension.is_some_and(|e| BROWSER_PLAYS.contains(&e.as_str())),
+            Containers::Browser => remux || FileType::of(path).is_some_and(|t| t.browser.is_some()),
             Containers::Tv(plays) => plays.takes(path),
         }
     }
 }
 
-/// Plays `ask` and reports each step, the last being `playing` or `failed`. A download here that
-/// holds the video plays first, before any search. Otherwise sources are tried once the search
-/// so far holds one that could lead, while slower indexes go on answering, and each next source
-/// is the best of what has been found by then. Dropping the future stops the play and gives up
-/// the source under test.
-pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) {
+/// Plays `ask`, reports each step, the last being `playing` or `failed`, and answers how it ended.
+/// A download here that holds the video plays first, before any search. Otherwise sources are
+/// tried once the search so far holds one that could lead, while slower indexes go on answering,
+/// and each next source is the best of what has been found by then. Dropping the future stops the
+/// play and gives up the source under test.
+pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent) + Send) -> Outcome {
     let end = Instant::now() + ctx.titles.timing.budget;
     if let Some(id) = ask.replace {
         ctx.titles.failed(ReleaseId::Torrent(id), Skip::Stalled);
     }
     let title = match ctx.titles.resolve(&ask.video, torrential_core::time::now()).await {
         Ok(title) => title,
-        Err(error) => return report(AttemptEvent::Failed { error, tried: Vec::new() }),
+        Err(error) => return ended(&mut report, Outcome::Failed { error, tried: Vec::new() }),
     };
     report(AttemptEvent::Resolved {
         video: title.video.clone(),
@@ -95,7 +138,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     });
     let jobs = match ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await {
         Ok(jobs) => jobs,
-        Err(error) => return report(AttemptEvent::Failed { error, tried: Vec::new() }),
+        Err(error) => return ended(&mut report, Outcome::Failed { error, tried: Vec::new() }),
     };
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
@@ -105,16 +148,16 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
     if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
-        && walk.try_source(release, 1, &mut report).await
+        && let Some(outcome) = walk.try_source(release, 1, &mut report).await
     {
-        return;
+        return outcome;
     }
 
     let preferences = (ctx.web.preferences)();
     let rank_for = || ctx.machine.profile(preferences, ask.player);
     let query = match ctx.titles.query(&title, preferences, ask.player).await {
         Ok(query) => query,
-        Err(error) => return report(AttemptEvent::Failed { error, tried: walk.tried }),
+        Err(error) => return ended(&mut report, Outcome::Failed { error, tried: walk.tried }),
     };
     let (progress, answers) = mpsc::unbounded_channel();
     let mut search = Searching {
@@ -143,7 +186,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     if search.releases.is_empty()
         && let Some(error) = search.error.take()
     {
-        return report(AttemptEvent::Failed { error, tried: walk.tried });
+        return ended(&mut report, Outcome::Failed { error, tried: walk.tried });
     }
     report(AttemptEvent::Searched { found: search.releases.len() as u32, sources: search.sources.clone() });
     while Instant::now() < end {
@@ -165,12 +208,12 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
                 () = search.next(ctx) => {}
             }
         };
-        if over {
-            return;
+        if let Some(outcome) = over {
+            return outcome;
         }
     }
     let error = failure(&title.name(), &walk.tried, ask.pin.is_some(), ask.replace.is_some());
-    report(AttemptEvent::Failed { error, tried: walk.tried });
+    ended(&mut report, Outcome::Failed { error, tried: walk.tried })
 }
 
 /// Whether a title play may stop waiting for its search and try `first`, the best of its sources
@@ -276,9 +319,14 @@ impl Walk<'_> {
         }
     }
 
-    /// Tries `release` as the next of `of` sources, and answers whether the play is over: it
-    /// plays, or the engine is going away. A source that does not play joins `tried`.
-    async fn try_source(&mut self, release: Release, of: u32, report: &mut (impl FnMut(AttemptEvent) + Send)) -> bool {
+    /// Tries `release` as the next of `of` sources, and answers how the play ended once it is over:
+    /// it plays, or the engine is going away. A source that does not play joins `tried`.
+    async fn try_source(
+        &mut self,
+        release: Release,
+        of: u32,
+        report: &mut (impl FnMut(AttemptEvent) + Send),
+    ) -> Option<Outcome> {
         let ctx = self.ctx;
         report(AttemptEvent::Trying { rank: self.tried.len() as u32 + 1, of, release: release.clone() });
         let asked = *self.asked.entry(release.id).or_insert_with(Instant::now);
@@ -287,17 +335,18 @@ impl Walk<'_> {
             Ok((job, file)) => {
                 let id = job.id;
                 if let Err(error) = ctx.owner.ask(|reply| Command::Played { id, reply }).await {
-                    report(AttemptEvent::Failed { error, tried: std::mem::take(&mut self.tried) });
-                    return true;
+                    return Some(ended(report, Outcome::Failed { error, tried: std::mem::take(&mut self.tried) }));
                 }
                 trial.hold = None;
                 let video = self.title.video.clone();
                 let resume_at = resume_at(ctx, &video);
-                report(AttemptEvent::Playing { video, release, job: id, file, resume_at });
+                let tried = std::mem::take(&mut self.tried);
+                let played = Played { name: self.title.name(), video, release, job: id, file, resume_at, tried };
+                let outcome = ended(report, Outcome::Played(Box::new(played)));
                 if let Some(old) = self.ask.replace.filter(|old| *old != id) {
                     let _ = ctx.owner.ask(|reply| Command::Pause { refs: vec![old.to_hex()], reply }).await;
                 }
-                true
+                Some(outcome)
             }
             Err(reason) => {
                 let reason = *reason;
@@ -305,7 +354,7 @@ impl Walk<'_> {
                 ctx.titles.failed(release.id, reason.clone());
                 report(AttemptEvent::Skipped { release: release.id, reason: reason.clone() });
                 self.tried.push(Tried { release: release.id, reason });
-                false
+                None
             }
         }
     }
@@ -377,15 +426,17 @@ impl Trial<'_> {
         let hold = Hold::fresh();
         // Held before the owner is asked, so a play that goes away at any point after gives it up.
         self.hold = Some(hold);
-        // A film played to keep goes where `get` puts it. One played to watch goes to the plays folder.
-        let to = if ask.finish == Finish::Keep { Destination::Folder(None) } else { Destination::Plays };
+        let finish = match ask.to {
+            Destination::Plays => Finish::Stream,
+            Destination::Folder(_) => Finish::Keep,
+        };
         let play = PlayCommand {
             source,
-            to,
+            to: ask.to.clone(),
             files: [playable.video].into_iter().chain(playable.subtitles.iter().copied()).collect(),
             setup_max_size: (ctx.web.preferences)().max_size,
             title: Some(TitlePlay { link, hold }),
-            finish: ask.finish,
+            finish,
         };
         let (job, _) =
             ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await.map_err(
@@ -490,17 +541,7 @@ fn video_of(
     containers: Containers,
     remux: bool,
 ) -> Result<Playable, Box<Skip>> {
-    let listing: Vec<TorrentFile> = (0..)
-        .zip(&metainfo.files)
-        .map(|(index, f)| TorrentFile {
-            index,
-            path: sanitize(&f.path),
-            size: f.size,
-            selected: false,
-            verified: 0,
-            risk: None,
-        })
-        .collect();
+    let listing = metainfo.listing();
     let playable = match episode {
         Some(episode) => stream::episode(&listing, &sanitize(&metainfo.name), episode),
         None => stream::pick(&listing),
@@ -510,7 +551,7 @@ fn video_of(
     if containers.open(path, remux) {
         Ok(playable)
     } else {
-        let container = path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
+        let container = filetype::extension(path);
         let skip = match containers {
             Containers::Tv(_) => Skip::NotOnTv { container },
             Containers::Browser | Containers::Any => Skip::Unplayable { container },
@@ -599,7 +640,7 @@ mod tests {
             replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
             player: Player::External,
             containers: Containers::Browser,
-            finish: Finish::Stream,
+            to: Destination::Plays,
         };
         let line: Vec<Release> = (1..=12).map(release).collect();
         type Row<'a> = (Option<u8>, Option<u8>, &'a [u8], &'a [u8]);

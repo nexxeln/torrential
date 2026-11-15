@@ -1,6 +1,7 @@
 //! What is inside a video file, as ffprobe reports it and as the web player needs it.
 
 use serde::{Deserialize, Serialize};
+use torrential_core::filetype::{self, FileType, Kind};
 use torrential_core::{Error, ErrorCode};
 
 use crate::ffmpeg::fetch::Readiness;
@@ -189,16 +190,12 @@ impl Media {
 
     /// What the file's name and header say when ffprobe is not installed.
     pub fn without_ffprobe(name: &str, duration: Option<f64>, ffmpeg: Readiness) -> Media {
-        let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
-        let (container, direct) = match extension.as_str() {
-            "mp4" | "m4v" | "mov" => ("mp4", Some("video/mp4")),
-            "webm" => ("webm", Some("video/webm")),
-            "mkv" => ("matroska", None),
-            other => (other, None),
-        };
+        let known = FileType::of(name).filter(|t| t.kind == Some(Kind::Video));
+        let container = known.and_then(|t| t.ffmpeg).map_or_else(|| filetype::extension(name), String::from);
+        let direct = known.and_then(|t| t.browser);
         Media {
             duration,
-            container: container.to_string(),
+            container,
             video: None,
             audio: Vec::new(),
             subtitles: Vec::new(),

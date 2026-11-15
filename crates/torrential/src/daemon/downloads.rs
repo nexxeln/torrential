@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use torrential_core::protocol::{FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
 use torrential_core::text::sanitize;
 use torrential_core::{
@@ -165,12 +166,36 @@ pub(super) fn streams(ctx: &Ctx, id: TorrentId, metainfo: &Metainfo, files: Vec<
     files
         .into_iter()
         .map(|index| {
-            let file = &metainfo.files[index as usize];
-            let path = sanitize(&file.path);
+            let Served { index, path, size, .. } = served(id, metainfo, index);
             let url = http::url(ctx.http_port, id, index, &path);
-            Stream { index, path, size: file.size, url }
+            Stream { index, path, size, url }
         })
         .collect()
+}
+
+/// A file the engine serves while it downloads.
+#[derive(Serialize)]
+pub struct Served {
+    pub index: u32,
+    pub path: String,
+    pub size: u64,
+    /// The path of `http::url`, for a page on the engine's own origin.
+    pub url: String,
+    /// Where the file starts in the torrent, in bytes.
+    pub offset: u64,
+}
+
+/// File `index` of the download `id`, as the engine serves it.
+pub(super) fn served(id: TorrentId, metainfo: &Metainfo, index: u32) -> Served {
+    let file = &metainfo.files[index as usize];
+    let path = sanitize(&file.path);
+    Served {
+        index,
+        url: http::route_of(id, index, &path),
+        path,
+        size: file.size,
+        offset: metainfo.files[..index as usize].iter().map(|f| f.size).sum(),
+    }
 }
 
 pub(super) async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Result<FilesReply, Error> {
