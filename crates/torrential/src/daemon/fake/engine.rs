@@ -47,6 +47,8 @@ struct SwarmState {
     unsaved: BTreeMap<TorrentId, (Error, u32)>,
     /// The torrents the engine was asked to download in playing order.
     streamed: BTreeSet<TorrentId>,
+    /// The file ranges the engine was asked to fetch first, as (file, offset, length).
+    wanted: BTreeMap<TorrentId, Vec<(u32, u64, u64)>>,
 }
 
 impl Swarm {
@@ -89,6 +91,12 @@ impl Swarm {
     #[cfg(test)]
     pub fn streamed(&self, id: TorrentId) -> bool {
         self.0.lock().unwrap().streamed.contains(&id)
+    }
+
+    /// The file ranges the engine was asked to fetch first for `id`, as (file, offset, length).
+    #[cfg(test)]
+    pub fn wanted(&self, id: TorrentId) -> Vec<(u32, u64, u64)> {
+        self.0.lock().unwrap().wanted.get(&id).cloned().unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -305,6 +313,7 @@ impl EnginePort for Engine {
     }
 
     fn want_range(&mut self, id: TorrentId, file: u32, offset: u64, length: u64) -> Result<bool, Error> {
+        self.swarm.0.lock().unwrap().wanted.entry(id).or_default().push((file, offset, length));
         self.torrent(id)?.written(file, offset, length)
     }
 
