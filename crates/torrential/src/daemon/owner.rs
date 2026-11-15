@@ -22,9 +22,10 @@ use super::magnet::{self, Magnet};
 use super::playing::Playing;
 use super::resolve::{self, Found, Scope};
 use super::search_port::SavedLink;
+use super::shelf::Shelf;
 use super::store::{Store, Tombstone};
 use crate::disk::Disk;
-use crate::log::log;
+use crate::log::{log, persist};
 use deleter::Deleter;
 use plays::{Destination, Plays, Tending};
 pub use streams::Lease;
@@ -308,6 +309,9 @@ struct Stopping {
 
 pub struct Owner {
     store: Store,
+    shelf: Arc<Shelf>,
+    /// The titles in the library. Every save goes through the owner, so this is the library.
+    saved: BTreeSet<TitleId>,
     jobs: BTreeMap<TorrentId, JobEntry>,
     tombstones: Vec<Tombstone>,
     probes: BTreeSet<TorrentId>,
@@ -335,6 +339,7 @@ pub struct Owner {
 impl Owner {
     pub fn new(
         mut store: Store,
+        shelf: Arc<Shelf>,
         engine: EngineHandle,
         parse: ParseTorrent,
         disk: Box<dyn Disk>,
@@ -362,6 +367,8 @@ impl Owner {
             tombstones: store.tombstones(now)?,
             tending: Tending::new(deleter),
             store,
+            saved: shelf.saved()?.into_iter().map(|card| card.id).collect(),
+            shelf,
             jobs,
             probes: BTreeSet::new(),
             draining: BTreeSet::new(),
@@ -454,7 +461,11 @@ impl Owner {
             }
             Command::Metadata { target, deadline, reply } => self.metadata(target, deadline, reply),
             Command::Cache { metainfo } => {
-                let _ = self.store.cache_metainfo(metainfo.info_hash.id(), &metainfo.bytes, now());
+                let id = metainfo.info_hash.id();
+                persist(
+                    &format!("save the file list of {}", &id.to_hex()[..6]),
+                    self.store.cache_metainfo(id, &metainfo.bytes, now()),
+                );
             }
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
@@ -548,10 +559,10 @@ impl Owner {
                     Found::Release(_) => unreachable!("downloads scope finds only downloads"),
                 }
             }
-            Target::InfoHash(hash) => self.find_job(&hash).ok_or_else(|| no_download(reference)),
+            Target::InfoHash(hash) => self.find_job(&hash)?.ok_or_else(|| no_download(reference)),
             Target::Magnet(uri) => {
                 let hash = magnet::parse(&uri)?.info_hash;
-                self.find_job(&hash).ok_or_else(|| no_download(&hash.id().to_hex()))
+                self.find_job(&hash)?.ok_or_else(|| no_download(&hash.id().to_hex()))
             }
             Target::TorrentUrl(_) | Target::TorrentFile(_) => Err(Error::new(
                 ErrorCode::InvalidRef,
@@ -563,11 +574,11 @@ impl Owner {
         }
     }
 
-    fn find_job(&self, hash: &InfoHash) -> Option<TorrentId> {
+    fn find_job(&self, hash: &InfoHash) -> Result<Option<TorrentId>, Error> {
         if self.jobs.contains_key(&hash.id()) {
-            return Some(hash.id());
+            return Ok(Some(hash.id()));
         }
-        self.store.alias_owners(hash).ok()?.into_iter().find(|id| self.jobs.contains_key(id))
+        Ok(self.store.alias_owners(hash)?.into_iter().find(|id| self.jobs.contains_key(id)))
     }
 
     fn resolve_any(&self, prefix: &HexPrefix, results: &[Release], command: &'static str) -> Result<Resolved, Error> {
@@ -577,7 +588,7 @@ impl Owner {
             Found::Job(id) => Ok(Resolved::Job(id)),
             Found::Release(release) => {
                 let cached = match release.id {
-                    torrential_core::ReleaseId::Torrent(id) => self.cached(id),
+                    torrential_core::ReleaseId::Torrent(id) => self.cached(id)?,
                     torrential_core::ReleaseId::Locator(_) => None,
                 };
                 Ok(Resolved::Release { release: Box::new(release.clone()), cached })
@@ -585,23 +596,27 @@ impl Owner {
         }
     }
 
-    fn cached(&self, id: TorrentId) -> Option<Arc<Metainfo>> {
-        let bytes = self.store.metainfo(id).ok().flatten()?;
-        (self.parse)(&bytes).ok().map(Arc::new)
+    /// The file list kept from an earlier fetch, if it is there and still parses.
+    fn cached(&self, id: TorrentId) -> Result<Option<Arc<Metainfo>>, Error> {
+        let Some(bytes) = self.store.metainfo(id)? else { return Ok(None) };
+        Ok((self.parse)(&bytes).ok().map(Arc::new))
     }
 
     fn record_results(&mut self, saved: Vec<(Release, Option<SavedLink>)>) {
-        let _ = self.store.record_results(&saved, now());
+        persist("save the search results", self.store.record_results(&saved, now()));
     }
 
-    fn others_remaining(&self, dir: &Path, except: TorrentId) -> u64 {
-        let Ok(space) = self.disk.space(dir) else { return 0 };
-        self.jobs
+    fn others_remaining(&self, dir: &Path, except: TorrentId) -> Result<u64, Error> {
+        let space = self.disk.space(dir).map_err(|e| {
+            Error::new(ErrorCode::StorageError, format!("cannot read free space at {}: {e}", dir.display()))
+        })?;
+        Ok(self
+            .jobs
             .values()
             .filter(|j| j.id() != except && j.record.intent == Intent::Running && !self.leaving(j.id()))
             .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
             .map(|job| self.space_needed(job))
-            .sum()
+            .sum())
     }
 
     fn space_needed(&self, job: &JobEntry) -> u64 {
@@ -653,13 +668,13 @@ impl Owner {
             Source::Magnet(m) => m.info_hash,
             Source::Torrent { metainfo, .. } => metainfo.info_hash,
         };
-        if let Some(id) = self.find_job(&info_hash) {
+        if let Some(id) = self.find_job(&info_hash)? {
             return self.get_existing(id, source, selection, max_size, dry_run);
         }
         let id = info_hash.id();
         let (metainfo, magnet) = match source {
             Source::Torrent { metainfo, .. } => (Some(Arc::new(metainfo)), None),
-            Source::Magnet(m) => (self.cached(id), Some(m)),
+            Source::Magnet(m) => (self.cached(id)?, Some(m)),
             Source::Download(_) => unreachable!("handled above"),
         };
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
@@ -684,7 +699,7 @@ impl Owner {
                 }
                 _ => plan.space,
             };
-            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(&dir, id))?;
+            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(&dir, id)?)?;
         }
         let record = JobRecord {
             id,
@@ -776,7 +791,7 @@ impl Owner {
         }
         let needed = plan.needed(if recheck { 0 } else { job.verified() });
         // A running download gets the files at once, so only room the disk has now counts.
-        admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id))?;
+        admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id)?)?;
         if dry_run {
             let mut preview = job.clone();
             preview.record.selection = selection;
@@ -847,8 +862,8 @@ impl Owner {
         let id = match &source {
             Source::Download(id) if self.jobs.contains_key(id) => *id,
             Source::Download(id) => return Err(no_download(&id.to_hex())),
-            Source::Magnet(m) => self.find_job(&m.info_hash).unwrap_or(m.info_hash.id()),
-            Source::Torrent { metainfo, .. } => self.find_job(&metainfo.info_hash).unwrap_or(metainfo.info_hash.id()),
+            Source::Magnet(m) => self.find_job(&m.info_hash)?.unwrap_or(m.info_hash.id()),
+            Source::Torrent { metainfo, .. } => self.find_job(&metainfo.info_hash)?.unwrap_or(metainfo.info_hash.id()),
         };
         let job = self.jobs.get(&id);
         let before = match job.map(|job| &job.record.intent) {
@@ -857,10 +872,11 @@ impl Owner {
             Some(Intent::Failed { error }) => Before::Failed(error.clone()),
             Some(Intent::Running | Intent::Done { .. }) => Before::Kept,
         };
-        let metainfo = job.and_then(|j| j.metainfo.clone()).or_else(|| match &source {
-            Source::Torrent { metainfo, .. } => Some(Arc::new(metainfo.clone())),
-            _ => self.cached(id),
-        });
+        let metainfo = match (job.and_then(|j| j.metainfo.clone()), &source) {
+            (Some(metainfo), _) => Some(metainfo),
+            (None, Source::Torrent { metainfo, .. }) => Some(Arc::new(metainfo.clone())),
+            (None, _) => self.cached(id)?,
+        };
         let short = id.to_hex()[..6].to_string();
         let see_files = |e: Error| {
             e.with_hint(format!("run torrential files {short} first")).with_next(format!("torrential files {short}"))
@@ -1027,13 +1043,24 @@ impl Owner {
         let id = match target {
             MetaTarget::Job(id) => id,
             MetaTarget::Magnet(magnet) => match self.find_job(&magnet.info_hash) {
-                Some(id) => id,
-                None => {
+                Ok(Some(id)) => id,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                Ok(None) => {
                     let id = magnet.info_hash.id();
-                    if let Some(metainfo) = self.cached(id) {
-                        let _ =
-                            reply.send(Ok(FilesInfo { id, metainfo, source: Origin::Cache.as_str(), download: None }));
-                        return;
+                    match self.cached(id) {
+                        Ok(Some(metainfo)) => {
+                            let source = Origin::Cache.as_str();
+                            let _ = reply.send(Ok(FilesInfo { id, metainfo, source, download: None }));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            return;
+                        }
+                        Ok(None) => {}
                     }
                     if !self.probes.contains(&id) && !self.draining.contains(&id) {
                         self.probes.insert(id);
@@ -1307,7 +1334,10 @@ impl Owner {
         match event {
             EngineEvent::Metadata { id, metainfo } => {
                 if self.probes.remove(&id) {
-                    let _ = self.store.cache_metainfo(id, &metainfo.bytes, now());
+                    persist(
+                        &format!("save the file list of {}", &id.to_hex()[..6]),
+                        self.store.cache_metainfo(id, &metainfo.bytes, now()),
+                    );
                     self.engine.send(EngineCommand::Remove(id));
                     self.draining.insert(id);
                     let info =
@@ -1383,12 +1413,11 @@ impl Owner {
     }
 
     fn job_metadata(&mut self, id: TorrentId, metainfo: Metainfo) {
-        let claimed = self
-            .store
-            .alias_owners(&metainfo.info_hash)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|owner| *owner != id && self.jobs.contains_key(owner));
+        let owners = match self.store.alias_owners(&metainfo.info_hash) {
+            Ok(owners) => owners,
+            Err(error) => return self.fail(id, error),
+        };
+        let claimed = owners.into_iter().find(|owner| *owner != id && self.jobs.contains_key(owner));
         if let Some(original) = claimed {
             self.drop_duplicate(id, original);
             return;
@@ -1408,7 +1437,7 @@ impl Owner {
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
             // The engine gets the files at once, so only room the disk has now counts.
-            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id))?;
+            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id)?)?;
             Ok(plan)
         });
         match admitted {
@@ -1429,7 +1458,7 @@ impl Owner {
     }
 
     fn drop_duplicate(&mut self, id: TorrentId, original: TorrentId) {
-        let _ = self.store.remove_duplicate(id);
+        persist(&format!("save the removal of {}", &id.to_hex()[..6]), self.store.remove_duplicate(id));
         if let Some(job) = self.jobs.remove(&id)
             && job.observed.in_engine()
         {
@@ -1465,7 +1494,7 @@ impl Owner {
         let disk = matches!(error.code, ErrorCode::DiskFull | ErrorCode::StorageError);
         if !saving {
             let intent = Intent::Failed { error };
-            let _ = self.store.set_intent(id, &intent);
+            persist(&format!("save that {} stopped", &id.to_hex()[..6]), self.store.set_intent(id, &intent));
             job.record.intent = intent;
         }
         let save = job.metainfo.is_some() && !saving && !disk;
@@ -1599,7 +1628,8 @@ impl Owner {
             self.publish(id);
             return;
         }
-        let saved = self.store.save_resume(id, &data, verified, piece_map, files.as_deref(), now()).is_ok();
+        let saving = self.store.save_resume(id, &data, verified, piece_map, files.as_deref(), now());
+        let saved = persist(&format!("save the progress of {}", &id.to_hex()[..6]), saving);
         if !saved && let Some(stopping) = &mut self.stopping {
             stopping.unsaved = true;
         }
@@ -1633,7 +1663,7 @@ impl Owner {
         let intent = job.record.intent.clone();
         let files = job.record.files_verified.clone().unwrap_or_default();
         let record = |store: &mut Store, intent: Option<&Intent>| {
-            let _ = store.record_check(id, intent, verified, piece_map, &files);
+            persist(&format!("save the check of {short}"), store.record_check(id, intent, verified, piece_map, &files));
         };
         match (intent, damaged, mode) {
             (Intent::Running, n, _) => {
@@ -1655,7 +1685,7 @@ impl Owner {
                     _ => now(),
                 };
                 let done = Intent::Done { finished_at };
-                let _ = self.store.set_intent(id, &done);
+                persist(&format!("save that {short} is done"), self.store.set_intent(id, &done));
                 let job = self.jobs.get_mut(&id).expect("checked above");
                 job.record.intent = done;
                 job.observed = Observed::Absent;
@@ -1713,8 +1743,9 @@ impl Owner {
         }
         if job.metainfo.is_some()
             && let Ok(space) = self.disk.space(&job.record.dir)
-            && let Err(error) =
-                admission::check_disk(space, self.space_needed(job), self.others_remaining(&job.record.dir, id))
+            && let Err(error) = self
+                .others_remaining(&job.record.dir, id)
+                .and_then(|others| admission::check_disk(space, self.space_needed(job), others))
         {
             // Plays leaving the plays folder make room: it is checked again once they are gone.
             if !self.reclaiming(space) {
@@ -1722,7 +1753,10 @@ impl Owner {
             }
             return;
         }
-        let resume_data = self.store.resume(id).ok().flatten();
+        let resume_data = match self.store.resume(id) {
+            Ok(data) => data,
+            Err(error) => return self.fail(id, error),
+        };
         let job = &self.jobs[&id];
         let source = match (&job.metainfo, &job.record.magnet) {
             (Some(m), _) => AddSource::Metainfo(m.bytes.clone()),

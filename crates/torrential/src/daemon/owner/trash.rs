@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
-use super::deleter::Identity;
+use super::super::book::Identity;
 use crate::fsutil::open_folder;
 
 /// Where the files of a download in a folder the person chose go when they delete them.

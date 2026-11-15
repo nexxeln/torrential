@@ -8,7 +8,7 @@ pub mod names;
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer, TorrentId};
 
-use super::store::sql_error;
+use super::db::{Db, sql_error};
 use names::Names;
 
 /// How long a pairing code works.
@@ -238,8 +238,7 @@ impl State {
 }
 
 /// The paired devices, the open pairing offer, and the live cast grants. Paired devices are kept
-/// in the `devices` table, on a connection of their own to the engine's database, which
-/// `Store::open` has migrated.
+/// in the `devices` table, on a connection of their own to the engine's database.
 pub struct Devices {
     conn: Mutex<Connection>,
     path: PathBuf,
@@ -250,10 +249,8 @@ pub struct Devices {
 }
 
 impl Devices {
-    pub fn open(path: &Path) -> Result<Self, Error> {
-        let conn = Connection::open(path).map_err(|e| sql_error(path, e))?;
-        conn.execute_batch("PRAGMA synchronous = FULL;").map_err(|e| sql_error(path, e))?;
-        conn.busy_timeout(Duration::from_secs(1)).map_err(|e| sql_error(path, e))?;
+    pub fn open(db: &Db) -> Result<Self, Error> {
+        let (conn, path) = (db.open()?, db.path());
         let paired = {
             let mut stmt = conn
                 .prepare("SELECT id, token_hash, name, added_at, seen_at FROM devices")

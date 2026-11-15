@@ -16,7 +16,7 @@ use torrential_core::{Error, ErrorCode};
 use crate::config::Policy;
 use crate::env::{Env, hooks};
 use crate::fsutil::{Writes, sha256, write_atomic};
-use crate::log::log;
+use crate::log::{log, persist};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::wire;
@@ -655,7 +655,12 @@ pub async fn watch(env: Env, paths: Paths, board: &Board) -> Version {
     loop {
         let now = now();
         let wait = match crate::config::updates(&paths) {
-            Ok(Policy::Off) | Err(_) => {
+            Ok(Policy::Off) => {
+                board.post(None);
+                HOUR
+            }
+            Err(e) => {
+                log(&format!("no update check, for the updates setting cannot be read: {}", e.message));
                 board.post(None);
                 HOUR
             }
@@ -779,15 +784,24 @@ pub fn notice(paths: &Paths, env: &Env, audience: Audience, now: i64) -> Option<
     Some(audience.out(&env.version(), latest))
 }
 
+/// The record at `path`, or `None` when there is none. One that cannot be read is logged and
+/// read as none, so the next write replaces it.
 fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            log(&format!("cannot read {}: {e}", path.display()));
+            return None;
+        }
+    };
+    serde_json::from_slice(&bytes).inspect_err(|e| log(&format!("cannot read {}: {e}", path.display()))).ok()
 }
 
 fn write_json(path: &Path, value: &impl Serialize) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = write_atomic(path, &serde_json::to_vec(value).expect("update records serialize"));
+    let bytes = serde_json::to_vec(value).expect("update records serialize");
+    let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| write_atomic(path, &bytes));
+    persist(&format!("write {}", path.display()), written);
 }
 
 #[cfg(test)]

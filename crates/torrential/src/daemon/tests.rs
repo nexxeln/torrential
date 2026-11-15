@@ -150,7 +150,7 @@ impl Harness {
     fn seeded() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let outside = Outside::default();
-        let mut store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut store = Store::open(&super::db::connect(&dir.path().join("state.db")).unwrap()).unwrap();
         super::fake::fixture::seed(&mut store, &dir.path().join("downloads"), 0).unwrap();
         drop(store);
         let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), fake::Search::new(fake::isos()));
@@ -198,9 +198,9 @@ impl Harness {
             catalog: outside.catalog.clone(),
             tvs: outside.tvs,
         };
-        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let db = super::db::connect(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, store, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), &[0]).unwrap()
+        start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), &[0]).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {

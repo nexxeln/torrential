@@ -61,6 +61,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         })
 }
 
+/// Removes the file at `path`. A file that is not there is already removed.
+pub fn remove(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    }
+}
+
 pub fn temporary(path: &Path) -> PathBuf {
     let name = path.file_name().expect("written paths end in a name").to_string_lossy();
     path.with_file_name(format!(".{name}.{}.partial", std::process::id()))
