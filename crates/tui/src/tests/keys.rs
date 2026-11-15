@@ -2,7 +2,8 @@ use crossterm::event::KeyCode;
 use torrential_core::protocol::{Change, ChangeResult, GetOutcome, GetReply};
 
 use super::*;
-use crate::state::{Files, Focus, JobAction, Upgrade};
+use crate::state::{Files, Focus, Upgrade};
+use torrential_core::protocol::JobAction;
 
 #[test]
 fn opens_on_the_downloads_when_there_are_some() {
@@ -306,6 +307,32 @@ fn remove_asks_first_and_keeps_files() {
     state.update(Msg::Changed { id: stackexchange, action: JobAction::Remove, result: Ok(Vec::new()) });
     assert_eq!(state.toast.as_ref().unwrap().text, "Removed from the list. Files are kept in ~/Downloads/torrential.");
     assert_eq!((state.downloads.len(), cursor_name(&state)), (4, "big_buck_bunny_1080p_h264.mov".into()));
+}
+
+#[test]
+fn remove_says_what_the_engine_did_with_the_files() {
+    use torrential_core::protocol::{ChangeResult, Kept};
+    let mut state = with_downloads((100, 30));
+    let removed = |id: TorrentId, deleted: &[&str], kept: Option<Kept>| Change {
+        deleted: deleted.iter().map(Into::into).collect(),
+        kept: kept.into_iter().collect(),
+        ..Change::new(id.to_hex(), None, ChangeResult::Removed)
+    };
+    let play = id("91fd3b");
+    let result = Ok(vec![removed(play, &["/plays/91fd3b"], None)]);
+    state.update(Msg::Changed { id: play, action: JobAction::Remove, result });
+    assert_eq!(state.toast.as_ref().unwrap().text, "Removed from the list, and its files were deleted.");
+    let left = id("6f2c81");
+    let kept = Kept { path: "/plays/6f2c81".into(), reason: "it holds files torrential did not write".into() };
+    state.update(Msg::Changed {
+        id: left,
+        action: JobAction::Remove,
+        result: Ok(vec![removed(left, &[], Some(kept))]),
+    });
+    assert_eq!(
+        state.toast.as_ref().unwrap().text,
+        "Removed from the list. /plays/6f2c81 stays: it holds files torrential did not write"
+    );
 }
 
 #[test]

@@ -25,11 +25,17 @@ pub struct Watched {
     pub at: i64,
 }
 
+/// The share of a video at its end that counts as credits.
+pub const FINISHED_SHARE: f64 = 0.03;
+/// Seconds at the end of a video that count as credits, when that is more than the share.
+pub const FINISHED_WITHIN: f64 = 20.0;
+
 impl Watched {
-    /// The last 20 seconds, or the last 3% when that is longer, are credits, so stopping there
-    /// finishes the video.
+    /// Stopping in the credits finishes the video.
     pub fn finished(&self) -> bool {
-        self.duration.is_some_and(|duration| duration > 0.0 && duration - self.position <= (duration * 0.03).max(20.0))
+        self.duration.is_some_and(|duration| {
+            duration > 0.0 && duration - self.position <= (duration * FINISHED_SHARE).max(FINISHED_WITHIN)
+        })
     }
 }
 
@@ -74,6 +80,11 @@ pub struct Next {
     pub video: VideoRef,
     /// Seconds to resume at, or `None` to start from the beginning.
     pub resume_at: Option<f64>,
+}
+
+/// Where the person stopped `video`, of what they `watched`, unless they finished it.
+pub fn resume_at(watched: &[Watched], video: &VideoRef) -> Option<f64> {
+    watched.iter().find(|w| w.video == *video && !w.finished()).map(|w| w.position)
 }
 
 /// What of a title to play: an unfinished film or episode to resume, or else the first aired
@@ -240,6 +251,22 @@ mod tests {
     use crate::release::{Category, SourceOutcome};
 
     const HASH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
+
+    #[test]
+    fn a_video_is_finished_where_the_shared_vectors_say() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/format.json")).expect("the vectors are JSON");
+        for case in vectors["finished"].as_array().unwrap() {
+            let watched = Watched {
+                video: video("tt0063350"),
+                position: case["position"].as_f64().unwrap(),
+                duration: Some(case["duration"].as_f64().unwrap()),
+                release: None,
+                at: 0,
+            };
+            assert_eq!(watched.finished(), case["finished"], "{case}");
+        }
+    }
 
     fn video(text: &str) -> VideoRef {
         text.parse().unwrap()

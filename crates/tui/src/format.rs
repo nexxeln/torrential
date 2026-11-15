@@ -177,6 +177,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sizes_ages_and_percents_read_as_the_shared_vectors_say() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../core/tests/fixtures/format.json")).expect("the vectors are JSON");
+        for case in vectors["size"].as_array().unwrap() {
+            assert_eq!(size(case["bytes"].as_u64().unwrap()), case["tui"], "{case}");
+        }
+        for case in vectors["age"].as_array().unwrap() {
+            assert_eq!(age(0, case["seconds"].as_i64().unwrap()), case["tui"], "{case}");
+        }
+        for case in vectors["percent"].as_array().unwrap() {
+            assert_eq!(percent(case["done"].as_u64().unwrap(), case["size"].as_u64().unwrap()), case["tui"], "{case}");
+        }
+    }
+
+    #[test]
     fn ellipsizes_by_display_width() {
         assert_eq!(ellipsize("archlinux-2026.10.01", 9), "archlinu…");
         assert_eq!(ellipsize("short", 9), "short");

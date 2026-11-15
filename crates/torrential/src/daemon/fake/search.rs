@@ -23,6 +23,8 @@ struct State {
     script: Vec<Source>,
     recent: Vec<Release>,
     searches: usize,
+    /// The `.torrent` files fetched, by URL, in order.
+    fetched: Vec<String>,
     /// The profile the last answer was ranked for.
     ranked_for: Option<Profile>,
 }
@@ -59,6 +61,7 @@ impl Search {
             script,
             recent: Vec::new(),
             searches: 0,
+            fetched: Vec::new(),
             ranked_for: None,
         })))
     }
@@ -66,6 +69,11 @@ impl Search {
     #[cfg(test)]
     pub fn searches(&self) -> usize {
         self.0.lock().unwrap().searches
+    }
+
+    #[cfg(test)]
+    pub fn fetched(&self) -> Vec<String> {
+        self.0.lock().unwrap().fetched.clone()
     }
 
     #[cfg(test)]
@@ -166,7 +174,9 @@ impl SearchPort for Search {
 
     fn fetch_torrent(&self, url: String) -> BoxFuture<'_, Result<Vec<u8>, Error>> {
         Box::pin(async move {
-            self.0.lock().unwrap().torrents.get(&url).cloned().ok_or_else(|| {
+            let mut state = self.0.lock().unwrap();
+            state.fetched.push(url.clone());
+            state.torrents.get(&url).cloned().ok_or_else(|| {
                 Error::new(ErrorCode::FetchFailed, "could not fetch the .torrent file: HTTP 404")
                     .with_hint("try the magnet link instead")
             })

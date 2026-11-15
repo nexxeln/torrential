@@ -22,7 +22,7 @@ use super::db::{Db, sql_error};
 use names::Names;
 
 /// How long a pairing code works.
-const OFFER: Duration = Duration::from_secs(5 * 60);
+pub(crate) const OFFER: Duration = Duration::from_secs(5 * 60);
 /// Wrong codes after which an offer stops working, so guessing six digits has a 5 in a million
 /// chance.
 const WRONG_CODES: u32 = 5;

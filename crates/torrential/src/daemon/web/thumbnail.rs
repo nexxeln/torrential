@@ -19,8 +19,10 @@ const DECODE_WITHIN: Duration = Duration::from_secs(10);
 const MIB: u64 = 1024 * 1024;
 /// A film's bitrate varies, so the bytes of a second can be this far from where an even bitrate
 /// would put them: 8 MiB, or 2% of a large file.
-const MARGIN: u64 = 8 * MIB;
-const MARGIN_SHARE: u64 = 50;
+pub(super) const MARGIN: u64 = 8 * MIB;
+pub(super) const MARGIN_SHARE: u64 = 50;
+/// Seconds of video one thumbnail stands for. The seek bar asks for one at the start of each.
+pub(super) const EVERY: u32 = 10;
 
 /// `GET /api/thumbnail`: a JPEG of the frame at `t` seconds. Only from bytes already on disk: a
 /// picture is never worth fetching pieces ahead of the ones being watched.
@@ -28,11 +30,6 @@ pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
     let (id, index) = file_of(request)?;
     let t = number::<f64>(request, "t")?.filter(|t| t.is_finite() && *t >= 0.0);
     let t = t.ok_or_else(|| Error::new(ErrorCode::Usage, "the request has no t parameter of zero or more seconds"))?;
-    let key = (id, index, t.round() as u32);
-    let kept = ctx.web.thumbnails.lock().expect("no holder panics").get(&key);
-    if let Some(jpeg) = kept {
-        return Ok(jpeg);
-    }
     let program = ctx.web.ffmpeg.now()?.ffmpeg;
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
     let name = watch::name(&file);
@@ -42,6 +39,11 @@ pub async fn jpeg(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
     let duration = media.duration.filter(|d| *d > 0.0).ok_or_else(|| none("its length is not known"))?;
     if media.video.is_none() || t >= duration {
         return Err(none("the video has no frame there"));
+    }
+    let key = (id, index, t as u32 / EVERY * EVERY);
+    let kept = ctx.web.thumbnails.lock().expect("no holder panics").get(&key);
+    if let Some(jpeg) = kept {
+        return Ok(jpeg);
     }
     if !file.complete && !on_disk(ctx, id, index, &file, t / duration).await {
         // A download that finishes leaves the engine a moment before it is marked done.

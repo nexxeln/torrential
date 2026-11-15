@@ -168,6 +168,22 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
 
+    /// The format vectors the web app's tests read too.
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/format.json")).expect("the vectors are JSON")
+    }
+
+    #[test]
+    fn sizes_and_clocks_read_as_the_shared_vectors_say() {
+        let vectors = vectors();
+        for case in vectors["size"].as_array().unwrap() {
+            assert_eq!(format_size(case["bytes"].as_u64().unwrap()), case["cli"], "{case}");
+        }
+        for case in vectors["clock"].as_array().unwrap() {
+            assert_eq!(clock(Duration::from_secs(case["seconds"].as_u64().unwrap())), case["text"], "{case}");
+        }
+    }
+
     #[test]
     fn parses_iec_and_si_sizes() {
         assert_eq!(parse_size("8GiB"), Some(8 * 1024 * 1024 * 1024));

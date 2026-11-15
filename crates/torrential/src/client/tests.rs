@@ -12,7 +12,7 @@ use torrential_core::{
     SearchResult, Selection, SourceOutcome, SourceReport, TorrentFile, TorrentId,
 };
 
-use super::changes::{ChangeCommand, changes};
+use super::changes::changes;
 use super::doctor::{Check, CheckStatus, Checked, doctor, skill_check};
 use super::engine::{DaemonReport, daemon_status};
 use super::files::{Files, files, keep_matching};
@@ -23,6 +23,7 @@ use super::skill::{skill_changes, skill_status};
 use super::titles::view::*;
 use super::wait::{Printer, WaitEnd, wait_row, watched};
 use crate::output::{Body, Doc, DocKind, Mode, Typed, render};
+use torrential_core::protocol::JobAction;
 
 const NOW: i64 = 1_792_314_723;
 const DAY: i64 = 86_400;
@@ -532,21 +533,21 @@ fn change(hex: &str, name: &str, result: ChangeResult, path: Option<&str>) -> Ch
 fn pause_resume_rm_and_verify() {
     let cases = [
         (
-            ChangeCommand::Pause,
+            JobAction::Pause,
             vec![
                 change(ARCH, "archlinux-2026.10.01-x86_64.iso", ChangeResult::Paused, None),
                 change("c32cdd", "stackexchange", ChangeResult::AlreadyPaused, None),
             ],
         ),
         (
-            ChangeCommand::Resume,
+            JobAction::Resume,
             vec![
                 change("c32cdd", "stackexchange", ChangeResult::Resumed, None),
                 change("6bc1af", "night_of_the_living_dead_dvd", ChangeResult::AlreadyDone, None),
             ],
         ),
         (
-            ChangeCommand::Remove,
+            JobAction::Remove,
             vec![
                 Change {
                     trashed: vec![PathBuf::from("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso")],
@@ -586,7 +587,7 @@ fn pause_resume_rm_and_verify() {
                 ),
             ],
         ),
-        (ChangeCommand::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", ChangeResult::Checking, None)]),
+        (JobAction::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", ChangeResult::Checking, None)]),
     ];
     let mut out = String::new();
     for (command, list) in cases {

@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { type Job, pieces, type StreamedFile } from "../api";
 import { arrived } from "../lib/pieces";
+import { PIECE_RUNS } from "../wire";
 
 /** How much of each equal run of the playing file is on disk, from 0 to 1, in file order. */
 export type Downloaded = number[];
 
-const RUNS = 200;
 const POLL_MS = 1000;
 const GIVE_UP = 3;
-const WHOLE: Downloaded = Array.from({ length: RUNS }, () => 1);
+const WHOLE: Downloaded = Array.from({ length: PIECE_RUNS }, () => 1);
 
 /** The torrent-wide map, read for this file: coarse for a small file in a large torrent, but always there. */
 function fromTorrentMap(job: Job, file: StreamedFile, totalSize: number): Downloaded {
   const runs = arrived(job, file, totalSize);
-  return Array.from({ length: RUNS }, (_, i) => {
-    const middle = (i + 0.5) / RUNS;
+  return Array.from({ length: PIECE_RUNS }, (_, i) => {
+    const middle = (i + 0.5) / PIECE_RUNS;
     return runs.find((run) => run.from <= middle && middle < run.to)?.share ?? 0;
   });
 }

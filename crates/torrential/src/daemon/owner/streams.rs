@@ -16,12 +16,12 @@ use crate::log::log;
 
 /// A film with less than this on disk ahead of its player holds the other downloads back. It
 /// gives the line time to turn toward the film before the player runs out.
-const BEHIND: Duration = Duration::from_secs(60);
+const HOLD_UNDER: Duration = Duration::from_secs(60);
 /// Once every film being watched has this much on disk ahead of its player, the other downloads
 /// go. A film let go at this lead drains for a minute before it holds them back again, so the
 /// caps change at most about once a minute. Its peers take up to half a minute to come back
-/// once the others are held again, which `BEHIND` leaves room for.
-const AHEAD: Duration = Duration::from_secs(120);
+/// once the others are held again, which `HOLD_UNDER` leaves room for.
+const FREE_OVER: Duration = Duration::from_secs(120);
 /// A film whose players have taken nothing and asked for nothing for this long is paused, and
 /// holds nothing back.
 const IDLE: Duration = Duration::from_secs(60);
@@ -107,8 +107,8 @@ impl Lease {
         loop {
             let at = self.reading.lock().expect("no holder panics").at;
             let rate = bitrate(size, runtime());
-            let window = rate.saturating_mul(AHEAD.as_secs()).min(size.saturating_sub(at));
-            let measured = match engine.ask(move |e| e.written(id, file, at, window, AHEAD.as_secs() as u32)).await {
+            let window = rate.saturating_mul(FREE_OVER.as_secs()).min(size.saturating_sub(at));
+            let measured = match engine.ask(move |e| e.written(id, file, at, window, FREE_OVER.as_secs() as u32)).await {
                 Ok(runs) => lead(&runs, window, rate, at + window == size),
                 // The engine lets go of a download once it is done, and has nothing past the end.
                 Err(_) => Duration::MAX,
@@ -160,10 +160,10 @@ enum Others {
 fn decide(before: Others, leads: impl IntoIterator<Item = Duration>) -> Others {
     let mut after = Others::Free;
     for lead in leads {
-        if lead < BEHIND {
+        if lead < HOLD_UNDER {
             return Others::Held;
         }
-        if lead < AHEAD {
+        if lead < FREE_OVER {
             after = before;
         }
     }
@@ -253,7 +253,7 @@ impl Owner {
     }
 
     /// Holds every download no one is watching to a trickle, from when a film being watched is
-    /// less than `BEHIND` ahead of its player until every one is `AHEAD` ahead.
+    /// less than `HOLD_UNDER` ahead of its player until every one is `FREE_OVER` ahead.
     pub(super) fn prioritize(&mut self, now: Instant) {
         let streams = &mut self.streams;
         if streams.decided_at.is_some_and(|at| now.duration_since(at) < DECIDE_EVERY) {
@@ -273,11 +273,11 @@ impl Owner {
         match (before, streams.others) {
             (Others::Free, Others::Held) => log(&format!(
                 "a film is less than {}s ahead of its player, so the other downloads trickle",
-                BEHIND.as_secs()
+                HOLD_UNDER.as_secs()
             )),
             (Others::Held, Others::Free) => log(&format!(
                 "no film is less than {}s ahead of its player, so the other downloads go",
-                AHEAD.as_secs()
+                FREE_OVER.as_secs()
             )),
             _ => {}
         }

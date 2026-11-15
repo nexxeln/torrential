@@ -97,13 +97,11 @@ impl Printer {
 
 struct State {
     watched: Vec<Watched>,
-    printed: Vec<&'static str>,
 }
 
 impl State {
     fn new(jobs: Vec<Job>) -> Self {
-        let printed = vec![""; jobs.len()];
-        Self { watched: watched(jobs), printed }
+        Self { watched: watched(jobs) }
     }
 
     fn update(&mut self, job: Job) -> Option<usize> {
@@ -134,6 +132,9 @@ fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Ev
         loop {
             let event = match read_frame::<Event>(&mut stream) {
                 Ok(Some(event)) => Ok(event),
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    Err(Error::internal(format!("the engine sent an event this torrential cannot read: {e}")))
+                }
                 Ok(None) | Err(_) => match back(&engine, &ids) {
                     Ok((jobs, again)) => {
                         stream = again;
@@ -173,75 +174,97 @@ fn watch(mut conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, UnixStream), Er
 /// ends the wait at once.
 fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, UnixStream), Error> {
     let stopped = || Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting");
-    let deadline = Instant::now() + connect::BACK_WITHIN;
-    loop {
-        match connect::existing(&engine.paths, &engine.env) {
-            Ok(Some(conn)) => match watch(conn, ids.to_vec()) {
-                Err(error) if error.code == ErrorCode::DaemonUnavailable => {}
-                followed => return followed,
-            },
-            Ok(None) if !engine.paths.socket().exists() => return Err(stopped()),
-            Ok(None) => {}
-            Err(error) if error.code == ErrorCode::DaemonUnavailable => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() > deadline {
-            return Err(stopped());
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    let followed = connect::poll(connect::BACK_WITHIN, || match connect::existing(&engine.paths, &engine.env) {
+        Ok(Some(conn)) => match watch(conn, ids.to_vec()) {
+            Err(error) if error.code == ErrorCode::DaemonUnavailable => Ok(None),
+            followed => followed.map(Some),
+        },
+        Ok(None) if !engine.paths.socket().exists() => Err(stopped()),
+        Ok(None) => Ok(None),
+        Err(error) if error.code == ErrorCode::DaemonUnavailable => Ok(None),
+        Err(error) => Err(error),
+    })?;
+    followed.ok_or_else(stopped)
 }
 
+/// Follows `refs` until `until` holds for each, one fails or stops, or `timeout` passes, and prints
+/// a line each time one changes state.
 pub fn run(
-    (conn, engine): (Conn, Engine),
+    following: (Conn, Engine),
     refs: Vec<String>,
     until: Until,
     timeout: Option<Duration>,
     printer: &Printer,
 ) -> Result<u8, Error> {
+    let lines = Lines {
+        printer,
+        out: std::io::stdout().lock(),
+        every: heartbeat(timeout),
+        beat: Instant::now(),
+        printed: Vec::new(),
+    };
+    follow(following, refs, until, timeout, lines)
+}
+
+/// Follows `refs` as `run` does, with a bar for each in a terminal.
+pub fn attach(
+    following: (Conn, Engine),
+    refs: Vec<String>,
+    until: Until,
+    timeout: Option<Duration>,
+) -> Result<u8, Error> {
+    follow(
+        following,
+        refs,
+        until,
+        timeout,
+        Bars { all: MultiProgress::with_draw_target(ProgressDrawTarget::stderr()), each: Vec::new() },
+    )
+}
+
+/// How a wait shows the downloads it follows.
+trait Show {
+    fn start(&mut self, watched: &[Watched]);
+    /// Shows that download `i` changed, `at` into the wait.
+    fn changed(&mut self, watched: &[Watched], i: usize, at: Duration);
+    /// Shows the downloads again if it is time, and says when it is time next.
+    fn tick(&mut self, watched: &[Watched], at: Duration) -> Instant;
+    fn end(&mut self, end: &WaitEnd, at: Duration, watched: &[Watched]);
+    /// Shows that the engine no longer has a download the wait follows.
+    fn removed(&mut self, end: &WaitEnd, at: Duration, watched: &[Watched]) {
+        self.end(end, at, watched);
+    }
+}
+
+fn follow(
+    (conn, engine): (Conn, Engine),
+    refs: Vec<String>,
+    until: Until,
+    timeout: Option<Duration>,
+    mut show: impl Show,
+) -> Result<u8, Error> {
     let started = Instant::now();
     let (jobs, rx) = events(conn, refs, engine)?;
     let mut state = State::new(jobs);
-    let mut out = std::io::stdout().lock();
-    let print = |out: &mut std::io::StdoutLock, text: String| {
-        let _ = out.write_all(text.as_bytes());
-        let _ = out.flush();
-    };
-    print(&mut out, printer.header());
-    let heartbeat = heartbeat(timeout);
-    let mut last_beat = started;
-    for (i, w) in state.watched.iter().enumerate() {
-        print(&mut out, printer.row(Duration::ZERO, &w.id, &w.job));
-        state.printed[i] = w.job.status.name();
-    }
+    show.start(&state.watched);
     let deadline = timeout.map(|t| started + t);
+    let finish = |show: &mut dyn Show, end: WaitEnd, state: &State| {
+        show.end(&end, started.elapsed(), &state.watched);
+        Ok(end.exit_code())
+    };
     loop {
         if let Some(end) = evaluate(&state.watched, until) {
-            print(&mut out, printer.end(&end, started.elapsed(), &state.watched));
-            return Ok(end.exit_code());
+            return finish(&mut show, end, &state);
         }
-        let now = Instant::now();
-        if deadline.is_some_and(|d| now >= d) {
-            let end = WaitEnd::Timeout;
-            print(&mut out, printer.end(&end, started.elapsed(), &state.watched));
-            return Ok(end.exit_code());
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return finish(&mut show, WaitEnd::Timeout, &state);
         }
-        if now >= last_beat + heartbeat {
-            last_beat = now;
-            for w in &state.watched {
-                print(&mut out, printer.row(started.elapsed(), &w.id, &w.job));
-            }
-        }
-        let wake = deadline.map_or(last_beat + heartbeat, |d| d.min(last_beat + heartbeat));
+        let wake = show.tick(&state.watched, started.elapsed());
+        let wake = deadline.map_or(wake, |d| d.min(wake));
         match rx.recv_timeout(wake.saturating_duration_since(Instant::now())) {
             Ok(Ok(Event::Job { job })) => {
                 if let Some(i) = state.update(*job) {
-                    let w = &state.watched[i];
-                    let name = w.job.status.name();
-                    if name != state.printed[i] {
-                        state.printed[i] = name;
-                        print(&mut out, printer.row(started.elapsed(), &w.id, &w.job));
-                    }
+                    show.changed(&state.watched, i, started.elapsed());
                 }
             }
             Ok(Ok(Event::Snapshot { jobs })) => {
@@ -252,7 +275,7 @@ pub fn run(
             Ok(Ok(Event::Removed { id })) => {
                 if let Some(short) = id.parse().ok().and_then(|id| state.removed(&id)) {
                     let end = WaitEnd::Stopped { id: short };
-                    print(&mut out, printer.end(&end, started.elapsed(), &state.watched));
+                    show.removed(&end, started.elapsed(), &state.watched);
                     return Ok(end.exit_code());
                 }
             }
@@ -265,69 +288,105 @@ pub fn run(
     }
 }
 
-pub fn attach(
-    (conn, engine): (Conn, Engine),
-    refs: Vec<String>,
-    until: Until,
-    timeout: Option<Duration>,
-) -> Result<u8, Error> {
-    let started = Instant::now();
-    let (jobs, rx) = events(conn, refs, engine)?;
-    let mut state = State::new(jobs);
-    let bars = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
-    let _ = ctrlc::set_handler(|| {
-        eprintln!("\nThe download continues in the background.");
-        std::process::exit(130);
-    });
-    let style = ProgressStyle::with_template(&format!(
-        "{{prefix:.{}}} {{bar:32.{}/{}}} {{msg}}",
-        Token::Accent.bar_color(),
-        Token::Mint.bar_color(),
-        Token::Muted.bar_color()
-    ))
-    .expect("the bar template is valid")
-    .progress_chars("━━─");
-    let handles: Vec<ProgressBar> = state
-        .watched
-        .iter()
-        .map(|w| bars.add(ProgressBar::new(1000).with_style(style.clone()).with_prefix(w.id.clone())))
-        .collect();
-    let deadline = timeout.map(|t| started + t);
-    loop {
-        for (bar, job) in handles.iter().zip(state.watched.iter().map(|w| &w.job)) {
+/// A line for each download when the wait starts, each time one changes state, and every `every`.
+struct Lines<'a> {
+    printer: &'a Printer,
+    out: std::io::StdoutLock<'static>,
+    every: Duration,
+    beat: Instant,
+    /// The state each download's last line showed.
+    printed: Vec<&'static str>,
+}
+
+impl Lines<'_> {
+    fn print(&mut self, text: String) {
+        let _ = self.out.write_all(text.as_bytes());
+        let _ = self.out.flush();
+    }
+}
+
+impl Show for Lines<'_> {
+    fn start(&mut self, watched: &[Watched]) {
+        self.print(self.printer.header());
+        for w in watched {
+            self.print(self.printer.row(Duration::ZERO, &w.id, &w.job));
+        }
+        self.printed = watched.iter().map(|w| w.job.status.name()).collect();
+    }
+
+    fn changed(&mut self, watched: &[Watched], i: usize, at: Duration) {
+        let w = &watched[i];
+        if w.job.status.name() != self.printed[i] {
+            self.printed[i] = w.job.status.name();
+            self.print(self.printer.row(at, &w.id, &w.job));
+        }
+    }
+
+    fn tick(&mut self, watched: &[Watched], at: Duration) -> Instant {
+        let now = Instant::now();
+        if now >= self.beat + self.every {
+            self.beat = now;
+            for w in watched {
+                self.print(self.printer.row(at, &w.id, &w.job));
+            }
+        }
+        self.beat + self.every
+    }
+
+    fn end(&mut self, end: &WaitEnd, at: Duration, watched: &[Watched]) {
+        self.print(self.printer.end(end, at, watched));
+    }
+}
+
+/// A bar for each download, on stderr, redrawn twice a second.
+struct Bars {
+    all: MultiProgress,
+    each: Vec<ProgressBar>,
+}
+
+impl Show for Bars {
+    fn start(&mut self, watched: &[Watched]) {
+        let _ = ctrlc::set_handler(|| {
+            eprintln!("\nThe download continues in the background.");
+            std::process::exit(130);
+        });
+        let style = ProgressStyle::with_template(&format!(
+            "{{prefix:.{}}} {{bar:32.{}/{}}} {{msg}}",
+            Token::Accent.bar_color(),
+            Token::Mint.bar_color(),
+            Token::Muted.bar_color()
+        ))
+        .expect("the bar template is valid")
+        .progress_chars("━━─");
+        self.each = watched
+            .iter()
+            .map(|w| self.all.add(ProgressBar::new(1000).with_style(style.clone()).with_prefix(w.id.clone())))
+            .collect();
+    }
+
+    fn changed(&mut self, _: &[Watched], _: usize, _: Duration) {}
+
+    fn tick(&mut self, watched: &[Watched], _: Duration) -> Instant {
+        for (bar, job) in self.each.iter().zip(watched.iter().map(|w| &w.job)) {
             bar.set_position(job.progress.fraction().map_or(0, |f| (f * 1000.0) as u64));
             bar.set_message(live_message(job));
         }
-        let end = evaluate(&state.watched, until)
-            .or_else(|| deadline.is_some_and(|d| Instant::now() >= d).then_some(WaitEnd::Timeout));
-        if let Some(end) = end {
-            let _ = bars.clear();
-            let (summary, next) = wait_end(&end, started.elapsed(), &state.watched);
-            anstream::print!(
-                "{}",
-                Doc { body: Body::Fields { title: Vec::new(), fields: Vec::new() }, summary, next }.human()
-            );
-            return Ok(end.exit_code());
+        Instant::now() + Duration::from_millis(500)
+    }
+
+    fn removed(&mut self, end: &WaitEnd, _: Duration, _: &[Watched]) {
+        if let WaitEnd::Stopped { id } = end {
+            eprintln!("{id} was removed");
         }
-        match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Ok(Event::Job { job })) => {
-                state.update(*job);
-            }
-            Ok(Ok(Event::Snapshot { jobs })) => jobs.into_iter().for_each(|job| {
-                state.update(job);
-            }),
-            Ok(Ok(Event::Removed { id })) => {
-                if let Some(short) = id.parse().ok().and_then(|id| state.removed(&id)) {
-                    eprintln!("{short} was removed");
-                    return Ok(WaitEnd::Stopped { id: short }.exit_code());
-                }
-            }
-            Ok(Ok(Event::Heartbeat { .. } | Event::SearchUpdate { .. })) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting"));
-            }
-        }
+    }
+
+    fn end(&mut self, end: &WaitEnd, at: Duration, watched: &[Watched]) {
+        let _ = self.all.clear();
+        let (summary, next) = wait_end(end, at, watched);
+        anstream::print!(
+            "{}",
+            Doc { body: Body::Fields { title: Vec::new(), fields: Vec::new() }, summary, next }.human()
+        );
     }
 }
 

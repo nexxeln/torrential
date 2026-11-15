@@ -498,6 +498,16 @@ impl Change {
     }
 }
 
+/// What a person does to downloads, as the requests `Pause`, `Resume`, `Remove` and `Verify`,
+/// which each answer with `Changed`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JobAction {
+    Pause,
+    Resume,
+    Remove,
+    Verify,
+}
+
 /// A file or folder `rm` was to delete or move to the Trash and left, and why.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

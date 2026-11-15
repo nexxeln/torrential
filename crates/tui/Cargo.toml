@@ -12,3 +12,4 @@ ratatui = "0.30"
 
 [dev-dependencies]
 insta = "1.49"
+serde_json = "1"

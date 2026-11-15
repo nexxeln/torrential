@@ -1242,3 +1242,21 @@ async fn a_pinned_source_that_fails_is_the_only_one_tried() {
     );
     h.until("the download the trial made leaves the list", |jobs| jobs.is_empty()).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_reads_the_torrent_file_the_engine_kept_from_an_earlier_fetch() {
+    let film = torrent(0xb1, "night_of_the_living_dead", &[("night_of_the_living_dead.mp4", 700 * MIB)]);
+    let url = "https://archive.org/download/night_of_the_living_dead/night_of_the_living_dead_archive.torrent";
+    let release = Release { magnet: None, torrent_url: Some(url.into()), ..listed(&film, "archive.org", None) };
+    let torrents = BTreeMap::from([(url.to_string(), film.bytes())]);
+    let script = vec![fake::Source::answers("archive.org", 0)];
+    let h = Harness::with_search(fake::Search::scripted(vec![release], script, torrents));
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    let played = "playing tt0063350 b1b1b1 file 0 at null".to_string();
+    assert_eq!(h.play_title("tt0063350", None, None).await.last(), Some(&played));
+    h.changes(Request::Remove { refs: vec![prefix(&film)], delete: false }).await.unwrap();
+    h.until("the download leaves the list", |jobs| jobs.is_empty()).await;
+    assert_eq!(h.play_title("tt0063350", None, None).await.last(), Some(&played));
+    assert_eq!(h.search.fetched(), [url], "the second play reads the .torrent file the first one fetched");
+}
