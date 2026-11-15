@@ -9,6 +9,7 @@ pub mod preferences;
 pub mod profile;
 pub mod protocol;
 pub mod quality;
+pub mod recording;
 pub mod release;
 pub mod stream;
 pub mod subtitle;

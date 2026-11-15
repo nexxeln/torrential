@@ -83,6 +83,14 @@ torrential status                            # list your downloads
 
 `torrential --help` lists the rest. Every command takes `--json`.
 
+### Finding music inside a release
+
+Torrent indexes usually search release titles, not the names of every track inside an album or compilation. An empty artist-and-track search does not establish that the track is unavailable.
+
+For music you have permission to download, use `--category audio`. If the track query is empty, try the album title or artist, then inspect a candidate with `torrential files <id>` before selecting files with `--files`. An artist-only result is a release candidate, not confirmation that it contains the requested track or remix. Broad artist names can also match unrelated artists.
+
+Check the recording and version separately from the download: original, radio edit, live performance, mixed compilation track, and remix can share most of their title. `torrential verify` checks the torrent's data against its piece hashes; it does not establish a recording's artist or remix identity. A metadata timeout also leaves the file contents unknown.
+
 ## With your agent
 
 ```sh
