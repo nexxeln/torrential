@@ -1,0 +1,52 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "id": "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+    "name": "night_of_the_living_dead",
+    "total_size": 1432408064,
+    "files": [
+      {
+        "index": 0,
+        "path": "night_of_the_living_dead.mp4",
+        "size": 783286272,
+        "selected": false,
+        "verified": 0
+      },
+      {
+        "index": 1,
+        "path": "night_of_the_living_dead.ogv",
+        "size": 426770432,
+        "selected": false,
+        "verified": 0
+      },
+      {
+        "index": 2,
+        "path": "night_of_the_living_dead_512kb.mp4",
+        "size": 222298112,
+        "selected": false,
+        "verified": 0
+      },
+      {
+        "index": 3,
+        "path": "night_of_the_living_dead.srt",
+        "size": 50176,
+        "selected": false,
+        "verified": 0
+      },
+      {
+        "index": 4,
+        "path": "night_of_the_living_dead_meta.xml",
+        "size": 3072,
+        "selected": false,
+        "verified": 0
+      }
+    ],
+    "metadata_source": "torrent_url",
+    "elapsed_ms": "[redacted]"
+  }
+}

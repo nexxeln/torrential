@@ -1,0 +1,20 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "changed",
+    "changes": [
+      {
+        "id": "91fd3b5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c",
+        "name": "stackexchange",
+        "result": "removed",
+        "path": "[home]/Downloads/torrential/stackexchange"
+      }
+    ],
+    "next": null
+  }
+}

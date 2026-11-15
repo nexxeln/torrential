@@ -1,0 +1,34 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "continue": [
+      {
+        "title": {
+          "id": "tt0063350",
+          "kind": "film",
+          "name": "Night of the Living Dead",
+          "year": 1968,
+          "rating": 7.8
+        },
+        "video": "tt0063350",
+        "episode": null,
+        "resume_at": 200.5,
+        "duration": 5760.0
+      }
+    ],
+    "saved": [
+      {
+        "id": "tt0063350",
+        "kind": "film",
+        "name": "Night of the Living Dead",
+        "year": 1968,
+        "rating": 7.8
+      }
+    ]
+  }
+}

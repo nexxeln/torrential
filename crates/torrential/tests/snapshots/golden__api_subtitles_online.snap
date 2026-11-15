@@ -1,0 +1,39 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "200 OK",
+  "type": "application/json",
+  "body": {
+    "title": {
+      "name": "big buck bunny",
+      "year": null,
+      "season": null,
+      "episode": null
+    },
+    "subtitles": [
+      {
+        "id": "fake-eng-1",
+        "language": "eng",
+        "name": "big_buck_bunny_1080p_h264.en.srt",
+        "exact": false,
+        "source": "fake"
+      },
+      {
+        "id": "fake-eng-2",
+        "language": "eng",
+        "name": "Another.Release.en.srt",
+        "exact": false,
+        "source": "fake"
+      },
+      {
+        "id": "fake-spa-1",
+        "language": "spa",
+        "name": "big_buck_bunny_1080p_h264.es.srt",
+        "exact": false,
+        "source": "fake"
+      }
+    ]
+  }
+}

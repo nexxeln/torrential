@@ -1,0 +1,21 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "code": 0,
+  "stdout": {
+    "schema": 1,
+    "type": "devices",
+    "devices": [],
+    "offer": {
+      "code": "[redacted]",
+      "url": "[redacted]",
+      "address": "[redacted]",
+      "lan_address": "[redacted]",
+      "expires_at": "[redacted]"
+    },
+    "unreachable": null,
+    "next": "torrential devices"
+  }
+}

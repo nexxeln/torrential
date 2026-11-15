@@ -1,0 +1,14 @@
+---
+source: crates/torrential/tests/golden.rs
+expression: value
+---
+{
+  "status": "404 Not Found",
+  "type": "application/json",
+  "body": {
+    "error": {
+      "code": "not_found",
+      "message": "the engine has no GET /api/nothing"
+    }
+  }
+}
