@@ -1,6 +1,6 @@
-use std::path::Path;
 use std::time::Duration;
 
+use crate::filetype::{FileType, Kind};
 use crate::job::TorrentFile;
 use crate::title::{self, Episode};
 
@@ -27,12 +27,6 @@ pub enum Start {
     Wait(Duration),
     /// Bytes are missing and no peer is sending any.
     Stalled,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
-    Video,
-    Subtitle,
 }
 
 /// The largest video file, plus the subtitle files that belong with it.
@@ -97,14 +91,7 @@ pub fn start(size: u64, runtime: Duration, have: u64, rate: u64) -> Start {
 }
 
 fn kind(path: &str) -> Option<Kind> {
-    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "mkv" | "mp4" | "m4v" | "mov" | "webm" | "avi" | "ts" | "m2ts" | "wmv" | "mpg" | "mpeg" | "ogv" => {
-            Some(Kind::Video)
-        }
-        "srt" | "ass" | "ssa" | "vtt" | "sub" => Some(Kind::Subtitle),
-        _ => None,
-    }
+    FileType::of(path)?.kind
 }
 
 /// Whether the file at `path` is a sample clip, by its own name or a folder's.

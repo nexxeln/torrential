@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use torrential_core::filetype::{self, FileType};
 use torrential_core::text::sanitize;
 use torrential_core::{Error, FileRisk, InfoHash, Selection};
 pub use torrential_engine::on_disk;
@@ -61,20 +62,13 @@ const EXECUTABLE: [&str; 25] = [
     "exe", "msi", "bat", "cmd", "com", "scr", "pif", "ps1", "vbs", "vbe", "js", "jse", "wsf", "hta", "jar", "sh",
     "command", "app", "dmg", "pkg", "apk", "lnk", "cpl", "run", "reg",
 ];
-const MEDIA: [&str; 22] = [
-    "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "m2ts", "mp3", "flac", "aac", "ogg",
-    "opus", "wav", "m4a", "wma", "srt", "ass",
-];
-
-fn extension(path: &str) -> Option<String> {
-    Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase())
-}
 
 pub fn risks(metainfo: &Metainfo) -> Vec<Option<FileRisk>> {
-    let is = |list: &[&str], path: &str| extension(path).is_some_and(|e| list.contains(&e.as_str()));
-    let media: u64 = metainfo.files.iter().filter(|f| is(&MEDIA, &f.path)).map(|f| f.size).sum();
+    let media: u64 =
+        metainfo.files.iter().filter(|f| FileType::of(&f.path).is_some_and(|t| t.media)).map(|f| f.size).sum();
     let mostly_media = media * 2 > metainfo.total();
-    metainfo.files.iter().map(|f| (mostly_media && is(&EXECUTABLE, &f.path)).then_some(FileRisk::Executable)).collect()
+    let executable = |path: &str| EXECUTABLE.contains(&filetype::extension(path).as_str());
+    metainfo.files.iter().map(|f| (mostly_media && executable(&f.path)).then_some(FileRisk::Executable)).collect()
 }
 
 #[cfg(test)]

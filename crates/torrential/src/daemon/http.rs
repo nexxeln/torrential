@@ -14,6 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{oneshot, watch};
+use torrential_core::filetype::FileType;
 use torrential_core::{ErrorCode, TorrentId};
 
 use super::cast::Dlna;
@@ -49,15 +50,6 @@ const MAX_BODY: usize = 64 * 1024;
 const ONE_WRITE: usize = 8 * 1024;
 
 const JSON: &str = "application/json";
-
-const TYPES: [(&str, &str); 6] = [
-    ("mp4", "video/mp4"),
-    ("m4v", "video/mp4"),
-    ("mkv", "video/x-matroska"),
-    ("webm", "video/webm"),
-    ("vtt", "text/vtt"),
-    ("srt", "application/x-subrip"),
-];
 
 /// Binds the first of `ports` that is free where `reach` says, or any free port when other programs
 /// hold them all.
@@ -920,8 +912,7 @@ fn range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, Unsatisf
 }
 
 fn content_type(path: &Path) -> &'static str {
-    let extension = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    TYPES.iter().find(|(e, _)| *e == extension).map_or("application/octet-stream", |(_, t)| t)
+    FileType::of(&path.to_string_lossy()).and_then(|t| t.served_as).unwrap_or("application/octet-stream")
 }
 
 #[cfg(test)]
