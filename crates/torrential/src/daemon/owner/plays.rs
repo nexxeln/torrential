@@ -14,9 +14,9 @@ use super::super::admission::{self, Space};
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
 use super::super::engine_port::EngineCommand;
 use super::super::files;
-use super::super::log;
 use super::deleter::{Deleter, Doom, InUse};
 use super::{Finish, Owner, Reply, Shelving, now};
+use crate::log::log;
 
 /// How long a play no one streams keeps downloading. Long enough that a break, or a phone that
 /// locked, comes back to a play still downloading. Short enough that a film left after a few

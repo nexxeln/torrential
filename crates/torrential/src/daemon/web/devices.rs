@@ -6,11 +6,11 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use torrential_core::time::now;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer};
 
 use super::super::devices::{Asker, COOKIE, qr};
 use super::super::http::{Connection, Method, Peer, Request};
-use super::super::owner::now;
 use super::super::server::Ctx;
 use super::{body, value};
 

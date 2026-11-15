@@ -12,6 +12,7 @@ use super::super::book::{Intent, JobEntry, Observed, Phase};
 use super::super::engine_port::{EngineCommand, EngineHandle};
 use super::super::playing::{Open, Playing};
 use super::Owner;
+use crate::log::log;
 
 /// A film with less than this on disk ahead of its player holds the other downloads back. It
 /// gives the line time to turn toward the film before the player runs out.
@@ -270,11 +271,11 @@ impl Owner {
         let before = streams.others;
         streams.others = decide(before, downloading.iter().filter_map(|(_, lead)| *lead));
         match (before, streams.others) {
-            (Others::Free, Others::Held) => super::super::log(&format!(
+            (Others::Free, Others::Held) => log(&format!(
                 "a film is less than {}s ahead of its player, so the other downloads trickle",
                 BEHIND.as_secs()
             )),
-            (Others::Held, Others::Free) => super::super::log(&format!(
+            (Others::Held, Others::Free) => log(&format!(
                 "no film is less than {}s ahead of its player, so the other downloads go",
                 AHEAD.as_secs()
             )),

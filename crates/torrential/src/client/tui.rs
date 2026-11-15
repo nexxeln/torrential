@@ -176,7 +176,7 @@ impl torrential_tui::Backend for EngineBackend {
 
     fn upgrade(&self) -> Result<Option<String>, Error> {
         let releases = Releases::required(&self.env)?;
-        let install = update::install(&releases, &self.paths, &self.env, crate::daemon::owner::now());
+        let install = update::install(&releases, &self.paths, &self.env, torrential_core::time::now());
         Ok(match update::runtime()?.block_on(install)? {
             Outcome::Updated(latest) => Some(latest.to_string()),
             Outcome::Latest(_) => None,

@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use torrential_core::protocol::{Request, Response, WIRE_VERSION};
+use torrential_core::time::now;
 use torrential_core::{Error, ErrorCode};
 
-use crate::daemon::owner::{self, now};
+use crate::daemon::owner;
 use crate::daemon::server::Ctx;
 use crate::env::Env;
+use crate::log::log;
 use crate::output::Mode;
 use crate::output::theme::{Token, paint};
 use crate::paths::Paths;
@@ -694,7 +696,7 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                 if Checked::read(&paths).next_check() <= now
                     && let Err(e) = check(&releases, &paths, now).await
                 {
-                    crate::daemon::log(&format!("update check failed: {}", e.message));
+                    log(&format!("update check failed: {}", e.message));
                 }
                 let checked = Checked::read(&paths);
                 if policy == Policy::Auto
@@ -708,7 +710,7 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                     };
                     match put.await {
                         Ok(Put::Installed) => {
-                            crate::daemon::log(&format!("installed torrential {latest}"));
+                            log(&format!("installed torrential {latest}"));
                             write_json(
                                 &paths.state.join(UPDATED),
                                 &Updated { from: current.clone(), to: latest.to_string() },
@@ -716,22 +718,20 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                             return switch(&ctx, latest, service).await;
                         }
                         Ok(Put::Current(installed)) => {
-                            crate::daemon::log(&format!("torrential {installed} is already installed"));
+                            log(&format!("torrential {installed} is already installed"));
                             return switch(&ctx, installed, service).await;
                         }
                         Ok(Put::NotWanted) => {
-                            crate::daemon::log(&format!(
-                                "updates is no longer auto, so torrential {latest} is not installed"
-                            ));
+                            log(&format!("updates is no longer auto, so torrential {latest} is not installed"));
                         }
                         Ok(Put::Refused(e)) => {
-                            crate::daemon::log(&format!("update failed: {}", e.message));
+                            log(&format!("update failed: {}", e.message));
                             let mut checked = Checked::read(&paths);
                             checked.refused = Some(latest.to_string());
                             checked.write(&paths);
                         }
                         Err(e) => {
-                            crate::daemon::log(&format!("update failed: {}", e.message));
+                            log(&format!("update failed: {}", e.message));
                             let mut checked = Checked::read(&paths);
                             checked.install_failed_at = Some(now);
                             checked.write(&paths);
@@ -751,20 +751,20 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
 /// download is saved. An engine without a login service keeps running until it next starts.
 async fn switch(ctx: &Ctx, to: Version, service: bool) {
     if !service {
-        crate::daemon::log(&format!("torrential {to} starts the next time the engine starts"));
+        log(&format!("torrential {to} starts the next time the engine starts"));
         ctx.news.post(Some(News::Installed { latest: to }));
         return std::future::pending().await;
     }
     loop {
         if ctx.playing.any() {
-            crate::daemon::log(&format!("torrential {to} starts when nothing is playing"));
+            log(&format!("torrential {to} starts when nothing is playing"));
             ctx.news.post(Some(News::Waiting { latest: to }));
         }
         let closed = ctx.playing.close().await;
         match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
             Ok(()) => return closed.keep(),
             Err(e) => {
-                crate::daemon::log(&format!("torrential {to} waits: {}", e.message));
+                log(&format!("torrential {to} waits: {}", e.message));
                 drop(closed);
                 tokio::time::sleep(SWITCH_RETRY).await;
             }
