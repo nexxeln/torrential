@@ -1,15 +1,12 @@
 //! `torrential web`: opens the web app the engine serves.
 
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-
 use serde::Serialize;
 use torrential_core::{Error, ErrorCode};
 
 use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
-use crate::env::{Env, hooks};
+use crate::env::Env;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 
@@ -29,7 +26,7 @@ pub fn run(conn: &Conn, args: WebArgs, mode: Mode, env: &Env) -> Result<u8, Erro
     let url = format!("http://127.0.0.1:{}", conn.http_port);
     let opened = !args.no_open && mode != Mode::Json;
     if opened {
-        open(&url, env)?;
+        crate::player::open_url(&url, env)?;
     }
     let state = if opened { "opened in your browser" } else { "ready" };
     let doc = Doc {
@@ -41,24 +38,4 @@ pub fn run(conn: &Conn, args: WebArgs, mode: Mode, env: &Env) -> Result<u8, Erro
         next: None,
     };
     Ok(emit(mode, &doc, &Typed { kind: DocKind::Web, body: Web { url, opened } }))
-}
-
-/// Opens `url` in the default browser. Tests name a program in `OPENER` to run in its place.
-fn open(url: &str, env: &Env) -> Result<(), Error> {
-    let program = match env.test().and_then(|test| test.path(hooks::OPENER)) {
-        Some(program) => program.to_path_buf(),
-        None if cfg!(target_os = "macos") => PathBuf::from("/usr/bin/open"),
-        None => PathBuf::from("xdg-open"),
-    };
-    Command::new(&program)
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(drop)
-        .map_err(|e| {
-            Error::new(ErrorCode::NotFound, format!("cannot open a browser with {}: {e}", program.display()))
-                .with_hint(format!("open {url} in your browser"))
-        })
 }

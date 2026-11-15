@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use torrential_core::protocol::{Change, Event, FilesReply, GetOutcome, GetReply, Home, TitlePage, TitlePlayed};
+use torrential_core::protocol::{
+    Change, Event, FilesReply, GetOutcome, GetReply, Home, JobAction, TitlePage, TitlePlayed,
+};
 use torrential_core::text::sanitize;
 use torrential_core::units::count;
 use torrential_core::{
@@ -12,8 +14,8 @@ use torrential_core::{
 use crate::format::{first_fit, home_path};
 use crate::layout;
 use crate::state::{
-    DownloadFiles, Edit, Engine, Files, Focus, Input, Item, JobAction, Page, RankedFor, Ranking, Search, SearchPhase,
-    State, Tone, Upgrade,
+    DownloadFiles, Edit, Engine, Files, Focus, Input, Item, Page, RankedFor, Ranking, Search, SearchPhase, State, Tone,
+    Upgrade,
 };
 use crate::tree::Tree;
 
@@ -968,20 +970,24 @@ impl State {
         self.pending.remove(&id);
         let name = self.job(id).and_then(|j| j.name.clone()).unwrap_or_else(|| id.to_hex()[..6].to_string());
         match result {
-            Ok(_) => {
+            Ok(changes) => {
                 let text = match action {
                     JobAction::Pause => format!("Paused {name}"),
                     JobAction::Resume => format!("Resumed {name}"),
                     JobAction::Verify => format!("Verifying {name}"),
                     JobAction::Remove => {
-                        let job = self.job(id);
-                        let play = job.is_some_and(|j| j.place == torrential_core::Place::Plays);
-                        let dir = job.map(|j| home_path(&j.dir, self.home.as_deref()));
+                        let dir = self.job(id).map(|j| home_path(&j.dir, self.home.as_deref()));
                         self.forget(id);
-                        match dir {
-                            _ if play => "Removed from the list, and its files were deleted.".into(),
-                            Some(dir) => format!("Removed from the list. Files are kept in {dir}."),
-                            None => "Removed from the list. Files are kept on disk.".into(),
+                        let home = self.home.as_deref();
+                        let change = changes.into_iter().next();
+                        let deleted = change.as_ref().is_some_and(|c| !c.deleted.is_empty());
+                        match (!deleted, change.as_ref().and_then(|c| c.kept.first()), dir) {
+                            (false, _, _) => "Removed from the list, and its files were deleted.".into(),
+                            (true, Some(kept), _) => {
+                                format!("Removed from the list. {} stays: {}", home_path(&kept.path, home), kept.reason)
+                            }
+                            (true, None, Some(dir)) => format!("Removed from the list. Files are kept in {dir}."),
+                            (true, None, None) => "Removed from the list. Files are kept on disk.".into(),
                         }
                     }
                 };

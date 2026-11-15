@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use torrential_core::protocol::JobAction;
 use torrential_core::units::format_limit;
 use torrential_core::{
     Error, Job, JobStatus, Machine, Playback, Preferences, Release, ReleaseId, Screen, SourceReport, TorrentFile,
@@ -255,22 +256,13 @@ impl DownloadFiles {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum JobAction {
-    Pause,
-    Resume,
-    Verify,
-    Remove,
-}
-
-impl JobAction {
-    pub fn progressive(self) -> &'static str {
-        match self {
-            Self::Pause => "pausing",
-            Self::Resume => "resuming",
-            Self::Verify => "verifying",
-            Self::Remove => "removing",
-        }
+/// What a row says while `action` waits for the engine.
+pub fn progressive(action: JobAction) -> &'static str {
+    match action {
+        JobAction::Pause => "pausing",
+        JobAction::Resume => "resuming",
+        JobAction::Verify => "verifying",
+        JobAction::Remove => "removing",
     }
 }
 

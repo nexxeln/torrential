@@ -76,6 +76,11 @@ pub struct Next {
     pub resume_at: Option<f64>,
 }
 
+/// Where the person stopped `video`, of what they `watched`, unless they finished it.
+pub fn resume_at(watched: &[Watched], video: &VideoRef) -> Option<f64> {
+    watched.iter().find(|w| w.video == *video && !w.finished()).map(|w| w.position)
+}
+
 /// What of a title to play: an unfinished film or episode to resume, or else the first aired
 /// episode after the one finished last that is not finished too. `None` when the film is
 /// finished or the series is caught up. Specials, in season 0, never come next. An episode the

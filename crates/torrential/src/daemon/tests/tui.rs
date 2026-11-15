@@ -87,6 +87,26 @@ fn watch(h: &Harness, video: &str, position: f64, duration: f64) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_play_reads_where_to_start_when_it_opens_the_player_not_when_it_began() {
+    let (h, _) = night();
+    watch(&h, "tt0063350", 200.5, 5760.0);
+    let tui = Tui::new(&h);
+    let backend = tui.backend.clone();
+    let start = move || {
+        let backend = backend.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = crate::client::connect::ensure(&backend.paths, &backend.env).unwrap();
+            crate::client::play::start_at(&mut conn, &"tt0063350".parse().unwrap()).unwrap()
+        })
+    };
+    assert_eq!(start().await.unwrap(), Some(200.5));
+    watch(&h, "tt0063350", 2473.0, 5760.0);
+    assert_eq!(start().await.unwrap(), Some(2473.0), "a TV saved a later place during the countdown");
+    watch(&h, "tt0063350", 5750.0, 5760.0);
+    assert_eq!(start().await.unwrap(), None, "the TV played the film to its credits");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_play_from_the_terminal_ui_starts_the_player_where_the_person_stopped() {
     let (h, _) = night();
     watch(&h, "tt0063350", 200.5, 5760.0);

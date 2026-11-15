@@ -8,11 +8,13 @@ use std::time::{Duration, Instant};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
 use torrential_core::Job;
-use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, TitlePlayed, TitleRequest};
+use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, TitlePage, TitlePlayed, TitleRequest};
 use torrential_core::stream::{self, Start};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
-use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, SearchResult, Target, media};
+use torrential_core::{
+    Category, Error, ErrorCode, Preferences, Profile, SearchQuery, SearchResult, Target, VideoRef, media,
+};
 
 use super::connect::{self, Conn};
 use super::rows::{short_ids, short_ref};
@@ -128,16 +130,21 @@ fn torrent(
 }
 
 /// Hands the video to the person's player, or with `--json` prints where it is served.
-fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, config: &Config) -> Result<u8, Error> {
+fn present(
+    mut conn: Conn,
+    mut playing: Playing,
+    mode: Mode,
+    env: &Env,
+    paths: &Paths,
+    config: &Config,
+) -> Result<u8, Error> {
     let doc = play(&playing, None);
     if mode == Mode::Json {
         return Ok(emit(mode, &doc, &Typed { kind: DocKind::Play, body: &playing }));
     }
     let player = player(config, paths, env, &playing.reply.streams[0].url)?;
-    if let Some(at) = resume_at(&playing) {
-        anstream::eprintln!("{}", resuming(at));
-    }
     if mode == Mode::Plain {
+        say_resuming(&playing);
         open(&player, &playing, env)?;
         let summary = vec![format!("playing in {} · the download continues", player.name())];
         return Ok(emit(mode, &Doc { summary, ..doc }, &Typed { kind: DocKind::Play, body: &playing }));
@@ -147,7 +154,14 @@ fn present(conn: Conn, playing: Playing, mode: Mode, env: &Env, paths: &Paths, c
         eprintln!("\nThe download continues in the background: torrential status {id}");
         std::process::exit(130);
     });
-    let runtime = countdown(conn, &playing)?;
+    let runtime = countdown(&mut conn, &playing)?;
+    // While the countdown ran, a TV or a browser that plays the same video kept saving its place.
+    if let Some(title) = &mut playing.title
+        && let Ok(at) = start_at(&mut conn, &title.video)
+    {
+        title.resume_at = at;
+    }
+    say_resuming(&playing);
     open(&player, &playing, env)?;
     let mut out = Doc { next: None, ..play(&playing, known(runtime)) }.human();
     if runtime == Runtime::Unknown {
@@ -172,6 +186,18 @@ pub fn player(config: &Config, paths: &Paths, env: &Env, url: &str) -> Result<Pl
 /// Where a title play resumes the video, unless it starts from the beginning.
 fn resume_at(playing: &Playing) -> Option<Duration> {
     Duration::try_from_secs_f64(playing.title.as_ref()?.resume_at?).ok()
+}
+
+fn say_resuming(playing: &Playing) {
+    if let Some(at) = resume_at(playing) {
+        anstream::eprintln!("{}", resuming(at));
+    }
+}
+
+/// Where the person stopped `video` now, unless they finished it.
+pub fn start_at(conn: &mut Conn, video: &VideoRef) -> Result<Option<f64>, Error> {
+    let page: Box<TitlePage> = conn.ask(&Request::Title { id: video.title.clone() })?;
+    Ok(torrential_core::watching::resume_at(&page.watched, video))
 }
 
 /// Opens the video and its subtitles in `player`, titled with the release name, showing subtitles in
@@ -280,7 +306,7 @@ enum Wake {
 }
 
 /// Shows why playback waits until it can start, or until the person presses Enter.
-fn countdown(mut conn: Conn, playing: &Playing) -> Result<Runtime, Error> {
+fn countdown(conn: &mut Conn, playing: &Playing) -> Result<Runtime, Error> {
     let video = &playing.reply.streams[0];
     let (tx, rx) = mpsc::channel();
     let (probe, url) = (tx.clone(), video.url.clone());
@@ -301,7 +327,7 @@ fn countdown(mut conn: Conn, playing: &Playing) -> Result<Runtime, Error> {
     let mut rates = Rates::default();
     let id = playing.reply.job.id.to_hex();
     loop {
-        let have = file_list(&mut conn, Target::Prefix(id.clone()))?
+        let have = file_list(conn, Target::Prefix(id.clone()))?
             .files
             .iter()
             .find(|f| f.index == video.index)

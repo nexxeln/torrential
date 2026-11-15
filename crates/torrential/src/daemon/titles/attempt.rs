@@ -252,8 +252,7 @@ impl Searching<'_> {
 
 /// Where the person stopped `video`, unless they finished it.
 fn resume_at(ctx: &Ctx, video: &VideoRef) -> Option<f64> {
-    let watched = ctx.titles.shelf.watched(&video.title).ok()?;
-    watched.into_iter().find(|w| w.video == *video && !w.finished()).map(|w| w.position)
+    torrential_core::watching::resume_at(&ctx.titles.shelf.watched(&video.title).ok()?, video)
 }
 
 /// A title play's way through its sources.

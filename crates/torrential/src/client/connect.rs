@@ -161,15 +161,11 @@ pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
     if let Ok(Response::Error { error }) = answered {
         return Err(error);
     }
-    let deadline = Instant::now() + request.within();
-    while alive(pid) {
-        if Instant::now() > deadline {
-            return Err(Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
-                .with_hint(format!("kill {pid}, then run the command again")));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Ok(pid)
+    let exited = poll(request.within(), || Ok((!alive(pid)).then_some(())))?;
+    exited.map(|()| pid).ok_or_else(|| {
+        Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
+            .with_hint(format!("kill {pid}, then run the command again"))
+    })
 }
 
 /// Stops the engine as the person asks, and returns the process ID of the last engine it stopped.
@@ -200,6 +196,25 @@ pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
     }
 }
 
+/// Asks `ready` until it answers, fails, or `within` passes, often at first and less often later.
+pub fn poll<T>(within: Duration, mut ready: impl FnMut() -> Result<Option<T>, Error>) -> Result<Option<T>, Error> {
+    let started = Instant::now();
+    loop {
+        if let Some(found) = ready()? {
+            return Ok(Some(found));
+        }
+        let waited = started.elapsed();
+        if waited > within {
+            return Ok(None);
+        }
+        std::thread::sleep(pause(waited));
+    }
+}
+
+fn pause(waited: Duration) -> Duration {
+    (waited / 10).clamp(Duration::from_millis(2), Duration::from_millis(20))
+}
+
 pub fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
@@ -209,4 +224,38 @@ pub fn unexpected(response: &Response) -> Error {
         "the engine sent an unexpected reply: {}",
         serde_json::to_string(response).unwrap_or_default()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_for_the_engine_asks_often_at_first_and_less_later() {
+        let ms = Duration::from_millis;
+        let pauses = [ms(0), ms(25), ms(100), ms(10_000)].map(pause);
+        assert_eq!(pauses, [ms(2), Duration::from_micros(2_500), ms(10), ms(20)]);
+    }
+
+    #[test]
+    fn the_wait_for_the_engine_ends_when_it_answers_fails_or_runs_out() {
+        let mut asked = 0;
+        let answered = poll(Duration::from_secs(10), || {
+            asked += 1;
+            Ok((asked == 3).then_some("conn"))
+        });
+        let failed = poll(Duration::from_secs(10), || Err::<Option<()>, _>(Error::internal("startup failed")));
+        let started = Instant::now();
+        let mut idle_asks = 0;
+        let ran_out = poll(Duration::from_millis(300), || {
+            idle_asks += 1;
+            Ok(None::<()>)
+        });
+
+        assert_eq!((answered.unwrap(), asked), (Some("conn"), 3));
+        assert_eq!(failed.unwrap_err().message, "startup failed");
+        assert_eq!(ran_out.unwrap(), None);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(idle_asks < 60, "asked {idle_asks} times in 300 ms");
+    }
 }
