@@ -3,7 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
-use torrential_core::protocol::{Request, Response, WIRE_VERSION};
+use torrential_core::protocol::{Frame, Reply, Request, Response, WIRE_VERSION, read_frame};
 use torrential_core::{Error, ErrorCode};
 
 use super::launch::{self, Blocked};
@@ -12,7 +12,6 @@ use crate::paths::Paths;
 use crate::update::Version;
 use crate::wire;
 
-pub const DEFAULT_REPLY_WITHIN: Duration = Duration::from_secs(30);
 /// How long an engine that refuses connections, as one does while it restarts, has to answer again.
 pub const BACK_WITHIN: Duration = Duration::from_secs(30);
 
@@ -27,35 +26,64 @@ pub struct Conn {
 }
 
 impl Conn {
-    pub fn call(&mut self, request: &Request) -> Result<Response, Error> {
-        self.call_within(request, DEFAULT_REPLY_WITHIN)
-    }
-
-    pub fn call_within(&mut self, request: &Request, within: Duration) -> Result<Response, Error> {
+    /// Sends `request` and reads its reply, which carries an `R`, within the request's limit.
+    pub fn ask<R: Reply>(&mut self, request: &Request) -> Result<R, Error> {
         self.send(request)?;
-        self.read_within(within)
+        reply(self.read(Some(request.within()))?)
     }
 
-    pub fn read_within<T: DeserializeOwned>(&mut self, within: Duration) -> Result<T, Error> {
-        self.stream.set_read_timeout(Some(within)).map_err(|e| self.lost(e))?;
-        let frame = wire::read(&mut self.stream).map_err(|e| self.lost(e))?;
-        frame.ok_or_else(|| self.lost(std::io::Error::from(ErrorKind::UnexpectedEof)))
+    /// Sends `request`, hands each update the engine sends to `on_update`, and returns the reply
+    /// that ends the stream. Each frame comes within the request's limit.
+    pub fn stream<U: DeserializeOwned, R: Reply>(
+        &mut self,
+        request: &Request,
+        mut on_update: impl FnMut(U),
+    ) -> Result<R, Error> {
+        self.send(request)?;
+        loop {
+            match self.read(Some(request.within()))? {
+                Frame::Update(update) => on_update(update),
+                Frame::Reply(response) => return reply(*response),
+            }
+        }
+    }
+
+    /// Reads the next frame, waiting at most `within`, or with no limit. `None` when the engine
+    /// closed the connection between frames.
+    pub fn next<T: DeserializeOwned>(&mut self, within: Option<Duration>) -> Result<Option<T>, Error> {
+        self.stream.set_read_timeout(within).map_err(|e| lost(e, &self.log))?;
+        read_frame(&mut self.stream).map_err(|e| lost(e, &self.log))
+    }
+
+    fn read<T: DeserializeOwned>(&mut self, within: Option<Duration>) -> Result<T, Error> {
+        self.next(within)?.ok_or_else(|| lost(ErrorKind::UnexpectedEof.into(), &self.log))
     }
 
     pub fn send(&mut self, request: &Request) -> Result<(), Error> {
-        wire::write(&mut self.stream, request).map_err(|e| self.lost(e))
+        wire::write(&mut self.stream, request).map_err(|e| lost(e, &self.log))
     }
 
-    pub fn into_stream(self) -> UnixStream {
-        self.stream
+    /// The connection, and the engine's log, for a reader that follows a watch.
+    pub fn into_stream(self) -> (UnixStream, String) {
+        (self.stream, self.log)
     }
+}
 
-    fn lost(&self, e: std::io::Error) -> Error {
-        let message = match e.kind() {
-            ErrorKind::WouldBlock | ErrorKind::TimedOut => "the engine did not respond in time".to_string(),
-            _ => format!("lost the connection to the engine: {e}"),
-        };
-        Error::new(ErrorCode::DaemonUnavailable, message).with_hint(format!("see {}", self.log))
+/// The error for a connection to the engine that ended or did not answer in time. `log` is the
+/// engine's log, which says why.
+pub fn lost(e: std::io::Error, log: &str) -> Error {
+    let message = match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => "the engine did not respond in time".to_string(),
+        _ => format!("lost the connection to the engine: {e}"),
+    };
+    Error::new(ErrorCode::DaemonUnavailable, message).with_hint(format!("see {log}"))
+}
+
+/// What `response` carries, the engine's error, or an error for a reply of another kind.
+pub fn reply<R: Reply>(response: Response) -> Result<R, Error> {
+    match response {
+        Response::Error { error } => Err(error),
+        other => R::from_response(other).map_err(|other| unexpected(&other)),
     }
 }
 
@@ -83,19 +111,9 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
         http_port: 0,
         log: paths.log().display().to_string(),
     };
-    match conn
-        .call_within(&Request::Hello { client_version: env.version(), wire: WIRE_VERSION }, Duration::from_secs(5))?
-    {
-        Response::Hello { engine_version, wire, pid, http_port } => {
-            conn.engine_version = engine_version;
-            conn.wire = wire;
-            conn.pid = pid;
-            conn.http_port = http_port;
-            Ok(Some(conn))
-        }
-        Response::Error { error } => Err(error),
-        other => Err(unexpected(&other)),
-    }
+    let hello = Request::Hello { client_version: env.version(), wire: WIRE_VERSION };
+    (conn.engine_version, conn.wire, conn.pid, conn.http_port) = conn.ask(&hello)?;
+    Ok(Some(conn))
 }
 
 /// The engine, for a command to use. A client never uses or stops a newer engine: it runs a release
@@ -103,7 +121,7 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
 /// Every connection a command uses comes from here.
 pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     match running(paths, env)? {
-        Some(conn) if newer(&conn, env) => Err(Error::new(
+        Some(conn) if Version::newer(&conn.engine_version, &env.version()) => Err(Error::new(
             ErrorCode::DaemonVersion,
             format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
         )),
@@ -125,10 +143,6 @@ pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
     }
 }
 
-fn newer(conn: &Conn, env: &Env) -> bool {
-    Version::parse(&conn.engine_version).is_some_and(|engine| engine.newer_than(&env.version()))
-}
-
 /// Why a client stops the engine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stop {
@@ -143,10 +157,11 @@ pub enum Stop {
 pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
     let pid = conn.pid;
     let request = Request::Shutdown { asked: why == Stop::Asked };
-    if let Ok(Response::Error { error }) = conn.call_within(&request, Duration::from_secs(20)) {
+    let answered = conn.send(&request).and_then(|()| conn.read::<Response>(Some(request.within())));
+    if let Ok(Response::Error { error }) = answered {
         return Err(error);
     }
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + request.within();
     while alive(pid) {
         if Instant::now() > deadline {
             return Err(Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))

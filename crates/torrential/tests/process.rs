@@ -160,12 +160,7 @@ fn frame(json: &str) -> Vec<u8> {
 }
 
 fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json::Value> {
-    use std::io::Read;
-    let mut len = [0; 4];
-    stream.read_exact(&mut len).ok()?;
-    let mut body = vec![0; u32::from_be_bytes(len) as usize];
-    stream.read_exact(&mut body).ok()?;
-    serde_json::from_slice(&body).ok()
+    torrential_core::protocol::read_frame(stream).ok().flatten()
 }
 
 #[test]

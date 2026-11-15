@@ -3,27 +3,21 @@
 use std::path::Path;
 use std::time::Duration;
 
-use torrential_core::protocol::{Request, Response};
+use torrential_core::protocol::Request;
 use torrential_core::units::count;
 use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode, Target, Tv, TvList};
 
-use super::connect::{self, Conn};
-use super::{answer, emit, titles};
+use super::connect::Conn;
+use super::{emit, titles};
 use crate::cli::{TvCommand, TvPlayArgs};
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 
-/// The longest a cast of a torrent takes to reach the TV: its file list, then the TV starting.
-const CAST_WITHIN: Duration = Duration::from_secs(240);
-
 pub fn run(mut conn: Conn, command: Option<TvCommand>, mode: Mode, cwd: &Path) -> Result<u8, Error> {
     let (tv, action) = match command {
         None | Some(TvCommand::List) => {
-            let list = match answer(conn.call(&Request::Tvs { fresh: true })?)? {
-                Response::Tvs { list } => list,
-                other => return Err(connect::unexpected(&other)),
-            };
+            let list: TvList = conn.ask(&Request::Tvs { fresh: true })?;
             return Ok(emit(mode, &list_doc(&list), &Typed { kind: DocKind::Tvs, body: &list }));
         }
         Some(TvCommand::Play(args)) => return play(conn, args, mode, cwd),
@@ -33,10 +27,8 @@ pub fn run(mut conn: Conn, command: Option<TvCommand>, mode: Mode, cwd: &Path) -
         Some(TvCommand::Volume { level, tv }) => (tv.tv, CastAction::Volume { level }),
         Some(TvCommand::Stop(args)) => (args.tv, CastAction::Stop),
     };
-    match answer(conn.call(&Request::CastControl { tv, action })?)? {
-        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast })),
-        other => Err(connect::unexpected(&other)),
-    }
+    let cast: Box<Cast> = conn.ask(&Request::CastControl { tv, action })?;
+    Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast }))
 }
 
 fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, Error> {
@@ -56,17 +48,14 @@ fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, 
         _ => {}
     }
     let request = Request::Cast(CastRequest { tv, target, source, file, video: None, subtitle, start_at: at });
-    let reply = match &video {
+    let cast: Box<Cast> = match &video {
         Some(video) => {
             let shown = titles::Shown::new(mode);
             titles::steps(&mut conn, &request, video, |step| shown.step(step, "Casting"))?
         }
-        None => answer(conn.call_within(&request, CAST_WITHIN)?)?,
+        None => conn.ask(&request)?,
     };
-    match reply {
-        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast })),
-        other => Err(connect::unexpected(&other)),
-    }
+    Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast }))
 }
 
 fn list_doc(list: &TvList) -> Doc {

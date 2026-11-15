@@ -57,6 +57,12 @@ impl Version {
     pub fn newer_than(self, current: &str) -> bool {
         Version::parse(current).is_some_and(|current| self > current)
     }
+
+    /// Whether `version` names a release newer than `than`. An engine never stops for a client
+    /// older than itself, and a client never uses or stops an engine newer than itself.
+    pub fn newer(version: &str, than: &str) -> bool {
+        Version::parse(version).is_some_and(|version| version.newer_than(than))
+    }
 }
 
 impl fmt::Display for Version {

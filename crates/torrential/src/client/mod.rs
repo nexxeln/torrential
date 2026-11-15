@@ -21,11 +21,10 @@ mod web;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Serialize;
 use torrential_core::protocol::{FilesReply, Request, Response};
-use torrential_core::{Error, ErrorCode, Target};
+use torrential_core::{Error, ErrorCode, Job, Target};
 
 use crate::cli::Command;
 use crate::env::Env;
@@ -55,13 +54,6 @@ fn emit(mode: Mode, doc: &output::Doc, payload: &impl Serialize) -> u8 {
     let _ = stdout.write_all(render(mode, doc, payload).as_bytes());
     let _ = stdout.flush();
     0
-}
-
-fn answer(response: Response) -> Result<Response, Error> {
-    match response {
-        Response::Error { error } => Err(error),
-        other => Ok(other),
-    }
 }
 
 fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
@@ -100,13 +92,9 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         Command::Status(args) => {
             let refs = job_refs(&args.references, &cwd)?;
             let detail = refs.len() == 1;
-            match answer(engine()?.call(&Request::Status { refs })?)? {
-                Response::Jobs { jobs } => {
-                    let doc = if detail { status::job(&jobs[0]) } else { status::jobs(&jobs) };
-                    Ok(emit(mode, &doc, &Response::Jobs { jobs }))
-                }
-                other => Err(connect::unexpected(&other)),
-            }
+            let jobs: Vec<Job> = engine()?.ask(&Request::Status { refs })?;
+            let doc = if detail { status::job(&jobs[0]) } else { status::jobs(&jobs) };
+            Ok(emit(mode, &doc, &Response::Jobs { jobs }))
         }
         Command::Wait(args) => {
             let refs = job_refs(&args.references, &cwd)?;
@@ -184,11 +172,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
 
 /// A torrent's files, fetching its metadata if needed, as `torrential files` lists them.
 pub fn file_list(conn: &mut Conn, target: Target) -> Result<FilesReply, Error> {
-    let request = Request::Files { target, timeout_ms: METADATA_WAIT.as_millis() as u32 };
-    match answer(conn.call_within(&request, METADATA_WAIT + Duration::from_secs(15))?)? {
-        Response::Files { files } => Ok(files),
-        other => Err(connect::unexpected(&other)),
-    }
+    conn.ask(&Request::Files { target, timeout_ms: METADATA_WAIT.as_millis() as u32 })
 }
 
 pub fn absolute(path: &Path, cwd: &Path, env: &Env) -> PathBuf {

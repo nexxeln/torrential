@@ -9,7 +9,7 @@ use std::time::Duration;
 use assert_cmd::Command;
 use serde_json::Value;
 use torrential_core::SearchQuery;
-use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame};
+use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame, read_frame};
 
 #[allow(dead_code)]
 #[path = "../src/env/hooks.rs"]
@@ -447,11 +447,7 @@ fn send(socket: &mut UnixStream, request: &Request) {
 }
 
 fn receive(socket: &mut UnixStream) -> Value {
-    let mut len = [0u8; 4];
-    socket.read_exact(&mut len).unwrap();
-    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    socket.read_exact(&mut body).unwrap();
-    serde_json::from_slice(&body).unwrap()
+    read_frame(socket).unwrap().expect("the engine sent a frame")
 }
 
 #[test]

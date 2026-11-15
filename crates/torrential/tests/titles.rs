@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
-use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame};
+use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame, read_frame};
 
 #[allow(dead_code)]
 #[path = "../src/env/hooks.rs"]
@@ -501,11 +501,7 @@ fn send(socket: &mut UnixStream, message: &impl serde::Serialize) {
 }
 
 fn receive(socket: &mut UnixStream) -> Option<Value> {
-    let mut len = [0u8; 4];
-    socket.read_exact(&mut len).ok()?;
-    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    socket.read_exact(&mut body).ok()?;
-    Some(serde_json::from_slice(&body).unwrap())
+    read_frame(socket).ok().flatten()
 }
 
 #[test]

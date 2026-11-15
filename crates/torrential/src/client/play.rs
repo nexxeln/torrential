@@ -8,16 +8,16 @@ use std::time::{Duration, Instant};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
 use torrential_core::Job;
-use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, Response, TitlePlayed, TitleRequest};
+use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, TitlePlayed, TitleRequest};
 use torrential_core::stream::{self, Start};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
-use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, Target, media};
+use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, SearchResult, Target, media};
 
 use super::connect::{self, Conn};
 use super::rows::{short_ids, short_ref};
 use super::titles::view::resuming;
-use super::{absolute, answer, emit, file_list, titles};
+use super::{absolute, emit, file_list, titles};
 use crate::cli::PlayArgs;
 use crate::config::{self, Config};
 use crate::env::Env;
@@ -206,10 +206,8 @@ pub fn start(
             .with_next(format!("torrential files {id}")));
     };
     let files = [playable.video].into_iter().chain(playable.subtitles).collect();
-    match answer(conn.call(&Request::Play(PlayRequest { target, dir, files, setup_max_size }))?)? {
-        Response::Play { reply } => Ok(*reply),
-        other => Err(connect::unexpected(&other)),
-    }
+    let reply: Box<PlayReply> = conn.ask(&Request::Play(PlayRequest { target, dir, files, setup_max_size }))?;
+    Ok(*reply)
 }
 
 /// The torrent the words name, with its files and, when a search found it, the result's name. A
@@ -236,11 +234,8 @@ fn resolve(
         profile: Profile { preferences, ..Profile::default() },
         ..SearchQuery::new(text.clone())
     };
-    let within = Duration::from_millis(query.timeout_ms.into()) + Duration::from_secs(10);
-    let releases = match answer(conn.call_within(&Request::Search { query, stream: false }, within)?)? {
-        Response::Search { result } => result.releases,
-        other => return Err(connect::unexpected(&other)),
-    };
+    let result: SearchResult = conn.ask(&Request::Search { query, stream: false })?;
+    let releases = result.releases;
     let Some(release) = releases.into_iter().next() else {
         let search = format!("torrential search {}", words.iter().map(|w| shell_word(w)).collect::<Vec<_>>().join(" "));
         return Err(Error::new(ErrorCode::NotFound, format!("no video result matches {text:?}"))
@@ -311,10 +306,8 @@ fn countdown(mut conn: Conn, playing: &Playing) -> Result<Runtime, Error> {
             .iter()
             .find(|f| f.index == video.index)
             .map_or(0, |f| f.verified);
-        let rate = match answer(conn.call(&Request::Status { refs: vec![id.clone()] })?)? {
-            Response::Jobs { jobs } => jobs.first().map_or(0, |job| job.progress.down_rate),
-            other => return Err(connect::unexpected(&other)),
-        };
+        let jobs: Vec<Job> = conn.ask(&Request::Status { refs: vec![id.clone()] })?;
+        let rate = jobs.first().map_or(0, |job| job.progress.down_rate);
         let rate = rates.mean(Instant::now(), rate);
         let Some(why) = hold(runtime, video.size, have, rate) else { break };
         let header = Doc { next: None, ..play(playing, known(runtime)) }.human();

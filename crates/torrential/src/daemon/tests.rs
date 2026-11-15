@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use torrential_core::protocol::{
-    Change, FilesReply, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream, TitleFrame,
+    Change, FilesReply, Frame, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream,
+    TitleStep,
 };
 use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
@@ -229,8 +230,8 @@ impl Harness {
         crate::wire::write_async(&mut wr, &request).await.unwrap();
         loop {
             match crate::wire::read_async(&mut rd).await.unwrap().expect("the engine answers") {
-                TitleFrame::Step { .. } => {}
-                TitleFrame::Reply(response) => return *response,
+                Frame::Update(TitleStep { .. }) => {}
+                Frame::Reply(response) => return *response,
             }
         }
     }

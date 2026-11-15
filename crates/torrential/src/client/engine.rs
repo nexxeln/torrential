@@ -2,7 +2,8 @@
 
 use serde::Serialize;
 use torrential_core::Error;
-use torrential_core::protocol::{Request, Response};
+use torrential_core::Job;
+use torrential_core::protocol::Request;
 
 use super::{connect, emit, launch};
 use crate::cli::DaemonCommand;
@@ -18,10 +19,8 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
         DaemonCommand::Status => {
             let report = match connect::running(&paths, env)? {
                 Some(mut conn) => {
-                    let downloads = match conn.call(&Request::Status { refs: Vec::new() }) {
-                        Ok(Response::Jobs { jobs }) => Some(jobs.len()),
-                        _ => None,
-                    };
+                    let jobs = conn.ask::<Vec<Job>>(&Request::Status { refs: Vec::new() });
+                    let downloads = jobs.ok().map(|jobs| jobs.len());
                     DaemonReport {
                         engine: "running",
                         pid: Some(conn.pid),
