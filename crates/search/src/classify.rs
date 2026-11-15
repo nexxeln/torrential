@@ -1,4 +1,4 @@
-use torrential_core::{Category, Resolution};
+use torrential_core::Category;
 
 use crate::terms::Terms;
 
@@ -75,15 +75,6 @@ pub(crate) fn is_extra(name: &str, terms: &Terms) -> bool {
         .iter()
         .filter(|extra| !asked(extra))
         .any(|extra| words.windows(extra.len()).any(|run| run.iter().zip(*extra).all(|(word, wanted)| word == wanted)))
-}
-
-pub(crate) fn is_too_small(size: Option<u64>, resolution: Resolution) -> bool {
-    let floor = match resolution {
-        Resolution::Sd => 0,
-        Resolution::P720 | Resolution::P1080 => 50_000_000,
-        Resolution::P2160 => 500_000_000,
-    };
-    size.is_some_and(|size| size < floor)
 }
 
 pub(crate) fn is_adult(name: &str) -> bool {

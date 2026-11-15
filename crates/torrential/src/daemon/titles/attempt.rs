@@ -623,7 +623,7 @@ mod tests {
         let listed = |source: &str, seeders: Option<u32>| Release {
             seeders,
             sources: vec![source.into()],
-            swarm: Swarm::of(seeders, torrential_search::lawful(source)),
+            swarm: torrential_search::rank::swarm(seeders, torrential_search::lawful(source)),
             ..release(1)
         };
         let archive = listed("archive.org", None);
