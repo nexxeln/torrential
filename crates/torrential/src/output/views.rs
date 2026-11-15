@@ -14,11 +14,11 @@ use super::format::{self, NONE};
 use super::theme::{Token, paint};
 use super::{Body, Cell, Doc};
 use crate::client::play::{Hold, Playing};
+use crate::config::Policy;
 use crate::skill::{Change as SkillChange, Installed, State};
-use crate::update::Policy;
 
 mod titles;
-pub use titles::{check, get_title, resuming, search_for, sources, step, title, title_name, titles};
+pub use titles::{check, get_title, resuming, search_for, sources, step, title, titles};
 
 const SHORT_ID: usize = 6;
 const MAX_FILE_ROWS: usize = 200;

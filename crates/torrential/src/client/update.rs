@@ -3,10 +3,11 @@ use torrential_core::Error;
 use torrential_core::time::now;
 
 use crate::cli::UpdateArgs;
+use crate::config::Policy;
 use crate::env::Env;
 use crate::output::{self, Body, Cell, Doc, Mode, Typed};
 use crate::paths::Paths;
-use crate::update::{self, Outcome, Policy, Releases};
+use crate::update::{self, Outcome, Releases};
 
 #[derive(Serialize)]
 struct CheckReport<'a> {

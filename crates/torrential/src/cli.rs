@@ -211,7 +211,7 @@ pub struct SetupArgs {
     pub playback: Option<PlaybackArg>,
     /// How to handle new versions: show a notice, install in the background, or never check
     #[arg(long, value_enum)]
-    pub updates: Option<crate::update::Policy>,
+    pub updates: Option<crate::config::Policy>,
 }
 
 pub const SETUP_FLAGS: &str = "torrential setup --screen phone|laptop|tv|tv-4k|auto --max-size 8GB|none --playback \

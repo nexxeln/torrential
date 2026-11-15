@@ -12,7 +12,8 @@ use super::super::engine_port::Metainfo;
 use super::super::http;
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
-use super::super::server::{self, Ctx, METADATA_WAIT};
+use super::super::server::{self, Ctx};
+use torrential_core::protocol::METADATA_WAIT;
 
 #[derive(Deserialize)]
 pub struct Play {

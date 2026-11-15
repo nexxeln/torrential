@@ -5,30 +5,13 @@ use std::time::Duration;
 
 use torrential_core::protocol::{GetReply, TitlePage, TitleSources};
 use torrential_core::text::sanitize;
-use torrential_core::title::Episode;
+use torrential_core::title::title_name;
 use torrential_core::{AttemptEvent, Check, Kind, Release, TitleCard, Watched};
 
 use super::super::format::{self, NONE, UNKNOWN};
 use super::super::theme::Token;
 use super::super::{Body, Cell, Doc};
 use super::{get, ranked_for, release_ids, release_row, short_ids, short_ref, source_outcome};
-use crate::daemon::titles::catalog_port::label;
-
-/// A film's name and year, or a series' name and the episode, as `Harbor Lights S01E02`.
-pub fn title_name(card: &TitleCard, episode: Option<Episode>) -> String {
-    match (episode, card.year) {
-        (Some(episode), _) => format!("{} {}", card.name, label(episode)),
-        (None, Some(year)) => format!("{} ({year})", card.name),
-        (None, None) => card.name.clone(),
-    }
-}
-
-fn kind(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Film => "film",
-        Kind::Series => "series",
-    }
-}
 
 fn rating(rating: Option<f32>) -> String {
     rating.map_or_else(|| UNKNOWN.to_string(), |r| format!("{r:.1}"))
@@ -52,7 +35,7 @@ pub fn titles(titles: &[TitleCard], words: &str) -> Doc {
         .iter()
         .map(|t| {
             let year = t.year.map_or_else(|| UNKNOWN.to_string(), |y| y.to_string());
-            let mut row = vec![Cell::styled(t.id.as_str(), Token::Accent), Cell::new(kind(t.kind)), Cell::new(year)];
+            let mut row = vec![Cell::styled(t.id.as_str(), Token::Accent), Cell::new(t.kind.word()), Cell::new(year)];
             row.extend(rated.then(|| Cell::new(rating(t.rating))));
             row.push(Cell::new(&t.name));
             row
@@ -98,7 +81,7 @@ pub fn title(page: &TitlePage) -> Doc {
 fn about(page: &TitlePage) -> Vec<String> {
     let details = &page.details;
     let mut about =
-        vec![format!("{} {}", details.card.id, title_name(&details.card, None)), kind(details.card.kind).into()];
+        vec![format!("{} {}", details.card.id, title_name(&details.card, None)), details.card.kind.word().into()];
     if let Some(r) = details.card.rating {
         about.push(format!("rated {}", rating(Some(r))));
     }
@@ -145,7 +128,7 @@ fn episodes(page: &TitlePage) -> Body {
         .map(|info| {
             let watched = page.watched.iter().find(|w| w.video.episode == Some(info.episode));
             vec![
-                Cell::styled(label(info.episode), Token::Accent),
+                Cell::styled(info.episode.to_string(), Token::Accent),
                 Cell::new(info.aired.map_or_else(|| UNKNOWN.to_string(), |t| format::timestamp(t)[..10].to_string())),
                 match watched {
                     Some(w) if w.finished() => Cell::styled("finished", Token::Mint),
@@ -186,7 +169,7 @@ fn up_next(page: &TitlePage) -> String {
     let Some(next) = &page.next else { return "caught up, so play starts from the first episode".to_string() };
     let Some(episode) = next.video.episode else { return String::new() };
     let info = page.details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == episode);
-    let mut line = format!("up next: {}", label(episode));
+    let mut line = format!("up next: {episode}");
     if let Some(name) = info.and_then(|info| info.name.as_deref()) {
         line.push(' ');
         line.push_str(name);

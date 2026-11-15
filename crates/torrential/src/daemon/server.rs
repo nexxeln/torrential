@@ -17,6 +17,7 @@ use torrential_core::{
     SearchResult, Target, TitleCard, TitleId, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
+use super::detector::Detector;
 use super::engine_port::{EngineHandle, Metainfo, ParseTorrent};
 use super::files;
 use super::http;
@@ -28,15 +29,14 @@ use super::owner::{
 use super::search_port::{Progress, SearchPort};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use crate::log::log;
-use crate::machine::Detector;
-use crate::output::views::title_name;
 use crate::update::Version;
 use crate::wire;
+use torrential_core::protocol::METADATA_WAIT;
+use torrential_core::title::title_name;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
 /// Titles listed under Continue on the home screens.
 const CONTINUE_MOST: usize = 20;
-pub const METADATA_WAIT: Duration = Duration::from_secs(60);
 pub(super) const HEARTBEAT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]

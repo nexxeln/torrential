@@ -15,7 +15,7 @@ use torrential_core::{
     SearchQuery, Skip, TitleDetails, TorrentId, VideoRef,
 };
 
-use catalog_port::{CatalogPort, label, season_episodes, wanted};
+use catalog_port::{CatalogPort, season_episodes, wanted};
 use shelf::Shelf;
 
 /// How long a release that failed stays at the back of the line.
@@ -159,7 +159,7 @@ pub struct Resolved {
 impl Resolved {
     /// The film's name and year, or the series' name and the episode, as a person reads it.
     pub fn name(&self) -> String {
-        crate::output::views::title_name(&self.details.card, self.video.episode)
+        torrential_core::title::title_name(&self.details.card, self.video.episode)
     }
 }
 
@@ -212,11 +212,11 @@ fn next_episode(details: &TitleDetails, watched: &[torrential_core::Watched], no
 }
 
 fn aired(details: &TitleDetails, info: &EpisodeInfo, now: i64) -> Result<(), Error> {
-    let episode = format!("{} {}", details.card.name, label(info.episode));
+    let episode = format!("{} {}", details.card.name, info.episode);
     match info.aired {
         Some(aired) if aired <= now => Ok(()),
         Some(aired) => {
-            let day = &crate::output::format::timestamp(aired)[..10];
+            let day = &torrential_core::units::timestamp(aired)[..10];
             Err(Error::new(ErrorCode::Usage, format!("{episode} airs on {day}, so it has no sources yet")))
         }
         None => Err(Error::new(ErrorCode::Usage, format!("{episode} has no air date yet, so it has no sources"))),

@@ -25,13 +25,14 @@ use torrential_core::{
 use super::devices::names::Names;
 use super::owner::{Command, Finish, MetaTarget};
 use super::playing::Open;
-use super::server::{self, Ctx, METADATA_WAIT};
+use super::server::{self, Ctx};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use super::web::{play, watch as web_watch};
 use crate::log::log;
-use crate::output::views::title_name;
 pub use ssdp::Find;
 use ssdp::Heard;
+use torrential_core::protocol::METADATA_WAIT;
+use torrential_core::title::title_name;
 use upnp::{Failed, Renderer, Service};
 
 /// A search this recent answers a request for the TVs without searching again.

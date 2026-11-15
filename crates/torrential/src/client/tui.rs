@@ -17,7 +17,7 @@ use super::connect::{self, Conn, DEFAULT_REPLY_WITHIN};
 use super::play::{self, Playing};
 use super::{answer, titles};
 use crate::config::{self, Config};
-use crate::daemon::admission::{Disk, RealDisk};
+use crate::disk::{Disk, RealDisk};
 use crate::env::Env;
 use crate::fsutil::Writes;
 use crate::paths::Paths;

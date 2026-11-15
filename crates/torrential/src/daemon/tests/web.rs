@@ -20,9 +20,9 @@ use super::super::admission::GIB;
 use super::super::engine_port::FakeTorrentFile;
 use super::super::search_port::{self, BoxFuture, FakeSource, SearchPort, fake_catalog};
 use super::super::titles::catalog_port::{self, CatalogPort};
-use super::super::web::fetch::{Build, Fetch};
-use super::super::web::ffmpeg::{INSTALL, Tools};
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
+use crate::ffmpeg::fetch::{Build, Fetch};
+use crate::ffmpeg::{INSTALL, Tools};
 
 /// Where a browser in a test runs.
 enum On {

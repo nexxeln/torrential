@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod book;
 pub mod cast;
+mod detector;
 pub mod devices;
 pub mod engine_port;
 pub mod files;
@@ -33,13 +34,13 @@ use tokio::sync::mpsc;
 use torrential_core::{Error, ErrorCode, Preferences};
 
 use crate::config::Config;
+use crate::disk::Disk;
 use crate::env::Env;
 use crate::log::log;
-use crate::machine::Detector;
 use crate::paths::{self, Paths};
 use crate::service;
 use crate::update;
-use admission::Disk;
+use detector::Detector;
 use engine_port::{EnginePort, ParseTorrent};
 use libtorrent::{Libtorrent, Network};
 use owner::{Ended, Owner, OwnerConfig};
@@ -62,7 +63,7 @@ pub struct Ports {
     /// The preferences in config.yaml now.
     pub preferences: Arc<dyn Fn() -> Preferences + Send + Sync>,
     /// ffmpeg and ffprobe, installed or fetched.
-    pub ffmpeg: web::fetch::Ffmpeg,
+    pub ffmpeg: crate::ffmpeg::fetch::Ffmpeg,
     pub subtitles: Arc<dyn subtitle_port::SubtitlePort>,
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
     /// Where searches for TVs go.
@@ -74,9 +75,9 @@ impl Ports {
         let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> =
             Arc::new(move || crate::config::preferences(&config).unwrap_or_default());
-        let installed = Arc::new(move || web::ffmpeg::Tools::find(path.as_deref()));
-        let fetch = web::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
-        let ffmpeg = web::fetch::Ffmpeg::new(installed, web::fetch::root(&paths.state), fetch);
+        let installed = Arc::new(move || crate::ffmpeg::Tools::find(path.as_deref()));
+        let fetch = crate::ffmpeg::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
+        let ffmpeg = crate::ffmpeg::fetch::Ffmpeg::new(installed, crate::ffmpeg::fetch::root(&paths.state), fetch);
         // The fake engine's subtitles are made up too, unless a test asks for the real sources.
         let subtitles: Arc<dyn subtitle_port::SubtitlePort> =
             if fake(env) && env.var("TORRENTIAL_TEST_SUBTITLES") != Some("live") {
@@ -111,8 +112,8 @@ impl Ports {
                 engine: Box::new(engine_port::Fake::new(swarm)),
                 parse: engine_port::parse_fake,
                 search: Arc::new(fixture::search(torrential_core::time::now())),
-                disk: Box::new(admission::RoomyDisk),
-                machine: Detector::start(env, settings.downloads_dir(paths), Box::new(admission::RoomyDisk)),
+                disk: Box::new(crate::disk::RoomyDisk),
+                machine: Detector::start(env, settings.downloads_dir(paths), Box::new(crate::disk::RoomyDisk)),
                 preferences,
                 ffmpeg,
                 subtitles,
@@ -126,7 +127,7 @@ impl Ports {
         };
         let roomy = env.var("TORRENTIAL_TEST_DISK") == Some("roomy");
         let disk = || -> Box<dyn Disk + Sync> {
-            if roomy { Box::new(admission::RoomyDisk) } else { Box::new(admission::RealDisk) }
+            if roomy { Box::new(crate::disk::RoomyDisk) } else { Box::new(crate::disk::RealDisk) }
         };
         let search =
             torrential_search::SearchConfig { cache_dir: Some(paths.cache.join("search")), ..settings.search.clone() };
@@ -260,6 +261,40 @@ pub fn start(
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
+/// Installs updates as `update::watch` finds them, then switches to the release it installed.
+async fn follow_updates(env: Env, paths: Paths, ctx: Arc<server::Ctx>, service: bool) {
+    let to = update::watch(env, paths, &ctx.news).await;
+    switch(&ctx, to, service).await
+}
+
+/// How long a switch to an installed update waits after the engine could not save every download.
+const SWITCH_RETRY: Duration = Duration::from_secs(60);
+
+/// Stops the engine for the login service to start release `to` once nothing plays and every
+/// download is saved. An engine without a login service keeps running until it next starts.
+async fn switch(ctx: &server::Ctx, to: update::Version, service: bool) {
+    if !service {
+        log(&format!("torrential {to} starts the next time the engine starts"));
+        ctx.news.post(Some(update::News::Installed { latest: to }));
+        return std::future::pending().await;
+    }
+    loop {
+        if ctx.playing.any() {
+            log(&format!("torrential {to} starts when nothing is playing"));
+            ctx.news.post(Some(update::News::Waiting { latest: to }));
+        }
+        let closed = ctx.playing.close().await;
+        match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
+            Ok(()) => return closed.keep(),
+            Err(e) => {
+                log(&format!("torrential {to} waits: {}", e.message));
+                drop(closed);
+                tokio::time::sleep(SWITCH_RETRY).await;
+            }
+        }
+    }
+}
+
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
 /// systemd started it, a switch to an installed update.
 pub fn run(env: &Env, service: bool) -> u8 {
@@ -384,7 +419,7 @@ fn serve(env: &Env, paths: &Paths, service: bool) -> Result<Ended, Startup> {
             }
         });
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let updates = tokio::spawn(update::watch(env.clone(), paths.clone(), running.ctx.clone(), service));
+        let updates = tokio::spawn(follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {

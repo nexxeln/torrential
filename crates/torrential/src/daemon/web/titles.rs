@@ -18,9 +18,8 @@ use super::super::http::{Connection, Request};
 use super::super::owner::{Command, Finish, Shelving};
 use super::super::server::{self, Ctx};
 use super::super::titles::attempt::{self, Containers, PlayTitle};
-use super::super::titles::catalog_port::label;
 use super::{NDJSON, fail, line, number, required};
-use crate::output::views::title_name;
+use torrential_core::title::title_name;
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
 const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
@@ -277,12 +276,12 @@ fn watchable(details: &TitleDetails, episode: Option<Episode>, now: i64) -> Resu
     let usage = |message: String| Err(Error::new(ErrorCode::Usage, message));
     let e = match (card.kind, episode) {
         (Kind::Film, None) => return Ok(()),
-        (Kind::Film, Some(e)) => return usage(format!("{} is a film, so it has no {}", card.name, label(e))),
+        (Kind::Film, Some(e)) => return usage(format!("{} is a film, so it has no {e}", card.name)),
         (Kind::Series, None) => return usage(format!("{} is a series, so name one of its episodes", card.name)),
         (Kind::Series, Some(e)) => e,
     };
     match details.seasons.iter().flat_map(|s| &s.episodes).find(|info| info.episode == e) {
-        None => usage(format!("{} is not an episode of {}", label(e), card.name)),
+        None => usage(format!("{e} is not an episode of {}", card.name)),
         Some(info) if info.aired.is_some_and(|aired| aired <= now) => Ok(()),
         Some(_) => usage(format!("{} has not aired yet", title_name(card, Some(e)))),
     }

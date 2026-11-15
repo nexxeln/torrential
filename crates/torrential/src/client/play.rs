@@ -13,7 +13,6 @@ use torrential_core::text::sanitize;
 use torrential_core::{Category, Error, ErrorCode, Preferences, Profile, SearchQuery, Target, media};
 
 use super::connect::{self, Conn};
-use super::player::{self, Launch, Player};
 use super::{absolute, answer, emit, file_list, titles};
 use crate::cli::PlayArgs;
 use crate::config::{self, Config};
@@ -22,6 +21,7 @@ use crate::output::format::shell_word;
 use crate::output::theme::{Token, paint};
 use crate::output::{Doc, Mode, Typed, views};
 use crate::paths::Paths;
+use crate::player::{self, Launch, Player};
 
 /// Bytes read from each end of the video for its runtime: Matroska and fast-start MP4 keep it in
 /// the head, and other MP4s in the tail.

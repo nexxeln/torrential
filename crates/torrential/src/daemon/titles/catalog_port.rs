@@ -32,7 +32,7 @@ pub fn season_episodes(details: &TitleDetails, episode: Option<Episode>) -> Resu
     match (card.kind, episode) {
         (Kind::Film, None) => Ok(None),
         (Kind::Film, Some(e)) => {
-            Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {}", card.name, label(e)))
+            Err(Error::new(ErrorCode::NotFound, format!("{} is a film, so it has no {e}", card.name))
                 .with_hint(format!("play {} without an episode", card.id)))
         }
         (Kind::Series, None) => {
@@ -42,10 +42,7 @@ pub fn season_episodes(details: &TitleDetails, episode: Option<Episode>) -> Resu
         (Kind::Series, Some(e)) => {
             let season = details.seasons.iter().find(|s| s.number == e.season);
             if !season.is_some_and(|s| s.episodes.iter().any(|info| info.episode == e)) {
-                return Err(Error::new(
-                    ErrorCode::NotFound,
-                    format!("{} is not an episode of {}", label(e), card.name),
-                ));
+                return Err(Error::new(ErrorCode::NotFound, format!("{e} is not an episode of {}", card.name)));
             }
             Ok(season.map(|s| s.episodes.len() as u32))
         }
@@ -72,11 +69,6 @@ pub fn wanted(details: &TitleDetails, namesakes: &[TitleCard], episode: Option<E
         season_episodes,
         countries: details.countries,
     })
-}
-
-/// An episode as people write it, such as S03E05.
-pub fn label(episode: Episode) -> String {
-    format!("S{:02}E{:02}", episode.season, episode.episode)
 }
 
 pub struct Live(Catalog);

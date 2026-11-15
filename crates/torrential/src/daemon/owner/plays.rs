@@ -10,12 +10,13 @@ use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, Kept};
 use torrential_core::{Error, TitleId, TorrentId};
 
-use super::super::admission::{self, Space};
+use super::super::admission;
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
 use super::super::engine_port::EngineCommand;
 use super::super::files;
 use super::deleter::{Deleter, Doom, InUse};
 use super::{Finish, Owner, Reply, Shelving, now};
+use crate::disk::Space;
 use crate::log::log;
 
 /// How long a play no one streams keeps downloading. Long enough that a break, or a phone that
@@ -324,7 +325,7 @@ impl Owner {
             })
             .map(JobEntry::id)
             .collect();
-        let after = crate::output::format::elapsed(idle_after);
+        let after = torrential_core::units::elapsed(idle_after);
         for id in idle {
             log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
             self.pause(vec![id.to_hex()], oneshot::channel().0);
@@ -409,7 +410,7 @@ impl Owner {
             return;
         }
         self.tending.refused = None;
-        let max = crate::output::format::size(Some(self.config.plays.max));
+        let max = torrential_core::units::format_size(self.config.plays.max);
         for id in &leaving {
             log(&format!("{} is leaving the plays folder to keep it under {max}", self.named(*id)));
         }
