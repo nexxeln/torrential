@@ -14,12 +14,13 @@ use torrential_core::{
     SearchResult, Skip, SourceReport, Swarm, TitleLink, TorrentFile, TorrentId, Tried, VideoRef,
 };
 
+use super::super::ctx::{Ctx, OwnerHandle};
+use super::super::downloads;
 use super::super::engine_port::Metainfo;
 use super::super::magnet::{self, Magnet};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, MetaTarget, Origin, PlayCommand, Source, TitlePlay};
 use super::super::search_port::{BoxFuture, Progress};
-use super::super::server::{self, Ctx, OwnerHandle};
 use super::Resolved;
 
 const MOST_TRIED: usize = 6;
@@ -213,7 +214,7 @@ impl Searching<'_> {
         };
         match found {
             Ok(mut result) => {
-                server::record(ctx, &mut result);
+                downloads::record(ctx, &mut result);
                 self.releases = result.releases;
                 self.sources = result.sources;
             }
@@ -440,15 +441,15 @@ async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Sourc
     if let ReleaseId::Torrent(id) = release.id
         && ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await.is_ok()
     {
-        let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
+        let info = downloads::metadata(ctx, MetaTarget::Job(id), deadline).await?;
         return Ok((Source::Download(id), info.metainfo));
     }
-    let source = tokio::time::timeout_at(deadline.into(), server::release_source(ctx, release.clone(), None))
+    let source = tokio::time::timeout_at(deadline.into(), downloads::release_source(ctx, release.clone(), None))
         .await
         .map_err(|_| Error::new(ErrorCode::MetadataTimeout, "the .torrent file did not arrive in time"))??;
     match source {
         Source::Magnet(magnet) => {
-            let info = server::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
+            let info = downloads::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
             let source = match info.download {
                 Some(_) => Source::Download(info.id),
                 None => Source::Torrent { metainfo: (*info.metainfo).clone(), origin: Origin::Peers },
@@ -460,7 +461,7 @@ async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Sourc
             Ok((Source::Torrent { metainfo, origin }, shared))
         }
         Source::Download(id) => {
-            let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
+            let info = downloads::metadata(ctx, MetaTarget::Job(id), deadline).await?;
             Ok((Source::Download(id), info.metainfo))
         }
     }

@@ -8,11 +8,12 @@ use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, Target, TorrentFile, TorrentId};
 
+use super::super::ctx::Ctx;
+use super::super::downloads;
 use super::super::engine_port::Metainfo;
 use super::super::http;
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, FilesInfo, Finish, MetaTarget, Origin, PlayCommand, Source};
-use super::super::server::{self, Ctx};
 use torrential_core::protocol::METADATA_WAIT;
 
 #[derive(Deserialize)]
@@ -62,13 +63,13 @@ pub async fn prepare(
     file: Option<u32>,
     deadline: Instant,
 ) -> Result<(Source, Arc<Metainfo>, Playable), Error> {
-    let (source, metainfo) = match server::resolve(ctx, target, "play").await? {
+    let (source, metainfo) = match downloads::resolve(ctx, target, "play").await? {
         Source::Download(id) => {
-            let info = server::metadata(ctx, MetaTarget::Job(id), deadline).await?;
+            let info = downloads::metadata(ctx, MetaTarget::Job(id), deadline).await?;
             (Source::Download(id), info.metainfo)
         }
         Source::Magnet(magnet) => {
-            let info = server::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
+            let info = downloads::metadata(ctx, MetaTarget::Magnet(magnet), deadline).await?;
             let source = match info.download {
                 Some(_) => Source::Download(info.id),
                 None => Source::Torrent { metainfo: (*info.metainfo).clone(), origin: Origin::Peers },
@@ -97,14 +98,14 @@ pub async fn begin(
     let to = Destination::Plays;
     let play = PlayCommand { source, to, files, setup_max_size, title: None, finish: Finish::Stream };
     let (job, _) = ctx.owner.ask(|reply| Command::Play { play: Box::new(play), reply }).await?;
-    let info = server::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
+    let info = downloads::metadata(ctx, MetaTarget::Job(job.id), deadline).await?;
     Ok((job, info))
 }
 
 /// How the web player plays `file` of a download that is already playing, as a title play
 /// answers once a source starts.
 pub async fn playing_file(ctx: &Ctx, id: TorrentId, file: u32) -> Result<Playing, Error> {
-    let info = server::metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
+    let info = downloads::metadata(ctx, MetaTarget::Job(id), Instant::now() + METADATA_WAIT).await?;
     let playable = choose(&info.metainfo, Some(file))?;
     let mut jobs = ctx.owner.ask(|reply| Command::Status { refs: vec![id.to_hex()], reply }).await?;
     let job = jobs.pop().ok_or_else(|| Error::new(ErrorCode::NotFound, "the download that played is gone"))?;
@@ -129,7 +130,7 @@ async fn playing(ctx: &Ctx, job: Job, info: &FilesInfo, playable: &Playable) -> 
     Playing {
         id: job.id.to_hex(),
         name: sanitize(&metainfo.name),
-        files: server::listed(ctx, info).await,
+        files: downloads::listed(ctx, info).await,
         total_size: metainfo.total(),
         video: streamed(playable.video),
         subtitles: playable.subtitles.iter().map(|&index| streamed(index)).collect(),
