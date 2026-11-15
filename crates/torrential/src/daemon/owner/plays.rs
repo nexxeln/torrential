@@ -13,8 +13,9 @@ use torrential_core::{Error, TorrentId};
 use super::super::admission;
 use super::super::book::{Home, Intent, JobEntry, Observed, Play};
 use super::super::files;
+use super::super::store::{Store, Tombstone};
 use super::deleter::{Deleter, Doom, InUse};
-use super::{Finish, Owner, Reply, Shelving, now};
+use super::{Finish, Owner, Removing, Reply, Shelving, now};
 use crate::disk::Space;
 use crate::log::log;
 
@@ -76,10 +77,10 @@ pub fn leaving(mut shares: Vec<Share>, max: u64) -> Vec<TorrentId> {
 
 /// What the owner keeps track of for plays and deletions.
 pub struct Tending {
-    pub(super) deleter: Deleter,
+    deleter: Deleter,
     /// The folder and the files of each download taken off the list that the engine has yet to
     /// let go of.
-    pub(super) letting_go: BTreeMap<TorrentId, (PathBuf, Vec<PathBuf>)>,
+    letting_go: BTreeMap<TorrentId, (PathBuf, Vec<PathBuf>)>,
     /// Plays leaving the plays folder, on the list until the engine lets go of them, and when
     /// each may leave.
     leaving: BTreeMap<TorrentId, Instant>,
@@ -100,6 +101,26 @@ impl Tending {
             tended_at: None,
             refused: None,
         }
+    }
+
+    /// Refuses a folder the person chose inside the plays folder.
+    pub(super) fn outside_plays(&self, dir: &Path) -> Result<(), Error> {
+        self.deleter.outside_plays(dir)
+    }
+
+    /// Puts the removal of a download on record, with what of it is to be deleted.
+    pub(super) fn remove(&mut self, store: &mut Store, tombstone: &Tombstone, doom: Option<Doom>) -> Result<(), Error> {
+        self.deleter.remove(store, tombstone, doom)
+    }
+
+    /// The engine has yet to let go of a removed download, whose folder and files are these.
+    pub(super) fn letting_go(&mut self, id: TorrentId, writes: (PathBuf, Vec<PathBuf>)) {
+        self.letting_go.insert(id, writes);
+    }
+
+    /// The engine let go of a removed download.
+    pub(super) fn let_go(&mut self, id: TorrentId) {
+        self.letting_go.remove(&id);
     }
 }
 
@@ -202,7 +223,7 @@ impl Owner {
         if let Some(job) = self.jobs.get(&id)
             && job.record.intent == Intent::Paused
             && matches!(job.record.home, Home::Plays(_))
-            && let Err(error) = self.resume(&[id.to_hex()], false)
+            && let Err(error) = self.resume(Some(&[id]))
         {
             log(&format!("{id} is streaming but cannot resume: {}", error.message));
         }
@@ -217,8 +238,8 @@ impl Owner {
 
     /// `rm`: takes downloads off the list, and answers once what it deletes is deleted, or once
     /// the engine has had as long to let go as a pause has to stop writing.
-    pub(super) fn rm(&mut self, refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>>) {
-        let changes = match self.remove(&refs, delete) {
+    pub(super) fn rm(&mut self, removing: Vec<Removing>, delete: bool, reply: Reply<Vec<Change>>) {
+        let changes = match self.remove(removing, delete) {
             Ok(changes) => changes,
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -320,7 +341,7 @@ impl Owner {
         let after = torrential_core::units::elapsed(idle_after);
         for id in idle {
             log(&format!("{} paused, for no one has streamed it for {after}", self.named(id)));
-            self.pause(vec![id.to_hex()], oneshot::channel().0);
+            self.pause(vec![id], oneshot::channel().0);
         }
         self.make_room(None);
     }
@@ -364,7 +385,7 @@ impl Owner {
 
     /// Someone streams `id`, or a title play is testing it.
     fn playing(&self, id: TorrentId) -> bool {
-        self.streamed_now(id) || self.under_test.contains_key(&id)
+        self.streamed_now(id) || self.holds.testing(id)
     }
 
     /// Starts taking the plays watched longest ago out of the plays folder until the rest, and
@@ -456,7 +477,7 @@ impl Owner {
                 continue;
             }
             log(&format!("{} left the plays folder", self.named(id)));
-            if let Err(error) = self.remove(&[id.to_hex()], false) {
+            if let Err(error) = self.remove(vec![Removing::Download(id)], false) {
                 log(&format!("{} stays, for it cannot be removed: {}", self.named(id), error.message));
             }
         }

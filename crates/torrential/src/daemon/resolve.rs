@@ -39,9 +39,7 @@ pub fn prefix<'a>(
     match found.len() {
         0 => {
             let error = match scope {
-                Scope::Downloads => Error::new(ErrorCode::NotFound, format!("no download matches {typed}"))
-                    .with_hint("run torrential status to list downloads")
-                    .with_next("torrential status"),
+                Scope::Downloads => no_download(&typed),
                 Scope::DownloadsAndResults => {
                     Error::new(ErrorCode::NotFound, format!("no download or recent search result matches {typed}"))
                         .with_hint("run torrential search <words> to find it, or pass a magnet link")
@@ -81,6 +79,13 @@ fn as_torrent_id(id: &ReleaseId) -> TorrentId {
         ReleaseId::Torrent(t) => *t,
         ReleaseId::Locator(l) => l.to_hex().parse().expect("locator IDs are 40 hex characters"),
     }
+}
+
+/// The error for a reference that names no download.
+pub fn no_download(reference: &str) -> Error {
+    Error::new(ErrorCode::NotFound, format!("no download matches {reference}"))
+        .with_hint("run torrential status to list downloads")
+        .with_next("torrential status")
 }
 
 #[cfg(test)]
