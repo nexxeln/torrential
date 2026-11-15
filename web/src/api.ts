@@ -88,6 +88,8 @@ import type {
   OnlineSubtitles,
   OnlineTitle,
   PairingOffer,
+  Decoders,
+  Decoding,
   PlayInfo,
   Playback,
   PlayingLine,
@@ -151,6 +153,8 @@ export type {
   OnlineSubtitles,
   OnlineTitle,
   PairingOffer,
+  Decoders,
+  Decoding,
   PlayInfo,
   Playback,
   PlayTitle,
@@ -445,9 +449,14 @@ export function artUrl(id: string, kind: "poster" | "background" | "logo" | { se
 }
 
 /** The releases of one film or episode, ranked for playing in this browser, as each source answers. The last message is `done` or `error`. */
-export async function* sources(video: string, viewer?: Viewer, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
+export async function* sources(video: string, viewer?: Promise<Viewer>, signal?: AbortSignal): AsyncGenerator<SearchMessage> {
   const params = new URLSearchParams({ video });
-  if (viewer) for (const [name, value] of Object.entries(viewer)) params.set(name, String(value));
+  const measured = await viewer;
+  if (measured) {
+    const { decoders, ...screen } = measured;
+    for (const [name, value] of Object.entries(screen)) params.set(name, String(value));
+    if (decoders) for (const [codec, decoding] of Object.entries(decoders)) params.set(codec, decoding);
+  }
   yield* searchMessages(`/api/title/sources?${params}`, { signal });
 }
 

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use torrential_core::Plays;
 use torrential_core::catalog::Episode;
 use torrential_core::filetype::{FileType, Kind};
 use torrential_core::job::TorrentFile;
@@ -30,11 +31,13 @@ pub enum Start {
     Stalled,
 }
 
-/// The largest video file, plus the subtitle files that belong with it.
-pub fn pick(files: &[TorrentFile]) -> Option<Playable> {
+/// The video a play in `plays` opens, as [`Plays::preferred`] chooses among the videos that are
+/// not samples, plus the subtitle files that belong with it.
+pub fn pick(files: &[TorrentFile], plays: Plays) -> Option<Playable> {
     let videos: Vec<&TorrentFile> = files.iter().filter(|f| kind(&f.path) == Some(Kind::Video)).collect();
     let features: Vec<&TorrentFile> = videos.iter().copied().filter(|f| !is_sample(&f.path)).collect();
-    let video = if features.is_empty() { &videos } else { &features }.iter().max_by_key(|f| f.size)?;
+    let candidates = if features.is_empty() { &videos } else { &features };
+    let video = *plays.preferred(candidates, |f| f.size, |f| &f.path)?;
     let subtitles = subtitles(files, video, features.len());
     Some(Playable { video: video.index, subtitles: subtitles.into_iter().map(|f| f.index).collect() })
 }
@@ -110,6 +113,8 @@ fn in_subtitle_folder(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use torrential_core::{Container, Opens};
+
     use super::*;
 
     fn picked<'a>(listing: &[(&'a str, u64)]) -> Option<(&'a str, Vec<&'a str>)> {
@@ -124,7 +129,7 @@ mod tests {
                 risk: None,
             })
             .collect();
-        let playable = pick(&files)?;
+        let playable = pick(&files, Plays::ANY)?;
         let path = |index: u32| listing[index as usize].0;
         Some((path(playable.video), playable.subtitles.into_iter().map(path).collect()))
     }
@@ -178,6 +183,33 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn a_player_takes_the_file_it_opens_as_it_is_when_it_is_nearly_as_large() {
+        let night = [
+            ("Night/Night.gif", 392_050),
+            ("Night/Night.mov", 286_303_405),
+            ("Night/Night.ogv", 469_976_138),
+            ("Night/Night_512kb.mp4", 416_743_288),
+        ];
+        let files: Vec<TorrentFile> = (0..)
+            .zip(night)
+            .map(|(index, (path, size))| TorrentFile {
+                index,
+                path: path.into(),
+                size,
+                selected: true,
+                verified: 0,
+                risk: None,
+            })
+            .collect();
+        let picked = |plays: Plays| pick(&files, plays).map(|p| night[p.video as usize].0);
+        let tv =
+            |containers: &[Container]| Plays { opens: Opens::Only(containers.iter().copied().collect()), ..Plays::ANY };
+        assert_eq!(picked(Plays::ANY), Some("Night/Night.ogv"), "a player that opens any file takes the largest");
+        assert_eq!(picked(Plays::BROWSER), Some("Night/Night_512kb.mp4"), "a browser takes the MP4, 89% of the Ogg");
+        assert_eq!(picked(tv(&[Container::Mov])), Some("Night/Night.ogv"), "the MOV is 61% of the Ogg");
     }
 
     #[test]

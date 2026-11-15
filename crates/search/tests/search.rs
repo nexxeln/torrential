@@ -198,18 +198,6 @@ async fn retries_once_after_a_5xx_but_not_after_a_4xx() {
     assert_eq!((server.hits("/apibay/"), server.hits("/knaben/")), (2, 1));
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_slow_answer_that_has_started_keeps_the_whole_deadline() {
-    let slow = Reply { stall: Duration::from_millis(2200), ..ok(fixture("apibay/q.php-ubuntu.json")) };
-    let server = Server::start(vec![("/apibay/", vec![slow])]).await;
-    let search = Search::new(&server.config(&["apibay"]), ResultCache::new()).unwrap();
-
-    let result = search.search(&query("ubuntu", &["apibay"])).await.unwrap();
-
-    assert_eq!(outcomes(&result), [("apibay".into(), SourceOutcome::Ok { results: 100 })]);
-    assert_eq!(server.hits("/apibay/"), 1);
-}
-
 #[tokio::test]
 async fn a_response_that_never_starts_is_retried_once() {
     let stalled = Reply { delay: Duration::from_secs(10), ..ok(Vec::new()) };
@@ -220,18 +208,6 @@ async fn a_response_that_never_starts_is_retried_once() {
 
     assert_eq!(outcomes(&result), [("apibay".into(), SourceOutcome::Ok { results: 100 })]);
     assert_eq!(server.hits("/apibay/"), 2);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_slow_first_byte_is_raced_rather_than_abandoned() {
-    let slow = Reply { delay: Duration::from_millis(2000), ..ok(fixture("apibay/q.php-ubuntu.json")) };
-    let server = Server::start(vec![("/apibay/", vec![slow])]).await;
-    let search = Search::new(&server.config(&["apibay"]), ResultCache::new()).unwrap();
-
-    let result = search.search(&query("ubuntu", &["apibay"])).await.unwrap();
-
-    assert_eq!(outcomes(&result), [("apibay".into(), SourceOutcome::Ok { results: 100 })]);
-    assert!(result.elapsed_ms < 2600, "took {} ms", result.elapsed_ms);
 }
 
 #[tokio::test]

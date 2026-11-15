@@ -32,12 +32,18 @@ impl Resolution {
         if width.len() < 3 || height.len() < 3 || !height.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        Some(match width.parse::<u32>().ok()? {
+        Some(Self::of_width(width.parse().ok()?))
+    }
+
+    /// The resolution of a picture `width` pixels wide, so that a film cropped wider or narrower
+    /// than 16:9 counts as what it was made for.
+    pub const fn of_width(width: u32) -> Resolution {
+        match width {
             3800.. => Self::P2160,
             1900.. => Self::P1080,
             1200.. => Self::P720,
             _ => Self::Sd,
-        })
+        }
     }
 }
 

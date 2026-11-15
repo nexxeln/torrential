@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use torrential_core::id::parse_full_infohash;
-use torrential_core::{Category, Flag, InfoHash};
+use torrential_core::{Category, Codec, Flag, InfoHash};
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Observation {
@@ -16,6 +16,30 @@ pub(crate) struct Observation {
     pub flags: BTreeSet<Flag>,
     pub trackers: Vec<String>,
     pub info_url: Option<String>,
+    /// The video files the item holds, as its catalog lists them. Only archive.org lists them, and
+    /// only in a title's search.
+    pub videos: Vec<VideoFile>,
+}
+
+/// A video file of an item, with the size of its picture.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct VideoFile {
+    /// Its path in the item, which ends in its extension.
+    pub name: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `None` when its catalog's format does not say.
+    pub codec: Option<VideoCodec>,
+}
+
+/// A video's codec, as a catalog's format or a release's name gives it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum VideoCodec {
+    /// H.264, HEVC or AV1, which a screen may decode in hardware.
+    Modern(Codec),
+    /// An older codec no browser decodes, such as Theora, XviD, DivX or MPEG-2.
+    Old,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -44,6 +68,7 @@ impl Observation {
             flags: BTreeSet::new(),
             trackers: Vec::new(),
             info_url: None,
+            videos: Vec::new(),
         })
     }
 

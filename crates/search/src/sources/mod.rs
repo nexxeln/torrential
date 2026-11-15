@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use torrential_core::title::Wanted;
 use torrential_core::{Error, ErrorCode, SourceOutcome, text};
 use url::Url;
 
@@ -181,6 +182,7 @@ pub(crate) struct Stores {
     hashes: Arc<hashes::Hashes>,
     academic: academic::Catalog,
     pages: pages::Pages,
+    lists: archive_org::Lists,
 }
 
 impl Stores {
@@ -189,7 +191,8 @@ impl Stores {
         Stores {
             hashes: Arc::new(hashes::Hashes::new(cache_dir, store.clone())),
             academic: academic::Catalog::new(store.clone()),
-            pages: pages::Pages::new(store),
+            pages: pages::Pages::new(store.clone()),
+            lists: archive_org::Lists::new(store),
         }
     }
 
@@ -204,6 +207,10 @@ pub(crate) struct Ctx<'a> {
     pub terms: &'a Terms,
     pub adult: bool,
     pub fresh: bool,
+    /// The title a title's search is for, which ranks its releases by the files a play would open.
+    pub wanted: Option<&'a Wanted>,
+    /// When the search began.
+    pub started: Instant,
     pub deadline: Instant,
     pub partial: AtomicBool,
 }
