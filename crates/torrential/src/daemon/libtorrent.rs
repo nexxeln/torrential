@@ -12,6 +12,7 @@ use super::engine_port::{
     Activity, AddSource, AddTorrent, EngineEvent, EnginePort, MetaFile, Metainfo, Missing, Stats,
 };
 use super::search_port::{BoxFuture, SearchPort};
+use crate::fsutil::write_atomic;
 use crate::log::log;
 
 const BOOTSTRAP_NODES: [&str; 4] = [
@@ -616,12 +617,6 @@ fn listen_port(path: &Path, ip: IpAddr) -> Result<u16, Error> {
     write_atomic(path, format!("{port}\n").as_bytes())
         .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot write {}: {e}", path.display())))?;
     Ok(port)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let partial = path.with_extension("partial");
-    std::fs::write(&partial, bytes)?;
-    std::fs::rename(&partial, path)
 }
 
 fn metainfo(m: lt::Metainfo) -> Result<Metainfo, Error> {

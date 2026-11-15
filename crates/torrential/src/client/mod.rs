@@ -4,7 +4,6 @@ pub mod launch;
 pub mod play;
 pub mod player;
 mod probe;
-pub mod service;
 mod setup;
 mod titles;
 pub mod tui;
@@ -25,10 +24,12 @@ use crate::cli::{Command, DaemonCommand, GetArgs, SearchArgs, Until};
 use crate::daemon::files;
 use crate::daemon::server::METADATA_WAIT;
 use crate::env::Env;
+use crate::fsutil::Writes;
 use crate::output::views::{self, ChangeCommand, Check, CheckStatus, DaemonReport, FileMatch};
 use crate::output::{self, Mode, Typed, render};
 use crate::paths::Paths;
-use crate::skill::{self, SkillCommand, Writes};
+use crate::service;
+use crate::skill::{self, SkillCommand};
 use connect::Conn;
 
 pub fn run(command: Command, mode: Mode, env: &Env) -> u8 {

@@ -4,8 +4,8 @@ use std::process::Command;
 use torrential_core::{Error, ErrorCode};
 
 use crate::env::Env;
+use crate::fsutil::write_atomic;
 use crate::paths::{Paths, uid};
-use crate::skill::write_atomic;
 use crate::update::{Audience, executable};
 
 pub const LABEL: &str = "dev.torrential.engine";
@@ -241,6 +241,34 @@ pub fn notice(paths: &Paths, audience: Audience) -> Option<String> {
     })
 }
 
+/// The exit status after which launchd (`KeepAlive` without `SuccessfulExit`) and systemd
+/// (`Restart=on-failure`) start the engine again, from the binary an update installed. Any other
+/// clean stop exits 0, which neither restarts.
+pub const RESTART: u8 = 75;
+
+/// What an engine that exits for the login service leaves, so `engine stop` waits for the next
+/// engine to stop it too. The next engine removes it once it is up.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Switching {
+    pid: u32,
+    at: i64,
+}
+
+/// How long a stop waits for the login service to start the next engine.
+const SWITCH_WITHIN: i64 = 60;
+
+pub fn leave_switching(paths: &Paths, at: i64) {
+    let switching = Switching { pid: std::process::id(), at };
+    let _ = write_atomic(&paths.switching(), &serde_json::to_vec(&switching).expect("records serialize"));
+}
+
+/// Whether an engine exited for the login service under a minute before `now`, and no engine has
+/// started since.
+pub fn switching(paths: &Paths, now: i64) -> bool {
+    let Ok(bytes) = std::fs::read(paths.switching()) else { return false };
+    serde_json::from_slice::<Switching>(&bytes).is_ok_and(|switching| now - switching.at < SWITCH_WITHIN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +320,28 @@ mod tests {
             Some("/srv/torrential"),
         );
         insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn an_engine_that_exits_for_the_login_service_counts_as_switching_for_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+        let paths = Paths {
+            config: at("config"),
+            state: at("state"),
+            cache: at("cache"),
+            data: at("data"),
+            runtime: at("run"),
+            downloads: at("downloads"),
+        };
+        std::fs::create_dir_all(&paths.state).unwrap();
+        let before = switching(&paths, 1_000);
+
+        leave_switching(&paths, 1_000);
+
+        assert_eq!(
+            (before, switching(&paths, 1_000), switching(&paths, 1_059), switching(&paths, 1_060)),
+            (false, true, true, false)
+        );
     }
 }

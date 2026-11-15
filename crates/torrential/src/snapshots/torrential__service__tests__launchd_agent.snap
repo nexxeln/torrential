@@ -1,5 +1,5 @@
 ---
-source: crates/torrential/src/client/service.rs
+source: crates/torrential/src/service.rs
 expression: text
 ---
 <?xml version="1.0" encoding="UTF-8"?>

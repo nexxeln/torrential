@@ -12,8 +12,8 @@ use torrential_search::{SearchConfig, TorznabConfig};
 
 use crate::client::player::Choice;
 use crate::env::Env;
+use crate::fsutil::{Writes, write_atomic};
 use crate::paths::Paths;
-use crate::skill::{Writes, write_atomic};
 use crate::update::Policy;
 
 #[derive(Clone, PartialEq, Debug, Default)]

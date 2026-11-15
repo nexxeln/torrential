@@ -169,7 +169,7 @@ pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
                 if let Some(conn) = found {
                     stopped = Some(stop(conn, Stop::Asked)?);
                 }
-                if !crate::daemon::switching(paths, torrential_core::time::now()) {
+                if !crate::service::switching(paths, torrential_core::time::now()) {
                     return Ok(stopped);
                 }
                 None
