@@ -34,7 +34,7 @@ written_as! {
     crate::VideoRef => "string",
     crate::title::Span => "string",
     crate::catalog::Countries => "Array<Country>",
-    crate::Plays => "Array<Container>",
+    crate::Containers => "Array<Container>",
     Country => "Country",
     crate::Container => "Container",
     crate::Release => "Release",

@@ -4,7 +4,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use torrential_core::{Container, Error, ErrorCode, Playback, Plays, Tv};
+use torrential_core::{Container, Containers, Error, ErrorCode, Playback, Tv};
 use url::Url;
 
 use super::ssdp::at;
@@ -137,12 +137,12 @@ fn takes(mime: &str, extra: &str) -> Option<Container> {
 
 /// The containers a sink takes. A sink that names `*` or `video/*` takes every one, and one that
 /// names no video at all is taken to play what nearly every TV does.
-fn plays(sink: &[(String, String)]) -> Plays {
+fn plays(sink: &[(String, String)]) -> Containers {
     if sink.iter().any(|(mime, _)| mime == "*" || mime == "video/*") {
-        return Plays::from_iter(Container::ALL);
+        return Containers::from_iter(Container::ALL);
     }
-    let named: Plays = sink.iter().filter_map(|(mime, extra)| takes(mime, extra)).collect();
-    if named == Plays::default() && !sink.iter().any(|(mime, _)| mime.starts_with("video/")) {
+    let named: Containers = sink.iter().filter_map(|(mime, extra)| takes(mime, extra)).collect();
+    if named == Containers::default() && !sink.iter().any(|(mime, _)| mime.starts_with("video/")) {
         return UNSAID.into_iter().collect();
     }
     named

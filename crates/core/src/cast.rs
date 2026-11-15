@@ -9,6 +9,7 @@ use crate::error::Error;
 use crate::filetype::FileType;
 use crate::id::Target;
 use crate::preferences::Playback;
+use crate::quality::Quality;
 
 /// A video container, which a TV takes or does not. Its codecs are another matter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,9 +85,9 @@ impl Container {
 
 /// The containers a TV takes. Written as their names, such as `["mkv", "mp4"]`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Plays(u16);
+pub struct Containers(u16);
 
-impl Plays {
+impl Containers {
     pub fn contains(self, container: Container) -> bool {
         self.0 & container.bit() != 0
     }
@@ -101,19 +102,69 @@ impl Plays {
     }
 }
 
-impl FromIterator<Container> for Plays {
-    fn from_iter<I: IntoIterator<Item = Container>>(containers: I) -> Self {
-        Plays(containers.into_iter().fold(0, |bits, container| bits | container.bit()))
+/// What a screen plays: the files it opens as they are, whether ffmpeg converts the others for it,
+/// and the codec it decodes. A title play judges its sources by it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Plays {
+    pub opens: Opens,
+    /// ffmpeg, when it is here, converts what the screen does not open, as for a browser.
+    pub remux: bool,
+    /// The newest codec it decodes, for a screen that refuses the rest, as a TV does. `None` takes
+    /// any.
+    pub decodes: Option<Playback>,
+}
+
+/// The files a screen opens as they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Opens {
+    /// Any, as mpv, IINA and VLC open, and as a download kept with `get` takes.
+    Any,
+    /// What a browser plays without ffmpeg, by the file-type table.
+    Browser,
+    /// These containers and no other, as a TV lists them.
+    Only(Containers),
+}
+
+impl Plays {
+    /// What mpv, IINA and VLC play, and what a download kept with `get` takes.
+    pub const ANY: Plays = Plays { opens: Opens::Any, remux: false, decodes: None };
+    /// What a browser plays: its own files, and the rest once ffmpeg converts them.
+    pub const BROWSER: Plays = Plays { opens: Opens::Browser, remux: true, decodes: None };
+
+    /// What `tv` plays: the containers it lists, as they are, in the codecs it decodes.
+    pub fn tv(tv: &Tv) -> Plays {
+        Plays { opens: Opens::Only(tv.plays), remux: false, decodes: Some(tv.decodes) }
+    }
+
+    /// Whether a file named `path` plays, with `ffmpeg` here to convert it or not.
+    pub fn opens(self, path: &str, ffmpeg: bool) -> bool {
+        (self.remux && ffmpeg)
+            || match self.opens {
+                Opens::Any => true,
+                Opens::Browser => FileType::of(path).is_some_and(|t| t.browser.is_some()),
+                Opens::Only(containers) => containers.takes(path),
+            }
+    }
+
+    /// Whether it decodes a video of `quality`, as far as a release's name tells.
+    pub fn decodes(self, quality: Quality) -> bool {
+        self.decodes.is_none_or(|playback| playback.plays(quality))
     }
 }
 
-impl Serialize for Plays {
+impl FromIterator<Container> for Containers {
+    fn from_iter<I: IntoIterator<Item = Container>>(containers: I) -> Self {
+        Containers(containers.into_iter().fold(0, |bits, container| bits | container.bit()))
+    }
+}
+
+impl Serialize for Containers {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_seq(self.iter().map(Container::name))
     }
 }
 
-impl<'de> Deserialize<'de> for Plays {
+impl<'de> Deserialize<'de> for Containers {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let names = Vec::<String>::deserialize(d)?;
         Ok(names.iter().filter_map(|name| Container::of_name(name)).collect())
@@ -132,7 +183,7 @@ pub struct Tv {
     /// Its IP address on the home network.
     pub address: String,
     /// The containers a cast sends it as they are.
-    pub plays: Plays,
+    pub plays: Containers,
     /// The newest video codec it says it decodes, which picks the sources a title cast tries.
     pub decodes: Playback,
     /// Whether torrential can set its volume.
@@ -256,10 +307,10 @@ mod tests {
 
     #[test]
     fn the_containers_a_tv_plays_read_and_write_as_their_names() {
-        let plays: Plays = [Container::Mp4, Container::Mkv].into_iter().collect();
+        let plays: Containers = [Container::Mp4, Container::Mkv].into_iter().collect();
         assert!(plays.takes("film.mkv") && plays.takes("film.MP4") && !plays.takes("film.avi"));
         assert_eq!(serde_json::to_string(&plays).unwrap(), r#"["mkv","mp4"]"#);
-        let read: Plays = serde_json::from_str(r#"["mp4","ogg","mkv"]"#).unwrap();
+        let read: Containers = serde_json::from_str(r#"["mp4","ogg","mkv"]"#).unwrap();
         assert_eq!(read, plays, "a name this version does not know is left out");
     }
 

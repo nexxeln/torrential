@@ -1364,7 +1364,7 @@ async fn a_title_plays_from_the_first_of_its_sources_that_starts_and_cleans_up_t
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_play_whose_download_goes_before_its_video_is_served_fails_with_the_sources_it_tried() {
     use super::super::owner::plays::Destination;
-    use super::super::titles::attempt::{self, Containers, PlayTitle};
+    use super::super::titles::attempt::{self, PlayTitle};
     use torrential_core::Player;
     use torrential_core::protocol::Request;
     let (h, night) = titles::night();
@@ -1373,7 +1373,7 @@ async fn a_title_play_whose_download_goes_before_its_video_is_served_fails_with_
         pin: None,
         replace: None,
         player: Player::External,
-        containers: Containers::Browser,
+        plays: torrential_core::Plays::BROWSER,
         to: Destination::Plays,
     };
     let outcome = attempt::run(&h.running.ctx, ask, |_| {}).await;

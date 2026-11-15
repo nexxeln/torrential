@@ -18,7 +18,7 @@ use super::super::engine_port::EngineEvent;
 use super::super::fake::{self, Swarm};
 use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Finish, Hold, Origin, PlayCommand, Source, TitlePlay};
-use super::super::titles::attempt::{self, Containers, PlayTitle};
+use super::super::titles::attempt::{self, PlayTitle};
 use super::super::titles::{Timing, catalog_port};
 use super::{Gate, Gated, Harness, MIB, Outside, TIMING, prefix, torrent};
 
@@ -181,7 +181,7 @@ impl Harness {
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace,
             player: Player::External,
-            containers: Containers::Browser,
+            plays: torrential_core::Plays::BROWSER,
             to: Destination::Plays,
         };
         let mut steps = Vec::new();
@@ -197,7 +197,7 @@ impl Harness {
             pin: pin.map(|t| ReleaseId::Torrent(t.info_hash.id())),
             replace: None,
             player: Player::External,
-            containers: Containers::Browser,
+            plays: torrential_core::Plays::BROWSER,
             to: Destination::Folder(None),
         };
         let mut steps = Vec::new();
@@ -711,7 +711,7 @@ async fn testing(h: &Harness, source: &fake::TorrentFile) -> tokio::task::JoinHa
         pin: Some(ReleaseId::Torrent(source.info_hash.id())),
         replace: None,
         player: Player::External,
-        containers: Containers::Browser,
+        plays: torrential_core::Plays::BROWSER,
         to: Destination::Plays,
     };
     let (told, mut steps) = tokio::sync::mpsc::unbounded_channel();

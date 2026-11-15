@@ -19,8 +19,8 @@ use torrential_core::text::sanitize;
 use torrential_core::time::now;
 use torrential_core::title::Span;
 use torrential_core::{
-    AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, Player, Quality, ReleaseId,
-    Resolution, Target, TitleLink, TorrentId, Tv, TvList, VideoRef, Viewer, Watched,
+    AttemptEvent, Cast, CastAction, CastRequest, CastState, Container, Error, ErrorCode, Player, Plays, Quality,
+    ReleaseId, Resolution, Target, TitleLink, TorrentId, Tv, TvList, VideoRef, Viewer, Watched,
 };
 
 use super::ctx::Ctx;
@@ -31,7 +31,7 @@ use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::playing::Open;
 use super::titles;
-use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
+use super::titles::attempt::{self, Outcome, PlayTitle, Played};
 use crate::log::log;
 pub use ssdp::Find;
 use ssdp::Heard;
@@ -948,7 +948,7 @@ async fn find(
             let pin = match &request.source {
                 Some(prefix) => {
                     let release = titles::pinned(ctx, video, prefix).await?;
-                    if !tv.tv.decodes.plays(Quality::parse(&release.name)) {
+                    if !Plays::tv(&tv.tv).decodes(Quality::parse(&release.name)) {
                         return Err(Error::new(
                             ErrorCode::Usage,
                             format!("{} cannot decode the video of this source", tv.tv.name),
@@ -965,7 +965,7 @@ async fn find(
                 replace: None,
                 // A TV says what it decodes but not its screen, and 1080p plays well on any TV.
                 player: Player::Device(Viewer { screen: Resolution::P1080, playback: tv.tv.decodes }),
-                containers: Containers::Tv(tv.tv.plays),
+                plays: Plays::tv(&tv.tv),
                 to: Destination::Plays,
             };
             let outcome = attempt::run(ctx, ask, |step| {

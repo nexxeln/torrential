@@ -6,13 +6,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
-use torrential_core::filetype::{self, FileType};
+use torrential_core::filetype;
 use torrential_core::stream::{self, Playable};
 use torrential_core::text::sanitize;
 use torrential_core::title::{Episode, Span};
 use torrential_core::{
-    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Player, Plays, Quality, Release, ReleaseId, Skip,
-    SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,
+    AttemptEvent, Check, Error, ErrorCode, InfoHash, Job, JobStatus, Opens, Player, Plays, Quality, Release, ReleaseId,
+    Skip, SourceReport, Swarm, TitleLink, TorrentId, Tried, VideoRef,
 };
 
 use super::super::ctx::{Ctx, OwnerHandle};
@@ -46,7 +46,8 @@ pub struct PlayTitle {
     pub replace: Option<TorrentId>,
     /// What the title plays in, which its sources are ranked for.
     pub player: Player,
-    pub containers: Containers,
+    /// What the screen plays, which a source's file must suit.
+    pub plays: Plays,
     /// Where its download goes. A title played into the plays folder downloads in playing order
     /// to be watched; one played into a folder downloads as `get` downloads, to be kept.
     pub to: Destination,
@@ -95,28 +96,6 @@ fn ended(report: &mut impl FnMut(AttemptEvent), outcome: Outcome) -> Outcome {
     outcome
 }
 
-/// The containers a caller's player opens.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Containers {
-    /// A browser's: MP4, M4V, MOV, and WebM, and any other once ffmpeg remuxes it.
-    Browser,
-    /// Any, as mpv, IINA, and VLC open. A download kept with `get` takes any too.
-    Any,
-    /// A TV's, which plays these as they are and no other.
-    Tv(Plays),
-}
-
-impl Containers {
-    /// Whether the file at `path` opens, when ffmpeg is there to `remux` it or not.
-    fn open(self, path: &str, remux: bool) -> bool {
-        match self {
-            Containers::Any => true,
-            Containers::Browser => remux || FileType::of(path).is_some_and(|t| t.browser.is_some()),
-            Containers::Tv(plays) => plays.takes(path),
-        }
-    }
-}
-
 /// Plays `ask`, reports each step, the last being `playing` or `failed`, and answers how it ended.
 /// A download here that holds the video plays first, before any search. Otherwise sources are
 /// tried once the search so far holds one that could lead, while slower indexes go on answering,
@@ -143,8 +122,7 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
     let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
-    // ffmpeg converts nothing for a TV, which fetches the file as it is.
-    let ffmpeg = !matches!(ask.containers, Containers::Tv(_)) && ctx.media.ffmpeg.converts();
+    let ffmpeg = ask.plays.remux && ctx.media.ffmpeg.converts();
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
     if let Some(release) = held.into_iter().find(|r| r.failed.is_none() && ask.may_try(r) && reused(r))
@@ -345,14 +323,12 @@ impl Walk<'_> {
 
 impl PlayTitle {
     /// Whether this play may try `release`: never the download it replaces, only the pinned
-    /// release when one is, and on a TV, which gets the file as it is, never one whose name says a
-    /// codec the TV does not decode, held here or not. A trial checks again once it knows the
-    /// release's torrent.
+    /// release when one is, and never one whose name says a codec the screen does not decode, held
+    /// here or not. A trial checks again once it knows the release's torrent.
     fn may_try(&self, release: &Release) -> bool {
-        let tv = matches!(self.containers, Containers::Tv(_));
         self.replace.is_none_or(|old| release.id != ReleaseId::Torrent(old))
             && self.pin.is_none_or(|pin| release.id == pin)
-            && (!tv || self.player.plays(Quality::parse(&release.name)))
+            && self.plays.decodes(Quality::parse(&release.name))
     }
 }
 
@@ -397,9 +373,9 @@ impl Trial<'_> {
             return Err(Skip::Stalled.into());
         }
         let remux = ctx.media.ffmpeg.converts();
-        let playable = video_of(&metainfo, title.video.episode, ask.containers, remux)?;
-        // ffmpeg comes while the download starts, when the browser cannot read this file itself.
-        if !ask.containers.open(&metainfo.files[playable.video as usize].path, false) {
+        let playable = video_of(&metainfo, title.video.episode, ask.plays, remux)?;
+        // ffmpeg comes while the download starts, when the screen cannot read this file itself.
+        if !ask.plays.opens(&metainfo.files[playable.video as usize].path, false) {
             let _ = ctx.media.ffmpeg.fetch();
         }
 
@@ -526,14 +502,9 @@ fn seconds(elapsed: Duration) -> u32 {
     elapsed.as_secs_f64().round() as u32
 }
 
-/// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays in a
-/// player that opens `containers`. A torrent that holds only sample clips holds no video.
-fn video_of(
-    metainfo: &Metainfo,
-    episode: Option<Episode>,
-    containers: Containers,
-    remux: bool,
-) -> Result<Playable, Box<Skip>> {
+/// The file of the film, or of `episode` in a pack, and its subtitles, or why none plays on a
+/// screen that `plays` them. A torrent that holds only sample clips holds no video.
+fn video_of(metainfo: &Metainfo, episode: Option<Episode>, plays: Plays, remux: bool) -> Result<Playable, Box<Skip>> {
     let listing = metainfo.listing();
     let playable = match episode {
         Some(episode) => stream::episode(&listing, &sanitize(&metainfo.name), episode),
@@ -541,13 +512,13 @@ fn video_of(
     };
     let playable = playable.filter(|p| !stream::is_sample(&listing[p.video as usize].path)).ok_or(Skip::NoVideo)?;
     let path = &listing[playable.video as usize].path;
-    if containers.open(path, remux) {
+    if plays.opens(path, remux) {
         Ok(playable)
     } else {
         let container = filetype::extension(path);
-        let skip = match containers {
-            Containers::Tv(_) => Skip::NotOnTv { container },
-            Containers::Browser | Containers::Any => Skip::Unplayable { container },
+        let skip = match plays.opens {
+            Opens::Only(_) => Skip::NotOnTv { container },
+            Opens::Browser | Opens::Any => Skip::Unplayable { container },
         };
         Err(skip.into())
     }
@@ -632,7 +603,7 @@ mod tests {
             pin: pin.map(|n| release(n).id),
             replace: replace.map(|n| TorrentId::from_bytes([n; 20])),
             player: Player::External,
-            containers: Containers::Browser,
+            plays: Plays::BROWSER,
             to: Destination::Plays,
         };
         let line: Vec<Release> = (1..=12).map(release).collect();
@@ -698,7 +669,7 @@ mod tests {
         let disc = torrent("Night DVD", &[("NIGHT.iso", 900), ("readme.txt", 9)]);
         let samples = torrent("Night", &[("Sample/Night.sample.mp4", 90), ("sample-night.mkv", 80)]);
         let episode = |season, episode| Some(Episode { season, episode });
-        let read = |m: &Metainfo, e, remux| video_of(m, e, Containers::Browser, remux).map(|p| (p.video, p.subtitles));
+        let read = |m: &Metainfo, e, remux| video_of(m, e, Plays::BROWSER, remux).map(|p| (p.video, p.subtitles));
         let table = [
             (read(&film, None, false), Ok((0, vec![1]))),
             (read(&pack, episode(1, 2), false), Ok((1, vec![2]))),
@@ -712,10 +683,10 @@ mod tests {
             assert_eq!(got, expected, "row {n}");
         }
         let paths = ["a.mp4", "a.M4V", "a.mov", "a.webm", "a.mkv", "a.avi", "mp4"];
-        let open = |containers: Containers, remux| paths.map(|p| containers.open(p, remux));
-        assert_eq!(open(Containers::Browser, false), [true, true, true, true, false, false, false]);
-        assert_eq!(open(Containers::Browser, true), [true; 7]);
-        assert_eq!(open(Containers::Any, false), [true; 7]);
+        let open = |plays: Plays, remux| paths.map(|p| plays.opens(p, remux));
+        assert_eq!(open(Plays::BROWSER, false), [true, true, true, true, false, false, false]);
+        assert_eq!(open(Plays::BROWSER, true), [true; 7]);
+        assert_eq!(open(Plays::ANY, false), [true; 7]);
     }
 
     #[test]

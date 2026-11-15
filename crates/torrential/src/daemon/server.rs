@@ -12,7 +12,7 @@ use torrential_core::protocol::{
     Event, Frame, GetOutcome, GetReply, METADATA_WAIT, PlayReply, Request, Response, TitlePlayed, TitleRequest,
     TitleStep, WIRE_VERSION,
 };
-use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, SearchQuery, TorrentId};
+use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, Plays, SearchQuery, TorrentId};
 
 use super::ctx::Ctx;
 use super::downloads::{
@@ -21,7 +21,7 @@ use super::downloads::{
 use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::search_port::Progress;
-use super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
+use super::titles::attempt::{self, Outcome, PlayTitle, Played};
 use super::titles::{home, pinned, sources, title_page};
 use crate::log::log;
 use crate::update::Version;
@@ -111,8 +111,7 @@ async fn play_title(
     };
     let jobs = ctx.owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
     let before: BTreeSet<TorrentId> = jobs.iter().map(|job| job.id).collect();
-    let ask =
-        PlayTitle { video, pin, replace: None, player: Player::External, containers: Containers::Any, to: to.clone() };
+    let ask = PlayTitle { video, pin, replace: None, player: Player::External, plays: Plays::ANY, to: to.clone() };
     let played = match attempt::run(ctx, ask, |step| drop(steps.send(step))).await {
         Outcome::Played(played) => *played,
         Outcome::Failed { error, tried } if tried.is_empty() => return Err(error),
