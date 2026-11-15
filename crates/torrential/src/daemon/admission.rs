@@ -164,7 +164,7 @@ pub fn check_conflicts(plan: &Plan) -> Result<(), Error> {
         ErrorCode::PathConflict,
         format!(
             "{} already {} under {}",
-            crate::output::format::count(n, "file"),
+            torrential_core::units::count(n, "file"),
             if n == 1 { "exists" } else { "exist" },
             plan.destination.display()
         ),
@@ -200,7 +200,7 @@ pub fn claimed(destination: &Path, owner: TorrentId, name: &str, paths: &[PathBu
         ErrorCode::PathConflict,
         format!(
             "{} under {} {are} already {files} of download {other} ({})",
-            crate::output::format::count(n, "file"),
+            torrential_core::units::count(n, "file"),
             destination.display(),
             torrential_core::text::sanitize(name)
         ),

@@ -29,9 +29,9 @@ use super::search_port::{Progress, SearchPort};
 use super::titles::attempt::{self, Containers, PlayTitle};
 use crate::log::log;
 use crate::machine::Detector;
-use crate::output::views::title_name;
 use crate::update::Version;
 use crate::wire;
+use torrential_core::title::title_name;
 
 const MAX_TORRENT_BYTES: u64 = 16 * 1024 * 1024;
 /// Titles listed under Continue on the home screens.

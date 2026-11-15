@@ -8,10 +8,11 @@ use ratatui::layout::Position;
 use ratatui::style::{Color, Style};
 use torrential_core::error::Details;
 use torrential_core::protocol::TitlePage;
+use torrential_core::title::title_name;
 use torrential_core::units::{count, format_duration};
 use torrential_core::{Error, Kind, Next, ReleaseId, TitleCard, VideoRef};
 
-use super::{Found, Load, Opened, Pick, Play, episodes, label, title_name};
+use super::{Found, Load, Opened, Pick, Play, episodes};
 use crate::format::{age, char_width, width};
 use crate::layout::Screen;
 use crate::state::{Engine, State};
@@ -136,7 +137,7 @@ fn home_lines(sheet: &mut Sheet, state: &State) {
         let left = match &item.episode {
             Some(episode) => {
                 let name = episode.name.as_deref().map(|name| format!(" · {name}")).unwrap_or_default();
-                vec![(item.title.name.clone(), fg(TEXT)), (format!("  {}{name}", label(episode.episode)), fg(PENCIL))]
+                vec![(item.title.name.clone(), fg(TEXT)), (format!("  {}{name}", episode.episode), fg(PENCIL))]
             }
             None => vec![(title_name(&item.title, None), fg(TEXT))],
         };
@@ -192,11 +193,7 @@ fn card_facts(card: &TitleCard) -> Vec<(String, Style)> {
 }
 
 fn title_lines(sheet: &mut Sheet, state: &State, open: &Opened, room: u16) {
-    let kind = match open.card.kind {
-        Kind::Film => "film",
-        Kind::Series => "series",
-    };
-    sheet.word(kind, PENCIL);
+    sheet.word(open.card.kind.word(), PENCIL);
     sheet.row(None, vec![(open.card.name.clone(), bold(INK))], Vec::new());
     let page = match &open.page {
         Load::Ready(page) => page,
@@ -280,7 +277,7 @@ fn play_row(sheet: &mut Sheet, page: &TitlePage, now: i64) {
         Some(episode) => {
             let info = episodes(page).into_iter().find(|info| info.episode == episode);
             let name = info.and_then(|info| info.name.clone()).map(|name| (format!("  {name}"), fg(PENCIL)));
-            std::iter::once((format!("{verb} {}", label(episode)), fg(TEXT))).chain(name).collect()
+            std::iter::once((format!("{verb} {episode}"), fg(TEXT))).chain(name).collect()
         }
     };
     let duration = page.watched.iter().find(|w| w.video == video).and_then(|w| w.duration);

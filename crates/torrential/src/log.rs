@@ -2,5 +2,5 @@
 
 /// Writes `message` to the log after the time.
 pub fn log(message: &str) {
-    eprintln!("{} {message}", crate::output::format::timestamp(torrential_core::time::now()));
+    eprintln!("{} {message}", torrential_core::units::timestamp(torrential_core::time::now()));
 }

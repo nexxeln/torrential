@@ -8,7 +8,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use torrential_core::protocol::{Home, TitlePage, TitlePlayed};
 use torrential_core::text::sanitize;
-use torrential_core::title::Episode;
+use torrential_core::title::{Episode, title_name};
 use torrential_core::units::count;
 use torrential_core::{AttemptEvent, Check, EpisodeInfo, Error, TitleCard, TitleId, VideoRef};
 
@@ -175,20 +175,6 @@ pub fn episodes(page: &TitlePage) -> Vec<&EpisodeInfo> {
     let mut seasons: Vec<_> = page.details.seasons.iter().collect();
     seasons.sort_by_key(|season| (season.number == 0, season.number));
     seasons.into_iter().flat_map(|season| &season.episodes).collect()
-}
-
-/// An episode as people write it, such as S03E05.
-pub fn label(episode: Episode) -> String {
-    format!("S{:02}E{:02}", episode.season, episode.episode)
-}
-
-/// A film's name and year, or a series' name and the episode, as `Harbor Lights S01E02`.
-pub fn title_name(card: &TitleCard, episode: Option<Episode>) -> String {
-    match (episode, card.year) {
-        (Some(episode), _) => format!("{} {}", card.name, label(episode)),
-        (None, Some(year)) => format!("{} ({year})", card.name),
-        (None, None) => card.name.clone(),
-    }
 }
 
 /// Seconds into a video as a clock, as `34:10` or `1:02:05`.
@@ -406,7 +392,7 @@ impl State {
             Pick::Episode(episode) => {
                 let info = page.and_then(|page| episodes(page).into_iter().find(|info| info.episode == *episode));
                 if info.is_some_and(|info| info.aired.is_none_or(|aired| aired > self.clock)) {
-                    self.say(Tone::Info, format!("{} has not aired yet.", label(*episode)));
+                    self.say(Tone::Info, format!("{} has not aired yet.", episode));
                     return Vec::new();
                 }
                 Some(*episode)

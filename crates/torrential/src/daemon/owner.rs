@@ -1516,14 +1516,14 @@ impl Owner {
         let pieces = job.stats.missing.map_or(0, |m| m.pieces) as usize;
         let verified = job.verified();
         let missing = job.selected_size().unwrap_or(verified).saturating_sub(verified);
-        let size = |bytes| crate::output::format::size(Some(bytes));
+        let size = |bytes| torrential_core::units::format_size(bytes);
         let error = Error::new(
             ErrorCode::NoSource,
             format!(
                 "no peer or web seed has had the remaining {} ({}) for {}",
-                crate::output::format::count(pieces, "piece"),
+                torrential_core::units::count(pieces, "piece"),
                 size(missing),
-                crate::output::format::elapsed(self.config.stall_after),
+                torrential_core::units::elapsed(self.config.stall_after),
             ),
         )
         .with_hint(format!(
@@ -1569,7 +1569,7 @@ impl Owner {
 
     fn still_writing(&self, ids: &BTreeSet<TorrentId>) -> Error {
         let shorts: Vec<String> = ids.iter().map(|id| id.to_hex()[..6].to_string()).collect();
-        let within = crate::output::format::elapsed(self.config.writes_stop_within);
+        let within = torrential_core::units::elapsed(self.config.writes_stop_within);
         Error::new(ErrorCode::JobConflict, format!("writes to {} did not stop within {within}", shorts.join(", ")))
             .with_hint(format!("run torrential pause {} again; it returns once writes stop", shorts.join(" ")))
             .with_next(format!("torrential pause {}", shorts.join(" ")))
@@ -1689,7 +1689,7 @@ impl Owner {
             (Intent::Done { .. }, n, Verify::Report) => {
                 let error = Error::new(
                     ErrorCode::VerificationFailed,
-                    format!("{} in the selected files", crate::output::format::count(n as usize, "damaged piece")),
+                    format!("{} in the selected files", torrential_core::units::count(n as usize, "damaged piece")),
                 )
                 .with_hint(format!("run torrential verify {short} --repair to download them again"))
                 .with_next(format!("torrential verify {short} --repair"));

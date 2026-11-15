@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Countries, Country};
+use crate::catalog::{Countries, Country, TitleCard};
 use crate::error::{Error, ErrorCode};
 use crate::quality::Quality;
 
@@ -25,6 +25,22 @@ pub struct Title {
 pub struct Episode {
     pub season: u32,
     pub episode: u32,
+}
+
+/// An episode as people write it, such as S03E05.
+impl fmt::Display for Episode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "S{:02}E{:02}", self.season, self.episode)
+    }
+}
+
+/// A film's name and year, or a series' name and the episode, as `Harbor Lights S01E02`.
+pub fn title_name(card: &TitleCard, episode: Option<Episode>) -> String {
+    match (episode, card.year) {
+        (Some(episode), _) => format!("{} {episode}", card.name),
+        (None, Some(year)) => format!("{} ({year})", card.name),
+        (None, None) => card.name.clone(),
+    }
 }
 
 /// What a file in a torrent is, most likely reading first. `path` is the file's path inside the
