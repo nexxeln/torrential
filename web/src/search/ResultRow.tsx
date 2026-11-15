@@ -1,5 +1,5 @@
 import { ArrowUpIcon, ClipboardDocumentCheckIcon, ClipboardDocumentIcon } from "@heroicons/react/16/solid";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import type { Flag, NameCodec, Release, Resolution } from "../api";
 import { age, bytes } from "../lib/format";
 import { isVideo, readable } from "../lib/release";
@@ -36,12 +36,14 @@ interface Props {
   pick?: boolean;
   /** Why the release did not start when Play last tried it, as a sentence. */
   failed?: string;
+  /** Another way to play the release, beside the row, such as Play on TV. */
+  action?: ReactNode;
 }
 
 const ROW =
-  "grid w-full grid-cols-1 items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 text-left hover:bg-white/5 data-selected:bg-white/8 sm:grid-cols-[minmax(0,1fr)_auto]";
+  "grid w-full min-w-0 grid-cols-1 items-center gap-x-6 gap-y-1.5 rounded-lg px-3 py-2.5 text-left hover:bg-white/5 data-selected:bg-white/8 sm:grid-cols-[minmax(0,1fr)_auto]";
 
-export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pick, failed }: Props) {
+export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pick, failed, action }: Props) {
   const row = useRef<HTMLLIElement>(null);
   useEffect(() => {
     if (selected) row.current?.scrollIntoView({ block: "nearest" });
@@ -96,7 +98,7 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pi
   );
 
   return (
-    <li ref={row} className="scroll-my-24">
+    <li ref={row} className="flex scroll-my-24 items-center gap-1">
       {playable ? (
         <Link
           href={href ?? watchPath(release.id)}
@@ -123,6 +125,7 @@ export function ResultRow({ release, selected, copied, onPoint, onCopy, href, pi
           {body}
         </button>
       )}
+      {action}
     </li>
   );
 }

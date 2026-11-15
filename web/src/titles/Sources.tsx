@@ -1,7 +1,10 @@
 import { ChevronRightIcon } from "@heroicons/react/16/solid";
 import { useEffect, useRef, useState } from "react";
-import { sources } from "../api";
+import { findTvs, sources } from "../api";
+import { CastButton } from "../cast/CastButton";
+import { heard, useTvList } from "../cast/casts";
 import { count, list, sentence } from "../lib/format";
+import { isVideo, readable } from "../lib/release";
 import { viewer } from "../player/plan";
 import { playPath } from "../router";
 import { ResultRow } from "../search/ResultRow";
@@ -34,11 +37,17 @@ interface Props {
   open: boolean;
 }
 
-/** The releases Play would try, listed only when opened. Each plays that release and no other. */
+/** The releases Play would try, listed only when opened. Each plays that release and no other, here or on a TV. */
 export function Sources({ video, label, kind, open: opened }: Props) {
   const [open, setOpen] = useState(opened);
   const state = useSearchStream(open ? video : null, (signal) => sources(video, viewer(), signal));
   const result = state.kind === "searching" || state.kind === "done" ? state.result : null;
+  const { tvs } = useTvList();
+
+  // Looks for TVs once the list opens, so each source can go to one. A search in the last 30 seconds answers at once.
+  useEffect(() => {
+    if (open) findTvs(false).then(heard, () => {});
+  }, [open]);
 
   // A link to the list scrolls to it once the first sources make the page long enough to.
   const section = useRef<HTMLElement>(null);
@@ -83,6 +92,11 @@ export function Sources({ video, label, kind, open: opened }: Props) {
                   href={playPath(video, release.id)}
                   pick={at === 0}
                   failed={release.failed && skipReason(release.failed, kind === "film" ? "film" : "series")}
+                  action={
+                    tvs.length > 0 && isVideo(release) ? (
+                      <CastButton look="row" label={`Play ${readable(release.name).title} on TV`} start={{ video, source: release.id }} />
+                    ) : undefined
+                  }
                 />
               ))}
             </ol>
