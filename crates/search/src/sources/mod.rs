@@ -1,6 +1,6 @@
 mod academic;
 mod apibay;
-mod archive_org;
+pub(crate) mod archive_org;
 mod archlinux;
 mod debian;
 mod hashes;
@@ -234,6 +234,14 @@ impl Source {
         match &self.adapter {
             Adapter::Torznab(torznab) => torznab.link(saved),
             _ => saved.key_params.is_empty().then(|| Url::parse(&saved.url).ok().map(String::from))?,
+        }
+    }
+
+    /// The archive.org item whose `.torrent` file is at `url`.
+    pub fn archive_item_of_link(&self, url: &Url) -> Option<archive_org::Item> {
+        match self.adapter {
+            Adapter::ArchiveOrg => archive_org::item_of_link(&self.base, url),
+            _ => None,
         }
     }
 
