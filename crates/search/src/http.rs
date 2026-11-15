@@ -3,9 +3,20 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::time::{Instant, timeout_at};
+use torrential_core::{Error, ErrorCode};
 use url::Url;
 
 pub(crate) const USER_AGENT: &str = concat!("torrential/", env!("CARGO_PKG_VERSION"));
+/// A browser's name, so lookups of titles, pictures and subtitles say nothing about the program or
+/// the person.
+pub(crate) const BROWSER: &str = "Mozilla/5.0";
+
+/// The `name` endpoint at `url` as a base that relative paths join under, with a slash at its end.
+pub(crate) fn endpoint(url: &str, name: &str) -> Result<Url, Error> {
+    let slashed = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
+    Url::parse(&slashed)
+        .map_err(|e| Error::new(ErrorCode::Usage, format!("the {name} endpoint {url} is not a URL: {e}")))
+}
 
 pub type Recorded = Vec<(String, Vec<u8>)>;
 
@@ -33,28 +44,28 @@ pub(crate) enum Retry {
 }
 
 impl Http {
-    pub fn new(record: bool) -> Result<Http, reqwest::Error> {
-        Http::named(USER_AGENT, record)
+    pub fn new() -> Result<Http, reqwest::Error> {
+        Http::named(USER_AGENT)
+    }
+
+    /// A client that keeps every body it receives, by URL, for [`Http::take_recorded`].
+    pub fn recording() -> Result<Http, reqwest::Error> {
+        Ok(Http { recorded: Some(Mutex::default()), ..Http::new()? })
     }
 
     /// A client that introduces itself as `agent`.
-    pub fn named(agent: &str, record: bool) -> Result<Http, reqwest::Error> {
-        Http::build(agent, record, reqwest::redirect::Policy::default(), false)
+    pub fn named(agent: &str) -> Result<Http, reqwest::Error> {
+        Http::build(agent, reqwest::redirect::Policy::default(), false)
     }
 
     /// A client for the public internet that introduces itself as `agent` and follows only the
     /// redirects `policy` allows. It resolves each host name once and connects only to the public
     /// addresses it found.
     pub fn public(agent: &str, policy: reqwest::redirect::Policy) -> Result<Http, reqwest::Error> {
-        Http::build(agent, false, policy, true)
+        Http::build(agent, policy, true)
     }
 
-    fn build(
-        agent: &str,
-        record: bool,
-        policy: reqwest::redirect::Policy,
-        public: bool,
-    ) -> Result<Http, reqwest::Error> {
+    fn build(agent: &str, policy: reqwest::redirect::Policy, public: bool) -> Result<Http, reqwest::Error> {
         let mut builder = reqwest::Client::builder()
             .user_agent(agent)
             .gzip(true)
@@ -64,7 +75,7 @@ impl Http {
         if public {
             builder = builder.dns_resolver(PublicOnly);
         }
-        Ok(Http { client: builder.build()?, recorded: record.then(Mutex::default) })
+        Ok(Http { client: builder.build()?, recorded: None })
     }
 
     pub fn detached(&self) -> Http {
@@ -285,7 +296,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!("http://{}/a.torrent", listener.local_addr().unwrap())).unwrap();
         let held = tokio::spawn(async move { listener.accept().await });
-        let http = Http::new(false).unwrap();
+        let http = Http::new().unwrap();
         let error = http.fetch(&url, 1 << 20, Instant::now() + Duration::from_millis(1200), Retry::Never).await;
         let Err(FetchError::Timeout(waited)) = error else { panic!("no answer is a timeout, not {error:?}") };
         assert!((1200..1500).contains(&waited.as_millis()), "{waited:?}");

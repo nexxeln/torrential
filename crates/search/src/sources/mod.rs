@@ -23,6 +23,7 @@ use url::Url;
 
 use crate::http::{FetchError, Http};
 use crate::observation::Observation;
+use crate::store::Store;
 use crate::terms::Terms;
 use crate::{SearchConfig, TorznabConfig};
 use torznab::Torznab;
@@ -184,10 +185,11 @@ pub(crate) struct Stores {
 
 impl Stores {
     pub fn new(cache_dir: Option<PathBuf>) -> Stores {
+        let store = cache_dir.clone().map(|dir| Arc::new(Store::Disk(dir)));
         Stores {
-            hashes: Arc::new(hashes::Hashes::new(cache_dir.clone())),
-            academic: academic::Catalog::new(cache_dir.clone()),
-            pages: pages::Pages::new(cache_dir),
+            hashes: Arc::new(hashes::Hashes::new(cache_dir, store.clone())),
+            academic: academic::Catalog::new(store.clone()),
+            pages: pages::Pages::new(store),
         }
     }
 

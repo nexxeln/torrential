@@ -1,23 +1,22 @@
 //! Academic Torrents publishes its whole catalog as one RSS file and has no search
 //! endpoint, so the catalog is kept on disk for a day and searched locally.
 
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use torrential_core::Category;
 use url::Url;
 
 use super::{Ctx, Failure, at, rss};
 use crate::observation::{Identity, Observation, infohash, web_url};
+use crate::store::{FRESH_FOR, Store};
 
-const FRESH_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 const CAP: usize = 32 << 20;
 const FILE: &str = "academictorrents.xml";
 const MAX_RESULTS: usize = 100;
 
 pub(crate) struct Catalog {
-    dir: Option<PathBuf>,
+    store: Option<Arc<Store>>,
     loaded: tokio::sync::Mutex<Option<Loaded>>,
 }
 
@@ -32,8 +31,8 @@ pub(super) async fn search(ctx: &Ctx<'_>, base: &Url) -> Result<Vec<Observation>
 }
 
 impl Catalog {
-    pub fn new(dir: Option<PathBuf>) -> Catalog {
-        Catalog { dir, loaded: tokio::sync::Mutex::new(None) }
+    pub fn new(store: Option<Arc<Store>>) -> Catalog {
+        Catalog { store, loaded: tokio::sync::Mutex::new(None) }
     }
 
     async fn items(&self, ctx: &Ctx<'_>, base: &Url) -> Result<Arc<Vec<Observation>>, Failure> {
@@ -67,22 +66,13 @@ impl Catalog {
     }
 
     async fn read_disk(&self, base: &Url) -> Option<Loaded> {
-        let path = self.dir.as_ref()?.join(FILE);
-        let fetched = tokio::fs::metadata(&path).await.ok()?.modified().ok()?;
-        let body = tokio::fs::read(&path).await.ok()?;
-        Some(Loaded { fetched, items: Arc::new(parse(&body, base).ok()?) })
+        let kept = self.store.as_ref()?.get(FILE).await?;
+        Some(Loaded { fetched: kept.at, items: Arc::new(parse(&kept.bytes, base).ok()?) })
     }
 
     async fn write_disk(&self, body: &[u8]) {
-        let Some(dir) = &self.dir else { return };
-        let tmp = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
-        let written = async {
-            tokio::fs::create_dir_all(dir).await?;
-            tokio::fs::write(&tmp, body).await?;
-            tokio::fs::rename(&tmp, dir.join(FILE)).await
-        };
-        if written.await.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
+        if let Some(store) = &self.store {
+            store.put(FILE, body).await;
         }
     }
 }

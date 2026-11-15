@@ -7,13 +7,11 @@
 //! never leave this module: callers name a picture by title ID and kind.
 
 mod cinemeta;
-pub(crate) mod imdb;
-mod shelf;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::time::Instant;
@@ -22,12 +20,11 @@ use torrential_core::{ArtKind, Error, ErrorCode, Kind, TitleCard, TitleDetails, 
 use url::{Host, Origin, Url};
 
 use self::cinemeta::Described;
-use self::shelf::Shelf;
-use crate::http::{FetchError, Http};
+use crate::http::{BROWSER, FetchError, Http, endpoint};
+use crate::imdb;
+use crate::store::{self, Store};
 
 const BASE: &str = "https://v3-cinemeta.strem.io/";
-/// A browser's name, so the lookups say nothing about the program or the person.
-const AGENT: &str = "Mozilla/5.0";
 const LOOKUP_WITHIN: Duration = Duration::from_secs(8);
 const LARGEST_LISTING: usize = 1 << 20;
 /// A long-running series lists thousands of episodes.
@@ -135,9 +132,9 @@ impl Lack {
 }
 
 /// One title of a search answer, with the poster address the search named.
-struct Listed {
-    card: TitleCard,
-    poster: Option<Url>,
+pub(crate) struct Listed {
+    pub card: TitleCard,
+    pub poster: Option<Url>,
 }
 
 /// Cinemeta and IMDb's suggestions, behind the core catalog types.
@@ -149,7 +146,7 @@ pub struct Catalog {
     cinemeta: Url,
     imdb: Url,
     online: bool,
-    shelf: Shelf,
+    store: Store,
     /// The kind and poster address of each title recent searches listed.
     listed: Mutex<HashMap<TitleId, (Kind, Option<Url>)>>,
 }
@@ -195,32 +192,27 @@ impl PictureFrom {
                 attempt.stop()
             }
         });
-        Http::public(AGENT, policy).map_err(no_client)
+        Http::public(BROWSER, policy).map_err(no_client)
     }
 }
 
 impl Catalog {
     /// Fails with `usage` when an endpoint is not a URL.
     pub fn new(config: &CatalogConfig) -> Result<Catalog, Error> {
-        let base = |url: &str, name: &str| {
-            let slashed = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
-            Url::parse(&slashed)
-                .map_err(|e| Error::new(ErrorCode::Usage, format!("the {name} endpoint {url} is not a URL: {e}")))
-        };
-        let cinemeta = base(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?;
+        let cinemeta = endpoint(config.endpoint.as_deref().unwrap_or(BASE), "catalog")?;
         let mirror = match cinemeta.host() {
             Some(Host::Domain(host)) if config.endpoint.is_some() => Some(host.to_string()),
             _ => None,
         };
         let picture_from = PictureFrom { mirror, plain: None };
         Ok(Catalog {
-            http: Http::named(AGENT, false).map_err(no_client)?,
+            http: Http::named(BROWSER).map_err(no_client)?,
             pictures: picture_from.client()?,
             picture_from,
             cinemeta,
-            imdb: base(config.imdb_endpoint.as_deref().unwrap_or(imdb::BASE), "IMDb")?,
+            imdb: endpoint(config.imdb_endpoint.as_deref().unwrap_or(imdb::BASE), "IMDb")?,
             online: config.online,
-            shelf: Shelf::new(config.cache_dir.clone()),
+            store: Store::new(config.cache_dir.clone()),
             listed: Mutex::default(),
         })
     }
@@ -303,15 +295,15 @@ impl Catalog {
     /// like JPEG, PNG, or WebP.
     pub async fn art(&self, id: &TitleId, kind: ArtKind) -> Result<Picture, Error> {
         let name = picture_name(id, kind);
-        if let Some(kept) = self.shelf.get(&name).await
+        if let Some(kept) = self.store.get(&name).await
             && let Some(format) = ImageFormat::of(&kept.bytes)
         {
-            self.shelf.touch(&name).await;
+            self.store.touch(&name).await;
             return Ok(Picture { bytes: kept.bytes, format });
         }
         let missed = format!("{name}.miss");
-        if let Some(miss) = self.shelf.get(&missed).await
-            && age(miss.at) < MISS_FOR
+        if let Some(miss) = self.store.get(&missed).await
+            && miss.age() < MISS_FOR
         {
             return Err(Error::new(ErrorCode::NotFound, String::from_utf8_lossy(&miss.bytes)));
         }
@@ -324,8 +316,8 @@ impl Catalog {
             Some(url) => match self.pictures.get(&url, LARGEST_PICTURE, Instant::now() + LOOKUP_WITHIN).await {
                 Ok(bytes) => match ImageFormat::of(&bytes) {
                     Some(format) => {
-                        self.shelf.put(&name, &bytes).await;
-                        self.shelf.trim(shelf::PICTURES, PICTURES_BUDGET).await;
+                        self.store.put(&name, &bytes).await;
+                        self.store.trim(store::PICTURES, PICTURES_BUDGET).await;
                         return Ok(Picture { bytes: Arc::new(bytes), format });
                     }
                     None => Lack::NotImage,
@@ -337,7 +329,7 @@ impl Catalog {
             },
         };
         let error = lack.error(id, kind);
-        self.shelf.put(&missed, error.message.as_bytes()).await;
+        self.store.put(&missed, error.message.as_bytes()).await;
         Err(error)
     }
 
@@ -393,14 +385,14 @@ impl Catalog {
 
     /// Keeps `id`'s details as Cinemeta answered them, and drops the oldest kept past the budget.
     async fn keep_details(&self, id: &TitleId, body: &[u8]) {
-        self.shelf.put(&details_name(id), body).await;
-        self.shelf.trim(shelf::TITLES, DETAILS_BUDGET).await;
+        self.store.put(&details_name(id), body).await;
+        self.store.trim(store::TITLES, DETAILS_BUDGET).await;
     }
 
     /// The kept copy of a title's details and its age.
     async fn kept(&self, id: &TitleId) -> Option<(Duration, Described)> {
-        let kept = self.shelf.get(&details_name(id)).await?;
-        Some((age(kept.at), cinemeta::described(&kept.bytes, id).ok().flatten()?))
+        let kept = self.store.get(&details_name(id)).await?;
+        Some((kept.age(), cinemeta::described(&kept.bytes, id).ok().flatten()?))
     }
 
     /// Asks Cinemeta for `id` as `kind`, or when the kind is not known as a series and then as a
@@ -499,7 +491,7 @@ fn merged(imdb: Vec<Listed>, mut cinemeta: Vec<Listed>) -> Vec<Listed> {
 }
 
 fn details_name(id: &TitleId) -> String {
-    format!("{}/{id}.json", shelf::TITLES)
+    format!("{}/{id}.json", store::TITLES)
 }
 
 fn picture_name(id: &TitleId, kind: ArtKind) -> String {
@@ -509,13 +501,7 @@ fn picture_name(id: &TitleId, kind: ArtKind) -> String {
         ArtKind::Logo => "logo".to_string(),
         ArtKind::Thumbnail(e) => format!("s{}e{}", e.season, e.episode),
     };
-    format!("{}/{id}.{kind}", shelf::PICTURES)
-}
-
-/// How long ago `at` was. A time in the future reads as long ago, so a skewed clock never keeps
-/// a copy fresh.
-fn age(at: SystemTime) -> Duration {
-    SystemTime::now().duration_since(at).unwrap_or(Duration::MAX)
+    format!("{}/{id}.{kind}", store::PICTURES)
 }
 
 fn turned_off(why: &str) -> Error {
@@ -562,7 +548,7 @@ mod tests {
         }
         let mut kept = Vec::new();
         for id in &ids {
-            kept.push(catalog.shelf.get(&details_name(id)).await.is_some());
+            kept.push(catalog.store.get(&details_name(id)).await.is_some());
         }
         assert_eq!(kept, [false, true, true]);
     }

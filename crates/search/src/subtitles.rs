@@ -4,7 +4,6 @@
 //! ID, and each [`Provider`] searches by it. A request carries the title, the ID, and for a
 //! better match the file's name, size, and hash: nothing about the person or the machine.
 
-mod imdb;
 mod opensubtitles;
 
 use std::collections::BTreeMap;
@@ -17,10 +16,9 @@ use torrential_core::title::{Episode, Title};
 use torrential_core::{Error, ErrorCode};
 use url::Url;
 
-use crate::http::{FetchError, Http};
+use crate::http::{BROWSER, FetchError, Http, endpoint};
+use crate::imdb;
 
-/// A browser's name, so the lookups say nothing about the program or the person.
-const AGENT: &str = "Mozilla/5.0";
 const FIND_WITHIN: Duration = Duration::from_secs(8);
 const FETCH_WITHIN: Duration = Duration::from_secs(10);
 /// A subtitle file is text. A long film's is well under a megabyte.
@@ -136,19 +134,15 @@ pub struct Online {
 impl Online {
     /// Fails with `usage` when an endpoint is not a URL or names nothing known.
     pub fn new(config: &SubtitleConfig) -> Result<Online, Error> {
-        let http = Http::named(AGENT, false)
+        let http = Http::named(BROWSER)
             .map_err(|e| Error::internal(format!("cannot start the HTTP client for subtitles: {e}")))?;
         let known = [imdb::NAME, opensubtitles::NAME];
         if let Some(unknown) = config.endpoints.keys().find(|name| !known.contains(&name.as_str())) {
             return Err(Error::new(ErrorCode::Usage, format!("{unknown} is not a subtitle endpoint"))
                 .with_hint(format!("the endpoints are {}", known.join(" and "))));
         }
-        let base = |name: &str, default: &str| {
-            let url = config.endpoints.get(name).map_or(default, String::as_str);
-            let slashed = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
-            Url::parse(&slashed)
-                .map_err(|e| Error::new(ErrorCode::Usage, format!("the {name} endpoint {url} is not a URL: {e}")))
-        };
+        let base =
+            |name: &str, default: &str| endpoint(config.endpoints.get(name).map_or(default, String::as_str), name);
         Ok(Online {
             imdb: base(imdb::NAME, imdb::BASE)?,
             providers: vec![Box::new(opensubtitles::OpenSubtitles {
