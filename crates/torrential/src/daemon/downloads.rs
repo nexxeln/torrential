@@ -295,6 +295,7 @@ pub(super) fn streams(ctx: &Ctx, id: TorrentId, metainfo: &Metainfo, files: Vec<
 
 /// A file the engine serves while it downloads.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "StreamedFile"))]
 pub struct Served {
     pub index: u32,
     pub path: String,

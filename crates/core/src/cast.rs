@@ -122,6 +122,7 @@ impl<'de> Deserialize<'de> for Plays {
 
 /// A TV, or another media renderer, that answered a search of the home network.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Tv {
     /// The renderer's UDN and its address, such as `uuid:6a3e…@192.168.1.40`. A device that
     /// copies a TV's UDN from another address is another TV, and so is the TV at a new address.
@@ -141,6 +142,7 @@ pub struct Tv {
 /// What plays on a TV now.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum CastState {
     /// Finding a source for the film or episode.
     Finding,
@@ -156,6 +158,7 @@ pub enum CastState {
 
 /// One cast on one TV, from the moment it is asked for until a minute after it ends.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Cast {
     /// The TV's ID.
     pub tv: String,
@@ -188,6 +191,7 @@ impl Cast {
 
 /// The TVs found on the home network, and the casts playing or just ended.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TvList {
     pub tvs: Vec<Tv>,
     pub casts: Vec<Cast>,
@@ -196,6 +200,7 @@ pub struct TvList {
 /// What a remote control asks a cast to do.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum CastAction {
     Pause,
     Resume,

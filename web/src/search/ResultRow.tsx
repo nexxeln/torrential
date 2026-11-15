@@ -1,6 +1,6 @@
 import { ArrowUpIcon, ClipboardDocumentCheckIcon, ClipboardDocumentIcon } from "@heroicons/react/16/solid";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import type { Flag, NameCodec, Release, Resolution } from "../api";
+import type { Codec, Flag, Release, Resolution } from "../api";
 import { age, bytes } from "../lib/format";
 import { isVideo, readable } from "../lib/release";
 import { isTv } from "../lib/tv";
@@ -8,7 +8,7 @@ import { Link, watchPath } from "../router";
 import { Chip } from "../ui/Chip";
 
 export const RESOLUTIONS: Record<Resolution, string> = { sd: "SD", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
-export const CODECS: Record<NameCodec, string> = { h264: "H.264", hevc: "HEVC", av1: "AV1" };
+export const CODECS: Record<Codec, string> = { h264: "H.264", hevc: "HEVC", av1: "AV1" };
 const FLAGS: Record<Flag, { label: string; tone: "good" | "bad" | "plain"; title: string }> = {
   official: { label: "Official", tone: "good", title: "Published by the project that made it" },
   trusted: { label: "Trusted", tone: "good", title: "The index marks the uploader as trusted" },

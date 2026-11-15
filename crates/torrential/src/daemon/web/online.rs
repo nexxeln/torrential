@@ -33,14 +33,16 @@ pub async fn list(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Value, Error> 
 
 /// What `GET /api/subtitles/online` answers.
 #[derive(Serialize)]
-struct Online<'a> {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "OnlineSubtitles"))]
+pub(super) struct Online<'a> {
     /// What the names in the torrent say the video is.
     title: Option<Named<'a>>,
     subtitles: Vec<Listed<'a>>,
 }
 
 #[derive(Serialize)]
-struct Named<'a> {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "OnlineTitle"))]
+pub(super) struct Named<'a> {
     name: &'a str,
     year: Option<u16>,
     season: Option<u32>,
@@ -48,7 +50,8 @@ struct Named<'a> {
 }
 
 #[derive(Serialize)]
-struct Listed<'a> {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "OnlineSubtitle"))]
+pub(super) struct Listed<'a> {
     id: &'a str,
     language: &'a str,
     name: Option<&'a str>,

@@ -12,6 +12,7 @@ pub const EXIT_PENDING: u8 = 8;
 crate::words! {
     /// Every failure torrential reports. The code is the contract; messages are for people.
     #[derive(Hash)]
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum ErrorCode {
         Usage = "usage",
         ConfirmationRequired = "confirmation_required",
@@ -93,6 +94,7 @@ impl fmt::Display for ErrorCode {
 
 /// One candidate listed by an `ambiguous_ref` error.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Candidate {
     pub id: String,
     pub name: String,
@@ -101,6 +103,7 @@ pub struct Candidate {
 
 crate::words! {
     /// What an `ambiguous_ref` candidate is.
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
     pub enum CandidateKind {
         Download = "download",
         SearchResult = "search result",
@@ -110,6 +113,7 @@ crate::words! {
 /// Structured context that lets an agent act on an error without parsing its message.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Details {
     Candidates(Vec<Candidate>),
     Sources(Vec<SourceReport>),
@@ -131,6 +135,7 @@ pub enum Details {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,

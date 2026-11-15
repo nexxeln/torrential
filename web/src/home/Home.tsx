@@ -1,5 +1,5 @@
 import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
-import { type ApiError, artUrl, asApiError, type ContinueItem, type Home as HomeData, home } from "../api";
+import { type ApiError, artUrl, asApiError, type Continue, type Home as HomeData, home } from "../api";
 import { count, minutes, sentence } from "../lib/format";
 import { useJobs } from "../lib/jobs";
 import { SearchField, useSearchText } from "../search/SearchField";
@@ -91,7 +91,7 @@ function Results({ query, state, onLeaveTop, grid }: { query: string; state: Tit
   );
 }
 
-function ContinueCard({ item }: { item: ContinueItem }) {
+function ContinueCard({ item }: { item: Continue }) {
   const { title, episode } = item;
   const background = (
     <Picture src={artUrl(title.id, "background")} alt="" className="absolute inset-0 size-full object-cover" fallback={<Blank kind={title.kind} />} />

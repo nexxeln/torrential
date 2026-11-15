@@ -196,6 +196,7 @@ impl Found {
 /// Whether the engine converts a file now, once it has fetched ffmpeg, or not at all.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub enum Readiness {
     Ready,
     Fetch,
