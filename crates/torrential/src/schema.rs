@@ -3,10 +3,12 @@ use serde::Serialize;
 use torrential_core::ErrorCode;
 use torrential_core::error::EXIT_PENDING;
 
+use crate::output::DocKind;
+
 #[derive(Serialize)]
 pub struct Schema {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: DocKind,
     version: String,
     commands: Vec<CommandSchema>,
     global_flags: Vec<FlagSchema>,
@@ -122,7 +124,7 @@ const FIELDS: [FieldSchema; 8] = [
 pub fn build(cli: &Command, version: String) -> Schema {
     let global_flags = cli.get_arguments().filter(|a| a.is_global_set()).map(flag).collect();
     Schema {
-        kind: "schema",
+        kind: DocKind::Schema,
         version,
         commands: visible(cli).map(command).collect(),
         global_flags,

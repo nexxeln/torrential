@@ -14,7 +14,7 @@ use crate::cli::Until;
 use crate::env::Env;
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, json_document, json_line};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, json_document, json_line};
 use crate::paths::Paths;
 use crate::wire;
 
@@ -50,7 +50,7 @@ pub struct Printer {
 #[derive(serde::Serialize)]
 struct ProgressLine<'a> {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: DocKind,
     elapsed: u64,
     job: &'a Job,
 }
@@ -58,7 +58,7 @@ struct ProgressLine<'a> {
 #[derive(serde::Serialize)]
 struct ResultLine<'a> {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: DocKind,
     outcome: &'static str,
     elapsed: u64,
     jobs: Vec<&'a Job>,
@@ -74,7 +74,7 @@ impl Printer {
 
     pub fn row(&self, elapsed: Duration, id: &str, job: &Job) -> String {
         match self.mode {
-            Mode::Json => json_line(&ProgressLine { kind: "progress", elapsed: elapsed.as_secs(), job }),
+            Mode::Json => json_line(&ProgressLine { kind: DocKind::Progress, elapsed: elapsed.as_secs(), job }),
             _ => {
                 let cells: Vec<String> = wait_row(elapsed, id, job).into_iter().map(|c| c.text).collect();
                 format!("{}\n", cells.join("\t"))
@@ -87,7 +87,8 @@ impl Printer {
         match self.mode {
             Mode::Json => {
                 let jobs = watched.iter().map(|w| &w.job).collect();
-                let line = ResultLine { kind: "result", outcome: end.outcome(), elapsed: elapsed.as_secs(), jobs };
+                let line =
+                    ResultLine { kind: DocKind::Result, outcome: end.outcome(), elapsed: elapsed.as_secs(), jobs };
                 json_document(&line, next.as_deref())
             }
             _ => Doc { body: Body::Table { header: Vec::new(), rows: Vec::new() }, summary, next }.plain(),

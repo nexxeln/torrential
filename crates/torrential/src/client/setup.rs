@@ -13,12 +13,21 @@ use crate::env::Env;
 use crate::fsutil::Writes;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc};
-use crate::output::{Mode, Typed};
+use crate::output::{DocKind, Mode, Typed};
 use crate::paths::Paths;
+
+torrential_core::words! {
+    /// What `setup` did with the settings it was given.
+    pub enum Setup {
+        Shown = "shown",
+        Saved = "saved",
+        Unchanged = "unchanged",
+    }
+}
 
 #[derive(Serialize)]
 struct Report<'a> {
-    result: &'static str,
+    result: Setup,
     profile: &'a Profile,
     updates: Policy,
     file: String,
@@ -38,7 +47,7 @@ pub fn run(args: SetupArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
     };
     let preferences_flagged = args.screen.is_some() || args.max_size.is_some() || args.playback.is_some();
     let writes = Writes::new(env, command(&wanted, updates));
-    let mut result = "shown";
+    let mut result = Setup::Shown;
     if preferences_flagged || args.updates.is_some() {
         let mut changed = false;
         if preferences_flagged {
@@ -47,13 +56,13 @@ pub fn run(args: SetupArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
         if args.updates.is_some() {
             changed |= config::save_updates(&paths, updates, &writes)?.1;
         }
-        result = if changed { "saved" } else { "unchanged" };
+        result = if changed { Setup::Saved } else { Setup::Unchanged };
     }
     let file = config::file(&paths)?;
     let profile = Profile { detected: Some(crate::machine::detect(env)?), preferences: wanted, ..Profile::default() };
     let doc = setup(&profile, updates, &file, result);
     let report = Report { result, profile: &profile, updates, file: file.display().to_string() };
-    Ok(super::emit(mode, &doc, &Typed { kind: "setup", body: report }))
+    Ok(super::emit(mode, &doc, &Typed { kind: DocKind::Setup, body: report }))
 }
 
 fn command(preferences: &Preferences, updates: Policy) -> String {
@@ -66,7 +75,7 @@ fn command(preferences: &Preferences, updates: Policy) -> String {
     )
 }
 
-pub fn setup(profile: &Profile, updates: Policy, file: &Path, result: &str) -> Doc {
+pub fn setup(profile: &Profile, updates: Policy, file: &Path, result: Setup) -> Doc {
     let detected = profile.detected.as_ref().map_or_else(|| "nothing".to_string(), machine);
     let fields = vec![
         ("detected", Cell::new(detected)),
@@ -74,15 +83,15 @@ pub fn setup(profile: &Profile, updates: Policy, file: &Path, result: &str) -> D
         ("file", Cell::new(file.display().to_string())),
     ];
     let title = match result {
-        "shown" => Vec::new(),
-        word => vec![Cell::styled(word, Token::Mint)],
+        Setup::Shown => Vec::new(),
+        word => vec![Cell::styled(word.as_str(), Token::Mint)],
     };
     let overrides = profile.overrides().unwrap_or_else(|| "none".to_string());
     let mut summary = vec![format!("ranking for {} · overrides: {overrides}", profile.describe())];
     if let Some(max) = profile.preferences.max_size {
         summary.push(format!("get rejects downloads over {} unless --max-size is higher", format_limit(max)));
     }
-    let next = if result == "shown" { crate::cli::SETUP_FLAGS } else { "torrential search <words>" };
+    let next = if result == Setup::Shown { crate::cli::SETUP_FLAGS } else { "torrential search <words>" };
     Doc { body: Body::Fields { title, fields }, summary, next: Some(next.to_string()) }
 }
 

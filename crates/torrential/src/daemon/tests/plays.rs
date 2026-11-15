@@ -101,7 +101,8 @@ async fn rm_deletes_a_plays_folder_and_trashes_the_files_of_a_download_in_the_pe
     h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
 
     let removed = h.rm(vec![prefix(&film), prefix(&iso)], false).await;
-    let deleted: Vec<_> = removed.into_iter().map(|change| (change.result, change.deleted)).collect();
+    let deleted: Vec<_> =
+        removed.into_iter().map(|change| (change.result.as_str().to_string(), change.deleted)).collect();
     assert_eq!(deleted, [("removed".to_string(), vec![folder.clone()]), ("removed".to_string(), vec![])]);
     assert_eq!((folder.exists(), std::fs::read(&disc).unwrap().len()), (false, MIB as usize));
 

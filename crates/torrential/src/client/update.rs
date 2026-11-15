@@ -5,7 +5,7 @@ use torrential_core::time::now;
 use crate::cli::UpdateArgs;
 use crate::config::Policy;
 use crate::env::Env;
-use crate::output::{self, Body, Cell, Doc, Mode, Typed};
+use crate::output::{self, Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 use crate::update::{self, Outcome, Releases};
 
@@ -21,7 +21,15 @@ struct CheckReport<'a> {
 struct UpdateReport<'a> {
     current: &'a str,
     latest: String,
-    result: &'static str,
+    result: Installed,
+}
+
+torrential_core::words! {
+    /// What `update` did.
+    enum Installed {
+        Updated = "updated",
+        UpToDate = "up_to_date",
+    }
 }
 
 pub fn run(args: UpdateArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
@@ -44,18 +52,18 @@ pub fn run(args: UpdateArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
             next: update_available.then(|| "torrential update".to_string()),
         };
         let body = CheckReport { current: &current, latest: latest.to_string(), update_available, policy };
-        return Ok(super::emit(mode, &doc, &Typed { kind: "update_check", body }));
+        return Ok(super::emit(mode, &doc, &Typed { kind: DocKind::UpdateCheck, body }));
     }
     let (latest, result) = match runtime.block_on(update::install(&releases, &paths, env, now()))? {
-        Outcome::Updated(latest) => (latest, "updated"),
-        Outcome::Latest(latest) => (latest, "up_to_date"),
+        Outcome::Updated(latest) => (latest, Installed::Updated),
+        Outcome::Latest(latest) => (latest, Installed::UpToDate),
     };
     match mode {
         Mode::Json => {
             let body = UpdateReport { current: &current, latest: latest.to_string(), result };
-            print!("{}", output::json_document(&Typed { kind: "update", body }, None));
+            print!("{}", output::json_document(&Typed { kind: DocKind::Update, body }, None));
         }
-        _ if result == "updated" => println!("Updated torrential {current} → {latest}."),
+        _ if result == Installed::Updated => println!("Updated torrential {current} → {latest}."),
         _ => println!("torrential {current} is up to date."),
     }
     Ok(0)

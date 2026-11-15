@@ -3,7 +3,8 @@
 use std::io::SeekFrom;
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use torrential_core::{Error, ErrorCode, TorrentId, subtitle, title};
 use torrential_search::subtitles::{FileHash, Found, Video};
@@ -16,20 +17,43 @@ use super::{file_of, required, watch};
 /// `GET /api/subtitles/online`: what the engine found for the file, by the names in its torrent.
 pub async fn list(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Value, Error> {
     let found = found(ctx, id, index).await?;
-    let title = found.title.as_ref().map(|title| {
-        json!({
-            "name": title.name,
-            "year": title.year,
-            "season": title.episode.map(|e| e.season),
-            "episode": title.episode.map(|e| e.episode),
-        })
+    let title = found.title.as_ref().map(|title| Named {
+        name: &title.name,
+        year: title.year,
+        season: title.episode.map(|e| e.season),
+        episode: title.episode.map(|e| e.episode),
     });
-    let subtitles: Vec<Value> = found
+    let subtitles = found
         .subtitles
         .iter()
-        .map(|s| json!({ "id": s.id, "language": s.language, "name": s.name, "exact": s.exact, "source": s.source }))
+        .map(|s| Listed { id: &s.id, language: &s.language, name: s.name.as_deref(), exact: s.exact, source: s.source })
         .collect();
-    Ok(json!({ "title": title, "subtitles": subtitles }))
+    super::value(Online { title, subtitles })
+}
+
+/// What `GET /api/subtitles/online` answers.
+#[derive(Serialize)]
+struct Online<'a> {
+    /// What the names in the torrent say the video is.
+    title: Option<Named<'a>>,
+    subtitles: Vec<Listed<'a>>,
+}
+
+#[derive(Serialize)]
+struct Named<'a> {
+    name: &'a str,
+    year: Option<u16>,
+    season: Option<u32>,
+    episode: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct Listed<'a> {
+    id: &'a str,
+    language: &'a str,
+    name: Option<&'a str>,
+    exact: bool,
+    source: &'a str,
 }
 
 /// `GET /api/subtitles/online/fetch`: one of those subtitles as WebVTT. The page names it by the

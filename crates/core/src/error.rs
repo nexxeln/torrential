@@ -9,74 +9,45 @@ use crate::watching::Tried;
 /// It is an observation, not an error, so it has no `ErrorCode`.
 pub const EXIT_PENDING: u8 = 8;
 
-/// Every failure torrential reports. The code is the contract; messages are for people.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCode {
-    Usage,
-    ConfirmationRequired,
-    InvalidRef,
-    InvalidTorrent,
-    NotFound,
-    AmbiguousRef,
-    JobConflict,
-    PathConflict,
-    ProvidersUnavailable,
-    MetadataTimeout,
-    NetworkUnavailable,
-    FetchFailed,
-    SandboxNetworkBlocked,
-    SandboxWriteBlocked,
-    DaemonUnavailable,
-    DaemonVersion,
-    StateCorrupt,
-    DiskFull,
-    TooLarge,
-    NoSelection,
-    StorageError,
-    VerificationFailed,
-    /// No connected peer or web seed had the pieces a download still needed, for long enough
-    /// that the engine stopped it.
-    NoSource,
-    Interrupted,
-    /// A browser on the home network that is not one of the paired devices.
-    NotPaired,
-    /// Something only the machine running the engine may do, such as adding a device.
-    LocalOnly,
-    Internal,
+crate::words! {
+    /// Every failure torrential reports. The code is the contract; messages are for people.
+    #[derive(Hash)]
+    pub enum ErrorCode {
+        Usage = "usage",
+        ConfirmationRequired = "confirmation_required",
+        InvalidRef = "invalid_ref",
+        InvalidTorrent = "invalid_torrent",
+        NotFound = "not_found",
+        AmbiguousRef = "ambiguous_ref",
+        JobConflict = "job_conflict",
+        PathConflict = "path_conflict",
+        ProvidersUnavailable = "providers_unavailable",
+        MetadataTimeout = "metadata_timeout",
+        NetworkUnavailable = "network_unavailable",
+        FetchFailed = "fetch_failed",
+        SandboxNetworkBlocked = "sandbox_network_blocked",
+        SandboxWriteBlocked = "sandbox_write_blocked",
+        DaemonUnavailable = "daemon_unavailable",
+        DaemonVersion = "daemon_version",
+        StateCorrupt = "state_corrupt",
+        DiskFull = "disk_full",
+        TooLarge = "too_large",
+        NoSelection = "no_selection",
+        StorageError = "storage_error",
+        VerificationFailed = "verification_failed",
+        /// No connected peer or web seed had the pieces a download still needed, for long enough
+        /// that the engine stopped it.
+        NoSource = "no_source",
+        Interrupted = "interrupted",
+        /// A browser on the home network that is not one of the paired devices.
+        NotPaired = "not_paired",
+        /// Something only the machine running the engine may do, such as adding a device.
+        LocalOnly = "local_only",
+        Internal = "internal",
+    }
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 27] = [
-        Self::Usage,
-        Self::ConfirmationRequired,
-        Self::InvalidRef,
-        Self::InvalidTorrent,
-        Self::NotFound,
-        Self::AmbiguousRef,
-        Self::JobConflict,
-        Self::PathConflict,
-        Self::ProvidersUnavailable,
-        Self::MetadataTimeout,
-        Self::NetworkUnavailable,
-        Self::FetchFailed,
-        Self::SandboxNetworkBlocked,
-        Self::SandboxWriteBlocked,
-        Self::DaemonUnavailable,
-        Self::DaemonVersion,
-        Self::StateCorrupt,
-        Self::DiskFull,
-        Self::TooLarge,
-        Self::NoSelection,
-        Self::StorageError,
-        Self::VerificationFailed,
-        Self::NoSource,
-        Self::Interrupted,
-        Self::NotPaired,
-        Self::LocalOnly,
-        Self::Internal,
-    ];
-
     pub const fn exit_code(self) -> u8 {
         match self {
             Self::Internal => 1,
@@ -112,38 +83,6 @@ impl ErrorCode {
                 | Self::Interrupted
         )
     }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Usage => "usage",
-            Self::ConfirmationRequired => "confirmation_required",
-            Self::InvalidRef => "invalid_ref",
-            Self::InvalidTorrent => "invalid_torrent",
-            Self::NotFound => "not_found",
-            Self::AmbiguousRef => "ambiguous_ref",
-            Self::JobConflict => "job_conflict",
-            Self::PathConflict => "path_conflict",
-            Self::ProvidersUnavailable => "providers_unavailable",
-            Self::MetadataTimeout => "metadata_timeout",
-            Self::NetworkUnavailable => "network_unavailable",
-            Self::FetchFailed => "fetch_failed",
-            Self::SandboxNetworkBlocked => "sandbox_network_blocked",
-            Self::SandboxWriteBlocked => "sandbox_write_blocked",
-            Self::DaemonUnavailable => "daemon_unavailable",
-            Self::DaemonVersion => "daemon_version",
-            Self::StateCorrupt => "state_corrupt",
-            Self::DiskFull => "disk_full",
-            Self::TooLarge => "too_large",
-            Self::NoSelection => "no_selection",
-            Self::StorageError => "storage_error",
-            Self::VerificationFailed => "verification_failed",
-            Self::NoSource => "no_source",
-            Self::Interrupted => "interrupted",
-            Self::NotPaired => "not_paired",
-            Self::LocalOnly => "local_only",
-            Self::Internal => "internal",
-        }
-    }
 }
 
 impl fmt::Display for ErrorCode {
@@ -157,8 +96,15 @@ impl fmt::Display for ErrorCode {
 pub struct Candidate {
     pub id: String,
     pub name: String,
-    /// `download` or `search result`.
-    pub kind: String,
+    pub kind: CandidateKind,
+}
+
+crate::words! {
+    /// What an `ambiguous_ref` candidate is.
+    pub enum CandidateKind {
+        Download = "download",
+        SearchResult = "search result",
+    }
 }
 
 /// Structured context that lets an agent act on an error without parsing its message.

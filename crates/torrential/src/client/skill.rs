@@ -11,7 +11,7 @@ use crate::fsutil::Writes;
 use crate::output;
 use crate::output::format::NONE;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::skill::{self, Change as SkillChange, Installed, SkillCommand, State};
 
 pub fn run(command: SkillCommand, mode: Mode, env: &Env, cwd: &Path) -> Result<u8, Error> {
@@ -32,7 +32,7 @@ pub fn run(command: SkillCommand, mode: Mode, env: &Env, cwd: &Path) -> Result<u
             match mode {
                 Mode::Json => {
                     let body = Text { version: &version, text: skill::SKILL };
-                    print!("{}", output::json_document(&Typed { kind: "skill", body }, None));
+                    print!("{}", output::json_document(&Typed { kind: DocKind::Skill, body }, None));
                 }
                 _ => print!("{}", skill::SKILL),
             }
@@ -51,14 +51,14 @@ pub fn run(command: SkillCommand, mode: Mode, env: &Env, cwd: &Path) -> Result<u
             let install = skill::command("install", &args, false, cwd);
             let doc = skill_status(&installed, &version, &install);
             let body = Status { version: &version, scope: args.scope, targets: &installed };
-            Ok(emit(mode, &doc, &Typed { kind: "skill_status", body }))
+            Ok(emit(mode, &doc, &Typed { kind: DocKind::SkillStatus, body }))
         }
         SkillCommand::Install(args) => {
             let layout = skill::Layout::new(args.target.scope, env, cwd)?;
             let writes = Writes::new(env, skill::command("install", &args.target, args.force, cwd));
             let changes = skill::install(&layout, args.target.agent, args.force, shipped, &writes)?;
             let body = Changes { scope: args.target.scope, changes: &changes };
-            Ok(emit(mode, &skill_changes(&changes), &Typed { kind: "skill_install", body }))
+            Ok(emit(mode, &skill_changes(&changes), &Typed { kind: DocKind::SkillInstall, body }))
         }
         SkillCommand::Refresh => {
             let writes = Writes::new(env, "torrential skill install".into());
@@ -72,7 +72,7 @@ pub fn run(command: SkillCommand, mode: Mode, env: &Env, cwd: &Path) -> Result<u
             let writes = Writes::new(env, skill::command("uninstall", &args, false, cwd));
             let changes = skill::uninstall(&layout, args.agent, shipped, &writes)?;
             let body = Changes { scope: args.scope, changes: &changes };
-            Ok(emit(mode, &skill_changes(&changes), &Typed { kind: "skill_uninstall", body }))
+            Ok(emit(mode, &skill_changes(&changes), &Typed { kind: DocKind::SkillUninstall, body }))
         }
     }
 }

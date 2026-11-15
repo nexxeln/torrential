@@ -19,7 +19,7 @@ use crate::cli::{GetArgs, Until};
 use crate::env::Env;
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 
 pub fn run(mut conn: Conn, target: Target, args: GetArgs, mode: Mode, cwd: &Path, env: &Env) -> Result<u8, Error> {
@@ -89,7 +89,7 @@ fn request_title(conn: &mut Conn, request: TitleRequest, mode: Mode) -> Result<(
         title: &'a TitlePlayed,
     }
     let doc = get_title(&reply, &title.name);
-    let exit = emit(mode, &doc, &Typed { kind: "get", body: Got { reply: &reply, title: &title } });
+    let exit = emit(mode, &doc, &Typed { kind: DocKind::Get, body: Got { reply: &reply, title: &title } });
     Ok((exit, reply.job))
 }
 

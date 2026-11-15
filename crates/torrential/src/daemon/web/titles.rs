@@ -3,14 +3,14 @@
 
 use std::io;
 
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use torrential_core::time::now;
 use torrential_core::title::Episode;
 use torrential_core::{
-    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, ReleaseId, TitleDetails, TitleId, TorrentId,
-    VideoRef, Viewer, Watched,
+    ArtKind, AttemptEvent, Error, ErrorCode, Kind, Playback, Player, Release, ReleaseId, TitleCard, TitleDetails,
+    TitleId, TorrentId, VideoRef, Viewer, Watched,
 };
 
 use super::super::ctx::Ctx;
@@ -20,7 +20,7 @@ use super::super::owner::plays::Destination;
 use super::super::owner::{Command, Shelving};
 use super::super::titles;
 use super::super::titles::attempt::{self, Containers, Outcome, PlayTitle, Played};
-use super::{NDJSON, fail, line, number, required};
+use super::{NDJSON, fail, line, number, required, value};
 use torrential_core::title::title_name;
 
 /// How long a browser keeps a picture. A title's pictures rarely change.
@@ -31,9 +31,18 @@ const ART_CACHE: &str = "Cache-Control: private, max-age=2592000\r\n";
 pub async fn search(ctx: &Ctx, request: &Request) -> Result<Value, Error> {
     let words = required(request, "q")?;
     if !ctx.titles.catalog.online() {
-        return Ok(json!({ "titles": [], "offline": true }));
+        return value(Found { titles: Vec::new(), offline: true });
     }
-    Ok(json!({ "titles": ctx.titles.catalog.search(words.trim()).await? }))
+    value(Found { titles: ctx.titles.catalog.search(words.trim()).await?, offline: false })
+}
+
+/// What `GET /api/titles` answers.
+#[derive(Serialize)]
+struct Found {
+    titles: Vec<TitleCard>,
+    /// Title lookups are off in config.yaml.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    offline: bool,
 }
 
 /// `GET /api/title?id=`.
@@ -56,7 +65,7 @@ pub async fn art(conn: &mut Connection<'_>, request: &Request) -> io::Result<boo
     match picture {
         Ok(picture) => conn.send("200 OK", picture.format.mime(), ART_CACHE, &picture.bytes, request).await,
         // A missing picture, a failed fetch, and lookups turned off all leave the page to draw a plain card.
-        Err(error) => conn.json("404 Not Found", &json!({ "error": error }), request).await,
+        Err(error) => conn.json("404 Not Found", &super::ErrorBody { error: &error }, request).await,
     }
 }
 
@@ -208,13 +217,13 @@ pub async fn play(conn: &mut Connection<'_>, request: &Request, asker: &Asker) -
     let outcome = loop {
         tokio::select! {
             biased;
-            Some(event) = events.recv() => line(conn, &serde_json::to_value(event).expect("steps serialize")).await?,
+            Some(event) = events.recv() => line(conn, &event).await?,
             outcome = &mut attempt => break outcome,
             gone = conn.gone() => return Err(gone),
         }
     };
     while let Ok(event) = events.try_recv() {
-        line(conn, &serde_json::to_value(event).expect("steps serialize")).await?;
+        line(conn, &event).await?;
     }
     line(conn, &last(ctx, outcome).await).await?;
     conn.end().await
@@ -228,9 +237,8 @@ pub(in crate::daemon) async fn last(ctx: &Ctx, outcome: Outcome) -> Value {
             let Played { video, release, job, file, resume_at, tried, .. } = *played;
             match super::play::playing_file(ctx, job, file).await {
                 Ok(play) => {
-                    return json!({
-                        "type": "playing", "video": video, "release": release, "play": play, "resume_at": resume_at
-                    });
+                    let line = PlayingLine { video, release, play, resume_at };
+                    return serde_json::to_value(line).expect("steps serialize");
                 }
                 Err(error) => (error, tried),
             }
@@ -238,6 +246,16 @@ pub(in crate::daemon) async fn last(ctx: &Ctx, outcome: Outcome) -> Value {
         Outcome::Failed { error, tried } => (error, tried),
     };
     serde_json::to_value(AttemptEvent::Failed { error, tried }).expect("steps serialize")
+}
+
+/// The `playing` line of a title play: the video, and where the player gets it.
+#[derive(Serialize)]
+#[serde(tag = "type", rename = "playing")]
+struct PlayingLine {
+    video: VideoRef,
+    release: Release,
+    play: super::play::Playing,
+    resume_at: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -261,7 +279,15 @@ pub async fn watched(ctx: &Ctx, request: Position) -> Result<Value, Error> {
     if kept {
         ctx.titles.shelf.watch(&watched)?;
     }
-    Ok(json!({ "watched": watched, "kept": kept }))
+    value(Saved { watched, kept })
+}
+
+/// What `POST /api/watched` answers.
+#[derive(Serialize)]
+struct Saved {
+    watched: Watched,
+    /// False while a TV plays the video.
+    kept: bool,
 }
 
 /// No video runs longer, in seconds.
@@ -309,6 +335,12 @@ pub struct Library {
     saved: bool,
 }
 
+/// What `POST /api/library` answers.
+#[derive(Serialize)]
+struct Shelved {
+    saved: bool,
+}
+
 /// `POST /api/library`: saves a title, or takes it out.
 pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
     let shelving = match request.saved {
@@ -316,7 +348,7 @@ pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
         false => Shelving::Unsave(request.title),
     };
     ctx.owner.ask(|reply| Command::Library { shelving, reply }).await?;
-    Ok(json!({ "saved": request.saved }))
+    value(Shelved { saved: request.saved })
 }
 
 /// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.

@@ -1,7 +1,7 @@
 //! `torrential files`: the files of a torrent or a download.
 
 use serde::Serialize;
-use torrential_core::protocol::FilesReply;
+use torrential_core::protocol::{FilesReply, MetadataSource};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
 use torrential_core::{Error, Selection};
@@ -38,7 +38,7 @@ pub struct FileMatch {
 }
 
 pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
-    let from_download = reply.metadata_source == "download";
+    let from_download = reply.metadata_source == MetadataSource::Download;
     let risky = reply.files.iter().any(|f| f.risk.is_some());
     let rows = reply
         .files
@@ -68,13 +68,12 @@ pub fn files(reply: &FilesReply, matched: Option<&FileMatch>) -> Doc {
         header.push("RISK");
     }
     let name = reply.name.as_deref().map_or_else(|| format::UNKNOWN.to_string(), sanitize);
-    let source = match reply.metadata_source.as_str() {
-        "download" => "from the download",
-        "cache" => "from cache",
-        "torrent_file" => "from the .torrent file",
-        "torrent_url" => "from the .torrent URL",
-        "peers" => "from peers",
-        _ => "",
+    let source = match reply.metadata_source {
+        MetadataSource::Download => "from the download",
+        MetadataSource::Cache => "from cache",
+        MetadataSource::TorrentFile => "from the .torrent file",
+        MetadataSource::TorrentUrl => "from the .torrent URL",
+        MetadataSource::Peers => "from peers",
     };
     let count = reply.files.len();
     let elapsed = format::seconds_tenths(reply.elapsed_ms);
@@ -136,7 +135,7 @@ mod tests {
             name: Some("film".into()),
             total_size: 600,
             files: vec![file(0, "Film.mp4", 400), file(1, "extras/Trailer.MP4", 150), file(2, "notes.txt", 50)],
-            metadata_source: "torrent_file".into(),
+            metadata_source: MetadataSource::TorrentFile,
             elapsed_ms: 1,
         }
     }

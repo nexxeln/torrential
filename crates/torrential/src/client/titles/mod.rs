@@ -13,7 +13,7 @@ use torrential_core::{AttemptEvent, Error, ErrorCode, VideoRef};
 use super::connect::{self, Conn};
 use super::{answer, emit};
 use crate::output::theme::{Token, paint};
-use crate::output::{Mode, Typed};
+use crate::output::{DocKind, Mode, Typed};
 
 /// The longest a title play goes between two steps: its whole budget, and the search before it.
 const STEP_WITHIN: Duration = Duration::from_secs(240);
@@ -111,7 +111,7 @@ pub fn sources(mut conn: Conn, video: VideoRef, mode: Mode) -> Result<u8, Error>
     match answer(conn.call(&request)?).map_err(|e| findable(e, &video))? {
         Response::Sources { sources } => {
             let doc = view::sources(&sources, torrential_core::time::now());
-            Ok(emit(mode, &doc, &Typed { kind: "sources", body: &*sources }))
+            Ok(emit(mode, &doc, &Typed { kind: DocKind::Sources, body: &*sources }))
         }
         other => Err(connect::unexpected(&other)),
     }

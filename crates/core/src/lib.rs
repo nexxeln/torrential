@@ -19,6 +19,7 @@ pub mod time;
 pub mod title;
 pub mod units;
 pub mod watching;
+pub mod words;
 
 pub use cast::{Cast, CastAction, CastRequest, CastState, Container, Plays, Tv, TvList};
 pub use catalog::{Art, ArtKind, EpisodeInfo, Kind, Season, TitleCard, TitleDetails, TitleId, VideoRef};

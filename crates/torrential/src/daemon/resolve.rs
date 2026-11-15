@@ -1,4 +1,4 @@
-use torrential_core::error::{Candidate, Details};
+use torrential_core::error::{Candidate, CandidateKind, Details};
 use torrential_core::id::shortest_unique_prefix;
 use torrential_core::{Error, ErrorCode, HexPrefix, Release, ReleaseId, TorrentId};
 
@@ -21,17 +21,17 @@ pub fn prefix<'a>(
     scope: Scope,
     command: &str,
 ) -> Result<Found<'a>, Error> {
-    let mut found: Vec<(ReleaseId, Found<'a>, String, &'static str)> = Vec::new();
+    let mut found: Vec<(ReleaseId, Found<'a>, String, CandidateKind)> = Vec::new();
     for (id, name) in jobs {
         let rid = ReleaseId::Torrent(*id);
         if prefix.matches(&rid) {
-            found.push((rid, Found::Job(*id), name.unwrap_or("?").to_string(), "download"));
+            found.push((rid, Found::Job(*id), name.unwrap_or("?").to_string(), CandidateKind::Download));
         }
     }
     if scope == Scope::DownloadsAndResults {
         for release in results {
             if prefix.matches(&release.id) && !found.iter().any(|(rid, ..)| *rid == release.id) {
-                found.push((release.id, Found::Release(release), release.name.clone(), "search result"));
+                found.push((release.id, Found::Release(release), release.name.clone(), CandidateKind::SearchResult));
             }
         }
     }
@@ -62,7 +62,7 @@ pub fn prefix<'a>(
                         shortest_unique_prefix(id, &ids, 6)
                     ),
                     name: name.clone(),
-                    kind: kind.to_string(),
+                    kind: *kind,
                 })
                 .collect();
             let first = candidates[0].id.clone();

@@ -1,9 +1,9 @@
 //! Play on TV for the web app: the TVs on the home network, starting a cast, and the remote
 //! control. A paired phone may use all of it.
 
-use serde::Deserialize;
-use serde_json::{Value, json};
-use torrential_core::{CastAction, CastRequest, Error, ErrorCode, Target, VideoRef};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use torrential_core::{Cast, CastAction, CastRequest, Error, ErrorCode, Target, VideoRef};
 
 use super::super::ctx::Ctx;
 
@@ -46,7 +46,13 @@ pub async fn start(ctx: &Ctx, request: Start) -> Result<Value, Error> {
     let request = CastRequest { tv, target, source, file, video, subtitle, start_at };
     let (view, _) = ctx.casts.start(request).await?;
     let cast = view.borrow().clone();
-    Ok(json!({ "cast": cast }))
+    super::value(CastReply { cast })
+}
+
+/// A cast, as `POST /api/cast` and `POST /api/cast/control` answer it.
+#[derive(Serialize)]
+struct CastReply {
+    cast: Cast,
 }
 
 #[derive(Deserialize)]
@@ -60,5 +66,5 @@ pub struct Control {
 /// `POST /api/cast/control`: pauses, resumes, seeks, stops, or sets the volume of a cast.
 pub async fn control(ctx: &Ctx, request: Control) -> Result<Value, Error> {
     let cast = ctx.casts.control(request.tv.as_deref(), request.action).await?;
-    Ok(json!({ "cast": cast }))
+    super::value(CastReply { cast })
 }

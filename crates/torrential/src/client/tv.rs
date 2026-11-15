@@ -12,7 +12,7 @@ use super::{answer, emit, titles};
 use crate::cli::{TvCommand, TvPlayArgs};
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 
 /// The longest a cast of a torrent takes to reach the TV: its file list, then the TV starting.
 const CAST_WITHIN: Duration = Duration::from_secs(240);
@@ -24,7 +24,7 @@ pub fn run(mut conn: Conn, command: Option<TvCommand>, mode: Mode, cwd: &Path) -
                 Response::Tvs { list } => list,
                 other => return Err(connect::unexpected(&other)),
             };
-            return Ok(emit(mode, &list_doc(&list), &Typed { kind: "tvs", body: &list }));
+            return Ok(emit(mode, &list_doc(&list), &Typed { kind: DocKind::Tvs, body: &list }));
         }
         Some(TvCommand::Play(args)) => return play(conn, args, mode, cwd),
         Some(TvCommand::Pause(args)) => (args.tv, CastAction::Pause),
@@ -34,7 +34,7 @@ pub fn run(mut conn: Conn, command: Option<TvCommand>, mode: Mode, cwd: &Path) -
         Some(TvCommand::Stop(args)) => (args.tv, CastAction::Stop),
     };
     match answer(conn.call(&Request::CastControl { tv, action })?)? {
-        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: "cast", body: &*cast })),
+        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast })),
         other => Err(connect::unexpected(&other)),
     }
 }
@@ -64,7 +64,7 @@ fn play(mut conn: Conn, args: TvPlayArgs, mode: Mode, cwd: &Path) -> Result<u8, 
         None => answer(conn.call_within(&request, CAST_WITHIN)?)?,
     };
     match reply {
-        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: "cast", body: &*cast })),
+        Response::Cast { cast } => Ok(emit(mode, &cast_doc(&cast), &Typed { kind: DocKind::Cast, body: &*cast })),
         other => Err(connect::unexpected(&other)),
     }
 }

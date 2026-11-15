@@ -122,32 +122,16 @@ pub enum Swarm {
     Unknown,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Category {
-    Video,
-    Audio,
-    Software,
-    Book,
-    Game,
-    Dataset,
-    Other,
-}
-
-impl Category {
-    pub const ALL: [Category; 7] =
-        [Self::Video, Self::Audio, Self::Software, Self::Book, Self::Game, Self::Dataset, Self::Other];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Video => "video",
-            Self::Audio => "audio",
-            Self::Software => "software",
-            Self::Book => "book",
-            Self::Game => "game",
-            Self::Dataset => "dataset",
-            Self::Other => "other",
-        }
+crate::words! {
+    #[derive(Hash, PartialOrd, Ord)]
+    pub enum Category {
+        Video = "video",
+        Audio = "audio",
+        Software = "software",
+        Book = "book",
+        Game = "game",
+        Dataset = "dataset",
+        Other = "other",
     }
 }
 
