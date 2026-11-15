@@ -108,7 +108,8 @@ impl Lease {
             let at = self.reading.lock().expect("no holder panics").at;
             let rate = bitrate(size, runtime());
             let window = rate.saturating_mul(FREE_OVER.as_secs()).min(size.saturating_sub(at));
-            let measured = match engine.ask(move |e| e.written(id, file, at, window, FREE_OVER.as_secs() as u32)).await {
+            let measured = match engine.ask(move |e| e.written(id, file, at, window, FREE_OVER.as_secs() as u32)).await
+            {
                 Ok(runs) => lead(&runs, window, rate, at + window == size),
                 // The engine lets go of a download once it is done, and has nothing past the end.
                 Err(_) => Duration::MAX,
