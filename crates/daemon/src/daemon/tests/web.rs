@@ -1692,11 +1692,11 @@ async fn titles_their_pictures_and_their_sources_come_from_the_catalog_and_the_s
     assert_eq!(
         (&profile["screen"], &profile["playback"], &profile["player"]),
         (
-            &Value::Null,
+            &json!({ "value": "720p", "source": "viewer" }),
             &json!({ "value": "hevc", "source": "viewer" }),
-            &json!({ "kind": "browser", "playback": "hevc" })
+            &json!({ "kind": "browser", "playback": "hevc", "measured": "720p" })
         ),
-        "a browser on this Mac, which detected no display, ranks for no screen"
+        "a browser on a machine that detected no display ranks for the screen it measured"
     );
     assert_eq!(error(&get(&h, "/api/title/sources?video=tt9999901:2:2").await).0, 400, "it has not aired");
 
@@ -1760,6 +1760,10 @@ async fn a_screen_measured_in_part_or_without_pixels_is_refused() {
     assert_eq!(
         error(&get(&h, "/api/title/sources?video=tt0063350&width=1170&playback=hevc").await),
         (400, "usage", "a viewer needs all of width, height, scale, and playback")
+    );
+    assert_eq!(
+        error(&get(&h, "/api/title/sources?video=tt0063350&h264=hardware&hevc=software").await),
+        (400, "usage", "how a browser decodes needs all of h264, hevc, and av1")
     );
     let flat = json!({ "width": 1170, "height": 2532, "scale": 0, "playback": "hevc" });
     assert_eq!(
@@ -1934,6 +1938,24 @@ async fn a_paired_device_ranks_for_the_screen_it_reports_and_config_yaml_only_fo
     let viewer = json!({ "width": 1170, "height": 2532, "scale": 3, "playback": "hevc" });
     play_on(&h, &phone, json!({ "video": "tt0063350", "viewer": viewer })).await;
     assert_eq!(played_for(&h), on_phone);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_on_a_machine_without_a_display_ranks_for_the_screen_it_measured_and_how_it_decodes() {
+    let (h, _) = titles::night();
+    let codecs = "h264=software&hevc=no&av1=no";
+    let listing = format!("/api/title/sources?video=tt0063350&width=800&height=600&scale=1&playback=h264&{codecs}");
+    let headless = (json!({ "value": "sd", "source": "viewer" }), json!({ "value": "h264", "source": "viewer" }));
+    assert_eq!(listed_for(&h, &On::Mac, &listing).await, headless);
+    let decoders = json!({ "h264": "software", "hevc": "no", "av1": "no" });
+    let viewer = json!({ "width": 800, "height": 600, "scale": 1, "playback": "h264", "decoders": decoders });
+    play_on(&h, &On::Mac, json!({ "video": "tt0063350", "viewer": viewer })).await;
+    assert_eq!(played_for(&h), headless);
+    let ranked = serde_json::to_value(h.search.ranked_for().unwrap()).unwrap();
+    assert_eq!(
+        ranked["player"],
+        json!({ "kind": "browser", "playback": "h264", "measured": "sd", "decoders": decoders })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -57,6 +57,36 @@ crate::words! {
     }
 }
 
+crate::words! {
+    /// How a browser decodes a codec, as its `mediaCapabilities` says: in hardware, which keeps up
+    /// and spares the battery, in software, or not at all.
+    #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+    pub enum Decoding {
+        Hardware = "hardware",
+        Software = "software",
+        No = "no",
+    }
+}
+
+/// How a browser decodes each codec a release's name may give.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Decoders {
+    pub h264: Decoding,
+    pub hevc: Decoding,
+    pub av1: Decoding,
+}
+
+impl Decoders {
+    pub const fn of(self, codec: Codec) -> Decoding {
+        match codec {
+            Codec::H264 => self.h264,
+            Codec::Hevc => self.hevc,
+            Codec::Av1 => self.av1,
+        }
+    }
+}
+
 impl Playback {
     /// AV1 is newer than HEVC, so a player that may not handle HEVC may not handle it
     /// either. An unknown codec plays.

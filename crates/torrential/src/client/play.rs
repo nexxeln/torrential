@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
-use torrential_core::Job;
 use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, TitlePage, TitlePlayed, TitleRequest};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
 use torrential_core::{Category, Error, ErrorCode, SearchQuery, SearchResult, Target, VideoRef};
+use torrential_core::{Job, Plays};
 use torrential_daemon::playback::stream::{self, Start};
 
 use torrential_daemon::playback::media;
@@ -218,7 +218,7 @@ pub fn open(conn: &mut Conn, player: &Player, playing: &Playing, env: &Env, path
 
 /// Picks the video and its subtitles from `listing` and asks the engine to stream them.
 pub fn start(conn: &mut Conn, target: Target, listing: &FilesReply, dir: Option<PathBuf>) -> Result<PlayReply, Error> {
-    let Some(playable) = stream::pick(&listing.files) else {
+    let Some(playable) = stream::pick(&listing.files, Plays::ANY) else {
         let id = short_ref(&listing.id);
         let name = listing.name.clone().unwrap_or_else(|| id.clone());
         return Err(Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))

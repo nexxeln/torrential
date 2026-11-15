@@ -7,6 +7,7 @@ use crate::playback::media::RUNTIME_BYTES;
 use crate::playback::stream::{self, Playable};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
+use torrential_core::Plays;
 use torrential_core::protocol::{Change, Event, FilesReply, GetRequest, METADATA_WAIT, PlayReply, PlayRequest, Stream};
 use torrential_core::text::sanitize;
 use torrential_core::{
@@ -477,7 +478,7 @@ pub(super) fn choose(metainfo: &Metainfo, file: Option<u32>) -> Result<Playable,
             let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
             Error::new(ErrorCode::Usage, format!("{name} has {files}, so it has no file {index}"))
         }),
-        None => stream::pick(&listing).ok_or_else(|| {
+        None => stream::pick(&listing, Plays::BROWSER).ok_or_else(|| {
             let id = metainfo.info_hash.id().to_hex();
             Error::new(ErrorCode::NoSelection, format!("{name} has no video file"))
                 .with_hint(format!("run torrential files {} to list its files", &id[..torrential_core::id::SHORT_ID]))
