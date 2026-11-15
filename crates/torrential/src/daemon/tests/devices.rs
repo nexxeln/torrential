@@ -471,7 +471,7 @@ async fn a_request_whose_body_arrives_after_its_device_is_removed_is_refused_and
 
 /// Another program on `port` of the home network, so the engine cannot listen there. macOS lets
 /// it sit on every address beside the engine's 127.0.0.1, and Linux on the home address.
-fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {
+pub(super) fn squatter(ip: Ipv4Addr, port: u16) -> std::net::TcpListener {
     let at = if cfg!(target_os = "macos") { Ipv4Addr::UNSPECIFIED } else { ip };
     std::net::TcpListener::bind((at, port)).unwrap()
 }
