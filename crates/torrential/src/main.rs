@@ -3,13 +3,18 @@ mod client;
 mod completions;
 mod config;
 mod daemon;
+mod disk;
 mod env;
+mod ffmpeg;
 mod fsutil;
 mod log;
 mod machine;
 mod output;
 mod paths;
+mod player;
+mod qr;
 mod schema;
+mod selection;
 mod service;
 mod skill;
 mod update;
@@ -78,18 +83,26 @@ fn main() -> ExitCode {
         return ExitCode::from(client::launch::launch_stage(&env));
     }
     let mode = Mode::detect(cli.json, stdout_is_terminal, &env);
-    let notices = !matches!(
-        command,
-        Command::Tui
-            | Command::Update(_)
-            | Command::Completions { .. }
-            | Command::Daemon { command: DaemonCommand::Run { .. } }
-    );
+    if let Command::Daemon { command: DaemonCommand::Run { service } } = command {
+        return ExitCode::from(engine(service, mode, &env));
+    }
+    let notices = !matches!(command, Command::Tui | Command::Update(_) | Command::Completions { .. });
     let exit = client::run(command, mode, &env);
     if notices {
         print_notices(mode, &env);
     }
     ExitCode::from(exit)
+}
+
+/// `torrential engine run`: the engine in this process until it stops.
+fn engine(service: bool, mode: Mode, env: &Env) -> u8 {
+    match Paths::from_process(env) {
+        Ok(_) => daemon::run(env, service),
+        Err(error) => {
+            client::print_error(mode, &error);
+            error.code.exit_code()
+        }
+    }
 }
 
 fn usage_error(e: &clap::Error, args: &[String]) -> Error {

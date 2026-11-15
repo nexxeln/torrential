@@ -448,7 +448,7 @@ fn fleet() -> Vec<Job> {
             Some("ubuntu-24.04.5-desktop-amd64.iso"),
             JobStatus::Error {
                 error: crate::daemon::admission::check_disk(
-                    crate::daemon::admission::Space { device: 1, total: 250 * GIB, free: 3 * GIB },
+                    crate::disk::Space { device: 1, total: 250 * GIB, free: 3 * GIB },
                     6_345_887_744,
                     0,
                 )
@@ -734,8 +734,9 @@ fn schema_document() {
 }
 
 fn sample(code: ErrorCode) -> Error {
-    use crate::daemon::admission::{self, Plan, Space};
+    use crate::daemon::admission::{self, Plan};
     use crate::daemon::engine_port::FakeTorrentFile;
+    use crate::disk::Space;
     let film = || {
         FakeTorrentFile {
             info_hash: InfoHash::V1([0x6b; 20]),

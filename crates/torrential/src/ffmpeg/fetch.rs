@@ -15,7 +15,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 use torrential_core::{Error, ErrorCode};
 
-use super::ffmpeg::{self, INSTALL, Programs, Tools};
+use super::{INSTALL, Programs, Tools, complaint};
 use crate::env::Env;
 use crate::log::log;
 
@@ -509,7 +509,7 @@ async fn runs(program: &Path) -> Result<(), Error> {
         .output();
     let why = match tokio::time::timeout(RUN_WITHIN, run).await {
         Ok(Ok(output)) if output.status.success() => return Ok(()),
-        Ok(Ok(output)) => ffmpeg::complaint(&String::from_utf8_lossy(&output.stderr)),
+        Ok(Ok(output)) => complaint(&String::from_utf8_lossy(&output.stderr)),
         Ok(Err(e)) => e.to_string(),
         Err(_) => format!("it did not answer within {} s", RUN_WITHIN.as_secs()),
     };

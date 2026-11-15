@@ -247,11 +247,3 @@ async fn a_second_iphone_is_named_iphone_2() {
     let names: Vec<String> = home.devices.list(PORT).devices.into_iter().map(|d| d.name).collect();
     assert_eq!(names.len(), 2);
 }
-
-#[test]
-fn a_qr_code_holds_the_pairing_address() {
-    let rows = qr("http://studio-mac.local:47919/pair#482913");
-    assert_eq!(rows.len(), 29, "version 3 at medium error correction");
-    assert!(rows.iter().all(|row| row.len() == 29 && row.bytes().all(|b| b == b'0' || b == b'1')));
-    assert_eq!(&rows[0][..7], "1111111", "a finder pattern in the corner");
-}

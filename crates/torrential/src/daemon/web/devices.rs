@@ -9,10 +9,11 @@ use serde_json::{Value, json};
 use torrential_core::time::now;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer};
 
-use super::super::devices::{Asker, COOKIE, qr};
+use super::super::devices::{Asker, COOKIE};
 use super::super::http::{Connection, Method, Peer, Request};
 use super::super::server::Ctx;
 use super::{body, value};
+use crate::qr::qr;
 
 /// The page that pairs a phone or TV.
 pub const PAIR: &str = "/pair";

@@ -13,8 +13,7 @@ use torrential_core::protocol::{Request, Response, WIRE_VERSION};
 use torrential_core::time::now;
 use torrential_core::{Error, ErrorCode};
 
-use crate::daemon::owner;
-use crate::daemon::server::Ctx;
+use crate::config::Policy;
 use crate::env::Env;
 use crate::fsutil::{Writes, sha256, write_atomic};
 use crate::log::log;
@@ -28,35 +27,11 @@ const DAY: i64 = 24 * 60 * 60;
 const HOUR: i64 = 60 * 60;
 const CHECK_WITHIN: Duration = Duration::from_secs(10);
 const MAX_ASSET: usize = 256 << 20;
-/// How long a switch to an installed update waits after the engine could not save every download.
-const SWITCH_RETRY: Duration = Duration::from_secs(60);
 const CHECKED: &str = "update.json";
 const UPDATED: &str = "updated.json";
 const CONFIRM_WITHIN: Duration = Duration::from_secs(10);
 /// How long a release has, in its trial run as an engine, to answer and then to stop.
 const TRIAL_WITHIN: Duration = Duration::from_secs(20);
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum Policy {
-    /// Show a notice when a newer version is available
-    Notify,
-    /// Install newer versions in the background, and switch to them when nothing is playing
-    #[default]
-    Auto,
-    /// Never check for newer versions
-    Off,
-}
-
-impl Policy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Notify => "notify",
-            Self::Auto => "auto",
-            Self::Off => "off",
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Version {
@@ -674,11 +649,10 @@ pub fn opening(env: &Env, paths: &Paths) -> Option<News> {
     Some(News::Updated { from: updated.from, to: current })
 }
 
-/// Looks for newer releases, and under `updates: auto` installs one. An engine that the login
-/// service started, as `service` says, then stops once nothing is playing and every download is
-/// saved, for the service to start the installed release. Returns once the owner has stopped.
-pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
-    let (current, board) = (env.version(), &ctx.news);
+/// Looks for newer releases, posts what it finds on `board`, and under `updates: auto` installs
+/// one. Returns the release the engine should switch to once one is installed.
+pub async fn watch(env: Env, paths: Paths, board: &Board) -> Version {
+    let current = env.version();
     let updated_from = read_json::<Updated>(&paths.state.join(UPDATED)).filter(|u| u.to == current).map(|u| u.from);
     let Some(releases) = Releases::from_env(&env) else {
         board.post(updated_from.map(|from| News::Updated { from, to: current }));
@@ -714,11 +688,11 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
                                 &paths.state.join(UPDATED),
                                 &Updated { from: current.clone(), to: latest.to_string() },
                             );
-                            return switch(&ctx, latest, service).await;
+                            return latest;
                         }
                         Ok(Put::Current(installed)) => {
                             log(&format!("torrential {installed} is already installed"));
-                            return switch(&ctx, installed, service).await;
+                            return installed;
                         }
                         Ok(Put::NotWanted) => {
                             log(&format!("updates is no longer auto, so torrential {latest} is not installed"));
@@ -743,31 +717,6 @@ pub async fn watch(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
             }
         };
         tokio::time::sleep(Duration::from_secs(wait as u64)).await;
-    }
-}
-
-/// Stops the engine for the login service to start release `to` once nothing plays and every
-/// download is saved. An engine without a login service keeps running until it next starts.
-async fn switch(ctx: &Ctx, to: Version, service: bool) {
-    if !service {
-        log(&format!("torrential {to} starts the next time the engine starts"));
-        ctx.news.post(Some(News::Installed { latest: to }));
-        return std::future::pending().await;
-    }
-    loop {
-        if ctx.playing.any() {
-            log(&format!("torrential {to} starts when nothing is playing"));
-            ctx.news.post(Some(News::Waiting { latest: to }));
-        }
-        let closed = ctx.playing.close().await;
-        match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
-            Ok(()) => return closed.keep(),
-            Err(e) => {
-                log(&format!("torrential {to} waits: {}", e.message));
-                drop(closed);
-                tokio::time::sleep(SWITCH_RETRY).await;
-            }
-        }
     }
 }
 

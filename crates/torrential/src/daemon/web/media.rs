@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use torrential_core::{Error, ErrorCode};
 
-use super::fetch::Readiness;
+use crate::ffmpeg::fetch::Readiness;
 
 /// The JSON of `GET /api/media`.
 #[derive(Clone, PartialEq, Debug, Serialize)]

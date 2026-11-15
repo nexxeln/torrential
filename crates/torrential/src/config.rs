@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_saphyr::{Localizer, Location, SnippetMode, Spanned, UserMessageFormatter};
 use torrential_core::units::{parse_size, size_text};
 use torrential_core::{Error, ErrorCode, Playback, Preferences, Screen};
@@ -10,11 +10,10 @@ use torrential_search::catalog::CatalogConfig;
 use torrential_search::subtitles::SubtitleConfig;
 use torrential_search::{SearchConfig, TorznabConfig};
 
-use crate::client::player::Choice;
 use crate::env::Env;
 use crate::fsutil::{Writes, write_atomic};
 use crate::paths::Paths;
-use crate::update::Policy;
+use crate::player::Choice;
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Config {
@@ -183,6 +182,29 @@ pub fn save_preferences(paths: &Paths, preferences: &Preferences, writes: &Write
         };
         (read_preferences(&edited).ok() == Some(*preferences)).then_some(edited)
     })
+}
+
+/// What `updates:` in config.yaml asks for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Policy {
+    /// Show a notice when a newer version is available
+    Notify,
+    /// Install newer versions in the background, and switch to them when nothing is playing
+    #[default]
+    Auto,
+    /// Never check for newer versions
+    Off,
+}
+
+impl Policy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Notify => "notify",
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
 }
 
 pub fn updates(paths: &Paths) -> Result<Policy, Error> {
