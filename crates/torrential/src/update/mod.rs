@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::env::Env;
 use crate::fsutil::write_atomic;
 use crate::log::{log, persist};
-use crate::output::Mode;
 use crate::paths::Paths;
 
 pub mod release;
@@ -122,15 +120,6 @@ pub enum Audience {
 }
 
 impl Audience {
-    pub fn of(mode: Mode, env: &Env, stderr_is_terminal: bool) -> Option<Audience> {
-        match mode {
-            Mode::Json => None,
-            _ if env.agent().is_some() => Some(Audience::Agent),
-            _ if stderr_is_terminal => Some(Audience::Person),
-            _ => None,
-        }
-    }
-
     pub(crate) fn out(self, current: &str, latest: Version) -> String {
         let news =
             format!("torrential {latest} is available (you have {current}). Run torrential update to install it.");
@@ -258,12 +247,7 @@ mod tests {
 
     #[test]
     fn people_and_agents_get_their_own_lines() {
-        let env = |pairs: &[(&str, &str)]| Env::from_pairs(pairs.iter().copied());
         let latest = version("0.1.1");
-        assert_eq!(Audience::of(Mode::Json, &env(&[("CLAUDECODE", "1")]), true), None);
-        assert_eq!(Audience::of(Mode::Plain, &env(&[("CLAUDECODE", "1")]), false), Some(Audience::Agent));
-        assert_eq!(Audience::of(Mode::Human, &env(&[]), true), Some(Audience::Person));
-        assert_eq!(Audience::of(Mode::Plain, &env(&[]), false), None);
         assert_eq!(
             Audience::Person.out("0.1.0", latest),
             "torrential 0.1.1 is available (you have 0.1.0). Run torrential update to install it."

@@ -118,10 +118,21 @@ fn usage_error(e: &clap::Error, args: &[String]) -> Error {
     Error::new(ErrorCode::Usage, message).with_hint(hint.clone()).with_next(hint)
 }
 
+/// Who reads the notices after a command: no one when it prints JSON, an agent when one runs
+/// torrential, and a person at a terminal.
+fn audience(mode: Mode, env: &Env, stderr_is_terminal: bool) -> Option<Audience> {
+    match mode {
+        Mode::Json => None,
+        _ if env.agent().is_some() => Some(Audience::Agent),
+        _ if stderr_is_terminal => Some(Audience::Person),
+        _ => None,
+    }
+}
+
 /// Prints, after a command, that the engine added the login service and that an update is
 /// out, each once.
 fn print_notices(mode: Mode, env: &Env) {
-    let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
+    let Some(audience) = audience(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
     let lines = [
         service::notice(&paths, audience),
@@ -132,5 +143,19 @@ fn print_notices(mode: Mode, env: &Env) {
             Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),
             Audience::Agent => eprintln!("{line}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_has_no_notices_and_agents_get_theirs_without_a_terminal() {
+        let env = |pairs: &[(&str, &str)]| Env::from_pairs(pairs.iter().copied());
+        assert_eq!(audience(Mode::Json, &env(&[("CLAUDECODE", "1")]), true), None);
+        assert_eq!(audience(Mode::Plain, &env(&[("CLAUDECODE", "1")]), false), Some(Audience::Agent));
+        assert_eq!(audience(Mode::Human, &env(&[]), true), Some(Audience::Person));
+        assert_eq!(audience(Mode::Plain, &env(&[]), false), None);
     }
 }
