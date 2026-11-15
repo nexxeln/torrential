@@ -45,7 +45,7 @@ pub struct Ctx {
     pub web: super::web::State,
     pub titles: super::titles::Titles,
     pub playing: super::playing::Playing,
-    pub news: crate::update::Board,
+    pub news: super::switch::Board,
     /// The phones and TVs this Mac let in, and the grants casts play from.
     pub devices: Arc<super::devices::Devices>,
     /// The TVs on the home network, and the casts playing on them.

@@ -122,8 +122,10 @@ fn usage_error(e: &clap::Error, args: &[String]) -> Error {
 fn print_notices(mode: Mode, env: &Env) {
     let Some(audience) = Audience::of(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
-    let lines =
-        [service::notice(&paths, audience), update::notice(&paths, env, audience, torrential_core::time::now())];
+    let lines = [
+        service::notice(&paths, audience),
+        client::update::notice(&paths, env, audience, torrential_core::time::now()),
+    ];
     for line in lines.into_iter().flatten() {
         match audience {
             Audience::Person => anstream::eprintln!("{}", paint(Token::Muted, &line)),

@@ -15,7 +15,7 @@ mod status;
 mod titles;
 pub mod tui;
 mod tv;
-mod update;
+pub mod update;
 pub mod wait;
 mod web;
 

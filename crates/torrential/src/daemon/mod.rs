@@ -21,6 +21,7 @@ pub mod server;
 pub mod shelf;
 pub mod store;
 pub mod subtitle_port;
+pub mod switch;
 pub mod titles;
 pub mod web;
 
@@ -46,7 +47,6 @@ use crate::fsutil;
 use crate::log::{log, persist};
 use crate::paths::{self, Paths};
 use crate::service;
-use crate::update;
 use ctx::{Ctx, OwnerHandle};
 use db::Db;
 use detector::Detector;
@@ -239,46 +239,12 @@ pub fn start(
         web: web::State::new(ports.ffmpeg, ports.subtitles),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         playing,
-        news: update::Board::default(),
+        news: switch::Board::default(),
         devices,
         casts: cast::Casts::new(ctx.clone(), ports.tvs),
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
-}
-
-/// Installs updates as `update::watch` finds them, then switches to the release it installed.
-async fn follow_updates(env: Env, paths: Paths, ctx: Arc<Ctx>, service: bool) {
-    let to = update::watch(env, paths, &ctx.news).await;
-    switch(&ctx, to, service).await
-}
-
-/// How long a switch to an installed update waits after the engine could not save every download.
-const SWITCH_RETRY: Duration = Duration::from_secs(60);
-
-/// Stops the engine for the login service to start release `to` once nothing plays and every
-/// download is saved. An engine without a login service keeps running until it next starts.
-async fn switch(ctx: &Ctx, to: update::Version, service: bool) {
-    if !service {
-        log(&format!("torrential {to} starts the next time the engine starts"));
-        ctx.news.post(Some(update::News::Installed { latest: to }));
-        return std::future::pending().await;
-    }
-    loop {
-        if ctx.playing.any() {
-            log(&format!("torrential {to} starts when nothing is playing"));
-            ctx.news.post(Some(update::News::Waiting { latest: to }));
-        }
-        let closed = ctx.playing.close().await;
-        match ctx.owner.ask(|reply| owner::Command::Restart { reply }).await {
-            Ok(()) => return closed.keep(),
-            Err(e) => {
-                log(&format!("torrential {to} waits: {}", e.message));
-                drop(closed);
-                tokio::time::sleep(SWITCH_RETRY).await;
-            }
-        }
-    }
 }
 
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
@@ -381,7 +347,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         let running =
             start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), &http_ports)?;
         // Before the socket answers, so a page that reconnects the moment this engine is up says what was updated.
-        running.ctx.news.post(update::opening(env, paths));
+        running.ctx.news.post(switch::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
             let written = fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
@@ -394,7 +360,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
         let accept = tokio::spawn(server::accept(listener, running.ctx.clone()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
-        let updates = tokio::spawn(follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
+        let updates = tokio::spawn(switch::follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
