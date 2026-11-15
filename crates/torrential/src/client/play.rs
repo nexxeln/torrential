@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use crate::playback::stream::{self, Start};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
-use torrential_core::{Job, Plays};
 use torrential_core::protocol::{FilesReply, PlayReply, PlayRequest, Request, TitlePage, TitlePlayed, TitleRequest};
 use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
 use torrential_core::{Category, Error, ErrorCode, SearchQuery, SearchResult, Target, VideoRef};
+use torrential_core::{Job, Plays};
 
 use crate::playback::media;
 

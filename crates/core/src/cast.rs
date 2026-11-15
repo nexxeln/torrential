@@ -82,7 +82,7 @@ impl Plays {
     /// Of `videos`, each with its `size` and its `path`, the one a play opens: the largest, unless
     /// one this screen opens as it is comes within a quarter of its size, which then plays without
     /// being converted. So a browser plays an archive.org film's MP4 rather than its larger Ogg.
-    pub fn preferred<'a, T>(self, videos: &'a [T], size: impl Fn(&T) -> u64, path: impl Fn(&T) -> &str) -> Option<&'a T> {
+    pub fn preferred<T>(self, videos: &[T], size: impl Fn(&T) -> u64, path: impl Fn(&T) -> &str) -> Option<&T> {
         let largest = videos.iter().max_by_key(|v| size(v))?;
         let (keep, of) = AS_IS_WITHIN;
         let near = |v: &&T| u128::from(size(v)) * u128::from(of) >= u128::from(size(largest)) * u128::from(keep);

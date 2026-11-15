@@ -1,10 +1,10 @@
 use std::time::Duration;
 
+use torrential_core::Plays;
 use torrential_core::catalog::Episode;
 use torrential_core::filetype::{FileType, Kind};
 use torrential_core::job::TorrentFile;
 use torrential_core::title;
-use torrential_core::Plays;
 
 /// Folders that hold the subtitles for every video in the torrent.
 const SUBTITLE_FOLDERS: [&str; 4] = ["sub", "subs", "subtitle", "subtitles"];
@@ -205,7 +205,8 @@ mod tests {
             })
             .collect();
         let picked = |plays: Plays| pick(&files, plays).map(|p| night[p.video as usize].0);
-        let tv = |containers: &[Container]| Plays { opens: Opens::Only(containers.iter().copied().collect()), ..Plays::ANY };
+        let tv =
+            |containers: &[Container]| Plays { opens: Opens::Only(containers.iter().copied().collect()), ..Plays::ANY };
         assert_eq!(picked(Plays::ANY), Some("Night/Night.ogv"), "a player that opens any file takes the largest");
         assert_eq!(picked(Plays::BROWSER), Some("Night/Night_512kb.mp4"), "a browser takes the MP4, 89% of the Ogg");
         assert_eq!(picked(tv(&[Container::Mov])), Some("Night/Night.ogv"), "the MOV is 61% of the Ogg");
