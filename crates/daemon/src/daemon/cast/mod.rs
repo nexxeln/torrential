@@ -969,7 +969,7 @@ async fn find(
                 pin,
                 replace: None,
                 // A TV says what it decodes but not its screen, and 1080p plays well on any TV.
-                player: Player::Device(Viewer { screen: Resolution::P1080, playback: tv.tv.decodes }),
+                player: Player::Device(Viewer { screen: Resolution::P1080, playback: tv.tv.decodes, decoders: None }),
                 plays: Plays::tv(&tv.tv),
                 to: Destination::Plays,
             };

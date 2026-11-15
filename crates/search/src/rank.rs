@@ -4,10 +4,15 @@
 use std::cmp::{Ordering, Reverse};
 use std::ops::RangeInclusive;
 
+use torrential_core::filetype::FileType;
 use torrential_core::title::{Span, Wanted};
-use torrential_core::{Arch, Category, Flag, Language, Profile, Quality, Resolution, Sort, Swarm};
+use torrential_core::{
+    Arch, Category, Codec, Container, Decoding, Flag, Language, Player, Plays, Profile, Quality, Resolution, Sort,
+    Swarm, name,
+};
 
 use crate::assemble::Candidate;
+use crate::observation::{VideoCodec, VideoFile};
 use crate::terms;
 
 /// Below this many Mbit/s a release is a fake or a broken file.
@@ -91,6 +96,79 @@ fn closeness(profile: &Profile, resolution: Option<Resolution>) -> u8 {
     }
 }
 
+/// The file of `videos` a play in `player` opens, as the play itself picks it: in a browser, one
+/// it plays as it is when that is nearly as large as the largest.
+fn opened(player: Player, videos: &[VideoFile]) -> Option<&VideoFile> {
+    let plays = match player {
+        Player::External => Plays::ANY,
+        Player::Browser { .. } | Player::Device(_) => Plays::BROWSER,
+    };
+    plays.preferred(videos, |video| video.size, |video| &video.name)
+}
+
+/// Tags that name a codec no browser decodes.
+const OLD_CODECS: [&str; 4] = ["xvid", "divx", "mpeg2", "theora"];
+
+/// The codec of a release's video: what its catalog says of the file a play opens, else what its
+/// name says. `None` when neither says.
+fn codec(c: &Candidate, opened: Option<&VideoFile>) -> Option<VideoCodec> {
+    let named_old = || name::tags(&c.release.name).iter().any(|tag| OLD_CODECS.contains(&tag.as_str()));
+    opened
+        .and_then(|video| video.codec)
+        .or(c.quality.codec.map(VideoCodec::Modern))
+        .or_else(|| named_old().then_some(VideoCodec::Old))
+}
+
+/// Lower decodes better in `player`: in hardware, then in software, then not at all, as a browser
+/// meets Theora, XviD and MPEG-2. A video whose codec nothing says is most likely H.264. The
+/// player this machine opens decodes every codec, and a browser that did not report how decodes
+/// each one it knows alike.
+fn decoding(player: Player, codec: Option<VideoCodec>) -> u8 {
+    if player == Player::External {
+        return 0;
+    }
+    match codec.unwrap_or(VideoCodec::Modern(Codec::H264)) {
+        VideoCodec::Old => 2,
+        VideoCodec::Modern(codec) => match player.decoders().map(|decoders| decoders.of(codec)) {
+            None | Some(Decoding::Hardware) => 0,
+            Some(Decoding::Software) => 1,
+            Some(Decoding::No) => 2,
+        },
+    }
+}
+
+/// Whether the file a play opens is in an older container, Ogg, AVI, MPEG, WMV or a transport
+/// stream, which plays after MP4, MKV, WebM and MOV. A file not known counts as the newer kind.
+fn old_container(opened: Option<&VideoFile>) -> bool {
+    let newer =
+        |container| matches!(container, Some(Container::Mp4 | Container::Mkv | Container::WebM | Container::Mov));
+    opened.and_then(|video| FileType::of(&video.name)).is_some_and(|file| !newer(file.container))
+}
+
+/// The lines a screen of `resolution` shows: the top of its band.
+const fn lines(resolution: Resolution) -> u32 {
+    match resolution {
+        Resolution::Sd => 576,
+        Resolution::P720 => 720,
+        Resolution::P1080 => 1080,
+        Resolution::P2160 => 2160,
+    }
+}
+
+/// Lower is a picture of `video` that suits the screen better, for releases equally close to it:
+/// the tallest that fits the screen, then the shortest taller than it, and of two as tall the
+/// wider. An unknown picture comes after every known one, and without a screen every picture ties.
+fn picture_fit(profile: &Profile, video: Option<&VideoFile>) -> (bool, u32, Reverse<u32>) {
+    match (profile.screen(), video) {
+        (None, _) => (false, 0, Reverse(0)),
+        (Some(screen), Some(video)) if video.height <= lines(screen.value) => {
+            (false, lines(screen.value) - video.height, Reverse(video.width))
+        }
+        (Some(screen), Some(video)) => (true, video.height - lines(screen.value), Reverse(video.width)),
+        (Some(_), None) => (true, u32::MAX, Reverse(0)),
+    }
+}
+
 /// 0 for a name that mentions this machine's architecture, and 1 for any other. A name for
 /// another architecture ranks no lower than one without, so on an arm64 Mac a search for Ubuntu
 /// still leads with its amd64 ISOs, not with TV episodes that mention Ubuntu.
@@ -140,7 +218,10 @@ struct PlayRank {
     off_band: bool,
     other_words: usize,
     span: u8,
+    decoding: u8,
+    old_container: bool,
     closeness: u8,
+    picture: (bool, u32, Reverse<u32>),
     /// Most first. `Reverse` puts unknown after every count.
     seeders: Reverse<Option<u32>>,
 }
@@ -156,14 +237,16 @@ fn breadth(span: Option<Span>) -> u8 {
 }
 
 /// In a title's search the play order leads: not a cam, fits, not in another language, swarm,
-/// names the year, standing, bitrate, a plain name, span, screen, and seeders. The chain after
-/// it orders every search.
+/// names the year, standing, bitrate, a plain name, span, how the player decodes it, its
+/// container, screen, picture, and seeders. The chain after it orders every search.
 pub(crate) fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) {
     let fits = |c: &Candidate| fits(profile, c.release.size, c.quality, c.title.as_ref().and_then(|t| t.mbps));
     let is_video = |c: &Candidate| c.release.category == Some(Category::Video) || c.quality.resolution.is_some();
     let video_search = candidates.iter().filter(|c| is_video(c)).count() * 2 > candidates.len();
     let closeness_here = |c: &Candidate| if video_search { closeness(profile, c.resolution) } else { 0 };
     let play = |c: &Candidate| {
+        let opened = opened(profile.player, &c.videos);
+        let resolution = opened.map(|video| Resolution::of_width(video.width)).or(c.resolution);
         c.title.as_ref().map(|t| PlayRank {
             cam: c.release.flags.contains(&Flag::Cam),
             unfit: !fits(c),
@@ -174,7 +257,10 @@ pub(crate) fn rank(candidates: &mut [Candidate], sort: Sort, profile: &Profile) 
             off_band: t.mbps.is_some_and(|mbps| !band(c.quality.resolution).contains(&mbps)),
             other_words: t.other_words,
             span: breadth(c.release.span),
-            closeness: closeness(profile, c.resolution),
+            decoding: decoding(profile.player, codec(c, opened)),
+            old_container: old_container(opened),
+            closeness: closeness(profile, resolution),
+            picture: picture_fit(profile, opened),
             seeders: Reverse(c.release.seeders),
         })
     };
@@ -217,7 +303,7 @@ fn known_first_desc<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torrential_core::{Display, Machine, Os, Playback, Player, Preferences, Screen, Viewer};
+    use torrential_core::{Decoders, Display, Machine, Os, Playback, Preferences, Screen, Viewer};
 
     fn mac() -> Machine {
         Machine {
@@ -259,7 +345,9 @@ mod tests {
         let rates = [8.0, 8.1, 22.0, 41.0];
         assert_eq!(fits(&watching_on(phone(), tv), rates), [true, false, false, false], "a phone");
         assert_eq!(fits(&watching_on(tv_4k(), Preferences::default()), rates), [true, true, true, false], "a 4K TV");
-        let here = |preferences| playing_in(Player::Browser { playback: Playback::Hevc }, preferences);
+        let here = |preferences| {
+            playing_in(Player::Browser { playback: Playback::Hevc, measured: None, decoders: None }, preferences)
+        };
         assert_eq!(fits(&here(Preferences::default()), rates), [true, true, false, false], "this Mac's browser");
         assert_eq!(
             fits(&here(tv), rates),
@@ -297,6 +385,33 @@ mod tests {
         assert_eq!(order(Some(Screen::Phone)), [4, 2, 0, 1, u8::MAX]);
         let headless = profile(Some(server()), Preferences::default());
         assert_eq!([Some(P2160), Some(Sd), None].map(|r| closeness(&headless, r)), [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_codec_decodes_as_the_browser_reported_and_old_codecs_last() {
+        let reported = Decoders { h264: Decoding::Hardware, hevc: Decoding::Software, av1: Decoding::No };
+        let browser = |decoders| Player::Browser { playback: Playback::HevcHdr, measured: None, decoders };
+        let codecs = [
+            Some(VideoCodec::Modern(Codec::H264)),
+            Some(VideoCodec::Modern(Codec::Hevc)),
+            Some(VideoCodec::Modern(Codec::Av1)),
+            Some(VideoCodec::Old),
+            None,
+        ];
+        assert_eq!(codecs.map(|codec| decoding(browser(Some(reported)), codec)), [0, 1, 2, 2, 0]);
+        assert_eq!(codecs.map(|codec| decoding(browser(None), codec)), [0, 0, 0, 2, 0]);
+        assert_eq!(codecs.map(|codec| decoding(Player::External, codec)), [0; 5], "the player here opens any codec");
+    }
+
+    #[test]
+    fn an_ogg_avi_or_mpeg_file_is_in_an_older_container() {
+        let file = |name: &str| VideoFile { name: name.into(), size: 1, width: 1, height: 1, codec: None };
+        let names = ["a.mp4", "a.mkv", "a.webm", "a.mov", "a.ogv", "a.avi", "a.mpg", "a.wmv"];
+        assert_eq!(
+            names.map(|name| old_container(Some(&file(name)))),
+            [false, false, false, false, true, true, true, true]
+        );
+        assert!(!old_container(None), "a release whose files are not known");
     }
 
     #[test]

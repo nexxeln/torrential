@@ -59,6 +59,8 @@ pub(crate) struct AnswerKey {
     pub scope: String,
     pub text: String,
     pub adult: bool,
+    /// A title's search, whose answers also list the items' files.
+    pub title: bool,
 }
 
 impl ResultCache {
@@ -149,6 +151,7 @@ mod tests {
             scope: "https://api.knaben.org/".into(),
             text: "ubuntu".into(),
             adult: false,
+            title: false,
         };
         let t0 = Instant::now();
         cache.store(key.clone(), rows("Ubuntu 24.04"), t0);

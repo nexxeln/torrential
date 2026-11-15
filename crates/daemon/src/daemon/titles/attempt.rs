@@ -514,7 +514,7 @@ fn video_of(metainfo: &Metainfo, episode: Option<Episode>, plays: Plays, remux: 
     let listing = metainfo.listing();
     let playable = match episode {
         Some(episode) => stream::episode(&listing, &sanitize(&metainfo.name), episode),
-        None => stream::pick(&listing),
+        None => stream::pick(&listing, plays),
     };
     let playable = playable.filter(|p| !stream::is_sample(&listing[p.video as usize].path)).ok_or(Skip::NoVideo)?;
     let path = &listing[playable.video as usize].path;
