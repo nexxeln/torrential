@@ -469,7 +469,7 @@ impl Drop for Trial<'_> {
 }
 
 /// The source of `release` and its file list, from a download on this machine, from the
-/// release's .torrent file, or from peers, by `deadline`. The owner judges the deadline for a file
+/// release's .torrent file as the engine kept it or fetches it now, or from peers, by `deadline`. The owner judges the deadline for a file
 /// list from peers, so one that arrived in time counts however long a slow disk keeps the owner
 /// from answering.
 async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Source, Arc<Metainfo>), Error> {
@@ -479,7 +479,11 @@ async fn files(ctx: &Ctx, release: &Release, deadline: Instant) -> Result<(Sourc
         let info = downloads::metadata(ctx, MetaTarget::Job(id), deadline).await?;
         return Ok((Source::Download(id), info.metainfo));
     }
-    let source = tokio::time::timeout_at(deadline.into(), downloads::release_source(ctx, release.clone(), None))
+    let cached = match release.id {
+        ReleaseId::Torrent(id) => ctx.owner.ask(|reply| Command::Cached { id, reply }).await.ok().flatten(),
+        ReleaseId::Locator(_) => None,
+    };
+    let source = tokio::time::timeout_at(deadline.into(), downloads::release_source(ctx, release.clone(), cached))
         .await
         .map_err(|_| Error::new(ErrorCode::MetadataTimeout, "the .torrent file did not arrive in time"))??;
     match source {

@@ -189,6 +189,7 @@ pub enum Command {
     Release { hold: Hold, reply: Reply<()> },
     Metadata { target: MetaTarget, deadline: Instant, reply: Reply<FilesInfo> },
     Cache { metainfo: Metainfo },
+    Cached { id: TorrentId, reply: Reply<Option<Arc<Metainfo>>> },
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
     Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
@@ -455,6 +456,9 @@ impl Owner {
             Command::Metadata { target, deadline, reply } => self.metadata(target, deadline, reply),
             Command::Cache { metainfo } => {
                 let _ = self.store.cache_metainfo(metainfo.info_hash.id(), &metainfo.bytes, now());
+            }
+            Command::Cached { id, reply } => {
+                let _ = reply.send(Ok(self.cached(id)));
             }
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
