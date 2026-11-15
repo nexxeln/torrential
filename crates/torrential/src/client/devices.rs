@@ -12,7 +12,7 @@ use super::{answer, emit};
 use crate::cli::DevicesCommand;
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::qr::qr;
 
 pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Result<u8, Error> {
@@ -36,7 +36,7 @@ pub fn run(mut conn: Conn, command: Option<DevicesCommand>, mode: Mode) -> Resul
         }
         _ => list_doc(&list, now()),
     };
-    Ok(emit(mode, &doc, &Typed { kind: "devices", body: &list }))
+    Ok(emit(mode, &doc, &Typed { kind: DocKind::Devices, body: &list }))
 }
 
 fn list_doc(list: &DeviceList, now: i64) -> Doc {

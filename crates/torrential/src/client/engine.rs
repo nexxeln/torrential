@@ -8,7 +8,7 @@ use super::{connect, emit, launch};
 use crate::cli::DaemonCommand;
 use crate::env::Env;
 use crate::output::theme::Token;
-use crate::output::{self, Body, Cell, Doc, Mode, Typed};
+use crate::output::{self, Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 use crate::service;
 
@@ -40,17 +40,17 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     downloads: None,
                 },
             };
-            Ok(emit(mode, &daemon_status(&report), &Typed { kind: "daemon", body: &report }))
+            Ok(emit(mode, &daemon_status(&report), &Typed { kind: DocKind::Daemon, body: &report }))
         }
         DaemonCommand::Stop => {
             let pid = connect::stop_asked(&paths, env)?;
-            let result = if pid.is_some() { "stopped" } else { "already_stopped" };
+            let result = if pid.is_some() { Stop::Stopped } else { Stop::AlreadyStopped };
             #[derive(Serialize)]
             struct Stopped {
-                result: &'static str,
+                result: Stop,
                 pid: Option<u32>,
             }
-            let mut fields = vec![("result", output::Cell::new(result))];
+            let mut fields = vec![("result", output::Cell::new(result.as_str()))];
             if let Some(pid) = pid {
                 fields.push(("pid", output::Cell::new(pid.to_string())));
             }
@@ -59,7 +59,7 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                 summary: Vec::new(),
                 next: None,
             };
-            Ok(emit(mode, &doc, &Typed { kind: "daemon_stop", body: Stopped { result, pid } }))
+            Ok(emit(mode, &doc, &Typed { kind: DocKind::DaemonStop, body: Stopped { result, pid } }))
         }
         DaemonCommand::Install => {
             if let Some(conn) = connect::running(&paths, env)? {
@@ -73,24 +73,32 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
     }
 }
 
+torrential_core::words! {
+    /// What `engine stop` did.
+    enum Stop {
+        Stopped = "stopped",
+        AlreadyStopped = "already_stopped",
+    }
+}
+
 fn service_report(report: service::Report, mode: Mode) -> Result<u8, Error> {
     #[derive(Serialize)]
     struct Payload {
-        result: &'static str,
+        result: service::Change,
         manager: &'static str,
         unit: String,
     }
     let unit = report.unit.display().to_string();
     let fields = vec![
-        ("result", output::Cell::new(report.result)),
+        ("result", output::Cell::new(report.result.as_str())),
         ("manager", output::Cell::new(report.manager.name())),
         ("unit", output::Cell::new(unit.clone())),
     ];
-    let next =
-        matches!(report.result, "installed" | "already_installed").then(|| "torrential engine status".to_string());
+    let next = matches!(report.result, service::Change::Installed | service::Change::AlreadyInstalled)
+        .then(|| "torrential engine status".to_string());
     let doc = output::Doc { body: output::Body::Fields { title: Vec::new(), fields }, summary: Vec::new(), next };
     let payload = Payload { result: report.result, manager: report.manager.name(), unit };
-    Ok(emit(mode, &doc, &Typed { kind: "daemon_service", body: payload }))
+    Ok(emit(mode, &doc, &Typed { kind: DocKind::DaemonService, body: payload }))
 }
 
 #[derive(Clone, PartialEq, Debug, serde::Serialize)]

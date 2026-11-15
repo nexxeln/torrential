@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use torrential_core::InfoHash;
 
 use crate::metainfo::Metainfo;
+use crate::store::Store;
 
 const FILE: &str = "torrent-hashes.json";
 const KEEP: usize = 256;
@@ -18,7 +19,7 @@ pub(crate) struct Key {
 }
 
 pub(crate) struct Hashes {
-    dir: Option<PathBuf>,
+    store: Option<Arc<Store>>,
     known: Mutex<HashMap<Key, Metainfo>>,
     claimed: Mutex<HashSet<Key>>,
     unsaved: AtomicBool,
@@ -35,10 +36,11 @@ struct Stored {
 }
 
 impl Hashes {
-    pub fn new(dir: Option<PathBuf>) -> Hashes {
-        let known = dir.as_deref().map(|d| parse(&std::fs::read(d.join(FILE)).unwrap_or_default())).unwrap_or_default();
+    /// Reads what an earlier process kept in `dir`, which `store` writes to.
+    pub fn new(dir: Option<PathBuf>, store: Option<Arc<Store>>) -> Hashes {
+        let known = dir.map(|d| parse(&std::fs::read(d.join(FILE)).unwrap_or_default())).unwrap_or_default();
         Hashes {
-            dir,
+            store,
             known: Mutex::new(known),
             claimed: Mutex::default(),
             unsaved: AtomicBool::new(false),
@@ -62,13 +64,12 @@ impl Hashes {
     }
 
     pub async fn save(&self) {
-        let Some(dir) = &self.dir else { return };
+        let Some(store) = &self.store else { return };
         let _one = self.saving.lock().await;
         if !self.unsaved.swap(false, Ordering::Relaxed) {
             return;
         }
-        let path = dir.join(FILE);
-        let mut all = parse(&tokio::fs::read(&path).await.unwrap_or_default());
+        let mut all = store.get(FILE).await.map(|kept| parse(&kept.bytes)).unwrap_or_default();
         all.extend(self.lock().iter().map(|(k, v)| (k.clone(), v.clone())));
         trim(&mut all);
         let mut stored: Vec<Stored> = all
@@ -83,7 +84,7 @@ impl Hashes {
             .collect();
         stored.sort_by(|a, b| (&a.url, a.modified).cmp(&(&b.url, b.modified)));
         let body = serde_json::to_vec_pretty(&stored).expect("stored hashes serialize");
-        if write(dir, &path, &body).await.is_err() {
+        if !store.put(FILE, &body).await {
             self.unsaved.store(true, Ordering::Relaxed);
         }
     }
@@ -111,18 +112,4 @@ fn trim(known: &mut HashMap<Key, Metainfo>) {
             known.remove(key);
         }
     }
-}
-
-async fn write(dir: &Path, path: &Path, body: &[u8]) -> std::io::Result<()> {
-    let tmp = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
-    let written = async {
-        tokio::fs::create_dir_all(dir).await?;
-        tokio::fs::write(&tmp, body).await?;
-        tokio::fs::rename(&tmp, path).await
-    };
-    let written = written.await;
-    if written.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    written
 }

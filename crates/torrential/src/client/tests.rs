@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use torrential_core::error::{Details, EXIT_PENDING};
 use torrential_core::protocol::{
-    Change, DownloadPlan, FilesReply, GetOutcome, GetReply, Kept, PlayReply, Response, Stream, TitlePlayed,
+    Change, ChangeResult, DownloadPlan, FilesReply, GetOutcome, GetReply, Kept, MetadataSource, PlayReply, Response,
+    Stream, TitlePlayed,
 };
 use torrential_core::{
     Error, ErrorCode, FileRisk, Flag, InfoHash, Job, JobStatus, LocatorId, Progress, Release, ReleaseId, SearchQuery,
@@ -21,7 +22,7 @@ use super::search::search;
 use super::skill::{skill_changes, skill_status};
 use super::titles::view::*;
 use super::wait::{Printer, WaitEnd, wait_row, watched};
-use crate::output::{Body, Doc, Mode, Typed, render};
+use crate::output::{Body, Doc, DocKind, Mode, Typed, render};
 
 const NOW: i64 = 1_792_314_723;
 const DAY: i64 = 86_400;
@@ -226,7 +227,7 @@ fn film_files() -> FilesReply {
             file(2, "VTS_01_1.mp4", 262_668_288),
             installer,
         ],
-        metadata_source: "torrent_url".into(),
+        metadata_source: MetadataSource::TorrentUrl,
         elapsed_ms: 412,
     }
 }
@@ -243,7 +244,10 @@ fn files_matching_globs_list_only_those() {
     let patterns = vec!["*.MP4".to_string(), "Night.asr.srt".to_string()];
     let matched = keep_matching(&mut reply, &patterns).unwrap();
     let doc = files(&reply, Some(&matched));
-    insta::assert_snapshot!(both(&doc, &Typed { kind: "files", body: Files { files: reply, matched: Some(matched) } }));
+    insta::assert_snapshot!(both(
+        &doc,
+        &Typed { kind: DocKind::Files, body: Files { files: reply, matched: Some(matched) } }
+    ));
 }
 
 #[test]
@@ -276,7 +280,7 @@ fn files_of_a_download_show_progress_per_file() {
             selected(file(1, "debian-13.1.0-amd64-DVD-2.iso", 4 * GIB), GIB),
             file(2, "debian-13.1.0-amd64-DVD-3.iso", 4 * GIB),
         ],
-        metadata_source: "download".into(),
+        metadata_source: MetadataSource::Download,
         elapsed_ms: 3,
     };
     insta::assert_snapshot!(both(&files(&reply, None), &Response::Files { files: reply }));
@@ -289,7 +293,7 @@ fn a_one_file_torrent_counts_one_file() {
         name: Some("archlinux-2026.10.01-x86_64.iso".into()),
         total_size: GIB,
         files: vec![file(0, "archlinux-2026.10.01-x86_64.iso", GIB)],
-        metadata_source: "peers".into(),
+        metadata_source: MetadataSource::Peers,
         elapsed_ms: 900,
     };
     assert_eq!(
@@ -520,14 +524,8 @@ fn status_of_one_download() {
     insta::assert_snapshot!(out);
 }
 
-fn change(hex: &str, name: &str, result: &str, path: Option<&str>) -> Change {
-    Change {
-        id: tid(hex).to_hex(),
-        name: Some(name.into()),
-        result: result.into(),
-        path: path.map(PathBuf::from),
-        ..Change::default()
-    }
+fn change(hex: &str, name: &str, result: ChangeResult, path: Option<&str>) -> Change {
+    Change { path: path.map(PathBuf::from), ..Change::new(tid(hex).to_hex(), Some(name.into()), result) }
 }
 
 #[test]
@@ -536,15 +534,15 @@ fn pause_resume_rm_and_verify() {
         (
             ChangeCommand::Pause,
             vec![
-                change(ARCH, "archlinux-2026.10.01-x86_64.iso", "paused", None),
-                change("c32cdd", "stackexchange", "already_paused", None),
+                change(ARCH, "archlinux-2026.10.01-x86_64.iso", ChangeResult::Paused, None),
+                change("c32cdd", "stackexchange", ChangeResult::AlreadyPaused, None),
             ],
         ),
         (
             ChangeCommand::Resume,
             vec![
-                change("c32cdd", "stackexchange", "resumed", None),
-                change("6bc1af", "night_of_the_living_dead_dvd", "already_done", None),
+                change("c32cdd", "stackexchange", ChangeResult::Resumed, None),
+                change("6bc1af", "night_of_the_living_dead_dvd", ChangeResult::AlreadyDone, None),
             ],
         ),
         (
@@ -559,26 +557,36 @@ fn pause_resume_rm_and_verify() {
                     ..change(
                         ARCH,
                         "archlinux-2026.10.01-x86_64.iso",
-                        "removed",
+                        ChangeResult::Removed,
                         Some("/Users/ada/isos/archlinux-2026.10.01-x86_64.iso"),
                     )
                 },
-                change("c32cdd", "stackexchange", "already_removed", Some("/Users/ada/datasets/stackexchange")),
+                change(
+                    "c32cdd",
+                    "stackexchange",
+                    ChangeResult::AlreadyRemoved,
+                    Some("/Users/ada/datasets/stackexchange"),
+                ),
                 Change {
                     deleted: vec![PathBuf::from("/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0")],
                     ..change(
                         "6bc1af",
                         "night_of_the_living_dead_dvd",
-                        "removed",
+                        ChangeResult::Removed,
                         Some(
                             "/Users/ada/.local/share/torrential/plays/6bc1af0000000000-0/night_of_the_living_dead_dvd",
                         ),
                     )
                 },
-                change("d4d4d4", "pioneer_one", "removed", Some("/Users/ada/Downloads/torrential/pioneer_one")),
+                change(
+                    "d4d4d4",
+                    "pioneer_one",
+                    ChangeResult::Removed,
+                    Some("/Users/ada/Downloads/torrential/pioneer_one"),
+                ),
             ],
         ),
-        (ChangeCommand::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", "checking", None)]),
+        (ChangeCommand::Verify, vec![change("6bc1af", "night_of_the_living_dead_dvd", ChangeResult::Checking, None)]),
     ];
     let mut out = String::new();
     for (command, list) in cases {
@@ -679,7 +687,7 @@ fn daemon_status_running_and_stopped() {
     let stopped = DaemonReport { engine: "stopped", pid: None, version: None, downloads: None, ..running.clone() };
     let mut out = String::new();
     for report in [running, stopped] {
-        out.push_str(&both(&daemon_status(&report), &crate::output::Typed { kind: "daemon", body: &report }));
+        out.push_str(&both(&daemon_status(&report), &crate::output::Typed { kind: DocKind::Daemon, body: &report }));
     }
     insta::assert_snapshot!(out);
 }
@@ -713,7 +721,7 @@ fn doctor_report() {
     );
     insta::assert_snapshot!(both(
         &doctor(&checks, fix),
-        &crate::output::Typed { kind: "doctor", body: serde_json::json!({"checks": checks}) }
+        &crate::output::Typed { kind: DocKind::Doctor, body: serde_json::json!({"checks": checks}) }
     ));
 }
 

@@ -28,7 +28,7 @@ impl Paths {
     }
 
     pub fn resolve(env: &Env, uid: u32, os_downloads: Option<PathBuf>) -> Result<Self, Error> {
-        let home = env.var("HOME").map(PathBuf::from);
+        let home = env.home().map(Path::to_path_buf);
         let torrential_home = env.var("TORRENTIAL_HOME").map(PathBuf::from);
         let downloads = os_downloads
             .or_else(|| home.as_ref().map(|h| h.join("Downloads")))
@@ -88,6 +88,11 @@ impl Paths {
         self.state.join("engine.log")
     }
 
+    /// The log before the last time it grew too long.
+    pub fn previous_log(&self) -> PathBuf {
+        self.state.join("engine.log.1")
+    }
+
     pub fn database(&self) -> PathBuf {
         self.state.join("state.db")
     }
@@ -100,6 +105,29 @@ impl Paths {
 
     pub fn startup_error(&self) -> PathBuf {
         self.state.join("engine.error")
+    }
+
+    /// Keeps why the engine could not start, for the client that started it to report.
+    pub fn record_startup_error(&self, error: &Error) {
+        let file = self.startup_error();
+        let written = std::fs::write(&file, serde_json::to_vec(error).expect("errors serialize"));
+        crate::log::persist(&format!("write {}", file.display()), written);
+    }
+
+    /// Why the engine last could not start, or `None` when it left no record. A record that does not
+    /// parse is an `Err`.
+    pub fn recorded_startup_error(&self) -> Option<Result<Error, serde_json::Error>> {
+        std::fs::read(self.startup_error()).ok().map(|bytes| serde_json::from_slice(&bytes))
+    }
+
+    /// Left by the engine for the next command to say it added the login service.
+    pub fn login_service_added(&self) -> PathBuf {
+        self.state.join("login-service-added")
+    }
+
+    /// Left by `torrential engine uninstall`, so the engine never adds the login service again.
+    pub fn login_service_declined(&self) -> PathBuf {
+        self.state.join("no-login-service")
     }
 
     /// Holds the port the engine last served the web app on.

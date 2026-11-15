@@ -94,6 +94,13 @@ pub fn read(path: &str, torrent: &str) -> Vec<Title> {
     titles
 }
 
+/// How many years a release's or a listing's year may be off the title's: 1 for a film, since a
+/// release can name the year after the premiere, and none for a series, whose year is the year it
+/// began.
+pub const fn year_slack(episode: bool) -> u16 {
+    if episode { 0 } else { 1 }
+}
+
 /// A title as it compares: lowercase, without accents or punctuation, `&` as `and`.
 pub fn normalized(title: &str) -> String {
     let mut out = String::new();
@@ -328,8 +335,7 @@ impl Wanted {
                     self.namesakes != Namesakes::Shadowed || reading.country.is_some() && self.episode.is_some()
                 }
                 (Some(_), None) => true,
-                (Some(named), Some(year)) if self.episode.is_some() => named == year,
-                (Some(named), Some(year)) => named.abs_diff(year) <= 1,
+                (Some(named), Some(year)) => named.abs_diff(year) <= year_slack(self.episode.is_some()),
             };
             country && year && reading.span.covers(self.episode) && normalized(&reading.name) == name
         })

@@ -1,5 +1,5 @@
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use torrential_core::{
     TitleId, VideoRef,
 };
 
-use torrential_tui::{Edit, Exit};
+use torrential_tui::{ColorMode, Edit, Exit};
 
 use super::connect::{self, Conn, DEFAULT_REPLY_WITHIN};
 use super::play::{self, Playing};
@@ -26,12 +26,15 @@ use crate::wire;
 
 pub fn run(env: &Env) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
-    let downloads = Config::load(&paths, env).map_or_else(|_| paths.downloads.clone(), |c| c.downloads_dir(&paths));
+    let downloads = config::downloads_dir(Config::load(&paths, env).as_ref(), &paths);
     let backend = EngineBackend { paths, downloads, env: env.clone() };
-    match torrential_tui::run(backend).map_err(|e| Error::internal(format!("the terminal UI stopped: {e}")))? {
+    let colors = ColorMode::detect(|key| env.var(key).map(String::from));
+    let home = env.home().map(Path::to_path_buf);
+    let exit = torrential_tui::run(backend, colors, home);
+    match exit.map_err(|e| Error::internal(format!("the terminal UI stopped: {e}")))? {
         Exit::Quit => Ok(0),
         Exit::Restart => {
-            let exe = update::executable()?;
+            let exe = env.installed()?;
             let error = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).exec();
             Err(Error::internal(format!("cannot start the new torrential at {}: {error}", exe.display())))
         }

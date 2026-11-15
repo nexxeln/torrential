@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
-use torrential_core::protocol::{Change, Kept};
+use torrential_core::protocol::{Change, ChangeResult, Kept};
 use torrential_core::{Error, TorrentId};
 
 use super::super::admission;
@@ -180,7 +180,7 @@ impl Owner {
 
     /// Starts the idle clock again for the plays a `resume` resumed.
     pub(super) fn touch_plays(&mut self, changes: &[Change]) {
-        for change in changes.iter().filter(|change| change.result == "resumed") {
+        for change in changes.iter().filter(|change| change.result == ChangeResult::Resumed) {
             if let Ok(id) = change.id.parse() {
                 self.watched_now(id);
             }

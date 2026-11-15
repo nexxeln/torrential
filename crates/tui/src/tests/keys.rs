@@ -1,5 +1,5 @@
 use crossterm::event::KeyCode;
-use torrential_core::protocol::{Change, GetOutcome, GetReply};
+use torrential_core::protocol::{Change, ChangeResult, GetOutcome, GetReply};
 
 use super::*;
 use crate::state::{Files, Focus, JobAction, Upgrade};
@@ -264,7 +264,7 @@ fn space_pauses_and_the_row_waits_for_the_engine() {
     assert_eq!(effects, [Effect::Job { id: wikipedia, action: JobAction::Pause }]);
     assert_eq!(state.pending.get(&wikipedia), Some(&JobAction::Pause));
     assert_eq!(press(&mut state, " "), [], "a second press waits for the first answer");
-    let change = Change { id: wikipedia.to_hex(), result: "paused".into(), ..Change::default() };
+    let change = Change::new(wikipedia.to_hex(), None, ChangeResult::Paused);
     state.update(Msg::Changed { id: wikipedia, action: JobAction::Pause, result: Ok(vec![change]) });
     assert!(state.pending.is_empty());
     assert_eq!(state.toast.as_ref().unwrap().text, "Paused wikipedia-en-2026-09-text");

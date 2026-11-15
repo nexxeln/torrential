@@ -22,10 +22,13 @@ use std::hash::Hash;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use torrential_core::{Category, Error, ErrorCode, Profile, Release, SearchQuery, Target, TorrentId};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use torrential_core::protocol::Change;
+use torrential_core::{
+    Category, Error, ErrorCode, Job, Profile, Release, SearchQuery, SearchResult, Target, TorrentId,
+};
 
 use super::ctx::Ctx;
 use super::devices::Asker;
@@ -152,7 +155,7 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         (Method::Post, "watched") => titles::watched(ctx, body(request)?).await,
         (Method::Post, "library") => titles::library(ctx, body(request)?).await,
         (Method::Get, "home") => titles::home(ctx).await,
-        (Method::Get, "version") => Ok(json!({ "version": ctx.version, "notice": ctx.news.line() })),
+        (Method::Get, "version") => value(VersionReply { version: &ctx.version, notice: ctx.news.line() }),
         (Method::Get, "media") => {
             let (id, file) = file_of(request)?;
             value(&*watch::media(ctx, id, file).await?)
@@ -163,11 +166,11 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         }
         (Method::Get, "pieces") => {
             let (id, file) = file_of(request)?;
-            Ok(json!({ "pieces": watch::pieces(ctx, id, file).await? }))
+            value(Pieces { pieces: watch::pieces(ctx, id, file).await? })
         }
         (Method::Get, "jobs") => {
             let jobs = owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
-            Ok(json!({ "jobs": jobs }))
+            value(Jobs { jobs })
         }
         (Method::Post, "files") => {
             let Ref { reference } = body(request)?;
@@ -183,10 +186,60 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
                 "resume" => downloads::resume(ctx, refs, false).await?,
                 _ => downloads::remove(ctx, refs, delete).await?,
             };
-            Ok(json!({ "changes": changes }))
+            value(Changes { changes })
         }
         _ => Err(Error::new(ErrorCode::NotFound, format!("the engine has no {} /api/{route}", method(request)))),
     }
+}
+
+/// `GET /api/version`.
+#[derive(Serialize)]
+struct VersionReply<'a> {
+    version: &'a str,
+    /// What the update board says, if anything.
+    notice: Option<String>,
+}
+
+/// `GET /api/pieces`: one character a run of the file, as `watch::pieces` writes them.
+#[derive(Serialize)]
+struct Pieces {
+    pieces: String,
+}
+
+/// `GET /api/jobs`.
+#[derive(Serialize)]
+struct Jobs {
+    jobs: Vec<Job>,
+}
+
+/// `POST /api/pause`, `/api/resume` and `/api/remove`.
+#[derive(Serialize)]
+struct Changes {
+    changes: Vec<Change>,
+}
+
+/// The body of every failed request.
+#[derive(Serialize)]
+pub struct ErrorBody<'a> {
+    pub error: &'a Error,
+}
+
+/// A line of `POST /api/search`: the results so far as each source answers, then the last.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SearchLine {
+    Update { result: SearchResult, pending: Vec<String> },
+    Done { result: SearchResult },
+    Error { error: Error },
+}
+
+/// A line of `POST /api/ffmpeg`.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum FfmpegLine {
+    Progress { done: u64, size: u64 },
+    Ready,
+    Error { error: Error },
 }
 
 #[derive(Deserialize)]
@@ -275,7 +328,7 @@ fn status(code: ErrorCode) -> &'static str {
 }
 
 async fn fail(conn: &mut Connection<'_>, request: &Request, error: &Error) -> io::Result<bool> {
-    conn.json(status(error.code), &json!({ "error": error }), request).await
+    conn.json(status(error.code), &ErrorBody { error }, request).await
 }
 
 /// Answers with a whole file the engine made, which the browser may keep for an hour: the same
@@ -324,13 +377,13 @@ async fn results(
         match answer {
             Answer::SoFar(Progress { mut result, pending }) => {
                 result.releases = order(result.releases);
-                line(conn, &json!({ "type": "update", "result": result, "pending": pending })).await?;
+                line(conn, &SearchLine::Update { result, pending }).await?;
             }
             Answer::Done(Ok(mut result)) => {
                 result.releases = order(result.releases);
-                break json!({ "type": "done", "result": result });
+                break SearchLine::Done { result };
             }
-            Answer::Done(Err(error)) => break json!({ "type": "error", "error": error }),
+            Answer::Done(Err(error)) => break SearchLine::Error { error },
         }
     };
     line(conn, &last).await?;
@@ -348,27 +401,27 @@ async fn ffmpeg(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool
     conn.begin(NDJSON, request).await?;
     let last = match running {
         Some(stage) => follow(conn, stage).await?,
-        None => json!({ "type": "ready" }),
+        None => FfmpegLine::Ready,
     };
     line(conn, &last).await?;
     conn.end().await
 }
 
 /// Sends a line for each step of a fetch, and answers its last line.
-async fn follow(conn: &mut Connection<'_>, mut stage: tokio::sync::watch::Receiver<Stage>) -> io::Result<Value> {
+async fn follow(conn: &mut Connection<'_>, mut stage: tokio::sync::watch::Receiver<Stage>) -> io::Result<FfmpegLine> {
     loop {
         let now = stage.borrow_and_update().clone();
         match now {
             Stage::Downloading { done, size } => {
-                line(conn, &json!({ "type": "progress", "done": done, "size": size })).await?;
+                line(conn, &FfmpegLine::Progress { done, size }).await?;
             }
-            Stage::Done(Ok(())) => return Ok(json!({ "type": "ready" })),
-            Stage::Done(Err(error)) => return Ok(json!({ "type": "error", "error": error })),
+            Stage::Done(Ok(())) => return Ok(FfmpegLine::Ready),
+            Stage::Done(Err(error)) => return Ok(FfmpegLine::Error { error }),
         }
         tokio::select! {
             changed = stage.changed() => if changed.is_err() {
                 let error = Error::internal("the ffmpeg fetch stopped before it finished");
-                return Ok(json!({ "type": "error", "error": error }));
+                return Ok(FfmpegLine::Error { error });
             },
             gone = conn.gone() => return Err(gone),
         }
@@ -410,7 +463,7 @@ fn search_query(ctx: &Ctx, request: &Request) -> Result<SearchQuery, Error> {
     })
 }
 
-async fn line(conn: &mut Connection<'_>, message: &Value) -> io::Result<()> {
+async fn line(conn: &mut Connection<'_>, message: &impl Serialize) -> io::Result<()> {
     let mut line = serde_json::to_vec(message).map_err(io::Error::other)?;
     line.push(b'\n');
     conn.chunk(&line).await

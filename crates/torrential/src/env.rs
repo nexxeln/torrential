@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use torrential_core::units::{parse_duration, parse_size};
@@ -8,9 +8,13 @@ use torrential_core::{Error, ErrorCode, TorrentId};
 
 pub mod hooks;
 
-#[derive(Clone, Debug, Default)]
+/// The environment torrential started with: its variables, and where its own binary was.
+#[derive(Clone, Debug)]
 pub struct Env {
     vars: HashMap<String, String>,
+    /// Read at start, because on Linux, once an update replaces the file, the process's own path
+    /// reads `<path> (deleted)`.
+    executable: Result<PathBuf, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,12 +38,19 @@ const AGENT_VARS: [(&str, Agent); 7] = [
 
 impl Env {
     pub fn from_process() -> Self {
-        Self { vars: std::env::vars().collect() }
+        Self { vars: std::env::vars().collect(), executable: running_binary() }
     }
 
     #[cfg(test)]
     pub fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
-        Self { vars: pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() }
+        let vars = pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        Self { vars, executable: running_binary() }
+    }
+
+    /// This environment as one whose torrential binary is at `path`.
+    #[cfg(test)]
+    pub fn with_executable(self, path: &Path) -> Self {
+        Self { executable: Ok(path.to_path_buf()), ..self }
     }
 
     /// This environment with `key` set to `value`.
@@ -50,6 +61,34 @@ impl Env {
 
     pub fn var(&self, key: &str) -> Option<&str> {
         self.vars.get(key).map(String::as_str).filter(|v| !v.is_empty())
+    }
+
+    pub fn home(&self) -> Option<&Path> {
+        self.var("HOME").map(Path::new)
+    }
+
+    /// `path` with a leading `~` replaced by the home folder. `~name` stays as it is.
+    pub fn expand_home(&self, path: &Path) -> PathBuf {
+        match (path.strip_prefix("~"), self.home()) {
+            (Ok(rest), Some(home)) if rest.as_os_str().is_empty() => home.to_path_buf(),
+            (Ok(rest), Some(home)) => home.join(rest),
+            _ => path.to_path_buf(),
+        }
+    }
+
+    /// The path this torrential started from, for starting the engine.
+    pub fn executable(&self) -> Result<PathBuf, Error> {
+        let found = self.executable.clone();
+        found.map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary: {e}")))
+    }
+
+    /// Where this torrential is installed, with links resolved, for an update to replace and the
+    /// login service to start.
+    pub fn installed(&self) -> Result<PathBuf, Error> {
+        let path = self.executable()?;
+        std::fs::canonicalize(&path).map_err(|e| {
+            Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary at {}: {e}", path.display()))
+        })
     }
 
     pub fn sandbox_harness(&self) -> Option<Agent> {
@@ -77,6 +116,10 @@ impl Env {
         let test = self.var(hooks::ENGINE) == Some("fake") || self.var(hooks::NETWORK) == Some("loopback");
         test.then_some(TestHooks(self))
     }
+}
+
+fn running_binary() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|e| e.to_string())
 }
 
 /// The `TORRENTIAL_TEST_*` settings of a process a test started, each read and parsed here.
@@ -197,6 +240,17 @@ mod tests {
         let older = (hooks::VERSION, "0.1.0");
         assert_eq!(env(&[older]).version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(env(&[older, (hooks::ENGINE, "fake")]).version(), "0.1.0");
+    }
+
+    #[test]
+    fn a_leading_tilde_means_the_home_folder() {
+        let env = Env::from_pairs([("HOME", "/Users/ada")]);
+        let expand = |path: &str| env.expand_home(Path::new(path));
+        assert_eq!(expand("~"), Path::new("/Users/ada"));
+        assert_eq!(expand("~/Movies/films"), Path::new("/Users/ada/Movies/films"));
+        assert_eq!(expand("~ada/Movies"), Path::new("~ada/Movies"));
+        assert_eq!(expand("/srv/~/films"), Path::new("/srv/~/films"));
+        assert_eq!(Env::from_pairs([]).expand_home(Path::new("~/Movies")), Path::new("~/Movies"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::ffmpeg::Tools;
 use crate::ffmpeg::fetch::{self, Fetch, Ffmpeg, Found};
 use crate::output::format;
 use crate::output::theme::Token;
-use crate::output::{Body, Cell, Doc, Mode, Typed};
+use crate::output::{Body, Cell, Doc, DocKind, Mode, Typed};
 use crate::paths::Paths;
 use crate::skill::{self, Installed, State};
 
@@ -41,12 +41,12 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
             return emit(
                 mode,
                 &doctor(&checks, fix.clone()),
-                &Typed { kind: "doctor", body: Checks { checks: &checks } },
+                &Typed { kind: DocKind::Doctor, body: Checks { checks: &checks } },
             );
         }
     };
     let settings = crate::config::Config::load(&paths, env);
-    let downloads = settings.as_ref().map_or_else(|_| paths.downloads.clone(), |s| s.downloads_dir(&paths));
+    let downloads = crate::config::downloads_dir(settings.as_ref(), &paths);
     match RealDisk.space(&downloads) {
         Ok(space) => {
             let low = space.free < reserve(space.total);
@@ -92,7 +92,7 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
     checks.extend(probe::checks(&paths, settings, network));
     checks.push(profile);
     checks.push(ffmpeg_check(env, &paths, fetch_ffmpeg));
-    emit(mode, &doctor(&checks, fix), &Typed { kind: "doctor", body: Checks { checks: &checks } })
+    emit(mode, &doctor(&checks, fix), &Typed { kind: DocKind::Doctor, body: Checks { checks: &checks } })
 }
 
 #[derive(Serialize)]

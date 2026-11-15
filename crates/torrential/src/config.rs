@@ -165,6 +165,11 @@ impl Config {
     }
 }
 
+/// The download folder `settings` names, or the default one when they name none or did not load.
+pub fn downloads_dir(settings: Result<&Config, &Error>, paths: &Paths) -> PathBuf {
+    settings.map_or_else(|_| paths.downloads.clone(), |settings| settings.downloads_dir(paths))
+}
+
 pub fn file(paths: &Paths) -> Result<PathBuf, Error> {
     Ok(read(paths)?.map_or_else(|| path(paths), |(path, _)| path))
 }
@@ -355,12 +360,7 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         .downloads
         .dir
         .map(|Spanned { value: raw, referenced, .. }| {
-            let expanded = match (raw.strip_prefix('~'), env.var("HOME")) {
-                (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-                    PathBuf::from(format!("{home}{rest}"))
-                }
-                _ => PathBuf::from(&raw),
-            };
+            let expanded = env.expand_home(Path::new(&raw));
             if expanded.is_absolute() {
                 Ok(expanded)
             } else {

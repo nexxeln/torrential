@@ -29,7 +29,7 @@ use torrential_core::{Error, ErrorCode, Target};
 
 use crate::cli::Command;
 use crate::env::Env;
-use crate::output::{self, Mode, Typed, render};
+use crate::output::{self, DocKind, Mode, Typed, render};
 use crate::paths::Paths;
 use connect::Conn;
 use torrential_core::protocol::METADATA_WAIT;
@@ -87,7 +87,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             let matched =
                 if args.files.is_empty() { None } else { Some(files::keep_matching(&mut files, &args.files)?) };
             let doc = files::files(&files, matched.as_ref());
-            Ok(emit(mode, &doc, &Typed { kind: "files", body: files::Files { files, matched } }))
+            Ok(emit(mode, &doc, &Typed { kind: DocKind::Files, body: files::Files { files, matched } }))
         }
         Command::Get(args) => match Target::parse(&args.reference, &cwd)? {
             Target::Title(_) => get::title(engine, args, mode, env),
@@ -162,13 +162,17 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
                     #[derive(Serialize)]
                     struct Payload<'a> {
                         #[serde(rename = "type")]
-                        kind: &'static str,
+                        kind: DocKind,
                         shell: &'a str,
                         rc_file: &'a str,
                         line: &'a str,
                     }
-                    let payload =
-                        Payload { kind: "completions", shell: setup.shell, rc_file: setup.rc_file, line: setup.line };
+                    let payload = Payload {
+                        kind: DocKind::Completions,
+                        shell: setup.shell,
+                        rc_file: setup.rc_file,
+                        line: setup.line,
+                    };
                     print!("{}", output::json_document(&payload, None));
                 }
                 _ => print!("{}", crate::completions::script(&setup)),
@@ -188,11 +192,7 @@ pub fn file_list(conn: &mut Conn, target: Target) -> Result<FilesReply, Error> {
 }
 
 pub fn absolute(path: &Path, cwd: &Path, env: &Env) -> PathBuf {
-    let expanded = match (path.strip_prefix("~"), env.var("HOME")) {
-        (Ok(rest), Some(home)) => Path::new(home).join(rest),
-        _ => path.to_path_buf(),
-    };
-    cwd.join(expanded)
+    cwd.join(env.expand_home(path))
 }
 
 fn job_refs(references: &[String], cwd: &Path) -> Result<Vec<String>, Error> {

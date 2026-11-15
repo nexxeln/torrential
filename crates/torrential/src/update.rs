@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -233,7 +233,7 @@ pub async fn install(releases: &Releases, paths: &Paths, env: &Env, now: i64) ->
     if !latest.newer_than(&env.version()) {
         return Ok(Outcome::Latest(latest));
     }
-    let (exe, target) = installed()?;
+    let (exe, target) = installed(env)?;
     let installed = match put_release(releases, env, latest, &exe, target, || true).await? {
         Put::Installed | Put::NotWanted => latest,
         Put::Current(installed) => installed,
@@ -323,7 +323,7 @@ impl FolderLock {
 
 /// Where this torrential is installed and which release asset fits this machine, or why it cannot
 /// update itself.
-fn installed() -> Result<(PathBuf, &'static str), Error> {
+fn installed(env: &Env) -> Result<(PathBuf, &'static str), Error> {
     let Some(target) = target(std::env::consts::OS, std::env::consts::ARCH) else {
         return Err(Error::new(
             ErrorCode::NotFound,
@@ -331,7 +331,7 @@ fn installed() -> Result<(PathBuf, &'static str), Error> {
         )
         .with_hint("build it from source: https://github.com/nexxeln/torrential#install"));
     };
-    let exe = executable()?;
+    let exe = env.installed()?;
     if exe.starts_with("/nix/store") {
         return Err(Error::new(
             ErrorCode::StorageError,
@@ -493,16 +493,6 @@ fn refused(version: Version, why: String) -> Error {
         format!("the binary of torrential {version} {why}, so the installed torrential is unchanged"),
     )
     .with_hint(format!("report it at {ISSUES}"))
-}
-
-static EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-
-/// Where this torrential is installed, as it was when the process started. `main` reads it first,
-/// because on Linux, once an update replaces the file, the process's own path reads `<path> (deleted)`.
-pub fn executable() -> Result<PathBuf, Error> {
-    let found =
-        EXECUTABLE.get_or_init(|| std::env::current_exe().and_then(std::fs::canonicalize).map_err(|e| e.to_string()));
-    found.clone().map_err(|e| Error::new(ErrorCode::StorageError, format!("cannot find the torrential binary: {e}")))
 }
 
 fn verify(asset: &str, tarball: &[u8], sums: &[u8]) -> Result<(), Error> {
@@ -676,7 +666,7 @@ pub async fn watch(env: Env, paths: Paths, board: &Board) -> Version {
                     && let Some(latest) = checked.newer(&current)
                 {
                     let put = async {
-                        let (exe, target) = installed()?;
+                        let (exe, target) = installed(&env)?;
                         let auto = || matches!(crate::config::updates(&paths), Ok(Policy::Auto));
                         put_release(&releases, &env, latest, &exe, target, auto).await
                     };

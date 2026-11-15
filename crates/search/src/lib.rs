@@ -11,11 +11,13 @@ pub mod catalog;
 mod classify;
 mod dates;
 mod http;
+mod imdb;
 mod metainfo;
 mod observation;
 pub mod rank;
 mod redirect;
 mod sources;
+mod store;
 pub mod subtitles;
 mod terms;
 
@@ -114,7 +116,8 @@ struct Inner {
 impl Search {
     /// Fails with `usage` when the config names an unknown source or a bad URL.
     pub fn new(config: &SearchConfig, cache: ResultCache) -> Result<Search, Error> {
-        Inner::new(config, cache, false).map(|inner| Search { inner: Arc::new(inner) })
+        let http = Http::new().map_err(no_client)?;
+        Inner::new(config, cache, http).map(|inner| Search { inner: Arc::new(inner) })
     }
 
     /// Every enabled source, most authoritative first.
@@ -307,10 +310,8 @@ impl Search {
 }
 
 impl Inner {
-    fn new(config: &SearchConfig, cache: ResultCache, record: bool) -> Result<Inner, Error> {
-        let client = |e: reqwest::Error| Error::internal(format!("cannot build the HTTP client: {e}"));
-        let http = Http::new(record).map_err(client)?;
-        let seeds = Http::public(http::USER_AGENT, redirect::policy()).map_err(client)?;
+    fn new(config: &SearchConfig, cache: ResultCache, http: Http) -> Result<Inner, Error> {
+        let seeds = Http::public(http::USER_AGENT, redirect::policy()).map_err(no_client)?;
         let sources = sources::registry(config)?;
         let disabled = config.disabled.clone();
         Ok(Inner { http, seeds, sources, disabled, stores: Stores::new(config.cache_dir.clone()), cache })
@@ -364,12 +365,16 @@ fn millis(d: Duration) -> u32 {
     u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
 }
 
+fn no_client(e: reqwest::Error) -> Error {
+    Error::internal(format!("cannot build the HTTP client: {e}"))
+}
+
 /// Runs one source the way a search does, with a 60-second deadline, and returns
 /// every response body it received by URL, plus how the source fared. The
 /// `record` example writes these as test fixtures.
 #[doc(hidden)]
 pub async fn record(config: &SearchConfig, source: &str, query: &str) -> Result<(String, http::Recorded), Error> {
-    let inner = Inner::new(config, ResultCache::new(), true)?;
+    let inner = Inner::new(config, ResultCache::new(), Http::recording().map_err(no_client)?)?;
     let source = inner
         .sources
         .iter()

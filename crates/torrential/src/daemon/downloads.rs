@@ -327,7 +327,7 @@ pub(super) async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Resul
         Source::Torrent { metainfo, origin } => FilesInfo {
             id: metainfo.info_hash.id(),
             metainfo: Arc::new(metainfo),
-            source: origin.as_str(),
+            source: origin.source(),
             download: None,
         },
     };
@@ -337,7 +337,7 @@ pub(super) async fn files(ctx: &Ctx, target: Target, timeout: Duration) -> Resul
         name: Some(sanitize(&m.name)),
         total_size: m.total(),
         files: listed(ctx, &info).await,
-        metadata_source: info.source.to_string(),
+        metadata_source: info.source,
         elapsed_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
     })
 }
