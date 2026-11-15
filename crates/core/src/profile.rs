@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::preferences::{Playback, Preferences, Screen};
-use crate::quality::{Quality, Resolution, band};
+use crate::quality::{Quality, Resolution};
 use crate::units::{format_limit, size_text};
 
 /// What the engine detected. Each part is `None` when detection found nothing.
@@ -101,7 +101,7 @@ impl Player {
 
     /// Whether the player streams the file as it downloads, so a bitrate its screen cannot show
     /// only makes the download take longer.
-    const fn streams(self) -> bool {
+    pub const fn streams(self) -> bool {
         !matches!(self, Self::External)
     }
 
@@ -325,79 +325,12 @@ impl Profile {
         self.detected.as_ref().and_then(|m| m.display)
     }
 
-    fn arch(&self) -> Option<Arch> {
+    pub fn arch(&self) -> Option<Arch> {
         self.detected.as_ref().and_then(|m| m.arch)
     }
 
-    fn language(&self) -> Option<&Language> {
+    pub fn language(&self) -> Option<&Language> {
         self.detected.as_ref().and_then(|m| m.language.as_ref())
-    }
-
-    /// False only for a release known to be larger than `max_size` or the room on disk, known
-    /// to need a codec or HDR the player may not handle, or known to stream to a browser at more
-    /// `mbps` than its screen shows. Unknown values fit.
-    pub fn fits(&self, size: Option<u64>, quality: Quality, mbps: Option<f64>) -> bool {
-        let within = |cap: Option<u64>| size.zip(cap).is_none_or(|(size, cap)| size <= cap);
-        within(self.preferences.max_size)
-            && within(self.room)
-            && self.playback().is_none_or(|playback| playback.value.plays(quality))
-            && mbps.zip(self.most_mbps()).is_none_or(|(mbps, most)| mbps <= most)
-    }
-
-    /// The most Mbit/s a play may stream to a browser: the top of the band of the resolution its
-    /// screen wants, where remuxes start. So a phone takes up to 8, about 6 GB for a film of 100
-    /// minutes, a 1080p screen up to 16, and a 4K TV up to 40. More shows the screen nothing new
-    /// and only makes the download take longer. The player this machine opens keeps the rules it
-    /// had.
-    fn most_mbps(&self) -> Option<f64> {
-        if !self.player.streams() {
-            return None;
-        }
-        Some(*band(Some(self.screen()?.value)).end())
-    }
-
-    /// Lower is closer to the screen's resolution: the same, then one step lower, then one
-    /// higher, then two lower, and so on. A bigger picture than the screen shows wastes
-    /// bytes, a smaller one loses detail. Without a screen every release ties at 0. With one,
-    /// an unknown resolution comes after every known one, since a name without a tag gives
-    /// no sign that it suits the screen.
-    pub fn closeness(&self, resolution: Option<Resolution>) -> u8 {
-        let step = |r: Resolution| match r {
-            Resolution::Sd => 0i8,
-            Resolution::P720 => 1,
-            Resolution::P1080 => 2,
-            Resolution::P2160 => 3,
-        };
-        match (self.screen(), resolution) {
-            (None, _) => 0,
-            (Some(screen), Some(resolution)) => {
-                let steps = step(resolution) - step(screen.value);
-                if steps < 0 { steps.unsigned_abs() * 2 - 1 } else { steps.unsigned_abs() * 2 }
-            }
-            (Some(_), None) => u8::MAX,
-        }
-    }
-
-    /// 0 for a name that mentions this machine's architecture, and 1 for any other. A name
-    /// for another architecture ranks no lower than one without, so on an arm64 Mac a search
-    /// for Ubuntu still leads with its amd64 ISOs, not with TV episodes that mention Ubuntu.
-    pub fn arch_rank(&self, named: &[Arch]) -> u8 {
-        u8::from(self.arch().is_some_and(|host| !named.contains(&host)))
-    }
-
-    /// 0 for a name that marks the system language, 1 for one in the original language, and
-    /// 2 for one that marks only others. The original is usually English, so a name in
-    /// English or without a marker is the original, and for English it ranks first.
-    pub fn language_rank(&self, named: &[Language]) -> u8 {
-        let Some(own) = self.language() else { return 0 };
-        let original = named.is_empty() || named.iter().any(|l| l.code() == "en");
-        if named.contains(own) || (original && own.code() == "en") {
-            0
-        } else if original {
-            1
-        } else {
-            2
-        }
     }
 
     /// `this Mac: 1080p screen, HDR, HEVC, arm64, English`.
@@ -607,53 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_takes_no_more_mbit_than_the_band_of_its_screen() {
-        let fits = |p: &Profile, mbps: [f64; 4]| mbps.map(|mbps| p.fits(Some(1), Quality::default(), Some(mbps)));
-        let tv = Preferences { screen: Some(Screen::Tv4k), ..Preferences::default() };
-        let rates = [8.0, 8.1, 22.0, 41.0];
-        assert_eq!(fits(&watching_on(phone(), tv), rates), [true, false, false, false], "a phone");
-        assert_eq!(fits(&watching_on(tv_4k(), Preferences::default()), rates), [true, true, true, false], "a 4K TV");
-        let here = |preferences| playing_in(Player::Browser { playback: Playback::Hevc }, preferences);
-        assert_eq!(fits(&here(Preferences::default()), rates), [true, true, false, false], "this Mac's browser");
-        assert_eq!(
-            fits(&here(tv), rates),
-            [true, true, true, false],
-            "this Mac's browser on the screen in config.yaml"
-        );
-        assert_eq!(fits(&playing_in(Player::External, Preferences::default()), rates), [true; 4], "this Mac's player");
-        assert!(
-            watching_on(phone(), Preferences::default()).fits(Some(1), Quality::default(), None),
-            "an unknown bitrate"
-        );
-    }
-
-    #[test]
-    fn an_sdr_display_ranks_hdr_as_unplayable_and_a_full_disk_ranks_big_files_out() {
-        let sdr = Machine { display: Some(Display { width: 1920, height: 1080, hdr: false }), ..mac() };
-        let fits = |p: &Profile, size, name| p.fits(Some(size), Quality::parse(name), None);
-        let on_sdr = profile(Some(sdr), Preferences::default());
-        let full = Profile { room: Some(4_000_000_000), ..profile(Some(mac()), Preferences::default()) };
-
-        assert_eq!([fits(&on_sdr, 1, "Film 2160p HDR x265"), fits(&on_sdr, 1, "Film 2160p x265")], [false, true]);
-        assert_eq!([fits(&full, 4_000_000_000, "Film"), fits(&full, 4_000_000_001, "Film")], [true, false]);
-        assert!(full.fits(None, Quality::default(), None), "an unknown size fits");
-    }
-
-    #[test]
-    fn closeness_runs_same_then_lower_then_higher_with_unknown_last() {
-        use Resolution::{P720, P1080, P2160, Sd};
-        let order = |screen| {
-            let p = profile(Some(mac()), Preferences { screen, ..Preferences::default() });
-            [Some(P2160), Some(P1080), Some(P720), Some(Sd), None].map(|r| p.closeness(r))
-        };
-        assert_eq!(order(None), [2, 0, 1, 3, u8::MAX], "this Mac's 1080p panel");
-        assert_eq!(order(Some(Screen::Tv4k)), [0, 1, 3, 5, u8::MAX]);
-        assert_eq!(order(Some(Screen::Phone)), [4, 2, 0, 1, u8::MAX]);
-        let headless = profile(Some(server()), Preferences::default());
-        assert_eq!([Some(P2160), Some(Sd), None].map(|r| headless.closeness(r)), [0, 0, 0]);
-    }
-
-    #[test]
     fn reads_architectures_from_recorded_names() {
         let cases = [
             ("debian-13.7.0-arm64-netinst.iso", vec![Arch::Arm64]),
@@ -668,16 +554,6 @@ mod tests {
         ];
         let read: Vec<(&str, Vec<Arch>)> = cases.iter().map(|(name, _)| (*name, Arch::named_in(name))).collect();
         assert_eq!(read, cases);
-    }
-
-    #[test]
-    fn the_host_architecture_ranks_first() {
-        let arm = profile(Some(mac()), Preferences::default());
-        let ranks = |p: &Profile| {
-            [&[Arch::Arm64][..], &[], &[Arch::X86_64], &[Arch::X86_64, Arch::Arm64]].map(|n| p.arch_rank(n))
-        };
-        assert_eq!(ranks(&arm), [0, 1, 1, 0]);
-        assert_eq!(ranks(&profile(None, Preferences::default())), [0, 0, 0, 0]);
     }
 
     #[test]
@@ -703,20 +579,6 @@ mod tests {
         assert_eq!(marked("Sintel.2010.720p.SWESUB.x264-SMS", "sintel 2010"), ["sv"]);
         assert_eq!(marked("Sintel, O Filme 2010 HD Dublado PT BR", "sintel 2010"), ["pt"]);
         assert_eq!(marked("Night of the Living Dead (1968) 1080p Ita Eng MIRCrew", film), ["en", "it"]);
-    }
-
-    #[test]
-    fn the_system_language_ranks_first_and_another_last() {
-        let with_locale = |locale| {
-            profile(Some(Machine { language: Language::from_locale(locale), ..mac() }), Preferences::default())
-        };
-        let es = Language::from_locale("es").unwrap();
-        let en = Language::from_locale("en").unwrap();
-        let names = [vec![], vec![en.clone()], vec![es.clone()], vec![es, en]];
-        let ranks = |p: Profile| names.clone().map(|n| p.language_rank(&n));
-        assert_eq!(ranks(with_locale("en-IN")), [0, 0, 2, 0]);
-        assert_eq!(ranks(with_locale("es_MX.UTF-8")), [1, 1, 0, 0]);
-        assert_eq!(ranks(with_locale("ja-JP")), [1, 1, 2, 1]);
     }
 
     #[test]

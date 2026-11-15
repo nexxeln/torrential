@@ -8,10 +8,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use torrential_core::{
     Error, ErrorCode, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult, SourceOutcome, SourceReport,
-    Swarm,
 };
 pub use torrential_search::{Progress, SavedLink};
-use torrential_search::{ResultCache, Search, SearchConfig};
+use torrential_search::{ResultCache, Search, SearchConfig, rank};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type RankFor<'a> = &'a (dyn Fn() -> Profile + Send + Sync);
@@ -229,7 +228,7 @@ fn compose(
     let found = |r: &Release| match &query.wanted {
         Some(wanted) => {
             let span = Some(wanted.fit(&r.name)?.span);
-            let swarm = Some(Swarm::of(r.seeders, r.sources.iter().any(|s| torrential_search::lawful(s)))?);
+            let swarm = Some(rank::swarm(r.seeders, r.sources.iter().any(|s| torrential_search::lawful(s)))?);
             Some(Release { span, swarm, ..r.clone() })
         }
         None => words.iter().all(|w| r.name.to_lowercase().contains(w.as_str())).then(|| r.clone()),
