@@ -43,6 +43,8 @@ pub struct Ctx {
     /// Where `http` serves downloads to players, and the web app.
     pub http_port: u16,
     pub web: super::web::State,
+    /// ffmpeg, and the tracks and thumbnails of the videos the engine has read.
+    pub media: super::media::State,
     pub titles: super::titles::Titles,
     pub playing: super::playing::Playing,
     pub news: super::switch::Board,

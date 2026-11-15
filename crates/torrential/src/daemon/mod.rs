@@ -12,7 +12,9 @@ pub mod files;
 pub mod http;
 pub mod libtorrent;
 pub mod magnet;
+pub mod media;
 pub mod metainfo;
+pub mod names;
 pub mod owner;
 pub mod playing;
 pub mod resolve;
@@ -236,7 +238,8 @@ pub fn start(
         version,
         preferences: ports.preferences,
         http_port,
-        web: web::State::new(ports.ffmpeg, ports.subtitles),
+        web: web::State::new(ports.subtitles),
+        media: media::State::new(ports.ffmpeg),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         playing,
         news: switch::Board::default(),

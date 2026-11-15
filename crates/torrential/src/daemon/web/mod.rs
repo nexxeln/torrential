@@ -8,19 +8,14 @@
 pub mod assets;
 mod cast;
 pub mod devices;
-pub mod ffmpeg;
-pub mod media;
 mod online;
 pub mod play;
-mod thumbnail;
 pub(super) mod titles;
 pub mod watch;
 #[cfg(test)]
 mod wire;
 
-use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::hash::Hash;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -36,77 +31,34 @@ use super::ctx::Ctx;
 use super::devices::Asker;
 use super::downloads::{self, Answer, Searching};
 use super::http::{Connection, Method, Request};
+use super::media::{self, Kept, Made};
 use super::owner::Command;
 use super::search_port::Progress;
 use super::subtitle_port::SubtitlePort;
-use crate::ffmpeg::fetch::{Fetching, Ffmpeg, Stage};
-use media::Media;
+use crate::ffmpeg::fetch::{Fetching, Stage};
 use torrential_core::protocol::METADATA_WAIT;
 
 const NDJSON: &str = "application/x-ndjson";
 const VTT: &str = "text/vtt; charset=utf-8";
 /// Converted subtitles kept in memory. One film's is some tens of kilobytes.
 const SUBTITLES_KEPT: usize = 64;
+/// Files whose online subtitles are kept. Each is a short list.
+const FOUND_KEPT: usize = 64;
 const SEARCH_LIMIT: u16 = 50;
 const MOST_RESULTS: u16 = 200;
 
-/// A whole file the engine made and keeps: a converted subtitle, or a thumbnail.
-type Made = Arc<Vec<u8>>;
-
 /// What the API reads from outside the engine, and what it remembers between requests.
 pub struct State {
-    /// ffmpeg and ffprobe, installed or fetched.
-    pub ffmpeg: Ffmpeg,
-    probes: Mutex<HashMap<(TorrentId, u32), Arc<Media>>>,
     pub subtitles: Arc<dyn SubtitlePort>,
     /// What the online sources have for each file asked about, with where each subtitle is.
-    found: Mutex<HashMap<(TorrentId, u32), Arc<torrential_search::subtitles::Found>>>,
+    found: Mutex<Kept<(TorrentId, u32), Arc<torrential_search::subtitles::Found>>>,
     /// Online subtitles as WebVTT, by file and subtitle ID.
     converted: Mutex<Kept<(TorrentId, u32, String), Made>>,
-    /// Thumbnails, by file and second.
-    thumbnails: Mutex<Kept<(TorrentId, u32, u32), Made>>,
-    thumbnailing: tokio::sync::Semaphore,
 }
 
 impl State {
-    pub fn new(ffmpeg: Ffmpeg, subtitles: Arc<dyn SubtitlePort>) -> Self {
-        Self {
-            ffmpeg,
-            probes: Mutex::default(),
-            subtitles,
-            found: Mutex::default(),
-            converted: Mutex::new(Kept::new(SUBTITLES_KEPT)),
-            thumbnails: Mutex::new(Kept::new(thumbnail::KEPT)),
-            thumbnailing: tokio::sync::Semaphore::new(thumbnail::AT_ONCE),
-        }
-    }
-}
-
-/// The last `most` values put in, by key. Putting one more drops the oldest.
-struct Kept<K, V> {
-    most: usize,
-    values: HashMap<K, V>,
-    order: VecDeque<K>,
-}
-
-impl<K: Clone + Eq + Hash, V: Clone> Kept<K, V> {
-    fn new(most: usize) -> Self {
-        Self { most, values: HashMap::new(), order: VecDeque::new() }
-    }
-
-    fn get(&self, key: &K) -> Option<V> {
-        self.values.get(key).cloned()
-    }
-
-    fn put(&mut self, key: K, value: V) {
-        if self.values.insert(key.clone(), value).is_none() {
-            self.order.push_back(key);
-        }
-        while self.order.len() > self.most {
-            if let Some(oldest) = self.order.pop_front() {
-                self.values.remove(&oldest);
-            }
-        }
+    pub fn new(subtitles: Arc<dyn SubtitlePort>) -> Self {
+        Self { subtitles, found: Mutex::new(Kept::new(FOUND_KEPT)), converted: Mutex::new(Kept::new(SUBTITLES_KEPT)) }
     }
 }
 
@@ -126,7 +78,7 @@ pub async fn answer(conn: &mut Connection<'_>, request: &Request, route: &str, a
     let ctx = conn.ctx;
     match (request.method, route) {
         (Method::Get, "subtitles/online/fetch") => return whole(conn, request, VTT, online::vtt(ctx, request)).await,
-        (Method::Get, "thumbnail") => return whole(conn, request, "image/jpeg", thumbnail::jpeg(ctx, request)).await,
+        (Method::Get, "thumbnail") => return whole(conn, request, "image/jpeg", thumbnail(ctx, request)).await,
         _ => {}
     }
     // A browser that leaves, or stops a request, closes the connection. The work stops with it.
@@ -160,7 +112,7 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         (Method::Get, "version") => value(VersionReply { version: &ctx.version, notice: ctx.news.line() }),
         (Method::Get, "media") => {
             let (id, file) = file_of(request)?;
-            value(&*watch::media(ctx, id, file).await?)
+            value(&*media::probe(ctx, id, file).await?)
         }
         (Method::Get, "subtitles/online") => {
             let (id, file) = file_of(request)?;
@@ -168,7 +120,7 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         }
         (Method::Get, "pieces") => {
             let (id, file) = file_of(request)?;
-            value(Pieces { pieces: watch::pieces(ctx, id, file).await? })
+            value(Pieces { pieces: downloads::pieces(ctx, id, file).await? })
         }
         (Method::Get, "jobs") => {
             let jobs = owner.ask(|reply| Command::Status { refs: Vec::new(), reply }).await?;
@@ -203,7 +155,7 @@ struct VersionReply<'a> {
     notice: Option<String>,
 }
 
-/// `GET /api/pieces`: one character a run of the file, as `watch::pieces` writes them.
+/// `GET /api/pieces`: one character a run of the file, as `downloads::pieces` writes them.
 #[derive(Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(rename = "FilePieces"))]
 struct Pieces {
@@ -246,6 +198,14 @@ enum FfmpegLine {
     Progress { done: u64, size: u64 },
     Ready,
     Error { error: Error },
+}
+
+/// `GET /api/thumbnail`: a JPEG of the frame at `t` seconds.
+async fn thumbnail(ctx: &Ctx, request: &Request) -> Result<Made, Error> {
+    let (id, index) = file_of(request)?;
+    let t = number::<f64>(request, "t")?.filter(|t| t.is_finite() && *t >= 0.0);
+    let t = t.ok_or_else(|| Error::new(ErrorCode::Usage, "the request has no t parameter of zero or more seconds"))?;
+    media::thumbnail::jpeg(ctx, id, index, t).await
 }
 
 #[derive(Deserialize)]
@@ -399,7 +359,7 @@ async fn results(
 /// `POST /api/ffmpeg`: fetches ffmpeg when the engine has none, with a line of JSON as the download
 /// goes and a last line `ready` or `error`. The fetch carries on when the browser leaves.
 async fn ffmpeg(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> {
-    let running = match conn.ctx.web.ffmpeg.fetch() {
+    let running = match conn.ctx.media.ffmpeg.fetch() {
         Ok(Fetching::Running(stage)) => Some(stage),
         Ok(Fetching::Here) => None,
         Err(error) => return fail(conn, request, &error).await,

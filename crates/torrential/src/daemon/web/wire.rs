@@ -8,13 +8,14 @@ use ts_rs::{Config, TS};
 
 use super::cast::Start;
 use super::devices::{Me, Offer, Shown};
-use super::media::{Audio, Chapter, Media, Subtitle, Video};
 use super::online::{Listed, Named, Online};
 use super::play::Playing;
 use super::titles::{Found, Measured, Play, PlayingLine, Saved};
-use super::{FfmpegLine, Pieces, SearchLine, VersionReply, thumbnail};
+use super::{FfmpegLine, Pieces, SearchLine, VersionReply};
 use crate::daemon::devices::OFFER;
-use crate::daemon::downloads::Served;
+use crate::daemon::downloads::{PIECE_RUNS, Served};
+use crate::daemon::media::thumbnail;
+use crate::daemon::media::tracks::{Audio, Chapter, Media, Subtitle, Video};
 use crate::ffmpeg::fetch::Readiness;
 
 const HEADER: &str = "// The engine's JSON, as the Rust types that write it describe it. `cargo test` writes this file\n\
@@ -57,7 +58,7 @@ fn constants() -> [(&'static str, &'static str, String); 10] {
     [
         ("SHORT_ID", "Hex digits every screen shows of an ID.", torrential_core::id::SHORT_ID.to_string()),
         ("SLICES", "Equal runs of a torrent's pieces in `Progress.piece_map`.", PieceMap::SLICES.to_string()),
-        ("PIECE_RUNS", "Equal runs of a file's bytes in `GET /api/pieces`.", super::watch::RUNS.to_string()),
+        ("PIECE_RUNS", "Equal runs of a file's bytes in `GET /api/pieces`.", PIECE_RUNS.to_string()),
         ("SEARCH_LIMIT", "Results `POST /api/search` answers when it names no limit.", super::SEARCH_LIMIT.to_string()),
         ("PAIRING_MINUTES", "How long a pairing code works.", (OFFER.as_secs() / 60).to_string()),
         ("THUMBNAIL_EVERY", "Seconds of video one thumbnail stands for.", thumbnail::EVERY.to_string()),

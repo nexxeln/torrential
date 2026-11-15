@@ -10,8 +10,8 @@ use tokio::net::TcpStream;
 use torrential_core::protocol::{Request, Response};
 use torrential_core::{DeviceList, ErrorCode};
 
-use super::super::devices::names::Names;
 use super::super::http;
+use super::super::names::Names;
 use super::{GIB, Harness, MIB, torrent, written};
 
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";

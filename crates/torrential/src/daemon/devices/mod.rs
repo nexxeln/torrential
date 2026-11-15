@@ -3,8 +3,6 @@
 //! fetches its one file through a grant in the URL instead. The HTTP guard asks this who sent each
 //! request.
 
-pub mod names;
-
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
@@ -19,7 +17,7 @@ use tokio::time::Instant;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer, TorrentId};
 
 use super::db::{Db, sql_error};
-use names::Names;
+use super::names::Names;
 
 /// How long a pairing code works.
 pub(crate) const OFFER: Duration = Duration::from_secs(5 * 60);
@@ -477,7 +475,7 @@ impl Devices {
         let mut state = self.state();
         state.grants.insert(key, Grant { id, index, path: path.clone() });
         self.publish(&state);
-        Ok(CastGrant { devices: Arc::downgrade(self), key, path })
+        Ok(CastGrant { devices: Arc::downgrade(self), key, token: token.hex(), path })
     }
 
     /// The file a live grant serves at exactly `path`.
@@ -521,6 +519,7 @@ impl Devices {
 pub struct CastGrant {
     devices: Weak<Devices>,
     key: Key,
+    token: String,
     path: String,
 }
 
@@ -529,6 +528,11 @@ impl CastGrant {
     /// the TV reaches this Mac by.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// The random part of the path, which no other grant's has.
+    pub fn token(&self) -> &str {
+        &self.token
     }
 }
 

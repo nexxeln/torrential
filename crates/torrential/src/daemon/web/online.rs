@@ -11,8 +11,9 @@ use torrential_search::subtitles::{FileHash, Found, Video};
 
 use super::super::ctx::Ctx;
 use super::super::http::Request;
+use super::super::media;
 use super::super::owner::{Command, StreamFile};
-use super::{file_of, required, watch};
+use super::{file_of, required};
 
 /// `GET /api/subtitles/online`: what the engine found for the file, by the names in its torrent.
 pub async fn list(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Value, Error> {
@@ -87,19 +88,19 @@ pub async fn vtt(ctx: &Ctx, request: &Request) -> Result<Arc<Vec<u8>>, Error> {
 /// What the sources have for the file. An answer is kept for as long as the engine runs. No
 /// answer, as when the sources are down, is not kept, so the next request asks again.
 async fn found(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Found>, Error> {
-    let kept = ctx.web.found.lock().expect("no holder panics").get(&(id, index)).cloned();
+    let kept = ctx.web.found.lock().expect("no holder panics").get(&(id, index));
     if let Some(found) = kept {
         return Ok(found);
     }
     let file = ctx.owner.ask(|reply| Command::StreamFile { id, index, reply }).await?;
     let video = Video {
         titles: title::read(&file.inside, &file.torrent),
-        file_name: watch::name(&file),
+        file_name: media::name(&file),
         hash: hash(ctx, id, index, &file).await,
     };
     let Some(found) = ctx.web.subtitles.find(&video).await else { return Ok(Arc::new(Found::default())) };
     let found = Arc::new(found);
-    ctx.web.found.lock().expect("no holder panics").insert((id, index), found.clone());
+    ctx.web.found.lock().expect("no holder panics").put((id, index), found.clone());
     Ok(found)
 }
 

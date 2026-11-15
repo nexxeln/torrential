@@ -615,7 +615,7 @@ impl Connection<'_> {
             let ctx = self.ctx;
             lease.waiting(start);
             let runtime =
-                || web::watch::probed(ctx, id, index)?.duration.and_then(|s| Duration::try_from_secs_f64(s).ok());
+                || super::media::probed(ctx, id, index)?.duration.and_then(|s| Duration::try_from_secs_f64(s).ok());
             tokio::select! {
                 sent = self.body(&file, id, index, start, end, &lease) => sent?,
                 never = lease.follow(&ctx.engine, id, index, file.size, runtime) => match never {},

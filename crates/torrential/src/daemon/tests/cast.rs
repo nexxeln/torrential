@@ -16,8 +16,8 @@ use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::{Cast, CastAction, CastRequest, CastState, Error, ErrorCode, Target, TvList, VideoRef};
 
 use super::super::cast::Find;
-use super::super::devices::names::Names;
 use super::super::fake;
+use super::super::names::Names;
 use super::devices::{listening, squatter};
 use super::titles::listed;
 use super::web::{magnet_link, post};
