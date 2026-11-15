@@ -14,6 +14,10 @@ use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame
 use torrential_core::{Target, TorrentId};
 use torrential_engine as lt;
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 const PIECE: u32 = 16 * 1024;
 const SLOW: Option<NonZeroU32> = NonZeroU32::new(256 * 1024);
 /// libtorrent waits `min_reconnect_time`, 60 seconds, before it dials a peer again after
@@ -48,22 +52,21 @@ impl Home {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::cargo_bin("torrential").unwrap();
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "TORRENTIAL_TEST_ENGINE"] {
+        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::ENGINE] {
             cmd.env_remove(key);
         }
         cmd.args(args)
             .env("HOME", self.dir.path())
             .env("TORRENTIAL_HOME", self.dir.path().join("th"))
-            .env("TORRENTIAL_TEST_IDLE_TIMEOUT", "60s")
-            .env("TORRENTIAL_TEST_NETWORK", "loopback")
-            .env("TORRENTIAL_TEST_PEERS", &self.peers)
-            .env("TORRENTIAL_TEST_DISK", "roomy")
+            .env(hooks::NETWORK, "loopback")
+            .env(hooks::PEERS, &self.peers)
+            .env(hooks::DISK, "roomy")
             .timeout(Duration::from_secs(300));
         if let Some(every) = self.save_resume_every {
-            cmd.env("TORRENTIAL_TEST_SAVE_RESUME_EVERY", every);
+            cmd.env(hooks::SAVE_RESUME_EVERY, every);
         }
         if let Some(after) = self.stall_after {
-            cmd.env("TORRENTIAL_TEST_STALL_AFTER", after);
+            cmd.env(hooks::STALL_AFTER, after);
         }
         if let Some(lang) = self.lang {
             cmd.env("LANG", lang);

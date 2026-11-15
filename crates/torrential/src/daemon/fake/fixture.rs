@@ -5,11 +5,10 @@ use torrential_core::{
     Category, Error, ErrorCode, Flag, InfoHash, Release, ReleaseId, Selection, SourceOutcome, TorrentId,
 };
 
-use super::admission::Cap;
-use super::book::{Intent, JobRecord};
-use super::engine_port::{FakeTorrentFile, Swarm, fake_landing};
-use super::search_port::{self, FakeSource};
-use super::store::Store;
+use super::{Search, Source, Swarm, TorrentFile, land};
+use crate::daemon::admission::Cap;
+use crate::daemon::book::{Intent, JobRecord};
+use crate::daemon::store::Store;
 
 const KIB: u64 = 1024;
 const MIB: u64 = 1024 * KIB;
@@ -21,8 +20,8 @@ fn id(short: &str) -> InfoHash {
     InfoHash::V1(*id.as_bytes())
 }
 
-fn torrent(short: &str, name: &str, files: &[(&str, u64)]) -> FakeTorrentFile {
-    FakeTorrentFile {
+fn torrent(short: &str, name: &str, files: &[(&str, u64)]) -> TorrentFile {
+    TorrentFile {
         info_hash: id(short),
         name: name.into(),
         files: files.iter().map(|(path, size)| (path.to_string(), *size)).collect(),
@@ -30,7 +29,7 @@ fn torrent(short: &str, name: &str, files: &[(&str, u64)]) -> FakeTorrentFile {
 }
 
 struct Listing {
-    torrent: FakeTorrentFile,
+    torrent: TorrentFile,
     title: &'static str,
     source: &'static str,
     flags: &'static [Flag],
@@ -193,15 +192,68 @@ fn night() -> Vec<Listing> {
     ]
 }
 
-fn torrent_url(torrent: &FakeTorrentFile) -> String {
+/// A Linux ISO every fake search knows, and the source that lists it in the fake engine.
+struct Iso {
+    id: &'static str,
+    name: &'static str,
+    size: u64,
+    seeders: u32,
+    source: &'static str,
+}
+
+const ISOS: [Iso; 2] = [
+    Iso {
+        id: "9b521219bc48550140a666f74a29048ed78e933b",
+        name: "archlinux-2026.10.01-x86_64.iso",
+        size: 1_640_497_152,
+        seeders: 412,
+        source: "archlinux.org",
+    },
+    Iso {
+        id: "e3a1f06d2b1c8a4f5e6d7c8b9a0f1e2d3c4b5a69",
+        name: "ubuntu-24.04.5-desktop-amd64.iso",
+        size: 6_345_887_744,
+        seeders: 1873,
+        source: "knaben",
+    },
+];
+
+impl Iso {
+    /// This ISO as `source` lists it. Arch's own site lists Arch's ISO as official.
+    fn listed_by(&self, source: &str) -> Release {
+        let (id, name, size) = (self.id, self.name, self.size);
+        Release {
+            id: ReleaseId::Torrent(id.parse().expect("catalog IDs are valid")),
+            name: name.to_string(),
+            size: Some(size),
+            seeders: Some(self.seeders),
+            leechers: None,
+            published: None,
+            category: Some(Category::Software),
+            flags: (source == "archlinux.org").then_some(Flag::Official).into_iter().collect(),
+            sources: vec![source.into()],
+            magnet: Some(format!("magnet:?xt=urn:btih:{id}&dn={name}&xl={size}")),
+            torrent_url: None,
+            info_url: None,
+            span: None,
+            swarm: None,
+            failed: None,
+        }
+    }
+}
+
+/// The Linux ISOs as the one source `fake` lists them, for a test that searches only them.
+#[cfg(test)]
+pub fn isos() -> Vec<Release> {
+    ISOS.iter().map(|iso| iso.listed_by("fake")).collect()
+}
+
+fn torrent_url(torrent: &TorrentFile) -> String {
     format!("https://archive.org/download/{0}/{0}_archive.torrent", torrent.name)
 }
 
-pub fn search(now: i64) -> search_port::Fake {
-    let mut catalog = search_port::fake_catalog();
-    catalog[0].sources = vec!["archlinux.org".into()];
-    catalog[0].flags.insert(Flag::Official);
-    catalog[1].sources = vec!["knaben".into()];
+pub fn search(now: i64) -> Search {
+    let mut catalog: Vec<Release> = ISOS.iter().map(|iso| iso.listed_by(iso.source)).collect();
     let mut torrents = BTreeMap::new();
     for listing in night() {
         let t = &listing.torrent;
@@ -229,14 +281,14 @@ pub fn search(now: i64) -> search_port::Fake {
         });
     }
     let script = vec![
-        FakeSource::answers("archlinux.org", 200),
-        FakeSource::answers("archive.org", 450),
-        FakeSource::fails("apibay", 600, SourceOutcome::Http { status: 503 }),
-        FakeSource::answers("knaben", 800),
-        FakeSource::answers("torrents-csv", 1_150),
-        FakeSource::fails("nyaa", 1_500, SourceOutcome::Timeout),
+        Source::answers("archlinux.org", 200),
+        Source::answers("archive.org", 450),
+        Source::fails("apibay", 600, SourceOutcome::Http { status: 503 }),
+        Source::answers("knaben", 800),
+        Source::answers("torrents-csv", 1_150),
+        Source::fails("nyaa", 1_500, SourceOutcome::Timeout),
     ];
-    search_port::Fake::scripted(catalog, script, torrents)
+    Search::scripted(catalog, script, torrents)
 }
 
 pub fn swarm(rate: u64) -> Swarm {
@@ -248,7 +300,7 @@ pub fn swarm(rate: u64) -> Swarm {
 }
 
 struct Seed {
-    torrent: FakeTorrentFile,
+    torrent: TorrentFile,
     intent: Intent,
     done_percent: u64,
     added_days_ago: i64,
@@ -335,7 +387,7 @@ pub fn seed(store: &mut Store, downloads: &Path, now: i64) -> Result<(), Error> 
         let size: u64 = seed.torrent.files.iter().map(|(_, size)| size).sum();
         let arrived = size / 100 * seed.done_percent;
         let metainfo = seed.torrent.metainfo()?;
-        let landing = fake_landing(&metainfo, &vec![true; metainfo.files.len()], arrived, 0);
+        let landing = land(&metainfo, &vec![true; metainfo.files.len()], arrived, 0);
         let id = seed.torrent.info_hash.id();
         let added_at = now - seed.added_days_ago * DAY - 3_600;
         let record = JobRecord {
@@ -352,7 +404,7 @@ pub fn seed(store: &mut Store, downloads: &Path, now: i64) -> Result<(), Error> 
             piece_map: landing.piece_map,
             files_verified: Some(landing.files),
             title: None,
-            home: super::book::Home::Folder,
+            home: crate::daemon::book::Home::Folder,
         };
         store.insert(&record, Some(&seed.torrent.bytes()), added_at)?;
         let resume = arrived.to_string();
@@ -366,9 +418,9 @@ pub fn seed(store: &mut Store, downloads: &Path, now: i64) -> Result<(), Error> 
 mod tests {
     use std::sync::Arc;
 
+    use super::super::parse;
     use super::*;
     use crate::daemon::book::{JobEntry, Observed};
-    use crate::daemon::engine_port::parse_fake;
     use torrential_core::{PieceMap, Slice};
 
     fn filled(map: PieceMap) -> f64 {
@@ -390,7 +442,7 @@ mod tests {
         seed(&mut store, dir.path(), 0).unwrap();
         let mut mapped = Vec::new();
         for stored in store.jobs().unwrap() {
-            let metainfo = parse_fake(&stored.metainfo.unwrap()).unwrap();
+            let metainfo = parse(&stored.metainfo.unwrap()).unwrap();
             let job = JobEntry::new(stored.record, Some(Arc::new(metainfo)), Observed::Absent).view();
             let name = job.name.unwrap();
             let Some(map) = job.progress.piece_map else {

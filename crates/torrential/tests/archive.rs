@@ -9,6 +9,10 @@ use serde_json::Value;
 use sha2::Digest;
 use torrential_engine as lt;
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 const ITEM: &str = "LlamaDrama";
 const FILES: [(&str, usize); 2] = [("a.bin", 100_000), ("b.bin", 60_000)];
 const OTHERS: [&str; 7] = ["archlinux", "ubuntu", "debian", "academictorrents", "knaben", "apibay", "nyaa"];
@@ -185,16 +189,15 @@ impl Home {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::cargo_bin("torrential").unwrap();
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "TORRENTIAL_TEST_ENGINE"] {
+        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::ENGINE] {
             cmd.env_remove(key);
         }
         cmd.args(args)
             .env("HOME", self.dir.path())
             .env("TORRENTIAL_HOME", self.dir.path().join("th"))
-            .env("TORRENTIAL_TEST_IDLE_TIMEOUT", "60s")
-            .env("TORRENTIAL_TEST_NETWORK", "loopback")
-            .env("TORRENTIAL_TEST_DISK", "roomy")
-            .env("TORRENTIAL_TEST_ENDPOINTS", format!("archive.org={}/archive.org/", self.archive))
+            .env(hooks::NETWORK, "loopback")
+            .env(hooks::DISK, "roomy")
+            .env(hooks::ENDPOINTS, format!("archive.org={}/archive.org/", self.archive))
             .timeout(Duration::from_secs(120));
         cmd
     }

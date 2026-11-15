@@ -238,14 +238,14 @@ pub fn check_disk(space: Space, needed: u64, others_remaining: u64) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::engine_port::FakeTorrentFile;
+    use crate::daemon::fake;
     use crate::disk::{FakeDisk, RealDisk};
     use torrential_core::InfoHash;
 
     const DISK: Space = Space { device: 1, total: 100 * GIB, free: 20 * GIB };
 
     fn torrent(size: u64) -> Metainfo {
-        FakeTorrentFile {
+        fake::TorrentFile {
             info_hash: InfoHash::V1([7; 20]),
             name: "set".into(),
             files: vec![("a.bin".into(), size), ("b.bin".into(), GIB)],
@@ -314,7 +314,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let dir = tmp.path().join("Downloads");
         symlink(&real, &dir).unwrap();
-        let set = FakeTorrentFile {
+        let set = fake::TorrentFile {
             info_hash: InfoHash::V1([8; 20]),
             name: "set".into(),
             files: vec![("a.bin".into(), 5), ("docs/b.txt".into(), 5), ("link".into(), 0)],

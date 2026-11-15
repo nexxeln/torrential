@@ -11,6 +11,10 @@ use serde_json::Value;
 use torrential_core::SearchQuery;
 use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame};
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 const BUILTIN: [&str; 8] =
     ["archlinux", "ubuntu", "debian", "archive.org", "academictorrents", "knaben", "apibay", "nyaa"];
 
@@ -130,11 +134,10 @@ impl Home {
             vars: vec![
                 ("HOME", dir.path().display().to_string()),
                 ("TORRENTIAL_HOME", root.display().to_string()),
-                ("TORRENTIAL_TEST_IDLE_TIMEOUT", "30s".into()),
-                ("TORRENTIAL_TEST_NETWORK", "loopback".into()),
-                ("TORRENTIAL_TEST_DISK", "roomy".into()),
-                ("TORRENTIAL_TEST_ENDPOINTS", endpoints.join(",")),
-                ("TORRENTIAL_TEST_MACHINE", MAC.into()),
+                (hooks::NETWORK, "loopback".into()),
+                (hooks::DISK, "roomy".into()),
+                (hooks::ENDPOINTS, endpoints.join(",")),
+                (hooks::MACHINE, MAC.into()),
             ],
             dir,
         };
@@ -159,7 +162,7 @@ impl Home {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::cargo_bin("torrential").unwrap();
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "TORRENTIAL_TEST_ENGINE"] {
+        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::ENGINE] {
             cmd.env_remove(key);
         }
         cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str()))).timeout(Duration::from_secs(60));
@@ -230,32 +233,6 @@ fn search_ranks_what_the_sources_answered() {
         result["sources"].as_array().unwrap().iter().map(|s| format!("{} {}", s["source"], s["outcome"])).collect();
     assert_eq!(sources, [r#""knaben" "cached""#, r#""apibay" "cached""#]);
     assert_eq!((server.asked("/knaben/").len(), server.asked("/apibay/").len()), (1, 1));
-}
-
-#[test]
-fn an_idle_engine_stays_up_while_its_search_answers_are_cached() {
-    let server = Server::start(|_| vec![("/apibay/", vec![ok(fixture("apibay/q.php-ubuntu.json"))])]);
-    let mut home = Home::new(&server, &["apibay"], "");
-    home.set("TORRENTIAL_TEST_IDLE_TIMEOUT", "1s");
-    let engine = |home: &Home| home.run(&["daemon", "status", "--json"]).json()["pid"].clone();
-
-    let first = home.run(&["search", "ubuntu"]);
-    let pid = engine(&home);
-    std::thread::sleep(Duration::from_secs(3));
-    let after_idle = engine(&home);
-    let again = home.run(&["search", "ubuntu", "--json"]).json();
-
-    assert_eq!(first.code, 0, "{}", first.stderr);
-    assert!(pid.is_u64(), "{pid}");
-    assert_eq!(after_idle, pid, "the engine outlived its idle timeout");
-    let sources: Vec<String> = again["result"]["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| format!("{} {}", s["source"], s["outcome"]))
-        .collect();
-    assert_eq!(sources, [r#""apibay" "cached""#]);
-    assert_eq!(server.asked("/apibay/").len(), 1);
 }
 
 const NETINST: &str = "/debian/debian-cd/current/arm64/bt-cd/debian-13.7.0-arm64-netinst.iso.torrent";

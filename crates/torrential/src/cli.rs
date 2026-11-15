@@ -422,6 +422,9 @@ pub enum DaemonCommand {
         /// installed update
         #[arg(long)]
         service: bool,
+        /// The port for the web app and players when the one used last is not free, 0 for any
+        #[arg(long, value_name = "PORT")]
+        http_port: Option<u16>,
     },
     /// The short-lived middle process of the detached start
     #[command(hide = true)]

@@ -40,8 +40,6 @@ pub struct OwnerConfig {
     pub default_dir: PathBuf,
     pub probe_dir: PathBuf,
     pub max_active: usize,
-    /// Only tests set one. Every other engine runs until it is stopped.
-    pub idle_timeout: Option<Duration>,
     pub save_resume_every: Duration,
     pub stall_after: Duration,
     pub writes_stop_within: Duration,
@@ -201,8 +199,6 @@ pub enum Command {
     Stream { id: TorrentId, index: u32, reply: Reply<(StreamFile, Lease)> },
     Library { shelving: Shelving, reply: Reply<()> },
     RecordResults(Vec<(Release, Option<SavedLink>)>),
-    Connected,
-    Disconnected { keep_until: Option<Instant> },
     Shutdown { reply: oneshot::Sender<()> },
     Restart { reply: Reply<()> },
 }
@@ -333,9 +329,6 @@ pub struct Owner {
     disk: Box<dyn Disk>,
     updates: broadcast::Sender<Update>,
     config: OwnerConfig,
-    connections: usize,
-    idle_since: Instant,
-    keep_until: Option<Instant>,
     resume_saved_at: Instant,
 }
 
@@ -384,9 +377,6 @@ impl Owner {
             disk,
             updates,
             config,
-            connections: 0,
-            idle_since: Instant::now(),
-            keep_until: None,
             resume_saved_at: Instant::now(),
         };
         // Nothing is in the engine yet, so what a removal cut short by a crash left goes now.
@@ -501,11 +491,6 @@ impl Owner {
                 let _ = reply.send(self.library(shelving));
             }
             Command::RecordResults(releases) => self.record_results(releases),
-            Command::Connected => self.connections += 1,
-            Command::Disconnected { keep_until } => {
-                self.connections = self.connections.saturating_sub(1);
-                self.keep_until = self.keep_until.max(keep_until);
-            }
             Command::Shutdown { reply } => self.begin_stop(Stopper::Exit(Some(reply))),
             Command::Restart { reply } => self.begin_stop(Stopper::Update(reply)),
         }
@@ -1797,7 +1782,6 @@ impl Owner {
         self.expire_metadata(now);
         self.finish_pauses();
         self.finish_stop_if_done();
-        self.check_idle(now);
         self.save_progress(now);
         self.finish_deletions();
         self.leave();
@@ -1837,23 +1821,6 @@ impl Owner {
             if job.record.intent == Intent::Running && job.observed == Observed::InEngine(Phase::Downloading) {
                 self.engine.send(EngineCommand::SaveResumeIfProgressed(job.id()));
             }
-        }
-    }
-
-    fn busy(&self) -> bool {
-        self.jobs.values().any(|j| {
-            j.observed.occupies_slot() || j.observed == Observed::InEngine(Phase::Pausing) || j.verify.is_some()
-        }) || !self.probes.is_empty()
-            || !self.pauses.is_empty()
-            || !self.draining.is_empty()
-    }
-
-    fn check_idle(&mut self, now: Instant) {
-        let Some(timeout) = self.config.idle_timeout else { return };
-        if self.connections > 0 || self.busy() || self.stopping.is_some() {
-            self.idle_since = now;
-        } else if now.duration_since(self.idle_since) >= timeout && self.keep_until.is_none_or(|until| now >= until) {
-            self.begin_stop(Stopper::Exit(None));
         }
     }
 

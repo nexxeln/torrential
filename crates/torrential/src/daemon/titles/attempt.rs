@@ -605,7 +605,7 @@ fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::engine_port::FakeTorrentFile;
+    use crate::daemon::fake;
     use torrential_core::InfoHash;
 
     fn release(n: u8) -> Release {
@@ -692,7 +692,7 @@ mod tests {
 
     fn torrent(name: &str, files: &[(&str, u64)]) -> Metainfo {
         let files = files.iter().map(|(path, size)| (path.to_string(), *size)).collect();
-        FakeTorrentFile { info_hash: InfoHash::V1([7; 20]), name: name.into(), files }.metainfo().unwrap()
+        fake::TorrentFile { info_hash: InfoHash::V1([7; 20]), name: name.into(), files }.metainfo().unwrap()
     }
 
     #[test]

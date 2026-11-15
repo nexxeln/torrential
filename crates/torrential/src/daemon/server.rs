@@ -216,9 +216,7 @@ async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -
 }
 
 pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
-    ctx.owner.tell(Command::Connected);
     let _ = serve(&ctx, stream).await;
-    ctx.owner.tell(Command::Disconnected { keep_until: ctx.search.answers_expire() });
 }
 
 async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {

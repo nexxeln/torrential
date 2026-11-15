@@ -8,15 +8,13 @@ use torrential_core::protocol::{
 use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
 use super::admission::GIB;
-use super::engine_port::{
-    AddTorrent, EngineEvent, EnginePort, Fake, FakeTorrentFile, MetaFile, Metainfo, ParseTorrent, Swarm, disagreement,
-    parse_fake,
-};
+use super::engine_port::{AddTorrent, EngineEvent, EnginePort, MetaFile, Metainfo, ParseTorrent};
+use super::fake::{self, Swarm};
 use super::owner::deleter::TrashPause;
 use super::owner::plays::{IDLE_AFTER, Plays};
 use super::owner::trash::Trash;
 use super::owner::{Command, Ended, OwnerConfig};
-use super::search_port::{self, SearchPort, fake_catalog};
+use super::search_port::SearchPort;
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
@@ -41,7 +39,7 @@ struct Harness {
     running: Running,
     swarm: Swarm,
     disk: FakeDisk,
-    search: search_port::Fake,
+    search: fake::Search,
     outside: Outside,
 }
 
@@ -98,7 +96,6 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
         default_dir: dir.join("downloads"),
         probe_dir: dir.join("probes"),
         max_active: super::MAX_ACTIVE,
-        idle_timeout: None,
         save_resume_every: Duration::from_millis(100),
         stall_after: STALL,
         writes_stop_within: WRITES_STOP_WITHIN,
@@ -111,40 +108,41 @@ fn config(dir: &std::path::Path, outside: &Outside) -> OwnerConfig {
 
 impl Harness {
     fn new() -> Self {
-        Self::with_catalog(fake_catalog())
+        Self::with_catalog(fake::isos())
     }
 
     fn with_catalog(catalog: Vec<torrential_core::Release>) -> Self {
-        Self::with_search(search_port::Fake::new(catalog))
+        Self::with_search(fake::Search::new(catalog))
     }
 
-    fn with_search(search: search_port::Fake) -> Self {
+    fn with_search(search: fake::Search) -> Self {
         Self::with_outside(search, Outside::default())
     }
 
-    fn with_outside(search: search_port::Fake, outside: Outside) -> Self {
+    fn with_outside(search: fake::Search, outside: Outside) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (swarm, disk) = (Swarm::new(0), FakeDisk::new(ROOMY));
         let engine: Box<dyn EnginePort> = match &outside.gate {
-            Some(gate) => Box::new(Gated { port: Fake::new(swarm.clone()), gate: gate.clone() }),
-            None => Box::new(Fake::new(swarm.clone())),
+            Some(gate) => Box::new(Gated { port: fake::Engine::new(swarm.clone()), gate: gate.clone() }),
+            None => Box::new(fake::Engine::new(swarm.clone())),
         };
-        let running = Self::boot(&dir, engine, parse_fake, &disk, &search, &outside);
+        let running = Self::boot(&dir, engine, fake::parse, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 
     fn with_titles(catalog: Arc<dyn CatalogPort>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let outside = Outside { catalog, ..Outside::default() };
-        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), fake::Search::new(fake::isos()));
+        let running =
+            Self::boot(&dir, Box::new(fake::Engine::new(swarm.clone())), fake::parse, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 
     fn with_engine(engine: impl FnOnce(&std::path::Path) -> Box<dyn EnginePort>, parse: ParseTorrent) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let outside = Outside::default();
-        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
+        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), fake::Search::new(fake::isos()));
         let running = Self::boot(&dir, engine(dir.path()), parse, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
@@ -153,10 +151,11 @@ impl Harness {
         let dir = tempfile::tempdir().unwrap();
         let outside = Outside::default();
         let mut store = Store::open(&dir.path().join("state.db")).unwrap();
-        super::fixture::seed(&mut store, &dir.path().join("downloads"), 0).unwrap();
+        super::fake::fixture::seed(&mut store, &dir.path().join("downloads"), 0).unwrap();
         drop(store);
-        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), search_port::Fake::new(fake_catalog()));
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        let (swarm, disk, search) = (Swarm::new(0), FakeDisk::new(ROOMY), fake::Search::new(fake::isos()));
+        let running =
+            Self::boot(&dir, Box::new(fake::Engine::new(swarm.clone())), fake::parse, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 
@@ -165,7 +164,7 @@ impl Harness {
         engine: Box<dyn EnginePort>,
         parse: ParseTorrent,
         disk: &FakeDisk,
-        search: &search_port::Fake,
+        search: &fake::Search,
         outside: &Outside,
     ) -> Running {
         let ports = Ports {
@@ -209,7 +208,8 @@ impl Harness {
         running.owner.abort();
         let _ = running.owner.await;
         drop(running.ctx);
-        let running = Self::boot(&dir, Box::new(Fake::new(swarm.clone())), parse_fake, &disk, &search, &outside);
+        let running =
+            Self::boot(&dir, Box::new(fake::Engine::new(swarm.clone())), fake::parse, &disk, &search, &outside);
         Self { dir, running, swarm, disk, search, outside }
     }
 
@@ -286,11 +286,11 @@ impl Harness {
         }
     }
 
-    async fn file_bytes(&self, t: &FakeTorrentFile) -> Vec<u64> {
+    async fn file_bytes(&self, t: &fake::TorrentFile) -> Vec<u64> {
         self.files(&prefix(t)).await.files.iter().map(|f| f.verified).collect()
     }
 
-    fn torrent_file(&self, torrent: &FakeTorrentFile) -> Target {
+    fn torrent_file(&self, torrent: &fake::TorrentFile) -> Target {
         let path = self.dir.path().join(format!("{}.torrent", torrent.name));
         std::fs::write(&path, torrent.bytes()).unwrap();
         Target::TorrentFile(path)
@@ -301,7 +301,7 @@ impl Harness {
     }
 
     /// The folder the first play of `t` downloads into.
-    fn play_folder(&self, t: &FakeTorrentFile) -> PathBuf {
+    fn play_folder(&self, t: &fake::TorrentFile) -> PathBuf {
         self.dir.path().join("plays").join(format!("{}-0", &t.info_hash.id().to_hex()[..16]))
     }
 }
@@ -428,19 +428,19 @@ impl<P: EnginePort> EnginePort for Gated<P> {
     }
 }
 
-fn torrent(n: u8, name: &str, files: &[(&str, u64)]) -> FakeTorrentFile {
-    FakeTorrentFile {
+fn torrent(n: u8, name: &str, files: &[(&str, u64)]) -> fake::TorrentFile {
+    fake::TorrentFile {
         info_hash: InfoHash::V1([n; 20]),
         name: name.into(),
         files: files.iter().map(|(p, s)| (p.to_string(), *s)).collect(),
     }
 }
 
-fn magnet(torrent: &FakeTorrentFile) -> Target {
+fn magnet(torrent: &fake::TorrentFile) -> Target {
     Target::Magnet(format!("magnet:?xt=urn:btih:{}&dn={}", torrent.info_hash.id().to_hex(), torrent.name))
 }
 
-fn prefix(t: &FakeTorrentFile) -> String {
+fn prefix(t: &fake::TorrentFile) -> String {
     t.info_hash.id().to_hex()[..6].to_string()
 }
 
@@ -604,7 +604,7 @@ async fn pause_and_rm_are_idempotent_and_rm_keeps_the_path() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_ambiguous_prefix_lists_the_candidates() {
-    let mut catalog = fake_catalog();
+    let mut catalog = fake::isos();
     let mut twin = catalog[1].clone();
     twin.id = torrential_core::ReleaseId::Torrent("e3a1c4aaaa000000000000000000000000000000".parse().unwrap());
     twin.name = "Ubuntu 24.04.5 desktop (repack)".into();
@@ -696,7 +696,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
     );
     h.changes(Request::Remove { refs: vec![prefix(&film)], delete: false }).await.unwrap();
 
-    let busy: Vec<FakeTorrentFile> = (45..48).map(|n| torrent(n, &format!("busy{n}"), &[("f", GIB)])).collect();
+    let busy: Vec<fake::TorrentFile> = (45..48).map(|n| torrent(n, &format!("busy{n}"), &[("f", GIB)])).collect();
     for t in &busy {
         h.get(h.torrent_file(t), &[]).await.unwrap();
     }
@@ -768,7 +768,7 @@ fn request(h: &Harness, target: Target) -> GetRequest {
     }
 }
 
-async fn over_its_setup_cap(h: &Harness, n: u8) -> FakeTorrentFile {
+async fn over_its_setup_cap(h: &Harness, n: u8) -> fake::TorrentFile {
     let film = torrent(n, &format!("film{n}"), &[("film.mkv", 2 * GIB), ("extras.mkv", GIB)]);
     h.swarm.publish(film.clone());
     h.get_with(GetRequest { setup_max_size: Some(2 * GIB), ..request(h, magnet(&film)) }).await.unwrap();
@@ -870,7 +870,7 @@ async fn other_downloads_on_the_same_disk_count_against_free_space() {
 #[tokio::test(flavor = "multi_thread")]
 async fn three_downloads_run_at_once_and_the_rest_queue() {
     let h = Harness::new();
-    let torrents: Vec<FakeTorrentFile> = (10..14).map(|n| torrent(n, &format!("t{n}"), &[("f", GIB)])).collect();
+    let torrents: Vec<fake::TorrentFile> = (10..14).map(|n| torrent(n, &format!("t{n}"), &[("f", GIB)])).collect();
     let mut outcomes = Vec::new();
     for t in &torrents {
         outcomes.push(h.get(h.torrent_file(t), &[]).await.unwrap().outcome);
@@ -901,7 +901,7 @@ async fn two_concurrent_gets_of_one_torrent_make_one_download() {
 async fn both_hashes_of_a_hybrid_torrent_name_one_download() {
     let h = Harness::new();
     let v2 = [0x77; 32];
-    let hybrid = FakeTorrentFile {
+    let hybrid = fake::TorrentFile {
         info_hash: InfoHash::Hybrid { v1: [0x21; 20], v2 },
         name: "hybrid".into(),
         files: vec![("hybrid".into(), GIB)],
@@ -917,7 +917,7 @@ async fn both_hashes_of_a_hybrid_torrent_name_one_download() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_downloads_that_turn_out_to_be_one_hybrid_torrent_converge() {
     let h = Harness::new();
-    let hybrid = FakeTorrentFile {
+    let hybrid = fake::TorrentFile {
         info_hash: InfoHash::Hybrid { v1: [0x31; 20], v2: [0x32; 32] },
         name: "hybrid".into(),
         files: vec![("hybrid".into(), GIB)],
@@ -1071,7 +1071,7 @@ async fn a_running_downloads_files_agree_with_its_piece_map() {
     let files = h.file_bytes(&set).await;
     let map = progress.piece_map.expect("a running download has a piece map");
     let wanted = [true, false, true];
-    assert_eq!(disagreement(&set.metainfo().unwrap(), &wanted, progress.verified, &files, &map), None, "{map}");
+    assert_eq!(fake::disagreement(&set.metainfo().unwrap(), &wanted, progress.verified, &files, &map), None, "{map}");
     assert!(files[2] > 0, "c.bin, last in the torrent, gets pieces too: {files:?}");
 }
 
@@ -1081,7 +1081,7 @@ fn assert_files_agree(job: &Job, reply: &FilesReply) {
     let wanted: Vec<bool> = reply.files.iter().map(|f| f.selected).collect();
     let bytes: Vec<u64> = reply.files.iter().map(|f| f.verified).collect();
     let map = job.progress.piece_map.expect("an unfinished download has a piece map");
-    let wrong = disagreement(&metainfo, &wanted, job.progress.verified, &bytes, &map);
+    let wrong = fake::disagreement(&metainfo, &wanted, job.progress.verified, &bytes, &map);
     assert_eq!(wrong, None, "{:?} {} {map}", job.name, job.status.name());
 }
 
@@ -1239,7 +1239,7 @@ async fn a_result_with_only_a_torrent_url_is_fetched_once_found() {
         name: "debian.iso".into(),
         magnet: None,
         torrent_url: Some(url.into()),
-        ..fake_catalog().remove(0)
+        ..fake::isos().remove(0)
     };
     let h = Harness::with_catalog(vec![row]);
     h.search.serve_torrent(url, iso.bytes());
@@ -1269,7 +1269,7 @@ async fn a_full_id_of_a_search_result_fetches_its_torrent_as_a_prefix_does() {
         name: "Big Buck Bunny".into(),
         magnet: Some(format!("magnet:?xt=urn:btih:{id}&dn=Big%20Buck%20Bunny")),
         torrent_url: Some(url.into()),
-        ..fake_catalog().remove(0)
+        ..fake::isos().remove(0)
     };
     let h = Harness::with_catalog(vec![row]);
     h.search.serve_torrent(url, bunny.bytes());
@@ -1307,20 +1307,19 @@ async fn a_slow_search_does_not_delay_a_pause() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_streaming_search_sends_results_as_sources_answer() {
-    use search_port::FakeSource;
     let listed = |hex: &str, name: &str, source: &str| torrential_core::Release {
         id: torrential_core::ReleaseId::Torrent(hex.repeat(20).parse().unwrap()),
         name: name.into(),
         sources: vec![source.into()],
-        ..fake_catalog().remove(0)
+        ..fake::isos().remove(0)
     };
     let catalog = vec![listed("aa", "dead \u{1b}[31mred", "slow"), listed("bb", "dead fast", "quick")];
     let script = vec![
-        FakeSource::answers("quick", 0),
-        FakeSource::fails("broken", 20, torrential_core::SourceOutcome::Http { status: 503 }),
-        FakeSource::answers("slow", 60),
+        fake::Source::answers("quick", 0),
+        fake::Source::fails("broken", 20, torrential_core::SourceOutcome::Http { status: 503 }),
+        fake::Source::answers("slow", 60),
     ];
-    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, Default::default()));
+    let h = Harness::with_search(fake::Search::scripted(catalog, script, Default::default()));
     let (client, served) = tokio::net::UnixStream::pair().unwrap();
     tokio::spawn(server::connection(h.running.ctx.clone(), served));
     let (mut rd, mut wr) = client.into_split();
@@ -1391,7 +1390,10 @@ async fn watching_every_download_includes_ones_started_later() {
 async fn every_pause_returns_once_writes_stop_or_fails_when_they_do_not() {
     let gate = Gate::default();
     let engine_gate = gate.clone();
-    let h = Harness::with_engine(|_| Box::new(Gated { port: Fake::new(Swarm::new(0)), gate: engine_gate }), parse_fake);
+    let h = Harness::with_engine(
+        |_| Box::new(Gated { port: fake::Engine::new(Swarm::new(0)), gate: engine_gate }),
+        fake::parse,
+    );
     let iso = torrent(60, "arch.iso", &[("arch.iso", GIB)]);
     h.get(h.torrent_file(&iso), &[]).await.unwrap();
     h.until("downloading", |jobs| jobs[0].status.name() == "downloading").await;
@@ -1478,7 +1480,7 @@ impl Seeder {
             let state = dir.join("state");
             std::fs::create_dir_all(&state).unwrap();
             let network = super::libtorrent::Network::Loopback { peers };
-            let search = Arc::new(search_port::Fake::new(Vec::new()));
+            let search = Arc::new(fake::Search::new(Vec::new()));
             let port = super::libtorrent::Libtorrent::start(&state, network, search, tokio::runtime::Handle::current())
                 .unwrap();
             Box::new(Gated { port, gate })
@@ -1716,7 +1718,7 @@ async fn play_adds_its_files_to_a_paused_download_and_resumes_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_played_download_runs_while_every_slot_is_taken() {
     let h = Harness::new();
-    let torrents: Vec<FakeTorrentFile> = (94..98).map(|n| torrent(n, &format!("t{n}"), &[("f.mkv", GIB)])).collect();
+    let torrents: Vec<fake::TorrentFile> = (94..98).map(|n| torrent(n, &format!("t{n}"), &[("f.mkv", GIB)])).collect();
     for t in &torrents {
         h.get(h.torrent_file(t), &[]).await.unwrap();
     }
@@ -1780,37 +1782,24 @@ mod web;
 
 #[test]
 fn settings_for_tests_reach_only_an_engine_a_test_started() {
-    use crate::env::Env;
+    use crate::env::{Env, hooks};
     let env =
         |pairs: &[(&str, &str)]| Env::from_pairs([("TORRENTIAL_HOME", "/th")].into_iter().chain(pairs.iter().copied()));
-    let pause = |pairs: &[(&str, &str)]| super::deletion_pause(&env(pairs));
-    let held = ("TORRENTIAL_TEST_DELETION_PAUSE", "30s");
-    assert_eq!(pause(&[held]), Duration::ZERO);
-    assert_eq!(pause(&[held, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(30));
-    let long = ("TORRENTIAL_TEST_DELETION_PAUSE", "2h");
-    assert_eq!(pause(&[long, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(60), "and a minute at most");
-    let public = ("TORRENTIAL_TEST_NETWORK", "public");
-    assert_eq!(pause(&[held, public]), Duration::ZERO, "an engine on the public network is no test engine");
-
+    let public = (hooks::NETWORK, "public");
     let trash = |pairs: &[(&str, &str)]| {
         let env = env(pairs);
         super::trash(&env, &crate::paths::Paths::resolve(&env, 501, None).unwrap())
     };
-    let named = ("TORRENTIAL_TEST_TRASH", "/tmp/trash");
+    let named = (hooks::TRASH, "/tmp/trash");
     let system = Trash::system(std::path::Path::new("/home/ada/.local/share"));
     assert_eq!(trash(&[named, ("HOME", "/home/ada")]), system);
     assert_eq!(trash(&[named, public, ("HOME", "/home/ada")]), system);
-    assert_eq!(trash(&[named, ("TORRENTIAL_TEST_ENGINE", "fake")]), Trash::At("/tmp/trash".into()));
-    assert_eq!(trash(&[("TORRENTIAL_TEST_NETWORK", "loopback")]), Trash::At("/th/state/trash".into()));
+    assert_eq!(trash(&[named, (hooks::ENGINE, "fake")]), Trash::At("/tmp/trash".into()));
+    assert_eq!(trash(&[(hooks::NETWORK, "loopback")]), Trash::At("/th/state/trash".into()));
 
-    let idle = |pairs: &[(&str, &str)]| super::plays_idle(&env(pairs));
-    let quick = ("TORRENTIAL_TEST_PLAYS_IDLE", "1s");
+    let idle = |pairs: &[(&str, &str)]| super::plays_idle(env(pairs).test());
+    let quick = (hooks::PLAYS_IDLE, "1s");
     assert_eq!(idle(&[quick]), IDLE_AFTER);
     assert_eq!(idle(&[quick, public]), IDLE_AFTER);
-    assert_eq!(idle(&[quick, ("TORRENTIAL_TEST_NETWORK", "loopback")]), Duration::from_secs(1));
-
-    let trash_pause = |pairs: &[(&str, &str)]| super::trash_pause(&env(pairs));
-    let held = ("TORRENTIAL_TEST_TRASH_PAUSE", "5s");
-    assert_eq!(trash_pause(&[held, public]), Duration::ZERO);
-    assert_eq!(trash_pause(&[held, ("TORRENTIAL_TEST_ENGINE", "fake")]), Duration::from_secs(5));
+    assert_eq!(idle(&[quick, (hooks::NETWORK, "loopback")]), Duration::from_secs(1));
 }

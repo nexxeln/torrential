@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,7 @@ use torrential_search::catalog::CatalogConfig;
 use torrential_search::subtitles::SubtitleConfig;
 use torrential_search::{SearchConfig, TorznabConfig};
 
-use crate::env::Env;
+use crate::env::{Env, hooks};
 use crate::fsutil::{Writes, write_atomic};
 use crate::paths::Paths;
 use crate::player::Choice;
@@ -151,10 +150,12 @@ impl Config {
                 Config { file: Some(path), ..config }
             }
         };
-        config.search.endpoints = test_endpoints(env, "TORRENTIAL_TEST_ENDPOINTS")?;
-        config.subtitles.endpoints = test_endpoints(env, "TORRENTIAL_TEST_SUBTITLE_ENDPOINTS")?;
-        if let Some(endpoint) = env.var("TORRENTIAL_TEST_CATALOG_ENDPOINT") {
-            config.catalog.endpoint = Some(endpoint.to_string());
+        if let Some(test) = env.test() {
+            config.search.endpoints = test.endpoints(hooks::ENDPOINTS)?;
+            config.subtitles.endpoints = test.endpoints(hooks::SUBTITLE_ENDPOINTS)?;
+            if let Some(endpoint) = test.var(hooks::CATALOG_ENDPOINT) {
+                config.catalog.endpoint = Some(endpoint.to_string());
+            }
         }
         Ok(config)
     }
@@ -440,17 +441,6 @@ fn invalid(path: &Path, line: Option<u64>, message: &str) -> Error {
 }
 
 /// Replacement base URLs for tests, as `name=url` pairs separated by commas in the variable `key`.
-fn test_endpoints(env: &Env, key: &str) -> Result<BTreeMap<String, String>, Error> {
-    let Some(list) = env.var(key) else { return Ok(BTreeMap::new()) };
-    list.split(',')
-        .map(|pair| {
-            pair.split_once('=')
-                .map(|(name, url)| (name.trim().to_string(), url.trim().to_string()))
-                .ok_or_else(|| Error::new(ErrorCode::Usage, format!("{key} has {pair:?}, which is not name=url")))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,8 +765,10 @@ sources:
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().display().to_string();
         let test = "http://127.0.0.1:9/";
-        let env = Env::from_pairs([("TORRENTIAL_HOME", home.as_str()), ("TORRENTIAL_TEST_CATALOG_ENDPOINT", test)]);
+        let env = Env::from_pairs([("TORRENTIAL_HOME", home.as_str()), (hooks::CATALOG_ENDPOINT, test)]);
         let paths = Paths::resolve(&env, 501, None).unwrap();
+        assert_eq!(Config::load(&paths, &env).unwrap().catalog.endpoint, None, "only a test process reads it");
+        let env = env.with(hooks::NETWORK, "loopback");
         assert_eq!(Config::load(&paths, &env).unwrap().catalog.endpoint.as_deref(), Some(test));
     }
 

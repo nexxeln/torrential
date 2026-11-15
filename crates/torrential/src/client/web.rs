@@ -9,7 +9,7 @@ use torrential_core::{Error, ErrorCode};
 use super::connect::Conn;
 use super::emit;
 use crate::cli::WebArgs;
-use crate::env::Env;
+use crate::env::{Env, hooks};
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, Mode, Typed};
 
@@ -43,11 +43,10 @@ pub fn run(conn: &Conn, args: WebArgs, mode: Mode, env: &Env) -> Result<u8, Erro
     Ok(emit(mode, &doc, &Typed { kind: "web", body: Web { url, opened } }))
 }
 
-/// Opens `url` in the default browser. Tests name a program in `TORRENTIAL_TEST_OPENER` to run in
-/// its place.
+/// Opens `url` in the default browser. Tests name a program in `OPENER` to run in its place.
 fn open(url: &str, env: &Env) -> Result<(), Error> {
-    let program = match env.var("TORRENTIAL_TEST_OPENER") {
-        Some(program) => PathBuf::from(program),
+    let program = match env.test().and_then(|test| test.path(hooks::OPENER)) {
+        Some(program) => program.to_path_buf(),
         None if cfg!(target_os = "macos") => PathBuf::from("/usr/bin/open"),
         None => PathBuf::from("xdg-open"),
     };

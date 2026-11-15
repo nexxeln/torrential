@@ -9,6 +9,10 @@ use assert_cmd::Command;
 use serde_json::{Value, json};
 use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame};
 
+#[allow(dead_code)]
+#[path = "../src/env/hooks.rs"]
+mod hooks;
+
 /// The archive.org release of Night of the Living Dead, which a play tries first.
 const ARCHIVE: &str = "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c";
 /// Its DVD release on archive.org, which a play tries next.
@@ -45,12 +49,11 @@ impl Home {
         let mut all = vec![
             ("HOME", dir.path().display().to_string()),
             ("TORRENTIAL_HOME", dir.path().join("th").display().to_string()),
-            ("TORRENTIAL_TEST_ENGINE", "fake".to_string()),
-            ("TORRENTIAL_TEST_FAKE_RATE", "1MiB".to_string()),
-            ("TORRENTIAL_TEST_IDLE_TIMEOUT", "30s".to_string()),
-            ("TORRENTIAL_TEST_NETWORK", "loopback".to_string()),
-            ("TORRENTIAL_TEST_MACHINE", MAC.to_string()),
-            ("TORRENTIAL_TEST_HTTP_PORT", "0".to_string()),
+            (hooks::ENGINE, "fake".to_string()),
+            (hooks::FAKE_RATE, "1MiB".to_string()),
+            (hooks::NETWORK, "loopback".to_string()),
+            (hooks::MACHINE, MAC.to_string()),
+            (hooks::HTTP_PORT, "0".to_string()),
             ("PATH", format!("{}:/usr/bin:/bin", bin.display())),
         ];
         all.extend(vars.iter().map(|(k, v)| (*k, v.to_string())));
@@ -59,7 +62,7 @@ impl Home {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_torrential"));
-        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "TORRENTIAL_TEST_VERSION"] {
+        for key in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", hooks::VERSION] {
             cmd.env_remove(key);
         }
         cmd.args(args).envs(self.vars.iter().map(|(k, v)| (*k, v.as_str())));
@@ -229,11 +232,7 @@ fn sources_lists_a_films_releases_in_the_order_play_tries_them() {
 
 #[test]
 fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
-    let home = Home::new(&[
-        ("TORRENTIAL_TEST_DEAD", ARCHIVE),
-        ("TORRENTIAL_TEST_TITLE_WAIT", "1s"),
-        ("TORRENTIAL_TEST_FAKE_RATE", "100MiB"),
-    ]);
+    let home = Home::new(&[(hooks::DEAD, ARCHIVE), (hooks::TITLE_WAIT, "1s"), (hooks::FAKE_RATE, "100MiB")]);
     let doc = home.json(&["get", "tt0063350", "--json"]);
     let title = &doc["title"];
     assert_eq!(
@@ -257,7 +256,7 @@ fn get_moves_past_a_dead_release_and_names_the_one_that_started() {
 
 #[test]
 fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
-    let home = Home::new(&[("TORRENTIAL_TEST_DEAD", ARCHIVE), ("TORRENTIAL_TEST_TITLE_WAIT", "1s")]);
+    let home = Home::new(&[(hooks::DEAD, ARCHIVE), (hooks::TITLE_WAIT, "1s")]);
     let run = home.run(&["play", "tt0063350", "--source", "4c1e9a", "--json"]);
     let doc: Value = serde_json::from_str(&run.stdout).unwrap();
     assert_eq!(
@@ -283,7 +282,7 @@ fn a_failed_title_play_lists_in_json_each_release_it_tried_and_why() {
 
 #[test]
 fn sources_lists_a_release_that_failed_lately_last_and_says_why() {
-    let home = Home::new(&[("TORRENTIAL_TEST_DEAD", ARCHIVE), ("TORRENTIAL_TEST_TITLE_WAIT", "1s")]);
+    let home = Home::new(&[(hooks::DEAD, ARCHIVE), (hooks::TITLE_WAIT, "1s")]);
     assert_eq!(home.run(&["play", "tt0063350", "--source", "4c1e9a", "--json"]).code, 7);
     let doc = home.json(&["sources", "tt0063350", "--json"]);
     let releases: Vec<String> = doc["result"]["releases"]

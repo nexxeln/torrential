@@ -748,10 +748,10 @@ fn schema_document() {
 
 fn sample(code: ErrorCode) -> Error {
     use crate::daemon::admission::{self, Plan};
-    use crate::daemon::engine_port::FakeTorrentFile;
+    use crate::daemon::fake;
     use crate::disk::Space;
     let film = || {
-        FakeTorrentFile {
+        fake::TorrentFile {
             info_hash: InfoHash::V1([0x6b; 20]),
             name: "night".into(),
             files: vec![("Night.mp4".into(), 70 * GIB)],
@@ -782,7 +782,7 @@ fn sample(code: ErrorCode) -> Error {
         ),
         ErrorCode::ConfirmationRequired => given(code, "deleting files needs confirmation", "add --yes to confirm"),
         ErrorCode::InvalidRef => torrential_core::Target::parse("9b5", Path::new("/")).unwrap_err(),
-        ErrorCode::InvalidTorrent => crate::daemon::engine_port::parse_fake(b"<html>").unwrap_err(),
+        ErrorCode::InvalidTorrent => fake::parse(b"<html>").unwrap_err(),
         ErrorCode::NotFound => {
             let prefix = "9b52".parse().unwrap();
             crate::daemon::resolve::prefix(&prefix, &[], &[], crate::daemon::resolve::Scope::Downloads, "pause")

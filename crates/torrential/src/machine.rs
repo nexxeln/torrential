@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use torrential_core::{Arch, Display, Error, ErrorCode, Language, Machine, Os};
 
-use crate::env::Env;
+use crate::env::{Env, hooks};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn detect(env: &Env) -> Result<Machine, Error> {
-    if let Some(json) = env.var("TORRENTIAL_TEST_MACHINE") {
+    if let Some(json) = env.test().and_then(|test| test.var(hooks::MACHINE)) {
         return serde_json::from_str(json)
-            .map_err(|e| Error::new(ErrorCode::Usage, format!("TORRENTIAL_TEST_MACHINE is not a machine: {e}")));
+            .map_err(|e| Error::new(ErrorCode::Usage, format!("{} is not a machine: {e}", hooks::MACHINE)));
     }
     let os = Os::of_host();
     let display = match os {
@@ -28,7 +28,7 @@ pub fn detect(env: &Env) -> Result<Machine, Error> {
 
 /// The language `detect` reads, without waiting for its display probe.
 pub fn system_language(env: &Env) -> Option<Language> {
-    match env.var("TORRENTIAL_TEST_MACHINE") {
+    match env.test().and_then(|test| test.var(hooks::MACHINE)) {
         Some(_) => detect(env).ok()?.language,
         None => language(Os::of_host(), env),
     }
@@ -192,13 +192,10 @@ mod tests {
 
     #[test]
     fn a_test_machine_replaces_detection() {
-        let env = Env::from_pairs([(
-            "TORRENTIAL_TEST_MACHINE",
-            r#"{"os": "linux", "display": null, "arch": "x86_64", "language": "en"}"#,
-        )]);
-        let machine = detect(&env).unwrap();
+        let test = |json| Env::from_pairs([(hooks::NETWORK, "loopback"), (hooks::MACHINE, json)]);
+        let machine = detect(&test(r#"{"os": "linux", "display": null, "arch": "x86_64", "language": "en"}"#)).unwrap();
         assert_eq!((machine.os, machine.display, machine.arch), (Os::Linux, None, Some(Arch::X86_64)));
-        let bad = detect(&Env::from_pairs([("TORRENTIAL_TEST_MACHINE", "{}")])).unwrap_err();
+        let bad = detect(&test("{}")).unwrap_err();
         assert_eq!(bad.message, "TORRENTIAL_TEST_MACHINE is not a machine: missing field `os` at line 1 column 2");
     }
 

@@ -85,11 +85,6 @@ impl ResultCache {
         self.lock().recent.get(id)?.saved.clone()
     }
 
-    /// When the newest answer stops answering. `None` while no answer is kept.
-    pub fn expires(&self) -> Option<Instant> {
-        self.lock().answers.values().map(|(at, _)| *at + TTL).max()
-    }
-
     pub(crate) fn answer(&self, key: &AnswerKey, now: Instant) -> Option<Arc<Vec<Observation>>> {
         let state = self.lock();
         let (at, rows) = state.answers.get(key)?;

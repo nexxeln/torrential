@@ -17,8 +17,8 @@ use torrential_core::{
 use torrential_search::catalog::Picture;
 
 use super::super::admission::GIB;
-use super::super::engine_port::FakeTorrentFile;
-use super::super::search_port::{self, BoxFuture, FakeSource, SearchPort, fake_catalog};
+use super::super::fake;
+use super::super::search_port::{self, BoxFuture, SearchPort};
 use super::super::titles::catalog_port::{self, CatalogPort};
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
 use crate::ffmpeg::fetch::{Build, Fetch};
@@ -189,7 +189,7 @@ fn error((status, body): &(u16, Value)) -> (u16, &str, &str) {
     (*status, body["error"]["code"].as_str().unwrap_or_default(), body["error"]["message"].as_str().unwrap_or_default())
 }
 
-pub(super) fn magnet_link(torrent: &FakeTorrentFile) -> String {
+pub(super) fn magnet_link(torrent: &fake::TorrentFile) -> String {
     let Target::Magnet(link) = magnet(torrent) else { unreachable!() };
     link
 }
@@ -276,11 +276,11 @@ async fn a_search_sends_a_line_each_time_a_source_answers() {
         id: torrential_core::ReleaseId::Torrent(hex.repeat(20).parse().unwrap()),
         name: name.into(),
         sources: vec![source.into()],
-        ..fake_catalog().remove(0)
+        ..fake::isos().remove(0)
     };
     let catalog = vec![listed("aa", "dead \u{1b}[31mred", "slow"), listed("bb", "dead fast", "quick")];
-    let script = vec![FakeSource::answers("quick", 0), FakeSource::answers("slow", 60)];
-    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, Default::default()));
+    let script = vec![fake::Source::answers("quick", 0), fake::Source::answers("slow", 60)];
+    let h = Harness::with_search(fake::Search::scripted(catalog, script, Default::default()));
     let (status, headers, body) = search(&h, json!({ "q": "dead", "limit": 5 })).await;
     assert_eq!(status, 200);
     assert!(headers.contains("content-type: application/x-ndjson\n"), "{headers}");
@@ -307,7 +307,7 @@ async fn a_search_sends_a_line_each_time_a_source_answers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_search_takes_a_json_post_so_another_website_cannot_start_one() {
-    let source = search_port::Fake::new(fake_catalog());
+    let source = fake::Search::new(fake::isos());
     let h = Harness::with_search(source.clone());
     assert_eq!(
         error(&get(&h, "/api/search?q=debian&fresh=1").await),
@@ -660,7 +660,7 @@ async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
     let archive = archive(&calls.path().join("calls"), FILM, "printf 'ftyp'; printf 'moof'");
     let (url, asked) = serve(archive.clone()).await;
     let outside = Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() };
-    let h = Harness::with_outside(search_port::Fake::new(fake_catalog()), outside);
+    let h = Harness::with_outside(fake::Search::new(fake::isos()), outside);
     // Without ffprobe the engine reads the file's header and its end for the duration.
     h.swarm.set_rate(100 * GIB);
     let id = playing(&h, 65).await;
@@ -718,7 +718,7 @@ async fn a_title_whose_file_the_browser_cannot_read_starts_the_ffmpeg_fetch_as_i
     let (url, asked) = serve(archive.clone()).await;
     let film = torrent(0xb1, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264", &[("Night.1968.1080p.mkv", 2 * GIB)]);
     let listed = vec![titles::listed(&film, "knaben", Some(40))];
-    let search = search_port::Fake::scripted(listed, vec![FakeSource::answers("knaben", 0)], BTreeMap::new());
+    let search = fake::Search::scripted(listed, vec![fake::Source::answers("knaben", 0)], BTreeMap::new());
     let h = Harness::with_outside(search, Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() });
     h.swarm.publish(film.clone());
     h.swarm.set_rate(GIB);
@@ -741,7 +741,7 @@ async fn a_paired_device_may_fetch_ffmpeg_and_a_stranger_may_not() {
     let archive = archive(&calls.path().join("calls"), FILM, "true");
     let (url, asked) = serve(archive.clone()).await;
     let h = Harness::with_outside(
-        search_port::Fake::new(fake_catalog()),
+        fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
     );
     let Some(phone) = On::pair(&h).await else { return };
@@ -764,7 +764,7 @@ async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
     let (url, asked) = serve(archive.clone()).await;
     let pinned = Build { sha256: "0".repeat(64), ..build(url, &archive) };
     let h = Harness::with_outside(
-        search_port::Fake::new(fake_catalog()),
+        fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Build(pinned.clone()), ..Outside::default() },
     );
     for tries in 1..=2 {
@@ -789,7 +789,7 @@ async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
     }
 
     let off = Harness::with_outside(
-        search_port::Fake::new(fake_catalog()),
+        fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Off(pinned), ..Outside::default() },
     );
     let refused = post(&off, "/api/ffmpeg", json!({})).await;
@@ -808,7 +808,7 @@ async fn a_fetched_ffmpeg_that_changed_on_disk_is_fetched_again() {
     let archive = archive(&calls.path().join("calls"), FILM, "true");
     let (url, asked) = serve(archive.clone()).await;
     let mut h = Harness::with_outside(
-        search_port::Fake::new(fake_catalog()),
+        fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
     );
     let fetched = h.dir.path().join("ffmpeg").join(VERSION);
@@ -841,7 +841,7 @@ async fn a_build_that_does_not_run_here_is_fetched_once_for_each_engine_run() {
     let archive = archive(&calls.path().join("calls"), FILM, ffmpeg);
     let (url, asked) = serve(archive.clone()).await;
     let mut h = Harness::with_outside(
-        search_port::Fake::new(fake_catalog()),
+        fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
     );
     let message = "the ffmpeg torrential fetched does not run on this machine: error while loading shared libraries: libmvec.so.1";
@@ -866,7 +866,7 @@ async fn ffmpeg_is_not_fetched_into_a_folder_other_users_can_change() {
     let archive = archive(&calls.path().join("calls"), FILM, "true");
     let (url, asked) = serve(archive.clone()).await;
     let h = Harness::with_outside(
-        search_port::Fake::new(fake_catalog()),
+        fake::Search::new(fake::isos()),
         Outside { fetch: Fetch::Build(build(url, &archive)), ..Outside::default() },
     );
     let refused = |folder: &Path, why: &str, hint: String| {
@@ -1689,8 +1689,8 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
     use torrential_core::protocol::{Request, Response, TitleRequest};
     let film = torrent(0xb1, "Night.of.the.Living.Dead.1968.1080p.BluRay.x264", &[("Night.1968.1080p.mkv", 2 * GIB)]);
     let catalog = vec![titles::listed(&film, "archive.org", None)];
-    let script = vec![FakeSource::answers("archive.org", 0)];
-    let h = Harness::with_search(search_port::Fake::scripted(catalog, script, Default::default()));
+    let script = vec![fake::Source::answers("archive.org", 0)];
+    let h = Harness::with_search(fake::Search::scripted(catalog, script, Default::default()));
     h.swarm.publish(film.clone());
     h.swarm.set_rate(GIB);
     let ask = r#"{"video":"tt0063350"}"#;
@@ -1971,7 +1971,7 @@ async fn a_download_here_plays_first_where_the_ffmpeg_that_converts_it_can_still
 
 /// A Torznab indexer on this machine that answers every search with `releases`, each a torrent
 /// with the size and seeders it claims.
-async fn indexer(releases: &[(&FakeTorrentFile, u64, u32)]) -> String {
+async fn indexer(releases: &[(&fake::TorrentFile, u64, u32)]) -> String {
     let items: String = releases
         .iter()
         .map(|(t, size, seeders)| {
@@ -2029,7 +2029,7 @@ async fn a_phone_and_a_tv_on_the_home_network_each_get_the_copy_for_their_screen
     let search: Arc<dyn SearchPort> = Arc::new(search_port::Live::new(&config).unwrap());
     let phone_screen = Preferences { screen: Some(Screen::Phone), playback: Some(Playback::H264), max_size: None };
     let outside = Outside { preferences: phone_screen, search: Some(search), ..Outside::default() };
-    let h = Harness::with_outside(search_port::Fake::default(), outside);
+    let h = Harness::with_outside(fake::Search::default(), outside);
     h.play_for(&uhd, &[0], Some("tt0063350")).await.unwrap();
     let (Some(phone), Some(tv)) = (On::pair(&h).await, On::pair(&h).await) else { return };
 

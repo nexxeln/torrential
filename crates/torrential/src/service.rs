@@ -3,7 +3,7 @@ use std::process::Command;
 
 use torrential_core::{Error, ErrorCode};
 
-use crate::env::Env;
+use crate::env::{Env, TestHooks, hooks};
 use crate::fsutil::write_atomic;
 use crate::paths::{Paths, uid};
 use crate::update::{Audience, executable};
@@ -106,12 +106,11 @@ fn home(env: &Env) -> Result<PathBuf, Error> {
     env.var("HOME").map(PathBuf::from).ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))
 }
 
-/// `TORRENTIAL_TEST_SERVICE_BIN` names a folder of stand-ins for launchctl and systemctl, so a
-/// test never changes the real login services.
+/// A test names a folder of stand-ins for launchctl and systemctl in `SERVICE_BIN`, so it never
+/// changes the real login services.
 fn run(env: &Env, program: &str, args: &[&str]) -> Result<(), Error> {
-    let path = env
-        .var("TORRENTIAL_TEST_SERVICE_BIN")
-        .map_or_else(|| PathBuf::from(program), |bin| Path::new(bin).join(program));
+    let bin = env.test().and_then(|test| test.path(hooks::SERVICE_BIN));
+    let path = bin.map_or_else(|| PathBuf::from(program), |bin| bin.join(program));
     let output = Command::new(path)
         .args(args)
         .output()
@@ -207,9 +206,9 @@ pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
 /// removed it with `torrential engine uninstall`. It takes effect at the next login. A test engine
 /// adds one only when its test supplies stand-ins for launchctl and systemctl.
 pub fn add_at_start(env: &Env, paths: &Paths) -> Result<Option<PathBuf>, Error> {
-    let test = ["TORRENTIAL_TEST_ENGINE", "TORRENTIAL_TEST_NETWORK"].iter().any(|var| env.var(var).is_some());
+    let stand_ins = |test: TestHooks| test.var(hooks::SERVICE_BIN).is_some();
     if env.var("TORRENTIAL_HOME").is_some()
-        || (test && env.var("TORRENTIAL_TEST_SERVICE_BIN").is_none())
+        || env.test().is_some_and(|test| !stand_ins(test))
         || paths.state.join(DECLINED).exists()
     {
         return Ok(None);
