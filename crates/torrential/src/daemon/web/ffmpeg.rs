@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use torrential_core::filetype::{FileType, Kind};
+
 use super::media::Media;
 
 /// Keeps the file's own timestamps in the fragments, so a stream that starts at 50 minutes says so.
@@ -117,13 +119,7 @@ pub fn subtitle_file(format: Option<&str>) -> Vec<String> {
 
 /// ffmpeg's name for the format of a subtitle file, by its extension.
 pub fn subtitle_format(name: &str) -> Option<&'static str> {
-    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase();
-    match extension.as_str() {
-        "srt" => Some("srt"),
-        "ass" | "ssa" => Some("ass"),
-        "vtt" => Some("webvtt"),
-        _ => None,
-    }
+    FileType::of(name).filter(|t| t.kind == Some(Kind::Subtitle))?.ffmpeg
 }
 
 fn bitrate(height: u32) -> &'static str {

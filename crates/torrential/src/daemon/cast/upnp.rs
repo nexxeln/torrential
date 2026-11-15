@@ -139,16 +139,7 @@ fn takes(mime: &str, extra: &str) -> Option<Container> {
 /// names no video at all is taken to play what nearly every TV does.
 fn plays(sink: &[(String, String)]) -> Plays {
     if sink.iter().any(|(mime, _)| mime == "*" || mime == "video/*") {
-        return Plays::from_iter([
-            Container::Mkv,
-            Container::Mp4,
-            Container::WebM,
-            Container::Avi,
-            Container::Ts,
-            Container::Mov,
-            Container::Mpeg,
-            Container::Wmv,
-        ]);
+        return Plays::from_iter(Container::ALL);
     }
     let named: Plays = sink.iter().filter_map(|(mime, extra)| takes(mime, extra)).collect();
     if named == Plays::default() && !sink.iter().any(|(mime, _)| mime.starts_with("video/")) {

@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use torrential_core::filetype::extension;
 use torrential_core::text::sanitize;
 use torrential_core::time::now;
 use torrential_core::title::Span;
@@ -1058,10 +1059,6 @@ fn refused(tv: &Tv, path: &str) -> Error {
     let plays: Vec<String> = tv.plays.iter().map(|c| c.name().to_ascii_uppercase()).collect();
     Error::new(ErrorCode::Usage, format!("{} does not play {container} files, only {}", tv.name, plays.join(" and ")))
         .with_hint("play it on this Mac, or choose a source in a format the TV plays")
-}
-
-fn extension(path: &str) -> String {
-    path.rsplit_once('.').map_or("", |(_, extension)| extension).to_ascii_lowercase()
 }
 
 fn file_name(path: &str) -> String {

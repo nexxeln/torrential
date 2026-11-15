@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::catalog::VideoRef;
 use crate::error::Error;
+use crate::filetype::FileType;
 use crate::id::Target;
 use crate::preferences::Playback;
 
@@ -22,20 +23,33 @@ pub enum Container {
     Wmv,
 }
 
-/// Each container's name, the extensions its files have, and the MIME types TVs list it by.
-const CONTAINERS: [(Container, &str, &[&str], &[&str]); 8] = [
-    (Container::Mkv, "mkv", &["mkv"], &["video/x-matroska", "video/x-mkv", "video/mkv", "video/matroska"]),
-    (Container::Mp4, "mp4", &["mp4", "m4v"], &["video/mp4", "video/mpeg4", "video/x-m4v"]),
-    (Container::WebM, "webm", &["webm"], &["video/webm"]),
-    (Container::Avi, "avi", &["avi", "divx"], &["video/avi", "video/x-msvideo", "video/x-avi", "video/divx"]),
-    (Container::Ts, "ts", &["ts", "m2ts", "mts"], &["video/mp2t", "video/vnd.dlna.mpeg-tts", "video/x-mpegts"]),
-    (Container::Mov, "mov", &["mov"], &["video/quicktime"]),
-    (Container::Mpeg, "mpeg", &["mpg", "mpeg"], &["video/mpeg"]),
-    (Container::Wmv, "wmv", &["wmv"], &["video/x-ms-wmv"]),
+/// Each container's name and the MIME types TVs list it by. The extensions its files have are in
+/// [`FileType`]'s table.
+const CONTAINERS: [(Container, &str, &[&str]); 8] = [
+    (Container::Mkv, "mkv", &["video/x-matroska", "video/x-mkv", "video/mkv", "video/matroska"]),
+    (Container::Mp4, "mp4", &["video/mp4", "video/mpeg4", "video/x-m4v"]),
+    (Container::WebM, "webm", &["video/webm"]),
+    (Container::Avi, "avi", &["video/avi", "video/x-msvideo", "video/x-avi", "video/divx"]),
+    (Container::Ts, "ts", &["video/mp2t", "video/vnd.dlna.mpeg-tts", "video/x-mpegts"]),
+    (Container::Mov, "mov", &["video/quicktime"]),
+    (Container::Mpeg, "mpeg", &["video/mpeg"]),
+    (Container::Wmv, "wmv", &["video/x-ms-wmv"]),
 ];
 
 impl Container {
-    fn row(self) -> &'static (Container, &'static str, &'static [&'static str], &'static [&'static str]) {
+    /// Every container, in the order a TV's list of them is written.
+    pub const ALL: [Container; 8] = [
+        Container::Mkv,
+        Container::Mp4,
+        Container::WebM,
+        Container::Avi,
+        Container::Ts,
+        Container::Mov,
+        Container::Mpeg,
+        Container::Wmv,
+    ];
+
+    fn row(self) -> &'static (Container, &'static str, &'static [&'static str]) {
         CONTAINERS.iter().find(|row| row.0 == self).expect("every container has a row")
     }
 
@@ -45,20 +59,18 @@ impl Container {
 
     /// The MIME types a TV may list this container by, the usual one first.
     pub fn mimes(self) -> &'static [&'static str] {
-        self.row().3
+        self.row().2
     }
 
     /// The container of a file named `path`, by its extension.
     pub fn of_path(path: &str) -> Option<Container> {
-        let (_, extension) = path.rsplit_once('.')?;
-        let extension = extension.to_ascii_lowercase();
-        CONTAINERS.iter().find(|row| row.2.contains(&extension.as_str())).map(|row| row.0)
+        FileType::of(path)?.container
     }
 
     /// The container a MIME type names, in any case.
     pub fn of_mime(mime: &str) -> Option<Container> {
         let mime = mime.trim().to_ascii_lowercase();
-        CONTAINERS.iter().find(|row| row.3.contains(&mime.as_str())).map(|row| row.0)
+        CONTAINERS.iter().find(|row| row.2.contains(&mime.as_str())).map(|row| row.0)
     }
 
     fn of_name(name: &str) -> Option<Container> {
