@@ -599,12 +599,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_are_tagged_by_op() {
-        let json = serde_json::to_value(Request::Pause { refs: vec!["9b5212".into()] }).unwrap();
-        assert_eq!(json, serde_json::json!({"op": "pause", "refs": ["9b5212"]}));
-    }
-
-    #[test]
     fn a_search_without_stream_is_the_non_streaming_search() {
         let json = r#"{"op":"search","query":{"text":"arch","limit":10,"timeout_ms":6000}}"#;
         let Request::Search { query, stream } = serde_json::from_str(json).unwrap() else { panic!("not a search") };

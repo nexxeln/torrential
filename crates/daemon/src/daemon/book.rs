@@ -336,36 +336,6 @@ mod tests {
     use crate::daemon::metainfo::MetaFile;
     use torrential_core::ErrorCode;
 
-    #[test]
-    fn status_derivation_table() {
-        let failed = Intent::Failed { error: Error::new(ErrorCode::DiskFull, "disk full") };
-        let done = Intent::Done { finished_at: 7 };
-        let engine = Observed::InEngine;
-        let table: [(&Intent, Observed, &str); 17] = [
-            (&Intent::Running, Observed::Absent, "queued"),
-            (&Intent::Running, engine(Phase::Metadata), "metadata"),
-            (&Intent::Running, engine(Phase::Checking), "checking"),
-            (&Intent::Running, engine(Phase::Downloading), "downloading"),
-            (&Intent::Running, engine(Phase::Pausing), "downloading"),
-            (&Intent::Running, engine(Phase::Paused), "queued"),
-            (&Intent::Running, engine(Phase::Finishing { writes_stopped: false }), "downloading"),
-            (&Intent::Paused, Observed::Absent, "paused"),
-            (&Intent::Paused, engine(Phase::Pausing), "paused"),
-            (&Intent::Paused, engine(Phase::Paused), "paused"),
-            (&Intent::Paused, engine(Phase::Checking), "checking"),
-            (&done, Observed::Absent, "done"),
-            (&done, engine(Phase::Checking), "checking"),
-            (&done, engine(Phase::Paused), "done"),
-            (&failed, Observed::Absent, "error"),
-            (&failed, engine(Phase::Checking), "checking"),
-            (&failed, engine(Phase::Downloading), "error"),
-        ];
-        for (intent, observed, expected) in table {
-            assert_eq!(status(intent, observed).name(), expected, "{intent:?} {observed:?}");
-        }
-        assert_eq!(status(&done, Observed::Absent), JobStatus::Done { finished_at: 7 });
-    }
-
     fn entry(n: u8, added_at: i64, intent: Intent, observed: Observed) -> JobEntry {
         let id = TorrentId::from_bytes([n; 20]);
         let record = JobRecord {

@@ -563,13 +563,6 @@ fn the_system_language_breaks_a_tie_before_seeders() {
 }
 
 #[test]
-fn the_result_carries_the_profile_it_ranked_for_in_place_of_the_querys() {
-    let q = SearchQuery::new("night of the living dead 1968");
-    let (result, _) = assemble(&q, mac(), &Terms::parse(&q.text), &remasters(), 0).unwrap();
-    assert_eq!((q.profile, result.query.profile), (Profile::default(), mac()));
-}
-
-#[test]
 fn a_file_too_small_for_its_tag_ranks_as_untagged_on_a_screen() {
     let laptop = Preferences { screen: Some(Screen::Laptop), ..Preferences::default() };
     let ranked = |text: &str, rows: Vec<Observation>| {

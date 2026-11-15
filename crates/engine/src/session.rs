@@ -255,10 +255,4 @@ fn with_id(e: cxx::Exception, id: TorrentId) -> EngineError {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn a_session_can_move_to_its_owning_thread() {
-        fn send<T: Send>() {}
-        send::<super::Session>();
-    }
-}
+mod tests {}

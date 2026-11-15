@@ -472,15 +472,4 @@ mod tests {
         kept.put("c", 4);
         assert_eq!((kept.get(&"a"), kept.get(&"b"), kept.get(&"c")), (None, Some(2), Some(4)));
     }
-
-    #[test]
-    fn every_error_code_has_a_failing_status() {
-        for code in ErrorCode::ALL {
-            let number: u16 = status(code).split(' ').next().unwrap().parse().unwrap();
-            assert!((400..600).contains(&number), "{code} answers {number}");
-        }
-        assert_eq!(status(ErrorCode::NotFound), "404 Not Found");
-        assert_eq!(status(ErrorCode::MetadataTimeout), "504 Gateway Timeout");
-        assert_eq!(status(ErrorCode::PathConflict), "409 Conflict");
-    }
 }

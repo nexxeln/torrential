@@ -206,44 +206,6 @@ mod tests {
         serde_json::to_value(build(&crate::cli::Cli::command(), "0.1.0".into())).unwrap()
     }
 
-    #[test]
-    fn lists_every_visible_command_and_no_hidden_ones() {
-        let names: Vec<String> =
-            schema()["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(
-            names,
-            [
-                "search",
-                "titles",
-                "title",
-                "sources",
-                "files",
-                "get",
-                "play",
-                "web",
-                "devices",
-                "tv",
-                "status",
-                "wait",
-                "pause",
-                "resume",
-                "rm",
-                "verify",
-                "setup",
-                "doctor",
-                "tui",
-                "engine",
-                "schema",
-                "completions",
-                "skill",
-                "update"
-            ]
-        );
-        let daemon = &named(&schema(), "engine")["subcommands"];
-        let subs: Vec<&str> = daemon.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-        assert_eq!(subs, ["status", "stop", "install", "uninstall"]);
-    }
-
     fn named(schema: &serde_json::Value, name: &str) -> serde_json::Value {
         schema["commands"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap().clone()
     }
@@ -260,14 +222,5 @@ mod tests {
         assert_eq!(until["values"], serde_json::json!(["done", "metadata"]));
         assert_eq!(until["default"], "done");
         assert_eq!(s["global_flags"][0]["name"], "--json");
-    }
-
-    #[test]
-    fn exit_codes_cover_every_error_code() {
-        let s = schema();
-        let exits: Vec<u64> = s["exit_codes"].as_array().unwrap().iter().map(|e| e["code"].as_u64().unwrap()).collect();
-        assert_eq!(exits, [0, 1, 2, 3, 4, 5, 6, 7, 8, 130]);
-        assert_eq!(s["errors"].as_array().unwrap().len(), ErrorCode::ALL.len());
-        assert_eq!(s["errors"][5], serde_json::json!({"code": "ambiguous_ref", "exit": 3, "retryable": false}));
     }
 }

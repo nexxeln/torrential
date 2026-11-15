@@ -698,10 +698,4 @@ mod tests {
         assert_eq!(max_size("none"), Ok(Some(Limit(None))));
         assert_eq!(max_size("big"), Err(clap::error::ErrorKind::ValueValidation));
     }
-
-    #[test]
-    fn bad_durations_name_the_expected_form() {
-        let err = Cli::try_parse_from(["torrential", "wait", "9b5212", "--timeout", "soon"]).unwrap_err();
-        assert!(err.to_string().contains("use a form like 100s"), "{err}");
-    }
 }

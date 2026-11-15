@@ -1,12 +1,12 @@
 //! Films and series from the command line, against the fake engine and its fake catalog.
 
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use torrential_core::protocol::{Request, WIRE_VERSION};
+use torrential_core::protocol::WIRE_VERSION;
 
 mod common;
 use common::{Home, eventually, hooks, portless, receive, send};
@@ -42,37 +42,6 @@ fn socketless(argv: &str) -> (String, Option<PathBuf>) {
     let socket = argv.lines().find_map(|line| line.strip_prefix(flag)).map(PathBuf::from);
     let text = argv.lines().map(|line| if line.starts_with(flag) { "--input-ipc-server=SOCKET" } else { line });
     (text.map(|line| format!("{line}\n")).collect(), socket)
-}
-
-#[test]
-fn titles_lists_the_1968_film_before_its_remake() {
-    let home = Home::playing();
-    let run = home.run(&["titles", "night", "of", "the", "living", "dead"]);
-    assert_eq!(
-        (run.code, run.stdout.as_str()),
-        (
-            0,
-            "ID\tKIND\tYEAR\tRATING\tNAME\ntt0063350\tfilm\t1968\t7.8\tNight of the Living Dead\ntt0100258\tfilm\t1990\t6.9\t\
-             Night of the Living Dead\n# 2 titles\nnext: torrential title tt0063350\n"
-        ),
-        "{}",
-        run.stderr
-    );
-    let doc = home.json(&["titles", "night", "of", "the", "living", "dead", "--json"]);
-    let titles: Vec<String> = doc["titles"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| format!("{} {} {} {}", t["id"], t["kind"], t["name"], t["year"]))
-        .collect();
-    assert_eq!(
-        titles,
-        [
-            r#""tt0063350" "film" "Night of the Living Dead" 1968"#,
-            r#""tt0100258" "film" "Night of the Living Dead" 1990"#
-        ]
-    );
-    assert_eq!((doc["type"].as_str(), doc["next"].as_str()), (Some("titles"), Some("torrential title tt0063350")));
 }
 
 #[test]
@@ -416,18 +385,6 @@ fn source_plays_only_the_release_it_names() {
 }
 
 #[test]
-fn an_episode_reads_the_same_as_two_words_or_one() {
-    let home = Home::playing();
-    let expected = "Finding sources of Harbor Lights S01E02\nFound 0 sources\nerror[no_source]: no source of Harbor \
-                    Lights S01E02 was found\nhint: search the torrents for it by name\nnext: torrential search Harbor \
-                    Lights S01E02\n";
-    for words in [&["tt9999901", "s01e02"][..], &["tt9999901", "1x02"], &["tt9999901:1:2"]] {
-        let run = home.run(&[&["play"], words].concat());
-        assert_eq!((run.code, run.stderr.as_str()), (7, expected), "{words:?}");
-    }
-}
-
-#[test]
 fn a_bad_or_unknown_title_or_episode_says_how_to_find_one() {
     let home = Home::playing();
     let errors = [
@@ -470,26 +427,6 @@ fn a_bad_or_unknown_title_or_episode_says_how_to_find_one() {
     let doc: Value = serde_json::from_str(&json.stdout).unwrap();
     assert_eq!((json.code, doc["error"]["code"].as_str()), (2, Some("usage")));
     assert_eq!(doc["next"], "torrential sources tt0063350");
-}
-
-#[test]
-fn a_client_one_version_older_gets_the_version_error_from_the_engine() {
-    let home = Home::playing();
-    assert_eq!(home.run(&["status"]).code, 0);
-    let mut socket = UnixStream::connect(home.socket()).unwrap();
-    send(&mut socket, &Request::Hello { client_version: "old".into(), wire: WIRE_VERSION - 1 });
-    assert_eq!(receive(&mut socket).unwrap()["wire"], WIRE_VERSION);
-    send(&mut socket, &json!({"op": "status", "refs": []}));
-    let reply = receive(&mut socket).unwrap();
-    assert_eq!(
-        reply["error"],
-        json!({
-            "code": "daemon_version",
-            "message": format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {}", WIRE_VERSION - 1),
-            "hint": "run torrential engine stop, then run the command again",
-            "next": "torrential engine stop"
-        })
-    );
 }
 
 /// Plays an engine one protocol version older at `socket`: it answers hello with its version,

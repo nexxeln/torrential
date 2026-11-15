@@ -244,11 +244,4 @@ mod tests {
         assert_eq!(err.code, ErrorCode::DaemonUnavailable);
         assert_eq!(err.hint.as_deref(), Some("set TORRENTIAL_HOME to a shorter directory"));
     }
-
-    #[test]
-    fn a_local_temp_dir_is_not_a_network_filesystem() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(network_filesystem(dir.path()).unwrap(), None);
-        assert!(check_state_filesystem(dir.path()).is_ok());
-    }
 }

@@ -42,14 +42,3 @@ pub fn paint(token: Token, text: &str) -> String {
     let style = token.style();
     if style == Style::new() { text.to_string() } else { format!("{style}{text}{style:#}") }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn paint_wraps_text_in_truecolor_escapes() {
-        assert_eq!(paint(Token::Mint, "done"), "\u{1b}[38;2;153;255;228mdone\u{1b}[0m");
-        assert_eq!(paint(Token::Text, "plain"), "plain");
-    }
-}

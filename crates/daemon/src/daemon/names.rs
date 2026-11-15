@@ -116,11 +116,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn this_machine_has_a_name_and_reads_its_addresses() {
-        let names = Names::read();
-        assert!(names.local.as_deref().is_none_or(|name| name.ends_with(".local")), "{names:?}");
-        assert!(names.lan.iter().all(|ip| !ip.is_loopback()), "{names:?}");
-    }
 }

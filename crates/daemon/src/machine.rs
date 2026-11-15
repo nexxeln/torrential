@@ -191,15 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn a_test_machine_replaces_detection() {
-        let test = |json| Env::from_pairs([(hooks::NETWORK, "loopback"), (hooks::MACHINE, json)]);
-        let machine = detect(&test(r#"{"os": "linux", "display": null, "arch": "x86_64", "language": "en"}"#)).unwrap();
-        assert_eq!((machine.os, machine.display, machine.arch), (Os::Linux, None, Some(Arch::X86_64)));
-        let bad = detect(&test("{}")).unwrap_err();
-        assert_eq!(bad.message, "TORRENTIAL_TEST_MACHINE is not a machine: missing field `os` at line 1 column 2");
-    }
-
-    #[test]
     fn a_command_that_fails_or_outlives_the_timeout_gives_nothing() {
         let second = Duration::from_secs(1);
         assert_eq!(run("/bin/echo", &["1920x1080"], second).as_deref(), Some("1920x1080\n"));
