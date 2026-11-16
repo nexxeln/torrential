@@ -108,6 +108,7 @@ pub fn unit(manager: Manager, exe: &Path, log: &Path, torrential_home: Option<&s
             // A task passes no environment and keeps no output, so cmd sets TORRENTIAL_HOME and
             // appends what the engine prints to its log. conhost gives it a console with no window.
             let set = torrential_home.map_or_else(String::new, |home| format!("set \"TORRENTIAL_HOME={home}\"&& "));
+            let exe = without_verbatim(&exe);
             let command =
                 format!("cmd.exe /d /s /c \"{set}\"{exe}\" daemon run --service >> \"{}\" 2>&1\"", log.display());
             format!(
@@ -148,6 +149,14 @@ pub fn unit(manager: Manager, exe: &Path, log: &Path, torrential_home: Option<&s
                 command = xml(&command),
             )
         }
+    }
+}
+
+/// `path` without the `\\?\` a canonical Windows path starts with, which cmd cannot run.
+fn without_verbatim(path: &str) -> &str {
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest,
+        _ => path,
     }
 }
 
@@ -442,6 +451,12 @@ mod tests {
         assert_eq!(
             line("<Arguments>"),
             r#"<Arguments>--headless cmd.exe /d /s /c ""C:\Users\Ada &amp; Bo\AppData\Local\Programs\torrential\torrential.exe" daemon run --service &gt;&gt; "C:\Users\Ada &amp; Bo\AppData\Local\torrential\state\engine.log" 2&gt;&amp;1"</Arguments>"#
+        );
+        let canonical = Path::new(r"\\?\C:\Users\Ada & Bo\AppData\Local\Programs\torrential\torrential.exe");
+        assert_eq!(
+            unit(Manager::TaskScheduler, canonical, log, None, r"STUDIO\ada"),
+            task,
+            "cmd runs no verbatim path"
         );
         let home = unit(Manager::TaskScheduler, exe, log, Some(r"D:\th"), r"STUDIO\ada");
         assert!(home.contains(r#"/c "set "TORRENTIAL_HOME=D:\th"&amp;&amp; "C:\"#), "{home}");
