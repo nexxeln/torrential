@@ -1,5 +1,5 @@
-use std::io::ErrorKind;
-use std::os::unix::net::UnixStream;
+use std::io::{BufReader, ErrorKind};
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -7,16 +7,20 @@ use torrential_core::protocol::{Frame, Reply, Request, Response, WIRE_VERSION, r
 use torrential_core::{Error, ErrorCode};
 
 use super::launch::{self, Blocked};
+use torrential_daemon::daemon::OwnerLock;
 use torrential_daemon::env::Env;
 use torrential_daemon::paths::Paths;
 use torrential_daemon::update::Version;
-use torrential_daemon::wire;
+use torrential_daemon::wire::{self, Access, Answer, Client};
 
 /// How long an engine that refuses connections, as one does while it restarts, has to answer again.
 pub const BACK_WITHIN: Duration = Duration::from_secs(30);
 
 pub struct Conn {
-    stream: UnixStream,
+    access: Access,
+    version: String,
+    /// The frames of the reply to the last request sent.
+    reply: Option<BufReader<TcpStream>>,
     pub engine_version: String,
     pub wire: u32,
     pub pid: u32,
@@ -48,11 +52,12 @@ impl Conn {
         }
     }
 
-    /// Reads the next frame, waiting at most `within`, or with no limit. `None` when the engine
-    /// closed the connection between frames.
+    /// Reads the next frame of the reply, waiting at most `within`, or with no limit. `None` when
+    /// the engine closed the connection between frames.
     pub fn next<T: DeserializeOwned>(&mut self, within: Option<Duration>) -> Result<Option<T>, Error> {
-        self.stream.set_read_timeout(within).map_err(|e| lost(e, &self.log))?;
-        read_frame(&mut self.stream).map_err(|e| lost(e, &self.log))
+        let Some(reply) = &mut self.reply else { return Err(Error::internal("no request was sent to the engine")) };
+        reply.get_ref().set_read_timeout(within).map_err(|e| lost(e, &self.log))?;
+        read_frame(reply).map_err(|e| lost(e, &self.log))
     }
 
     fn read<T: DeserializeOwned>(&mut self, within: Option<Duration>) -> Result<T, Error> {
@@ -60,12 +65,23 @@ impl Conn {
     }
 
     pub fn send(&mut self, request: &Request) -> Result<(), Error> {
-        wire::write(&mut self.stream, request).map_err(|e| lost(e, &self.log))
+        self.reply = None;
+        let client = Client { version: &self.version, wire: WIRE_VERSION };
+        match wire::post(&self.access, client, request, request.within()) {
+            Ok(Answer::Frames(reply)) => {
+                self.reply = Some(reply);
+                Ok(())
+            }
+            Ok(Answer::Status(status)) => Err(refused(status, &self.access, &self.log)),
+            Err(e) => Err(lost(e, &self.log)),
+        }
     }
 
-    /// The connection, and the engine's log, for a reader that follows a watch.
-    pub fn into_stream(self) -> (UnixStream, String) {
-        (self.stream, self.log)
+    /// Sends `request` and hands its reply, and the engine's log, to a reader that follows it.
+    pub fn follow(mut self, request: &Request) -> Result<(BufReader<TcpStream>, String), Error> {
+        self.send(request)?;
+        let reply = self.reply.take().ok_or_else(|| Error::internal("the engine sent no reply"))?;
+        Ok((reply, self.log))
     }
 }
 
@@ -79,6 +95,16 @@ pub fn lost(e: std::io::Error, log: &str) -> Error {
     Error::new(ErrorCode::DaemonUnavailable, message).with_hint(format!("see {log}"))
 }
 
+/// The error for an answer to a request with no reply in it, such as 401 for a token the engine
+/// does not take.
+fn refused(status: u16, access: &Access, log: &str) -> Error {
+    Error::new(
+        ErrorCode::DaemonUnavailable,
+        format!("the engine on 127.0.0.1:{} refused the request with HTTP {status}", access.port),
+    )
+    .with_hint(format!("see {log}"))
+}
+
 /// What `response` carries, the engine's error, or an error for a reply of another kind.
 pub fn reply<R: Reply>(response: Response) -> Result<R, Error> {
     match response {
@@ -88,31 +114,43 @@ pub fn reply<R: Reply>(response: Response) -> Result<R, Error> {
 }
 
 /// The engine that runs now, whatever its version, for reports and for stops the person asks for.
+/// It is the one at the port in the token file, which the engine writes before it answers there.
 pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
-    let socket = paths.socket();
-    let stream = match UnixStream::connect(&socket) {
-        Ok(stream) => stream,
-        Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
-            return Err(launch::sandbox_error(Blocked::Ipc { socket }, env));
-        }
-        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => return Ok(None),
-        Err(e) => {
-            return Err(Error::new(
-                ErrorCode::DaemonUnavailable,
-                format!("cannot reach the engine at {}: {e}", socket.display()),
-            ));
+    let file = paths.engine_token();
+    let read = || {
+        Access::read(&file)
+            .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot read {}: {e}", file.display())))
+    };
+    let (version, log) = (env.version(), paths.log().display().to_string());
+    let Some(mut access) = read()? else { return Ok(None) };
+    let frames = loop {
+        let client = Client { version: &version, wire: WIRE_VERSION };
+        match wire::post(&access, client, &Request::Hello, Request::Hello.within()) {
+            Ok(Answer::Frames(frames)) => break frames,
+            Ok(Answer::Status(_)) => match read()? {
+                // An engine that started since took the port, and wrote its own token first.
+                Some(newer) if newer != access => access = newer,
+                // The engine that wrote the file is gone, and another program has its port.
+                _ => return Ok(None),
+            },
+            Err(e) if e.kind() == ErrorKind::ConnectionRefused => return Ok(None),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
+                return Err(launch::sandbox_error(Blocked::Loopback { port: access.port }, env));
+            }
+            Err(e) => return Err(lost(e, &log)),
         }
     };
     let mut conn = Conn {
-        stream,
+        http_port: access.port,
+        access,
+        version,
+        reply: Some(frames),
         engine_version: String::new(),
         wire: 0,
         pid: 0,
-        http_port: 0,
-        log: paths.log().display().to_string(),
+        log,
     };
-    let hello = Request::Hello { client_version: env.version(), wire: WIRE_VERSION };
-    (conn.engine_version, conn.wire, conn.pid, conn.http_port) = conn.ask(&hello)?;
+    (conn.engine_version, conn.wire, conn.pid) = conn.read(Some(Request::Hello.within())).and_then(reply)?;
     Ok(Some(conn))
 }
 
@@ -159,7 +197,12 @@ pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
     if let Ok(Response::Error { error }) = answered {
         return Err(error);
     }
-    let exited = poll(request.within(), || Ok((!alive(pid)).then_some(())))?;
+    exits(pid, request.within())
+}
+
+/// Waits up to `within` for the engine `pid` to exit.
+fn exits(pid: u32, within: Duration) -> Result<u32, Error> {
+    let exited = poll(within, || Ok((!alive(pid)).then_some(())))?;
     exited.map(|()| pid).ok_or_else(|| {
         Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
             .with_hint(format!("kill {pid}, then run the command again"))
@@ -168,17 +211,23 @@ pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
 
 /// Stops the engine as the person asks, and returns the process ID of the last engine it stopped.
 /// An engine that exits for the login service to start an update says so in its state folder, so
-/// this waits across the gap until the new engine starts and stops that one too.
+/// this waits across the gap until the new engine starts and stops that one too. An engine that
+/// holds the state folder but does not answer, such as one from a torrential before 0.6, gets a
+/// SIGTERM, which it takes as a stop.
 pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
     let deadline = Instant::now() + BACK_WITHIN;
     let mut stopped = None;
     loop {
         let failed = match running(paths, env) {
             Ok(found) => {
+                let switching = torrential_daemon::service::switching(paths, torrential_core::time::now());
                 if let Some(conn) = found {
                     stopped = Some(stop(conn, Stop::Asked)?);
+                } else if !switching && let Some(pid) = OwnerLock::holder(&paths.lock()) {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                    stopped = Some(exits(pid, Request::Shutdown { asked: true }.within())?);
                 }
-                if !torrential_daemon::service::switching(paths, torrential_core::time::now()) {
+                if !switching {
                     return Ok(stopped);
                 }
                 None

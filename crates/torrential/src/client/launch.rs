@@ -3,7 +3,6 @@
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -11,6 +10,7 @@ use torrential_core::error::Details;
 use torrential_core::{Error, ErrorCode};
 
 use super::connect::{self, Conn};
+use torrential_daemon::daemon::OwnerLock;
 use torrential_daemon::env::{Agent, Env};
 use torrential_daemon::paths::Paths;
 
@@ -18,8 +18,13 @@ const START_WITHIN: Duration = Duration::from_secs(10);
 const MAX_LOG: u64 = 10 * 1024 * 1024;
 
 pub enum Blocked {
-    Network { signal: String },
-    Ipc { socket: PathBuf },
+    Network {
+        signal: String,
+    },
+    /// Connections to the engine's port on 127.0.0.1.
+    Loopback {
+        port: u16,
+    },
 }
 
 pub fn sandbox_signal(env: &Env, send_udp: impl FnOnce() -> std::io::Result<()>) -> Option<String> {
@@ -46,8 +51,8 @@ pub fn sandbox_error(blocked: Blocked, env: &Env) -> Error {
         Blocked::Network { signal } => {
             ("this sandbox blocks network access, so torrential cannot reach peers".to_string(), signal)
         }
-        Blocked::Ipc { socket } => (
-            format!("this sandbox blocks the engine socket at {}", socket.display()),
+        Blocked::Loopback { port } => (
+            format!("this sandbox blocks the connection to the engine at 127.0.0.1:{port}"),
             "connect: operation not permitted".to_string(),
         ),
     };
@@ -58,7 +63,7 @@ pub fn sandbox_error(blocked: Blocked, env: &Env) -> Error {
         Some(Agent::Codex) => {
             r#"in interactive Codex, rerun with sandbox_permissions "require_escalated" and prefix_rule ["torrential"]; unattended Codex (codex exec) has approvals off, so torrential cannot work there"#
         }
-        _ => "run torrential outside the sandbox, or allow it network and Unix socket access",
+        _ => "run torrential outside the sandbox, or allow it network access",
     };
     let harness = agent.map(|a| match a {
         Agent::ClaudeCode => "claude-code",
@@ -108,7 +113,19 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         }
         Ok(None)
     })?;
-    started.ok_or_else(|| unavailable(format!("the engine did not start within {}s", START_WITHIN.as_secs())))
+    if let Some(started) = started {
+        return Ok(started);
+    }
+    // The engine this started gave way to one that holds the state folder and does not answer.
+    if let Some(holder) = OwnerLock::holder(&paths.lock()).filter(|holder| *holder != pid) {
+        return Err(Error::new(
+            ErrorCode::DaemonUnavailable,
+            format!("another engine (pid {holder}) holds {} and does not answer", paths.state.display()),
+        )
+        .with_hint("stop it, then run the command again")
+        .with_next("torrential engine stop"));
+    }
+    Err(unavailable(format!("the engine did not start within {}s", START_WITHIN.as_secs())))
 }
 
 pub fn launch_stage(env: &Env) -> u8 {
@@ -202,8 +219,8 @@ mod tests {
         let codex = sandbox_error(blocked(), &env(&[("CODEX_THREAD_ID", "t")]));
         let hint = codex.hint.unwrap();
         assert!(hint.contains(r#"prefix_rule ["torrential"]"#) && hint.contains("cannot work there"), "{hint}");
-        let ipc = sandbox_error(Blocked::Ipc { socket: "/tmp/t/engine.sock".into() }, &env(&[]));
-        assert_eq!(ipc.message, "this sandbox blocks the engine socket at /tmp/t/engine.sock");
-        assert_eq!(ipc.code, ErrorCode::SandboxNetworkBlocked);
+        let loopback = sandbox_error(Blocked::Loopback { port: 47919 }, &env(&[]));
+        assert_eq!(loopback.message, "this sandbox blocks the connection to the engine at 127.0.0.1:47919");
+        assert_eq!(loopback.code, ErrorCode::SandboxNetworkBlocked);
     }
 }

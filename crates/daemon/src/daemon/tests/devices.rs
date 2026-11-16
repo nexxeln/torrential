@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use torrential_core::protocol::{Request, Response};
+use torrential_core::protocol::{Request, Response, WIRE_VERSION};
 use torrential_core::{DeviceList, ErrorCode};
 
 use super::super::http;
@@ -265,6 +265,38 @@ async fn a_request_from_the_network_must_name_this_mac_and_come_from_its_own_pag
     }
     let form = phone.send("POST", "/api/pair", &["Content-Type: text/plain"], "").await;
     assert_eq!(form.status, 415, "a cross-site form cannot send JSON");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_token_over_loopback_reaches_the_command_lines_requests_whatever_the_address() {
+    let ip = lan();
+    let h = Harness::new();
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut phone = Browser::on(ip, &h);
+    phone.pair(&offer.code).await;
+    assert_eq!(phone.get("/api/jobs").await.status, 200);
+    let (port, token, wrong) = (h.running.ctx.http_port, h.token(), "0".repeat(64));
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let bearer = |token: &str| format!("Authorization: Bearer {token}");
+    let hello = r#"{"op":"hello"}"#;
+
+    for (who, browser, token) in [
+        ("another machine", Browser::on(ip, &h), None),
+        ("another machine with a wrong token", Browser::on(ip, &h), Some(&wrong)),
+        ("another machine with this user's token", Browser::on(ip, &h), Some(&token)),
+        ("a paired phone", phone, None),
+        ("this Mac without a token", mac_again(port), None),
+        ("this Mac with a wrong token", mac_again(port), Some(&wrong)),
+    ] {
+        let headers: Vec<String> = token.map(|token| bearer(token)).into_iter().collect();
+        let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+        let answer = browser.send("POST", &path, &headers, hello).await;
+        assert_eq!((answer.status, answer.header("www-authenticate")), (401, Some("Bearer")), "{who}");
+    }
+    let mine = mac_again(port).send("POST", &path, &[&bearer(&token)], hello).await;
+    assert_eq!(mine.status, 200);
+    assert!(mine.text().contains(r#""type":"hello","engine_version":"0.1.0""#), "{}", mine.text());
 }
 
 #[tokio::test(flavor = "multi_thread")]

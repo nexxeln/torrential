@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sha2::Digest;
-use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame, read_frame};
+use torrential_core::protocol::{PlayRequest, Request};
 use torrential_core::{Target, TorrentId};
 use torrential_engine as lt;
 
@@ -703,11 +703,6 @@ fn a_download_to_files_a_queued_download_will_write_is_refused() {
     );
 }
 
-fn ask(socket: &mut std::os::unix::net::UnixStream, request: &Request) -> Value {
-    socket.write_all(&encode_frame(request).unwrap()).unwrap();
-    read_frame(socket).unwrap().expect("the engine answered")
-}
-
 /// The status line and headers, and the body, of one GET with a `Range` header.
 fn get_range(url: &str, range: &str) -> (String, Vec<u8>) {
     let (host, path) = url.strip_prefix("http://").unwrap().split_once('/').unwrap();
@@ -726,14 +721,12 @@ fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
     let seeder = Seeder::start(&fixture, SLOW);
     let home = Home::seeded_by(&[&seeder]);
     home.ok(&["status"]);
-    let mut socket = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
     let play = PlayRequest {
         target: Target::TorrentFile(fixture.torrent_file().into()),
         dir: Some(home.downloads()),
         files: vec![0],
     };
-    let reply = ask(&mut socket, &Request::Play(play));
+    let reply = home.ask(&Request::Play(play));
     let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
     assert!(url.ends_with(&format!("/{}/0/film.mkv", fixture.id())), "{url}");
 
@@ -754,14 +747,12 @@ fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
     let mut home = Home::seeded_by(&[&seeder]);
     home.set("LANG", "C");
     home.ok(&["status"]);
-    let mut socket = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
     let play = PlayRequest {
         target: Target::TorrentFile(fixture.torrent_file().into()),
         dir: Some(home.dir.path().join("Téléchargements")),
         files: vec![0],
     };
-    let reply = ask(&mut socket, &Request::Play(play));
+    let reply = home.ask(&Request::Play(play));
     let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
 
     let (head, body) = get_range(&url, "bytes=0-299999");

@@ -1,8 +1,8 @@
-//! Messages between a client (CLI or TUI) and the engine process over a Unix socket.
+//! Messages between a client (CLI or TUI) and the engine process over the engine's HTTP port.
 //!
-//! A frame is a 4-byte big-endian length followed by that many bytes of JSON. The
-//! client's first frame is `Request::Hello`. A `Watch` request turns the connection
-//! into a stream of `Event` frames until the client disconnects. A title play sends a
+//! Each request is the JSON body of its own POST, and the engine answers it in frames. A frame
+//! is a 4-byte big-endian length followed by that many bytes of JSON. A `Watch` request's answer
+//! is a stream of `Event` frames until the client disconnects. A title play sends a
 //! `Frame::Update` for each step before its reply.
 
 use std::io::{self, Read};
@@ -31,7 +31,7 @@ pub const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
 pub const STEP_WITHIN: Duration = Duration::from_secs(240);
 const REPLY_WITHIN: Duration = Duration::from_secs(30);
 
-pub const WIRE_VERSION: u32 = 10;
+pub const WIRE_VERSION: u32 = 11;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -39,10 +39,9 @@ pub const MAX_FRAME: usize = 32 * 1024 * 1024;
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op")]
 pub enum Request {
-    Hello {
-        client_version: String,
-        wire: u32,
-    },
+    /// The engine's version, protocol, and process ID. Every engine answers it, whatever protocol the
+    /// client speaks.
+    Hello,
     /// With `stream`, the engine sends an `Event::SearchUpdate` frame each time a source answers,
     /// then the final `Response::Search`.
     Search {
@@ -148,7 +147,7 @@ impl Request {
     /// limit holds for each frame. A watch's events come with no limit.
     pub fn within(&self) -> Duration {
         match self {
-            Request::Hello { .. } => Duration::from_secs(5),
+            Request::Hello => Duration::from_secs(5),
             Request::Search { query, .. } => Duration::from_millis(query.timeout_ms.into()) + Duration::from_secs(10),
             Request::Files { timeout_ms, .. } => Duration::from_millis((*timeout_ms).into()) + Duration::from_secs(15),
             Request::Get(get) if get.dry_run => METADATA_WAIT + Duration::from_secs(15),
@@ -198,10 +197,6 @@ pub enum Response {
         engine_version: String,
         wire: u32,
         pid: u32,
-        /// Where the engine serves downloads to players, and the web app, on 127.0.0.1. Zero from an
-        /// engine older than the web app.
-        #[serde(default)]
-        http_port: u16,
     },
     Search {
         result: SearchResult,
@@ -277,7 +272,7 @@ pub struct TitlePage {
 }
 
 /// What the home screens list: for each title watched lately, its video to go on with, and the
-/// saved titles. The socket's `home` and `GET /api/home` both answer with it.
+/// saved titles. The command line's `home` and `GET /api/home` both answer with it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Home {
@@ -359,7 +354,7 @@ macro_rules! replies {
 }
 
 replies! {
-    (String, u32, u32, u16) => Hello { engine_version, wire, pid, http_port },
+    (String, u32, u32) => Hello { engine_version, wire, pid },
     SearchResult => Search { result },
     FilesReply => Files { files },
     Box<GetReply> => Get { reply },
@@ -649,6 +644,8 @@ mod tests {
         (9, &[]),
         // The engine follows the player `torrential play` opens, to keep its place.
         (10, &["follow"]),
+        // Each request is a POST to the engine's HTTP port, which says the client's version.
+        (11, &[]),
     ];
 
     #[test]

@@ -2,9 +2,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::de::DeserializeOwned;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use torrential_core::protocol::{
     Change, FilesReply, Frame, GetOutcome, GetReply, GetRequest, PlayReply, PlayRequest, Request, Response, Stream,
-    TitleStep,
+    TitleStep, WIRE_VERSION, decode_frame, frame_len,
 };
 use torrential_core::{Display, Error, ErrorCode, InfoHash, Job, JobStatus, Preferences, Selection, Target};
 
@@ -20,12 +22,26 @@ use super::search_port::SearchPort;
 use super::store::Store;
 use super::titles::Timing;
 use super::titles::catalog_port::{self, CatalogPort};
-use super::{Ports, Running, server, start};
+use super::{Listen, Ports, Running, server, start};
 use crate::disk::{FakeDisk, Space};
 use crate::ffmpeg::Tools;
 use crate::ffmpeg::fetch::{Fetch, Ffmpeg};
 
 const ROOMY: Space = Space { device: 1, total: 1000 * GIB, free: 500 * GIB };
+/// Where the engine writes the token of this user's torrential.
+const TOKEN_FILE: &str = "engine-token";
+
+/// The frames of the engine's answer to a request from the command line.
+type Frames = tokio::io::BufReader<tokio::net::TcpStream>;
+
+/// The next frame of an answer, or `None` once the engine has closed it.
+async fn next<T: DeserializeOwned>(frames: &mut Frames) -> Option<T> {
+    let mut header = [0; 4];
+    frames.read_exact(&mut header).await.ok()?;
+    let mut body = vec![0; frame_len(header).unwrap()];
+    frames.read_exact(&mut body).await.unwrap();
+    Some(decode_frame(&body).unwrap())
+}
 const GIB_PIECE: u64 = GIB / 1024;
 const STALL: Duration = Duration::from_secs(1);
 const WRITES_STOP_WITHIN: Duration = Duration::from_secs(1);
@@ -203,7 +219,8 @@ impl Harness {
         };
         let db = super::db::connect(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), &[0]).unwrap()
+        let listen = Listen { ports: &[0], access: &dir.path().join(TOKEN_FILE) };
+        start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), listen).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -220,18 +237,48 @@ impl Harness {
         server::handle(&self.running.ctx, request).await
     }
 
-    /// Asks over the socket, as the command line does, and answers the reply that follows any
-    /// steps.
-    async fn ask_socket(&self, request: Request) -> Response {
-        let (client, served) = tokio::net::UnixStream::pair().unwrap();
-        tokio::spawn(server::connection(self.running.ctx.clone(), served));
-        let (mut rd, mut wr) = client.into_split();
-        let hello = Request::Hello { client_version: "0.1.0".into(), wire: torrential_core::protocol::WIRE_VERSION };
-        crate::wire::write_async(&mut wr, &hello).await.unwrap();
-        crate::wire::read_async::<Response>(&mut rd).await.unwrap();
-        crate::wire::write_async(&mut wr, &request).await.unwrap();
+    /// The token the engine wrote for this user's torrential.
+    fn token(&self) -> String {
+        crate::wire::Access::read(&self.dir.path().join(TOKEN_FILE)).unwrap().expect("a token file").token
+    }
+
+    /// Posts `request` to the engine's HTTP port as the command line does, with `token` when there
+    /// is one, and returns the frames of the answer, or its status when it has none.
+    async fn post_with(&self, token: Option<&str>, request: &Request) -> Result<Frames, u16> {
+        let port = self.running.ctx.http_port;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let body = serde_json::to_vec(request).unwrap();
+        let bearer = token.map(|token| format!("Authorization: Bearer {token}\r\n")).unwrap_or_default();
+        let head = format!(
+            "POST {}?version=0.1.0&wire={WIRE_VERSION} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{bearer}\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            crate::wire::PATH,
+            body.len()
+        );
+        stream.write_all(&[head.as_bytes(), &body].concat()).await.unwrap();
+        let mut frames = tokio::io::BufReader::new(stream);
+        let mut line = String::new();
+        frames.read_line(&mut line).await.unwrap();
+        let status = line.split(' ').nth(1).and_then(|code| code.parse().ok()).expect("an HTTP status");
         loop {
-            match crate::wire::read_async(&mut rd).await.unwrap().expect("the engine answers") {
+            line.clear();
+            if frames.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        if status == 200 { Ok(frames) } else { Err(status) }
+    }
+
+    async fn post(&self, request: &Request) -> Frames {
+        let token = self.token();
+        self.post_with(Some(&token), request).await.unwrap_or_else(|status| panic!("the engine answered {status}"))
+    }
+
+    /// Asks over HTTP, as the command line does, and answers the reply that follows any steps.
+    async fn ask_cli(&self, request: Request) -> Response {
+        let mut frames = self.post(&request).await;
+        loop {
+            match next(&mut frames).await.expect("the engine answers") {
                 Frame::Update(TitleStep { .. }) => {}
                 Frame::Reply(response) => return *response,
             }
@@ -1276,17 +1323,11 @@ async fn a_streaming_search_sends_results_as_sources_answer() {
         fake::Source::answers("slow", 60),
     ];
     let h = Harness::with_search(fake::Search::scripted(catalog, script, Default::default()));
-    let (client, served) = tokio::net::UnixStream::pair().unwrap();
-    tokio::spawn(server::connection(h.running.ctx.clone(), served));
-    let (mut rd, mut wr) = client.into_split();
-    let hello = Request::Hello { client_version: "0.1.0".into(), wire: torrential_core::protocol::WIRE_VERSION };
-    crate::wire::write_async(&mut wr, &hello).await.unwrap();
-    crate::wire::read_async::<Response>(&mut rd).await.unwrap();
     let search = Request::Search { query: torrential_core::SearchQuery::new("dead"), stream: true };
-    crate::wire::write_async(&mut wr, &search).await.unwrap();
+    let mut answer = h.post(&search).await;
     let mut frames = Vec::new();
     loop {
-        let frame: serde_json::Value = crate::wire::read_async(&mut rd).await.unwrap().unwrap();
+        let frame: serde_json::Value = next(&mut answer).await.unwrap();
         let names: Vec<&str> =
             frame["result"]["releases"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
         let sources: Vec<String> = frame["result"]["sources"]
@@ -1318,20 +1359,14 @@ async fn watching_every_download_includes_ones_started_later() {
     let h = Harness::new();
     let before = torrent(30, "before.iso", &[("before.iso", GIB)]);
     h.get(h.torrent_file(&before), &[]).await.unwrap();
-    let (client, served) = tokio::net::UnixStream::pair().unwrap();
-    tokio::spawn(server::connection(h.running.ctx.clone(), served));
-    let (mut rd, mut wr) = client.into_split();
-    let hello = Request::Hello { client_version: "0.1.0".into(), wire: torrential_core::protocol::WIRE_VERSION };
-    crate::wire::write_async(&mut wr, &hello).await.unwrap();
-    crate::wire::read_async::<Response>(&mut rd).await.unwrap();
-    crate::wire::write_async(&mut wr, &Request::Watch { refs: Vec::new() }).await.unwrap();
-    let first: torrential_core::protocol::Event = crate::wire::read_async(&mut rd).await.unwrap().unwrap();
+    let mut answer = h.post(&Request::Watch { refs: Vec::new() }).await;
+    let first: torrential_core::protocol::Event = next(&mut answer).await.unwrap();
     assert!(matches!(first, torrential_core::protocol::Event::Snapshot { ref jobs } if jobs.len() == 1));
     let later = torrent(31, "later.iso", &[("later.iso", GIB)]);
     h.get(h.torrent_file(&later), &[]).await.unwrap();
     let seen = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match crate::wire::read_async(&mut rd).await.unwrap().unwrap() {
+            match next(&mut answer).await.unwrap() {
                 torrential_core::protocol::Event::Job { job } if job.id == later.info_hash.id() => return job.name,
                 _ => continue,
             }
@@ -1340,6 +1375,20 @@ async fn watching_every_download_includes_ones_started_later() {
     .await
     .expect("an event for the later download");
     assert_eq!(seen.as_deref(), Some("later.iso"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_token_the_engine_wrote_lets_a_request_from_the_command_line_in() {
+    let h = Harness::new();
+    let token = h.token();
+    let wrong = "0".repeat(64);
+    for refused in [None, Some(wrong.as_str()), Some(&token[..63]), Some("")] {
+        assert_eq!(h.post_with(refused, &Request::Hello).await.err(), Some(401), "{refused:?}");
+    }
+    let mut answer = h.post_with(Some(&token), &Request::Hello).await.unwrap();
+    let hello: Response = next(&mut answer).await.unwrap();
+    assert_eq!(hello, Response::Hello { engine_version: "0.1.0".into(), wire: WIRE_VERSION, pid: std::process::id() });
+    assert_eq!(next::<Response>(&mut answer).await, None, "the answer ends after the reply");
 }
 
 #[tokio::test(flavor = "multi_thread")]

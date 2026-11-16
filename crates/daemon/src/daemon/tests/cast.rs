@@ -479,7 +479,7 @@ async fn tvs(h: &Harness, fresh: bool) -> TvList {
 }
 
 async fn cast(h: &Harness, request: CastRequest) -> Result<Cast, Error> {
-    match h.ask_socket(Request::Cast(request)).await {
+    match h.ask_cli(Request::Cast(request)).await {
         Response::Cast { cast } => Ok(*cast),
         Response::Error { error } => Err(error),
         other => panic!("not a cast: {other:?}"),
@@ -698,8 +698,7 @@ async fn a_title_play_while_a_cast_plays_resumes_where_the_tv_last_was() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let video = night();
-    let Response::PlayTitle { title, .. } =
-        h.ask_socket(Request::PlayTitle(TitleRequest { video, source: None })).await
+    let Response::PlayTitle { title, .. } = h.ask_cli(Request::PlayTitle(TitleRequest { video, source: None })).await
     else {
         panic!("the command line's play answers a title")
     };
