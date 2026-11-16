@@ -5,7 +5,7 @@ use torrential_core::{Error, ErrorCode};
 
 use crate::env::{Env, TestHooks, hooks};
 use crate::fsutil::write_atomic;
-use crate::paths::{Paths, uid};
+use crate::paths::Paths;
 use crate::update::Audience;
 
 pub const LABEL: &str = "dev.torrential.engine";
@@ -133,6 +133,7 @@ fn run(env: &Env, program: &str, args: &[&str]) -> Result<(), Error> {
 
 /// Writes whatever of the unit, and on Linux the link that starts it at login, is not already in
 /// place, without starting it. Returns whether it wrote anything.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn put(manager: Manager, path: &Path, text: &str) -> Result<bool, Error> {
     let write_failed = |e: std::io::Error| {
         Error::new(ErrorCode::SandboxWriteBlocked, format!("cannot write {}: {e}", path.display()))
@@ -145,6 +146,7 @@ fn put(manager: Manager, path: &Path, text: &str) -> Result<bool, Error> {
         write_atomic(path, text.as_bytes()).map_err(write_failed)?;
         wrote = true;
     }
+    #[cfg(unix)]
     if manager == Manager::Systemd {
         let wants = dir.join("default.target.wants");
         let link = wants.join("torrential.service");
@@ -162,7 +164,7 @@ fn put(manager: Manager, path: &Path, text: &str) -> Result<bool, Error> {
 fn activate(env: &Env, manager: Manager, path: &Path) -> Result<(), Error> {
     match manager {
         Manager::Launchd => {
-            let domain = format!("gui/{}", uid());
+            let domain = gui_domain();
             let _ = run(env, "launchctl", &["bootout", &format!("{domain}/{LABEL}")]);
             run(env, "launchctl", &["bootstrap", &domain, &path.display().to_string()])
         }
@@ -171,6 +173,16 @@ fn activate(env: &Env, manager: Manager, path: &Path) -> Result<(), Error> {
             run(env, "systemctl", &["--user", "enable", "--now", "torrential.service"])
         }
     }
+}
+
+/// launchd's domain for this person's agents.
+fn gui_domain() -> String {
+    #[cfg(unix)]
+    let uid = crate::paths::uid();
+    // launchd runs only on macOS.
+    #[cfg(not(unix))]
+    let uid = 0;
+    format!("gui/{uid}")
 }
 
 pub fn install(env: &Env, paths: &Paths) -> Result<Report, Error> {
@@ -195,7 +207,7 @@ pub fn uninstall(env: &Env, paths: &Paths) -> Result<Report, Error> {
     }
     match manager {
         Manager::Launchd => {
-            let _ = run(env, "launchctl", &["bootout", &format!("gui/{}/{LABEL}", uid())]);
+            let _ = run(env, "launchctl", &["bootout", &format!("{}/{LABEL}", gui_domain())]);
         }
         Manager::Systemd => {
             let _ = run(env, "systemctl", &["--user", "disable", "--now", "torrential.service"]);

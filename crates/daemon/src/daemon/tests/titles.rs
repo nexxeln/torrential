@@ -1,11 +1,14 @@
 //! Playing a title: trying its sources in turn, the downloads that makes, and what becomes of one
 //! given up.
+// Some helpers serve only the tests that make links, which run only on Unix.
+#![cfg_attr(windows, allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+#[cfg(unix)]
 use torrential_core::error::Details;
 use torrential_core::protocol::{Request, Response, TitleRequest};
 use torrential_core::title::Span;
@@ -216,14 +219,15 @@ fn write(path: &Path) {
     std::fs::write(path, b"payload").unwrap();
 }
 
-/// Every file, folder, and link below `root`, relative to it and sorted.
+/// Every file, folder, and link below `root`, relative to it with / between its parts, and sorted.
 fn tree(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
         for entry in std::fs::read_dir(&folder).unwrap() {
             let path = entry.unwrap().path();
-            found.push(path.strip_prefix(root).unwrap().display().to_string());
+            let parts: Vec<_> = path.strip_prefix(root).unwrap().iter().map(|part| part.to_string_lossy()).collect();
+            found.push(parts.join("/"));
             if path.symlink_metadata().unwrap().is_dir() {
                 folders.push(path);
             }
@@ -343,6 +347,8 @@ enum Theirs {
 /// folder holds afterwards.
 type Taken<'a> = (&'a fake::TorrentFile, &'a [Theirs], &'a str, &'a [(&'a str, &'a str)]);
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_play_makes_no_download_where_anything_already_is_and_leaves_it_as_it_was() {
     use Theirs::{File, Folder, Link};
@@ -439,6 +445,8 @@ async fn getting_a_title_skips_a_source_whose_folder_already_exists_and_gets_the
     assert_eq!(contents(&theirs), pairs(&[("Night.1968.1080p.mp4", "the person's own film")]));
 }
 
+// It shuts a folder with permission bits, which Windows does not have.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn getting_a_title_skips_a_source_when_the_disk_cannot_say_that_its_path_is_free() {
     use std::os::unix::fs::PermissionsExt;

@@ -60,8 +60,9 @@ impl Env {
         self.vars.get(key).map(String::as_str).filter(|v| !v.is_empty())
     }
 
+    /// The person's home folder: `HOME`, or on Windows, which seldom sets it, `USERPROFILE`.
     pub fn home(&self) -> Option<&Path> {
-        self.var("HOME").map(Path::new)
+        self.var("HOME").or_else(|| if cfg!(windows) { self.var("USERPROFILE") } else { None }).map(Path::new)
     }
 
     /// `path` with a leading `~` replaced by the home folder. `~name` stays as it is.

@@ -35,17 +35,10 @@ pub struct RealDisk;
 
 impl Disk for RealDisk {
     fn space(&self, path: &Path) -> std::io::Result<Space> {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::MetadataExt;
         let existing = path.ancestors().find(|p| p.exists()).unwrap_or(Path::new("/"));
-        let device = std::fs::metadata(existing)?.dev();
-        let c_path = std::ffi::CString::new(existing.as_os_str().as_bytes())?;
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let block = stat.f_frsize as u64;
-        Ok(Space { device: device as u64, total: stat.f_blocks as u64 * block, free: stat.f_bavail as u64 * block })
+        let device = crate::folder::identity(existing)?.device;
+        let (total, free) = total_and_free(existing)?;
+        Ok(Space { device, total, free })
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -57,10 +50,50 @@ impl Disk for RealDisk {
     }
 
     fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
-        use std::os::unix::fs::MetadataExt;
         let meta = path.symlink_metadata().ok()?;
-        meta.is_file().then(|| meta.blocks().saturating_mul(512).min(meta.len()))
+        meta.is_file().then(|| allocated(path, &meta).min(meta.len()))
     }
+}
+
+/// The size of the disk `path` is on, and what of it this user may still write.
+#[cfg(unix)]
+fn total_and_free(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let block = stat.f_frsize as u64;
+    Ok((stat.f_blocks as u64 * block, stat.f_bavail as u64 * block))
+}
+
+#[cfg(windows)]
+fn total_and_free(path: &Path) -> std::io::Result<(u64, u64)> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let (mut free, mut total) = (0u64, 0u64);
+    let path = windows::core::HSTRING::from(path.as_os_str());
+    unsafe { GetDiskFreeSpaceExW(&path, Some(&mut free), Some(&mut total), None) }.map_err(crate::fsutil::win32)?;
+    Ok((total, free))
+}
+
+/// What the file at `path` takes up on disk, which is less than its length while it is sparse.
+#[cfg(unix)]
+fn allocated(_: &Path, meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.blocks().saturating_mul(512)
+}
+
+#[cfg(windows)]
+fn allocated(path: &Path, meta: &std::fs::Metadata) -> u64 {
+    use windows::Win32::Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE};
+    let mut high = 0u32;
+    let path = windows::core::HSTRING::from(path.as_os_str());
+    let low = unsafe { GetCompressedFileSizeW(&path, Some(&mut high)) };
+    if low == INVALID_FILE_SIZE && std::io::Error::last_os_error().raw_os_error() != Some(0) {
+        return meta.len();
+    }
+    (u64::from(high) << 32) | u64::from(low)
 }
 
 pub struct RoomyDisk;

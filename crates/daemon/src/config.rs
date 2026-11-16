@@ -445,8 +445,11 @@ fn invalid(path: &Path, line: Option<u64>, message: &str) -> Error {
 mod tests {
     use super::*;
 
+    const HOME: &str = if cfg!(windows) { r"C:\Users\ada" } else { "/Users/ada" };
+    const PLAYER: &str = if cfg!(windows) { r"C:\Tools\play.exe" } else { "/usr/local/bin/play" };
+
     fn env() -> Env {
-        Env::from_pairs([("HOME", "/Users/ada"), ("JACKETT_KEY", "k3y")])
+        Env::from_pairs([("HOME", HOME), ("JACKETT_KEY", "k3y")])
     }
 
     fn load(text: &str) -> Result<Config, Error> {
@@ -456,13 +459,14 @@ mod tests {
     fn load_files(files: &[(&str, &str)]) -> Result<Config, Error> {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().display().to_string();
-        let env = Env::from_pairs([("HOME", "/Users/ada"), ("TORRENTIAL_HOME", home.as_str())]);
+        let env = Env::from_pairs([("HOME", HOME), ("TORRENTIAL_HOME", home.as_str())]);
         let paths = Paths::resolve(&env, 501, None).unwrap();
         std::fs::create_dir_all(&paths.config).unwrap();
         for (name, text) in files {
             std::fs::write(paths.config.join(name), text).unwrap();
         }
-        let relative = |text: String| text.replace(&home, "$TORRENTIAL_HOME");
+        // With / between a path's parts on every platform, so one message is expected everywhere.
+        let relative = |text: String| text.replace(&home, "$TORRENTIAL_HOME").replace('\\', "/");
         Config::load(&paths, &env)
             .map(|config| Config { file: config.file.map(|f| relative(f.display().to_string()).into()), ..config })
             .map_err(|e| Error { message: relative(e.message), hint: e.hint.map(relative), ..e })
@@ -481,7 +485,7 @@ sources:
       api_key_env: JACKETT_KEY
 ";
         let config = parse(text, &env()).unwrap();
-        assert_eq!(config.downloads, Some(PathBuf::from("/Users/ada/isos")));
+        assert_eq!(config.downloads, Some(Path::new(HOME).join("isos")));
         assert_eq!(config.search.disabled, ["nyaa", "apibay"]);
         assert_eq!(
             config.search.torznab,
@@ -595,7 +599,7 @@ sources:
     fn reads_the_player_and_names_the_line_of_a_bad_one() {
         let player = |text: &str| parse(text, &env()).map(|c| c.player);
         assert_eq!(player("player: mpv\n"), Ok(Some(Choice::Mpv)));
-        assert_eq!(player("player: /usr/local/bin/play\n"), Ok(Some(Choice::Program("/usr/local/bin/play".into()))));
+        assert_eq!(player(&format!("player: {PLAYER}\n")), Ok(Some(Choice::Program(PLAYER.into()))));
         assert_eq!(player("updates: auto\n"), Ok(None));
         assert_eq!(
             player("updates: auto\nplayer: celluloid\n"),
@@ -611,7 +615,7 @@ sources:
     impl Folder {
         fn new() -> Folder {
             let dir = tempfile::tempdir().unwrap();
-            let env = Env::from_pairs([("HOME", "/Users/ada"), ("TORRENTIAL_HOME", dir.path().to_str().unwrap())]);
+            let env = Env::from_pairs([("HOME", HOME), ("TORRENTIAL_HOME", dir.path().to_str().unwrap())]);
             let paths = Paths::resolve(&env, 501, None).unwrap();
             Folder { _dir: dir, paths }
         }
@@ -690,6 +694,8 @@ sources:
         assert!(!missing.save(Preferences::default()), "clearing a config that does not exist writes nothing");
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn setup_writes_through_a_linked_config() {
         let folder = Folder::new();
@@ -707,6 +713,8 @@ sources:
         );
     }
 
+    // It shuts a folder with permission bits, which Windows does not have.
+    #[cfg(unix)]
     #[test]
     fn setup_keeps_the_config_file_private() {
         use std::os::unix::fs::PermissionsExt;
@@ -814,7 +822,7 @@ sources:
         let indexer = "sources:\n  torznab:\n    - name: j\n      url: http://x/api\n";
         let cases = [
             (
-                "downloads:\n  dir: /tmp/x\nsources:\n  disable: [nyaa]\n".to_string(),
+                format!("downloads:\n  dir: {HOME}\nsources:\n  disable: [nyaa]\n"),
                 "line 4: unknown field `disable`, expected one of disabled, torznab",
             ),
             ("sources:\n  disabled: [nyaa, apibay\n".to_string(), "line 2: unclosed bracket '['"),

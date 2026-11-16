@@ -69,4 +69,6 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
           kind: test
-      - run: cargo test -p torrential-engine --locked
+      # The command line's own tests start engines with shell-script stand-ins, so they come in W7.
+      - run: cargo test --locked -p torrential-engine -p torrential-core -p torrential-search -p torrential-daemon -p torrential-tui
+      - run: cargo test --locked -p torrential --bin torrential

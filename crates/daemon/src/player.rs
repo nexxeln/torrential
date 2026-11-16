@@ -1,4 +1,3 @@
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -88,18 +87,13 @@ impl Player {
     /// Starts the player on its own, so it outlives torrential and never holds the terminal.
     pub fn launch(&self, launch: &Launch) -> Result<(), Error> {
         let (program, args) = command(self, launch);
-        Command::new(&program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .map(drop)
-            .map_err(|e| {
-                Error::new(ErrorCode::Usage, format!("cannot start {}: {e}", program.display()))
-                    .with_hint("set player: in config.yaml to iina, mpv, vlc, or the absolute path of a player")
-            })
+        let mut command = Command::new(&program);
+        command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        on_its_own(&mut command);
+        command.spawn().map(drop).map_err(|e| {
+            Error::new(ErrorCode::Usage, format!("cannot start {}: {e}", program.display()))
+                .with_hint("set player: in config.yaml to iina, mpv, vlc, or the absolute path of a player")
+        })
     }
 }
 
@@ -116,11 +110,13 @@ pub fn find(choice: Option<&Choice>, env: &Env) -> Option<Player> {
             .find(|cli| cli.is_file())
             .map(|cli| player(Kind::Iina, cli))
     };
-    let mpv = || on_path("mpv", env).map(|mpv| player(Kind::Mpv, mpv));
+    let mpv = || on_path("mpv", env).or_else(|| installed(env, &["mpv/mpv.exe"])).map(|mpv| player(Kind::Mpv, mpv));
     let vlc = || {
         let app = Path::new("/Applications/VLC.app/Contents/MacOS/VLC");
         let app = (cfg!(target_os = "macos") && app.is_file()).then(|| app.to_path_buf());
-        app.or_else(|| on_path("vlc", env)).map(|vlc| player(Kind::Vlc, vlc))
+        app.or_else(|| on_path("vlc", env))
+            .or_else(|| installed(env, &["VideoLAN/VLC/vlc.exe"]))
+            .map(|vlc| player(Kind::Vlc, vlc))
     };
     match choice {
         Some(Choice::Iina) => iina(),
@@ -128,8 +124,35 @@ pub fn find(choice: Option<&Choice>, env: &Env) -> Option<Player> {
         Some(Choice::Vlc) => vlc(),
         Some(Choice::Program(program)) => Some(player(Kind::Program, program.clone())),
         None if cfg!(target_os = "macos") => iina().or_else(mpv).or_else(vlc),
+        // Windows has no program that hands a stream to the default player.
+        None if cfg!(windows) => mpv().or_else(vlc),
         None => mpv().or_else(vlc).or_else(|| on_path("xdg-open", env).map(|open| player(Kind::Opener, open))),
     }
+}
+
+/// The first of `programs` that the Windows installers put under Program Files, or under the
+/// person's own programs folder.
+fn installed(env: &Env, programs: &[&str]) -> Option<PathBuf> {
+    let folders = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(|var| env.var(var).map(PathBuf::from))
+        .chain(env.var("LOCALAPPDATA").map(|local| Path::new(local).join("Programs")));
+    folders.flat_map(|folder| programs.iter().map(move |program| folder.join(program))).find(|path| path.is_file())
+}
+
+/// Detaches `command` from torrential, so the player outlives it and a Ctrl-C in its terminal.
+#[cfg(unix)]
+fn on_its_own(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn on_its_own(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    crate::process::keep_standard_handles();
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
 }
 
 /// Opens `url`, or a folder, in the default app. A test names a program in `OPENER` to run in its
@@ -138,6 +161,7 @@ pub fn open_url(url: &str, env: &Env) -> Result<(), Error> {
     let program = match env.test().and_then(|test| test.path(hooks::OPENER)) {
         Some(program) => program.to_path_buf(),
         None if cfg!(target_os = "macos") => PathBuf::from("/usr/bin/open"),
+        None if cfg!(windows) => PathBuf::from("explorer.exe"),
         None => PathBuf::from("xdg-open"),
     };
     Command::new(&program)
@@ -168,11 +192,19 @@ pub fn missing(choice: Option<&Choice>, url: &str, config: &Path) -> Error {
 }
 
 fn on_path(name: &str, env: &Env) -> Option<PathBuf> {
+    let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(env.var("PATH")?).map(|dir| dir.join(&name)).find(|path| runnable(path))
+}
+
+#[cfg(unix)]
+fn runnable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    env.var("PATH")?
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|path| path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn runnable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// The program and arguments that open `launch` in `player`.
@@ -215,7 +247,8 @@ fn command(player: &Player, launch: &Launch) -> (PathBuf, Vec<String>) {
 /// The known player a program's file name names, in any case: `mpv`, `iina` or its `iina-cli`,
 /// or `vlc`. An app's program inside its bundle is named as the app.
 fn named(program: &Path) -> Option<Kind> {
-    match program.file_name()?.to_str()?.to_ascii_lowercase().as_str() {
+    let name = program.file_name()?.to_str()?.to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
         "mpv" => Some(Kind::Mpv),
         "iina" | "iina-cli" => Some(Kind::Iina),
         "vlc" => Some(Kind::Vlc),
@@ -387,14 +420,15 @@ mod tests {
 
     #[test]
     fn config_names_a_player_or_an_absolute_path() {
-        let parsed = ["iina", "mpv", "vlc", "/usr/local/bin/play", "celluloid", "bin/play", "IINA"].map(Choice::parse);
+        let absolute = if cfg!(windows) { r"C:\Tools\play.exe" } else { "/usr/local/bin/play" };
+        let parsed = ["iina", "mpv", "vlc", absolute, "celluloid", "bin/play", "IINA"].map(Choice::parse);
         assert_eq!(
             parsed,
             [
                 Some(Choice::Iina),
                 Some(Choice::Mpv),
                 Some(Choice::Vlc),
-                Some(Choice::Program("/usr/local/bin/play".into())),
+                Some(Choice::Program(absolute.into())),
                 None,
                 None,
                 None,

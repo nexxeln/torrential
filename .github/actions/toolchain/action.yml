@@ -22,7 +22,8 @@ runs:
     - if: runner.os == 'macOS'
       shell: bash
       run: nix --extra-experimental-features 'nix-command flakes' develop -c true
-    - if: runner.os == 'Linux'
+    # The engine's build script builds the web app with bun; the macOS nix shell has its own.
+    - if: runner.os != 'macOS'
       uses: oven-sh/setup-bun@v2
     # libtorrent's Boost and OpenSSL, static on Rust's default dynamic CRT.
     # Saved as soon as it is built, so a job that fails later still keeps it.

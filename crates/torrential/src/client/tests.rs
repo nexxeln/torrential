@@ -344,6 +344,8 @@ fn plan(conflicts: Vec<PathBuf>) -> DownloadPlan {
     }
 }
 
+// Its expected output holds Unix paths, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn a_dry_run_shows_the_size_cap_beside_the_size_and_free_space() {
     let film = job("6bc1af", Some("night_of_the_living_dead_dvd"), JobStatus::Checking, Progress::default());
@@ -364,6 +366,8 @@ fn a_dry_run_shows_the_size_cap_beside_the_size_and_free_space() {
     );
 }
 
+// Its expected output holds Unix paths, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn get_outcomes() {
     let movies = |mut j: Job| {
@@ -477,6 +481,8 @@ fn fleet() -> Vec<Job> {
     ]
 }
 
+// Its expected output holds Unix paths, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn status_lists_every_state() {
     let jobs = fleet();
@@ -597,6 +603,8 @@ fn wait_transcript(mode: Mode, end: WaitEnd, frames: &[(u64, Job)], elapsed: u64
     out
 }
 
+// Its expected output holds Unix paths, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn wait_until_done_timeout_error_and_stop() {
     let arch = |status, progress| job(ARCH, Some("archlinux-2026.10.01-x86_64.iso"), status, progress);
@@ -936,6 +944,8 @@ fn skill_status_suggests_install_only_when_it_loses_no_edits() {
     assert_eq!(skill_check(&edited), (check(CheckStatus::Warn, "agents modified, claude foreign"), None));
 }
 
+// Its expected output holds Unix paths, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn a_tab_in_a_path_stays_inside_its_column() {
     use crate::skill::{self, AgentArg, Change as SkillChange, Installed, Scope, State, Target, TargetArgs};

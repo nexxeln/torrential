@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use torrential_core::time::now;
 use torrential_core::watching::SAVE_EVERY;
 use torrential_core::{ReleaseId, VideoRef, Watched};
@@ -45,10 +44,10 @@ pub fn follow(watching: Arc<Watching>, video: VideoRef, release: Option<ReleaseI
 }
 
 /// The socket at `path` once the player opens it, or `None` if it never does.
-async fn open(path: &Path) -> Option<UnixStream> {
+async fn open(path: &Path) -> Option<impl AsyncRead + AsyncWrite + use<>> {
     let deadline = Instant::now() + OPEN_WITHIN;
     loop {
-        if let Ok(stream) = UnixStream::connect(path).await {
+        if let Ok(stream) = connect(path).await {
             return Some(stream);
         }
         if Instant::now() >= deadline {
@@ -56,6 +55,17 @@ async fn open(path: &Path) -> Option<UnixStream> {
         }
         tokio::time::sleep(LOOK_EVERY).await;
     }
+}
+
+#[cfg(unix)]
+async fn connect(path: &Path) -> std::io::Result<tokio::net::UnixStream> {
+    tokio::net::UnixStream::connect(path).await
+}
+
+/// mpv on Windows opens a named pipe where it opens a socket elsewhere.
+#[cfg(windows)]
+async fn connect(path: &Path) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    tokio::net::windows::named_pipe::ClientOptions::new().open(path)
 }
 
 struct Follower<'a> {
@@ -99,8 +109,8 @@ impl Place {
 
 impl Follower<'_> {
     /// Saves the place every few seconds, and once more when the player quits.
-    async fn follow(&self, stream: UnixStream) -> std::io::Result<()> {
-        let (read, mut write) = stream.into_split();
+    async fn follow(&self, stream: impl AsyncRead + AsyncWrite) -> std::io::Result<()> {
+        let (read, mut write) = tokio::io::split(stream);
         for (id, name) in OBSERVED.iter().enumerate() {
             let command = serde_json::json!({ "command": ["observe_property", id + 1, name] });
             write.write_all(format!("{command}\n").as_bytes()).await?;

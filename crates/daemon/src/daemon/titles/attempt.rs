@@ -598,7 +598,7 @@ mod tests {
     }
 
     fn numbers(releases: Vec<Release>) -> Vec<u8> {
-        releases.iter().map(|r| r.name.trim_start_matches("release ").parse().unwrap()).collect()
+        releases.iter().map(|r| r.name.trim_start_matches("release ").parse::<u8>().unwrap()).collect()
     }
 
     #[test]

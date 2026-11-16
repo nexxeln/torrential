@@ -3,7 +3,6 @@
 
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, BufReader};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -22,7 +21,8 @@ use crate::log::log;
 /// jellyfin-ffmpeg's portable macOS build, which links only to `/usr/lib` and the system frameworks
 /// and leaves out fdk-aac.
 const JELLYFIN: &str = "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2";
-/// BtbN's GPL Linux builds, which link only to glibc and have no nonfree parts. The pin is a month's
+/// BtbN's GPL Linux and Windows builds, which link only to the system's C library and have no
+/// nonfree parts. The pin is a month's
 /// last build, which BtbN keeps for two years. It deletes other daily builds after two weeks.
 const BTBN: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59";
 
@@ -40,11 +40,19 @@ struct Pin {
     /// The glibc loader the programs start with, from the system's root folder. A Linux without
     /// glibc, such as Alpine, has none and cannot run them.
     loader: Option<&'static str>,
+    packing: Packing,
+}
+
+/// How a build's archive is packed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Packing {
+    TarXz,
+    Zip,
 }
 
 /// One for each platform torrential releases for, by `std::env::consts` names. The sizes and hashes
 /// are the ones each release publishes for its files.
-const PINS: [Pin; 3] = [
+const PINS: [Pin; 4] = [
     Pin {
         os: "macos",
         arch: "aarch64",
@@ -55,6 +63,7 @@ const PINS: [Pin; 3] = [
         sha256: "d898cc819e7c4e9219d6410ddbdaada0838f14bec6ff89e283639915394cb43f",
         size: 32_904_768,
         loader: None,
+        packing: Packing::TarXz,
     },
     Pin {
         os: "linux",
@@ -66,6 +75,7 @@ const PINS: [Pin; 3] = [
         sha256: "41e9c565594c390622cf968d82fa4135d9e9a11d06c1515644288cbc844e3380",
         size: 152_246_308,
         loader: Some("lib64/ld-linux-x86-64.so.2"),
+        packing: Packing::TarXz,
     },
     Pin {
         os: "linux",
@@ -77,11 +87,24 @@ const PINS: [Pin; 3] = [
         sha256: "a08c0ee6e1c4e02139344b303002dcc7c37cf125d639f1fbd15dabee40fcb525",
         size: 127_720_576,
         loader: Some("lib/ld-linux-aarch64.so.1"),
+        packing: Packing::TarXz,
+    },
+    Pin {
+        os: "windows",
+        arch: "x86_64",
+        version: "n8.1.3-27-g8dca1586f4",
+        release: BTBN,
+        file: "ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1.zip",
+        bin: "ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1/bin",
+        sha256: "401dffcf14c301082e1fc03b0bc876b92ea676bfc521fc56e80a1537d137034f",
+        size: 194_182_300,
+        loader: None,
+        packing: Packing::Zip,
     },
 ];
 
 const PROGRAMS: [&str; 2] = ["ffmpeg", "ffprobe"];
-const ARCHIVE: &str = "archive.tar.xz";
+const ARCHIVE: &str = "archive";
 const MANIFEST: &str = "manifest.json";
 /// Where a fetch puts its files until they are checked.
 const PARTIAL: &str = ".partial";
@@ -89,7 +112,7 @@ const PARTIAL: &str = ".partial";
 const RUN_WITHIN: Duration = Duration::from_secs(30);
 const REPORT_EVERY: Duration = Duration::from_millis(200);
 
-/// A .tar.xz holding ffmpeg and ffprobe, and what it must hash to.
+/// An archive holding ffmpeg and ffprobe, and what it must hash to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Build {
     /// The ffmpeg version, which names the folder the build unpacks into.
@@ -101,6 +124,7 @@ pub struct Build {
     pub sha256: String,
     /// Bytes. A download of any other size is not this build.
     pub size: u64,
+    pub packing: Packing,
 }
 
 impl Build {
@@ -116,6 +140,7 @@ impl Build {
             bin: PathBuf::from(pin.bin),
             sha256: pin.sha256.to_string(),
             size: pin.size,
+            packing: pin.packing,
         })
     }
 }
@@ -329,9 +354,9 @@ impl Manifest {
     /// Fails when a program is a link or is not executable.
     fn of(folder: &Path, build: &Build) -> io::Result<Manifest> {
         let hash = |program: &str| {
-            let path = folder.join(program);
+            let path = folder.join(program_file(program));
             let meta = path.symlink_metadata()?;
-            if !meta.is_file() || meta.mode() & 0o100 == 0 {
+            if !meta.is_file() || !runnable(&meta) {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{program} is not a program")));
             }
             let mut hash = Sha256::new();
@@ -342,7 +367,7 @@ impl Manifest {
     }
 
     fn write(&self, folder: &Path) -> io::Result<()> {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(folder.join(MANIFEST))?;
+        let mut file = new_file(&folder.join(MANIFEST), false)?;
         io::Write::write_all(&mut file, &serde_json::to_vec(self)?)
     }
 }
@@ -359,7 +384,34 @@ fn check(root: &Path, pin: &Build) -> Option<Programs> {
 }
 
 fn programs(folder: &Path) -> Programs {
-    Programs { ffmpeg: folder.join("ffmpeg"), ffprobe: folder.join("ffprobe") }
+    Programs { ffmpeg: folder.join(program_file("ffmpeg")), ffprobe: folder.join(program_file("ffprobe")) }
+}
+
+/// The file a program is in: `ffmpeg`, or `ffmpeg.exe` on Windows.
+fn program_file(program: &str) -> String {
+    format!("{program}{}", std::env::consts::EXE_SUFFIX)
+}
+
+#[cfg(unix)]
+fn runnable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.mode() & 0o100 != 0
+}
+
+#[cfg(windows)]
+fn runnable(_: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// A new file at `path` for this user alone, which runs when it is a `program`.
+fn new_file(path: &Path, program: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, if program { 0o700 } else { 0o600 });
+    #[cfg(not(unix))]
+    let _ = program;
+    options.open(path)
 }
 
 enum Failure {
@@ -388,7 +440,7 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
         download(build, &archive, report).await?;
         let (into, unpacked) = (partial.path.clone(), build.clone());
         tokio::task::spawn_blocking(move || {
-            unpack(&archive, &unpacked.bin, &into)?;
+            unpack(&archive, unpacked.packing, &unpacked.bin, &into)?;
             Manifest::of(&into, &unpacked)?.write(&into)
         })
         .await
@@ -398,7 +450,7 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
                 .with_hint("free some space or fix the folder's permissions, then try again")
         })?;
         for program in PROGRAMS {
-            runs(&partial.path.join(program)).await.map_err(Failure::Refused)?;
+            runs(&partial.path.join(program_file(program))).await.map_err(Failure::Refused)?;
         }
         Ok(partial.finish(&folder)?)
     }
@@ -435,13 +487,7 @@ async fn download(build: &Build, to: &Path, report: &watch::Sender<Stage>) -> Re
         return Err(Error::new(ErrorCode::FetchFailed, format!("cannot fetch ffmpeg: the server answered {status}"))
             .with_hint(format!("try again later, or {INSTALL}")));
     }
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(to)
-        .await
-        .map_err(|e| unwritable(to, &e))?;
+    let mut file = tokio::fs::File::from_std(new_file(to, false).map_err(|e| unwritable(to, &e))?);
     let (mut hash, mut done, mut reported) = (Sha256::new(), 0, Instant::now());
     while let Some(chunk) = response.chunk().await.map_err(|e| unreachable(&e))? {
         done += chunk.len() as u64;
@@ -473,21 +519,34 @@ fn unwritable(path: &Path, e: &io::Error) -> Error {
 }
 
 /// Writes the ffmpeg and ffprobe in the archive's `bin` folder into `into`, and nothing else from it.
-fn unpack(archive: &Path, bin: &Path, into: &Path) -> io::Result<()> {
-    let xz = lzma_rust2::XzReader::new(BufReader::new(File::open(archive)?), true);
-    let mut tar = tar::Archive::new(xz);
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        let path = path.strip_prefix(".").unwrap_or(&path);
-        let program = PROGRAMS.into_iter().find(|program| path == bin.join(program));
-        if let Some(program) = program.filter(|_| entry.header().entry_type().is_file()) {
-            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o700).open(into.join(program))?;
-            io::copy(&mut entry, &mut file)?;
+fn unpack(archive: &Path, packing: Packing, bin: &Path, into: &Path) -> io::Result<()> {
+    let wanted = |path: &Path| PROGRAMS.into_iter().map(program_file).find(|file| path == bin.join(file));
+    match packing {
+        Packing::TarXz => {
+            let xz = lzma_rust2::XzReader::new(BufReader::new(File::open(archive)?), true);
+            let mut tar = tar::Archive::new(xz);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let path = entry.path()?.into_owned();
+                let file = wanted(path.strip_prefix(".").unwrap_or(&path));
+                if let Some(file) = file.filter(|_| entry.header().entry_type().is_file()) {
+                    io::copy(&mut entry, &mut new_file(&into.join(file), true)?)?;
+                }
+            }
+        }
+        Packing::Zip => {
+            let mut zip = zip::ZipArchive::new(BufReader::new(File::open(archive)?))?;
+            for index in 0..zip.len() {
+                let mut entry = zip.by_index(index)?;
+                let file = entry.enclosed_name().and_then(|path| wanted(&path));
+                if let Some(file) = file.filter(|_| entry.is_file()) {
+                    io::copy(&mut entry, &mut new_file(&into.join(file), true)?)?;
+                }
+            }
         }
     }
     for program in PROGRAMS {
-        let path = into.join(program);
+        let path = into.join(program_file(program));
         if !path.is_file() {
             return Err(io::Error::new(io::ErrorKind::NotFound, format!("the archive has no {program}")));
         }
@@ -530,8 +589,10 @@ impl Partial {
     /// Empties `root` of what earlier fetches left, other versions included, and makes the folder.
     fn create(root: &Path) -> Result<Partial, Error> {
         private(root.parent().unwrap_or(root))?;
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut folder = DirBuilder::new();
-        folder.mode(0o700);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
         match folder.create(root) {
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(unwritable(root, &e)),
             _ => private(root)?,
@@ -575,15 +636,32 @@ fn private(folder: &Path) -> Result<(), Error> {
         ("it is a symbolic link", "make it a real folder, not a link, then try again".to_string())
     } else if !meta.is_dir() {
         ("it is not a folder", "move it away, then try again".to_string())
-    } else if meta.uid() != crate::paths::uid() {
-        ("it belongs to another user", "make it yours with chown, then try again".to_string())
-    } else if meta.mode() & 0o022 != 0 {
-        ("other users can write to it", format!("run chmod go-w {}, then try again", folder.display()))
+    } else if let Some(why) = shared(&meta, folder) {
+        why
     } else {
         return Ok(());
     };
     Err(Error::new(ErrorCode::StorageError, format!("torrential will not keep ffmpeg in {}: {why}", folder.display()))
         .with_hint(hint))
+}
+
+/// Why another user could change `folder`, and what to do about it. Windows keeps a folder under
+/// the person's profile to them by its permissions.
+#[cfg(unix)]
+fn shared(meta: &std::fs::Metadata, folder: &Path) -> Option<(&'static str, String)> {
+    use std::os::unix::fs::MetadataExt;
+    if meta.uid() != crate::paths::uid() {
+        Some(("it belongs to another user", "make it yours with chown, then try again".to_string()))
+    } else if meta.mode() & 0o022 != 0 {
+        Some(("other users can write to it", format!("run chmod go-w {}, then try again", folder.display())))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn shared(_: &std::fs::Metadata, _: &Path) -> Option<(&'static str, String)> {
+    None
 }
 
 /// Clears the quarantine mark macOS can put on a downloaded program, which stops it running. A
@@ -642,19 +720,32 @@ mod tests {
     fn an_installed_ffmpeg_wins_over_the_fetched_one() {
         let dir = tempfile::tempdir().unwrap();
         let (installed, root) = (dir.path().join("bin"), dir.path().join("ffmpeg"));
-        let build =
-            Build { version: "8.1".into(), url: String::new(), bin: PathBuf::new(), sha256: "ab".repeat(32), size: 0 };
+        let build = Build {
+            version: "8.1".into(),
+            url: String::new(),
+            bin: PathBuf::new(),
+            sha256: "ab".repeat(32),
+            size: 0,
+            packing: Packing::TarXz,
+        };
         let fetched = root.join(&build.version);
         for folder in [&installed, &fetched] {
-            DirBuilder::new().recursive(true).mode(0o700).create(folder).unwrap();
+            let mut builder = DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder.create(folder).unwrap();
             for program in PROGRAMS {
-                OpenOptions::new().write(true).create_new(true).mode(0o700).open(folder.join(program)).unwrap();
+                new_file(&folder.join(program_file(program)), true).unwrap();
             }
         }
         Manifest::of(&fetched, &build).unwrap().write(&fetched).unwrap();
         let found =
             |installed: Tools, fetch| Ffmpeg::new(Arc::new(move || installed.clone()), root.clone(), fetch).found();
-        let system = Tools { ffmpeg: Some(installed.join("ffmpeg")), ffprobe: Some(installed.join("ffprobe")) };
+        let system = Tools {
+            ffmpeg: Some(installed.join(program_file("ffmpeg"))),
+            ffprobe: Some(installed.join(program_file("ffprobe"))),
+        };
         assert_eq!(found(system.clone(), Fetch::Off(build.clone())), Found::Installed(programs(&installed)));
         let fetched_found = found(Tools::default(), Fetch::Off(build.clone()));
         assert_eq!(fetched_found, Found::Fetched(programs(&fetched)));
@@ -668,6 +759,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     /// Unpacks the programs in `bin` from a .tar.xz of `files`, each a path and its text, and `links`,
     /// each a path and where it points. Answers what unpacking said, and each file it wrote as
     /// `name: text`.
@@ -692,7 +784,7 @@ mod tests {
         let (archive, into) = (dir.path().join(ARCHIVE), dir.path().join("into"));
         std::fs::write(&archive, xz.finish().unwrap()).unwrap();
         std::fs::create_dir(&into).unwrap();
-        let said = unpack(&archive, Path::new(bin), &into).map_err(|e| e.to_string());
+        let said = unpack(&archive, Packing::TarXz, Path::new(bin), &into).map_err(|e| e.to_string());
         let mut wrote: Vec<String> = std::fs::read_dir(&into)
             .unwrap()
             .map(|entry| {
@@ -705,6 +797,8 @@ mod tests {
         (said, wrote)
     }
 
+    // The builds they unpack are the Linux and macOS ones, whose programs have no .exe.
+    #[cfg(unix)]
     #[test]
     fn only_the_ffmpeg_and_ffprobe_in_the_builds_folder_come_out_of_its_archive() {
         let btbn = [
@@ -725,12 +819,40 @@ mod tests {
         assert_eq!(wrote, ["ffmpeg: ffmpeg", "ffprobe: ffprobe"]);
     }
 
+    // The builds they unpack are the Linux and macOS ones, whose programs have no .exe.
+    #[cfg(unix)]
     #[test]
     fn a_link_in_the_archive_is_not_unpacked_as_a_program() {
         let files = [("ffmpeg-n8.1/bin/ffmpeg", "ffmpeg"), ("ffmpeg-n8.1/bin/real", "ffprobe")];
         let (said, wrote) = unpacked(&files, &[("ffmpeg-n8.1/bin/ffprobe", "real")], "ffmpeg-n8.1/bin");
         assert_eq!(said, Err("the archive has no ffprobe".to_string()));
         assert_eq!(wrote, ["ffmpeg: ffmpeg"]);
+    }
+
+    #[test]
+    fn the_programs_come_out_of_a_zip_build_as_windows_builds_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let (archive, into) = (dir.path().join(ARCHIVE), dir.path().join("into"));
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        let bin = |name: &str| format!("ffmpeg-n8.1/bin/{}", program_file(name));
+        let files = [
+            (bin("ffmpeg"), "ffmpeg"),
+            (bin("ffprobe"), "ffprobe"),
+            (bin("ffplay"), "ffplay"),
+            ("LICENSE.txt".into(), "GPL"),
+        ];
+        for (name, text) in files {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        std::fs::create_dir(&into).unwrap();
+        unpack(&archive, Packing::Zip, Path::new("ffmpeg-n8.1/bin"), &into).unwrap();
+        let read = |name: &str| std::fs::read_to_string(into.join(program_file(name))).ok();
+        assert_eq!(
+            [read("ffmpeg"), read("ffprobe"), read("ffplay")],
+            [Some("ffmpeg".into()), Some("ffprobe".into()), None]
+        );
     }
 
     #[cfg(target_os = "macos")]

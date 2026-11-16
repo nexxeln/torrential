@@ -69,6 +69,7 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
         DaemonCommand::Uninstall => service_report(service::uninstall(env, &paths)?, mode),
         DaemonCommand::Run { .. } => unreachable!("main runs the engine itself"),
         DaemonCommand::Launch => Ok(launch::launch_stage(env)),
+        DaemonCommand::Interrupt { .. } => unreachable!("main sends the interrupt itself"),
     }
 }
 
