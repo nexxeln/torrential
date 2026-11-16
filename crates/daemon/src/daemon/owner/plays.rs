@@ -265,7 +265,7 @@ impl Owner {
                         && let Some(change) = removal.changes.iter_mut().find(|change| change.id == id)
                     {
                         change.deleted.extend(done.deleted.iter().cloned());
-                        change.trashed.extend(done.trashed.iter().cloned());
+                        change.trashed.extend(done.trashed.iter().map(|(path, _)| path.clone()));
                         let kept = done.kept.iter().map(|(path, why)| Kept { path: path.clone(), reason: why.clone() });
                         change.kept.extend(kept);
                     }
