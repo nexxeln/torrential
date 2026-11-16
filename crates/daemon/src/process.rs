@@ -92,3 +92,19 @@ pub async fn asked_to_stop() {
         _ = shutdown.recv() => {}
     }
 }
+
+/// Keeps this process's standard handles from passing to the programs it starts. Windows hands a
+/// child every handle that may be inherited, and an engine that kept the pipe a command writes to
+/// would leave whoever reads that pipe waiting until the engine stopped.
+#[cfg(windows)]
+pub fn keep_standard_handles() {
+    use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
+    use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        if let Ok(handle) = unsafe { GetStdHandle(which) }
+            && !handle.is_invalid()
+        {
+            let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+        }
+    }
+}
