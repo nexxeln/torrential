@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -806,14 +805,19 @@ rust::Vec<std::uint8_t> create_torrent(rust::Str path, std::uint32_t piece_size,
   lt::create_torrent t(std::move(files), static_cast<int>(piece_size), flags);
   t.set_creator("torrential");
   lt::error_code ec;
-  lt::set_piece_hashes(t, std::filesystem::path(root).parent_path().string(), ec);
+  lt::set_piece_hashes(t, lt::parent_path(root), ec);
   if (ec) fail(FailureKind::InvalidInput, "hashing " + root + ": " + ec.message());
   return to_vec(t.generate_buf());
 }
 
 rust::Vec<std::uint8_t> native_path(rust::Slice<const std::uint8_t> path) {
-  std::string const native =
-      lt::convert_to_native_path_string(std::string(reinterpret_cast<char const*>(path.data()), path.size()));
+  std::string const utf8(reinterpret_cast<char const*>(path.data()), path.size());
+#ifdef TORRENT_WINDOWS
+  // libtorrent widens UTF-8 paths on Windows, so names reach the disk as they are.
+  std::string const& native = utf8;
+#else
+  std::string const native = lt::convert_to_native_path_string(utf8);
+#endif
   return to_vec(std::vector<char>(native.begin(), native.end()));
 }
 

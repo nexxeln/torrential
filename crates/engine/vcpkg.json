@@ -1,0 +1,22 @@
+{
+  "$comment": "What libtorrent needs on Windows. CI installs it with the x64-windows-static-md triplet: static libraries on Rust's default dynamic CRT.",
+  "name": "torrential-engine",
+  "dependencies": [
+    "openssl",
+    "boost-asio",
+    "boost-config",
+    "boost-container",
+    "boost-crc",
+    "boost-date-time",
+    "boost-functional",
+    "boost-intrusive",
+    "boost-logic",
+    "boost-multi-index",
+    "boost-multiprecision",
+    "boost-pool",
+    "boost-predef",
+    "boost-range",
+    "boost-smart-ptr",
+    "boost-system"
+  ]
+}
