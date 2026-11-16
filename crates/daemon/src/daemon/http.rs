@@ -48,6 +48,9 @@ const STRANGERS: usize = 64;
 const BACKOFF: Duration = Duration::from_secs(1);
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
+/// The most of a refused body the engine reads, and for how long, before it closes the connection.
+const LINGER_MOST: usize = 1 << 20;
+const LINGER: Duration = Duration::from_secs(1);
 const MAX_FRAME: usize = torrential_core::protocol::MAX_FRAME;
 /// Smaller chunks of a streamed answer go out in one write with their framing.
 const ONE_WRITE: usize = 8 * 1024;
@@ -397,6 +400,7 @@ impl Connection<'_> {
                         if request.path == wire::PATH && ask_now(&request).is_ok() { MAX_FRAME } else { MAX_BODY };
                     if request.length > most {
                         self.empty("413 Content Too Large", "", false).await?;
+                        self.linger(request.length).await;
                         return Ok(());
                     }
                     // Before the body, so strangers that come while a slow body arrives cannot
@@ -663,6 +667,22 @@ impl Connection<'_> {
             }
         }
         Ok(keep)
+    }
+
+    /// Ends the answer, then reads and drops what is left of a body of `length` bytes, up to
+    /// `LINGER_MOST` and for at most `LINGER`. Closing on an unread body resets the connection, and
+    /// Windows then drops the answer before the client reads it.
+    async fn linger(&mut self, length: usize) {
+        let _ = self.wr.shutdown().await;
+        let mut left = length.min(LINGER_MOST).saturating_sub(self.pending.len());
+        let deadline = tokio::time::Instant::now() + LINGER;
+        let mut buf = vec![0; 16 * 1024];
+        while left > 0 {
+            match tokio::time::timeout_at(deadline, self.rd.read(&mut buf)).await {
+                Ok(Ok(read)) if read > 0 => left = left.saturating_sub(read),
+                _ => return,
+            }
+        }
     }
 
     pub async fn empty(&mut self, status: &str, extra: &str, keep: bool) -> io::Result<bool> {
