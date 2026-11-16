@@ -650,7 +650,9 @@ async fn disk_size_and_conflicting_directories_refuse_a_download() {
     assert_eq!(err.code, ErrorCode::PathConflict);
     assert_eq!(
         err.details,
-        Some(torrential_core::error::Details::Paths(vec![h.downloads().join("big/b.bin").display().to_string()]))
+        Some(torrential_core::error::Details::Paths(vec![
+            h.downloads().join("big").join("b.bin").display().to_string()
+        ]))
     );
     assert!(h.status().await.is_empty());
     let only_a = GetRequest { files: vec!["a.bin".into()], ..raised };
