@@ -77,6 +77,8 @@ fn main() {
     if target_os == "windows" {
         // libtorrent sets this for its own sources only, and Boost.Asio's types depend on it.
         shim.define("_WIN32_WINNT", "0x0A00");
+        // Without C++ exceptions Boost hides the libtorrent calls that throw.
+        shim.flag("/EHsc");
     }
     shim.compile("torrential-shim");
 
