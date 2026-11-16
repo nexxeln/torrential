@@ -1,5 +1,5 @@
 {
-  "$comment": "What libtorrent needs on Windows. CI installs it with the x64-windows-static-md triplet: static libraries on Rust's default dynamic CRT.",
+  "$comment": "What libtorrent needs on Windows. CI installs it with the x64-windows-static triplet: static libraries on the static C runtime that .cargo/config.toml asks for.",
   "name": "torrential-engine",
   "dependencies": [
     "openssl",

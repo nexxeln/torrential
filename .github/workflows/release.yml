@@ -13,7 +13,9 @@ on:
     paths:
       - .github/**
       - scripts/release.sh
+      - scripts/release.ps1
       - install.sh
+      - install.ps1
       - flake.nix
       - flake.lock
 
@@ -51,8 +53,12 @@ jobs:
             target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false; git config --global core.longpaths true
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -60,12 +66,42 @@ jobs:
         with:
           target: ${{ matrix.target }}
           kind: build
-      - run: scripts/release.sh
+      - if: runner.os != 'Windows'
+        run: scripts/release.sh
+      - if: runner.os == 'Windows'
+        run: scripts/release.ps1
       - name: Check the binary runs
+        if: runner.os != 'Windows'
         run: |
           mkdir -p check && tar -xzf dist/torrential-${{ matrix.target }}.tar.gz -C check
           ls check
           check/torrential --version
+      - name: Check the binary runs
+        if: runner.os == 'Windows'
+        run: |
+          Expand-Archive dist/torrential-${{ matrix.target }}.zip check
+          Get-ChildItem check
+          check/torrential.exe --version
+      - name: Install this build with install.ps1, which starts the engine
+        if: runner.os == 'Windows'
+        run: |
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'dist' -PassThru
+          Start-Sleep 2
+          $env:TORRENTIAL_DOWNLOAD_URL = 'http://127.0.0.1:8765'
+          ./install.ps1
+          $dir = "$env:LOCALAPPDATA\Programs\torrential"
+          $path = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if (($path -split ';') -notcontains $dir) { throw "$dir is not on the user's PATH: $path" }
+          $status = & "$dir\torrential.exe" engine status --json | ConvertFrom-Json
+          if ($status.engine -ne 'running') { throw "the engine is $($status.engine)" }
+          & "$dir\torrential.exe" engine stop
+          Stop-Process $server
+      - name: Say whether Invoke-WebRequest marks a download from the internet
+        if: runner.os == 'Windows'
+        run: |
+          Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh -OutFile downloaded.txt
+          $mark = Get-Content downloaded.txt -Stream Zone.Identifier -Raw -ErrorAction SilentlyContinue
+          if ($mark) { "Zone.Identifier: $mark" } else { 'no Zone.Identifier stream' }
       - uses: actions/upload-artifact@v7
         with:
           name: torrential-${{ matrix.target }}

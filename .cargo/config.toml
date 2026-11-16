@@ -1,0 +1,4 @@
+# Windows builds carry the C runtime, so torrential.exe runs on a Windows without the Visual C++
+# redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
