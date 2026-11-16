@@ -25,9 +25,10 @@ runs:
     - if: runner.os == 'Linux'
       uses: oven-sh/setup-bun@v2
     # libtorrent's Boost and OpenSSL, static on Rust's default dynamic CRT.
+    # Saved as soon as it is built, so a job that fails later still keeps it.
     - if: runner.os == 'Windows'
       id: vcpkg
-      uses: actions/cache@v6
+      uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}/vcpkg
         key: vcpkg-${{ inputs.target }}-${{ hashFiles('crates/engine/vcpkg.json') }}
@@ -36,6 +37,11 @@ runs:
       run: |
         & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet x64-windows-static-md --x-manifest-root=crates/engine --x-install-root="$env:RUNNER_TEMP\vcpkg"
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    - if: runner.os == 'Windows' && steps.vcpkg.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/vcpkg
+        key: vcpkg-${{ inputs.target }}-${{ hashFiles('crates/engine/vcpkg.json') }}
     - if: runner.os == 'Windows'
       shell: pwsh
       run: |
