@@ -385,10 +385,11 @@ fn make_link(at: &Path) -> io::Result<()> {
 /// junction, which anyone can make, to the shared copy's full path.
 #[cfg(windows)]
 fn make_link(at: &Path) -> io::Result<()> {
+    // mklink takes only \ between a path's parts, which `absolute` gives on Windows.
     let target = std::path::absolute(at.parent().unwrap_or(Path::new(".")).join(LINK))?;
     let made = std::process::Command::new("cmd.exe")
         .args(["/d", "/c", "mklink", "/J"])
-        .arg(at)
+        .arg(std::path::absolute(at)?)
         .arg(&target)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -506,6 +507,8 @@ mod tests {
         assert_eq!(home.install(NOW, false).unwrap(), [("agents", "installed"), ("claude", "installed")]);
         assert_eq!(home.states(), BOTH_UP_TO_DATE);
         assert_eq!(home.skill(), SKILL);
+        // Windows links the folder with a junction, which holds the copy's full path.
+        #[cfg(unix)]
         assert_eq!(std::fs::read_link(&home.layout.link).unwrap(), Path::new("../../.agents/skills/torrential"));
         assert_eq!(home.layout.link.canonicalize().unwrap(), home.layout.copy.canonicalize().unwrap());
         let sidecar: serde_json::Value =
