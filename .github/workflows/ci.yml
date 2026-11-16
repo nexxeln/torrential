@@ -72,3 +72,27 @@ jobs:
       # The command line's own tests start engines with shell-script stand-ins, so they come in W7.
       - run: cargo test --locked -p torrential-engine -p torrential-core -p torrential-search -p torrential-daemon -p torrential-tui
       - run: cargo test --locked -p torrential --bin torrential
+      - name: The logon task starts the engine, and uninstalling it stops the engine
+        shell: pwsh
+        run: |
+          cargo build --locked -p torrential
+          $exe = (Resolve-Path target\debug\torrential.exe).Path
+          function Engine { (& $exe engine status --json | ConvertFrom-Json).engine }
+          & $exe engine install
+          if ($LASTEXITCODE) { throw 'engine install failed' }
+          schtasks /Query /TN 'torrential engine' /V /FO LIST
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Engine) -ne 'running') {
+            if ((Get-Date) -gt $deadline) {
+              Get-Content "$env:LOCALAPPDATA\torrential\state\engine.log" -ErrorAction SilentlyContinue
+              throw 'the logon task did not start the engine within 60 s'
+            }
+            Start-Sleep 2
+          }
+          & $exe engine status
+          & $exe engine uninstall
+          if ($LASTEXITCODE) { throw 'engine uninstall failed' }
+          schtasks /Query /TN 'torrential engine' 2>$null
+          if (-not $LASTEXITCODE) { throw 'the task is still registered' }
+          if ((Engine) -ne 'stopped') { throw 'the engine still runs after uninstall' }
+          $global:LASTEXITCODE = 0

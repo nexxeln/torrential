@@ -261,15 +261,18 @@ pub fn start(
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
-/// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
-/// systemd started it, a switch to an installed update.
+/// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd,
+/// systemd or Task Scheduler started it, a switch to an installed update.
 pub fn run(env: &Env, service: bool, http_port: Option<u16>) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
     match serve(env, &paths, service, http_port) {
-        Ok(Ended::Restart) if service => service::RESTART,
+        Ok(Ended::Restart) if service => {
+            service::start_next(env, &paths);
+            service::RESTART
+        }
         Ok(_) => 0,
         // The other engine serves this home, so launchd and systemd have nothing to start again.
         Err(Startup::AlreadyRunning(message)) => {

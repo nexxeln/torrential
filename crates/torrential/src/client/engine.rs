@@ -66,7 +66,17 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
             }
             service_report(service::install(env, &paths)?, mode)
         }
-        DaemonCommand::Uninstall => service_report(service::uninstall(env, &paths)?, mode),
+        DaemonCommand::Uninstall => {
+            let report = service::uninstall(env, &paths)?;
+            // Task Scheduler leaves running the engine its task started.
+            if matches!(
+                (report.manager, report.result),
+                (service::Manager::TaskScheduler, service::Change::Uninstalled)
+            ) {
+                connect::stop_asked(&paths, env)?;
+            }
+            service_report(report, mode)
+        }
         DaemonCommand::Run { .. } => unreachable!("main runs the engine itself"),
         DaemonCommand::Launch => Ok(launch::launch_stage(env)),
         DaemonCommand::Interrupt { .. } => unreachable!("main sends the interrupt itself"),
