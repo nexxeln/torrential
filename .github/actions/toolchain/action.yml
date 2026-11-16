@@ -24,6 +24,34 @@ runs:
       run: nix --extra-experimental-features 'nix-command flakes' develop -c true
     - if: runner.os == 'Linux'
       uses: oven-sh/setup-bun@v2
+    # libtorrent's Boost and OpenSSL, static on Rust's default dynamic CRT.
+    # Saved as soon as it is built, so a job that fails later still keeps it.
+    - if: runner.os == 'Windows'
+      id: vcpkg
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/vcpkg
+        key: vcpkg-${{ inputs.target }}-${{ hashFiles('crates/engine/vcpkg.json') }}
+    - if: runner.os == 'Windows' && steps.vcpkg.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet x64-windows-static-md --x-manifest-root=crates/engine --x-install-root="$env:RUNNER_TEMP\vcpkg"
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    - if: runner.os == 'Windows' && steps.vcpkg.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/vcpkg
+        key: vcpkg-${{ inputs.target }}-${{ hashFiles('crates/engine/vcpkg.json') }}
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $root = "$env:RUNNER_TEMP\vcpkg\x64-windows-static-md"
+        Add-Content $env:GITHUB_ENV "BOOST_ROOT=$root"
+        Add-Content $env:GITHUB_ENV "OPENSSL_INCLUDE_DIR=$root\include"
+        Add-Content $env:GITHUB_ENV "OPENSSL_LIB_DIR=$root\lib"
+    # cl.exe, CMake and Ninja for libtorrent's build.
+    - if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
     - uses: actions/cache@v6
       with:
         path: |

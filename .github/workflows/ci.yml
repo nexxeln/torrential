@@ -56,3 +56,17 @@ jobs:
           target: ${{ matrix.target }}
           kind: test
       - run: scripts/release.sh test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      # Tests compare files byte for byte, and libtorrent's submodules have long paths.
+      - run: git config --global core.autocrlf false; git config --global core.longpaths true
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/toolchain
+        with:
+          target: x86_64-pc-windows-msvc
+          kind: test
+      - run: cargo test -p torrential-engine --locked
