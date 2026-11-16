@@ -126,6 +126,7 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
 }
 
 pub fn launch_stage(env: &Env) -> u8 {
+    #[cfg(unix)]
     close_inherited_descriptors();
     let result = (|| -> Result<u32, String> {
         let paths = Paths::from_process(env).map_err(|e| e.message)?;
@@ -173,12 +174,9 @@ fn on_its_own(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    torrential_daemon::process::keep_standard_handles();
     command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
-
-/// Windows passes a child no handles but its standard ones.
-#[cfg(windows)]
-fn close_inherited_descriptors() {}
 
 #[cfg(unix)]
 fn close_inherited_descriptors() {
