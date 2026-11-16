@@ -1746,7 +1746,7 @@ async fn without_ffmpeg_the_browser_passes_over_a_matroska_film_that_a_media_pla
 
     let video = "tt0063350".parse().unwrap();
     let Response::PlayTitle { reply, title } =
-        h.ask_socket(Request::PlayTitle(TitleRequest { video, source: None })).await
+        h.ask_cli(Request::PlayTitle(TitleRequest { video, source: None })).await
     else {
         panic!("the command line's play answers a title")
     };

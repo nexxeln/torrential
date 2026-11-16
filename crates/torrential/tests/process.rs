@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use torrential_core::protocol::WIRE_VERSION;
+use serde_json::{Value, json};
+use torrential_core::protocol::{Request, WIRE_VERSION};
+use torrential_daemon::wire::{Access, Client};
 
 mod common;
-use common::{Home, alive, eventually, hooks, portless, receive};
+use common::{Home, alive, eventually, hooks, portless, read_post};
 
 const ARCH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 
@@ -72,12 +74,6 @@ fn a_version_mismatch_restarts_the_engine() {
     assert!(!alive(old_pid), "the old engine exited after saving its state");
 }
 
-fn frame(json: &str) -> Vec<u8> {
-    let mut bytes = (json.len() as u32).to_be_bytes().to_vec();
-    bytes.extend_from_slice(json.as_bytes());
-    bytes
-}
-
 #[test]
 fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves_it_running() {
     let mut home = Home::new().with(hooks::VERSION, "9.0.0");
@@ -97,21 +93,22 @@ fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves
 }
 
 #[test]
-fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_running() {
-    use std::io::Write;
+fn a_stop_that_an_older_torrential_sends_for_its_own_version_leaves_a_newer_engine_running() {
     let home = Home::new().with(hooks::VERSION, "9.0.0");
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
 
-    // Byte for byte what torrential 0.4.0 sends when it meets an engine of another version.
-    let mut old = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    old.write_all(&frame(r#"{"op":"hello","client_version":"0.4.0","wire":5}"#)).unwrap();
-    let hello = receive(&mut old).unwrap();
-    old.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
-    let answer = receive(&mut old);
+    let old = Client { version: "0.6.0", wire: WIRE_VERSION - 1 };
+    let hello = home.ask_as(old, &Request::Hello);
+    let status = home.ask_as(old, &Request::Status { refs: Vec::new() });
+    let answer = home.ask_as(old, &Request::Shutdown { asked: false });
 
     assert_eq!((hello["engine_version"].as_str(), hello["pid"].as_i64()), (Some("9.0.0"), Some(pid.into())));
-    assert_eq!(answer.unwrap()["error"]["code"], "daemon_version");
+    assert_eq!(
+        status["error"]["message"],
+        format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {}", WIRE_VERSION - 1)
+    );
+    assert_eq!(answer["error"]["code"], "daemon_version");
     assert_eq!(home.engine(), Some((pid, "9.0.0".into())), "the engine kept running");
     let stop = home.run(&["engine", "stop", "--json"]);
     assert_eq!(stop.code, 0, "{}", stop.stderr);
@@ -138,11 +135,9 @@ fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film
     let mut head = [0; 12];
     player.read_exact(&mut head).unwrap();
 
-    let mut newer = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    newer.write_all(&frame(r#"{"op":"hello","client_version":"0.1.1","wire":5}"#)).unwrap();
-    receive(&mut newer).unwrap();
-    newer.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
-    let answer = receive(&mut newer).unwrap();
+    let newer = Client { version: "0.1.1", wire: WIRE_VERSION };
+    home.ask_as(newer, &Request::Hello);
+    let answer = home.ask_as(newer, &Request::Shutdown { asked: false });
     home.set(hooks::VERSION, "0.1.1");
     let during = home.run(&["status", "--json"]);
     let kept = home.engine();
@@ -163,29 +158,10 @@ fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film
 
 #[test]
 fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_switches() {
-    use std::io::Write;
     let home = Home::new();
-    let socket = home.socket();
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    let asked = std::thread::spawn(move || {
-        let mut ops = Vec::new();
-        for stream in listener.incoming().take(1) {
-            let mut stream = stream.unwrap();
-            while let Some(request) = receive(&mut stream) {
-                let op = request["op"].as_str().unwrap().to_string();
-                let reply = match op.as_str() {
-                    "hello" => format!(
-                        r#"{{"type":"hello","engine_version":"0.1.0","wire":99,"pid":{},"http_port":0}}"#,
-                        std::process::id()
-                    ),
-                    _ => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
-                };
-                ops.push(op);
-                stream.write_all(&frame(&reply)).unwrap();
-            }
-        }
-        ops
+    let asked = home.stand_in(|request| match request["op"].as_str().unwrap() {
+        "hello" => (json!({"type": "hello", "engine_version": "0.1.0", "wire": 99, "pid": std::process::id()}), false),
+        _ => (refused_switch(), true),
     });
 
     let run = home.run(&["status"]);
@@ -200,27 +176,25 @@ fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_swit
 const NEWER_ENGINE: &str =
     "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n";
 
-/// A stand-in engine on `socket` that answers one connection per version in `versions`, each as
-/// that torrential: hello with the version, a refused switch to shutdown, and no downloads to the rest.
-fn stand_in(socket: &Path, versions: &'static [&'static str]) -> std::thread::JoinHandle<()> {
-    use std::io::Write;
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
-    std::thread::spawn(move || {
-        for (version, stream) in versions.iter().zip(listener.incoming()) {
-            let mut stream = stream.unwrap();
-            while let Some(request) = receive(&mut stream) {
-                let reply = match request["op"].as_str().unwrap() {
-                    "hello" => format!(
-                        r#"{{"type":"hello","engine_version":"{version}","wire":{WIRE_VERSION},"pid":{},"http_port":0}}"#,
-                        std::process::id()
-                    ),
-                    "shutdown" => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
-                    _ => r#"{"type":"jobs","jobs":[]}"#.to_string(),
-                };
-                stream.write_all(&frame(&reply)).unwrap();
-            }
+fn refused_switch() -> Value {
+    json!({"type": "error", "error": {"code": "daemon_version", "message": "torrential switches to 0.4.0 when the film ends"}})
+}
+
+/// A stand-in engine that answers as each torrential of `versions` in turn: hello with the version,
+/// a refused switch to shutdown, which hands over to the next version, and no downloads to the rest.
+/// It stops after the last version's hello.
+fn stand_in(home: &Home, versions: &'static [&'static str]) -> std::thread::JoinHandle<Vec<String>> {
+    let mut at = 0;
+    home.stand_in(move |request| match request["op"].as_str().unwrap() {
+        "hello" => {
+            let hello = json!({"type": "hello", "engine_version": versions[at], "wire": WIRE_VERSION, "pid": std::process::id()});
+            (hello, at + 1 == versions.len())
         }
+        "shutdown" => {
+            at += 1;
+            (refused_switch(), false)
+        }
+        _ => (json!({"type": "jobs", "jobs": []}), false),
     })
 }
 
@@ -241,7 +215,7 @@ fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrentia
     eventually("the launched engine gave way", Duration::from_secs(10), || {
         std::fs::read_to_string(home.state().join("engine.log")).is_ok_and(|log| log.contains("another engine owns"))
     });
-    let newer = stand_in(&home.socket(), &["9.0.0"]);
+    let newer = stand_in(&home, &["9.0.0"]);
 
     let client = client.wait_with_output().unwrap();
 
@@ -252,7 +226,7 @@ fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrentia
 #[test]
 fn a_client_that_an_engine_playing_a_film_turns_away_never_uses_a_newer_one_it_finds_next() {
     let home = Home::new();
-    let engines = stand_in(&home.socket(), &["0.1.0", "9.0.0"]);
+    let engines = stand_in(&home, &["0.1.0", "9.0.0"]);
 
     let run = home.run(&["status"]);
 
@@ -747,18 +721,90 @@ fn daemon_stop_is_idempotent() {
 }
 
 #[test]
+fn the_engine_writes_its_port_and_a_new_token_where_only_this_user_can_read_them() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let first = Access::read(&home.token_file()).unwrap().unwrap();
+    let mode = std::fs::metadata(home.token_file()).unwrap().permissions().mode();
+    let web = home.json(&["engine", "status", "--json"])["address"].as_str().unwrap().to_string();
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let after_stop = home.token_file().exists();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let second = Access::read(&home.token_file()).unwrap().unwrap();
+
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(web, format!("http://127.0.0.1:{}", first.port));
+    assert!(first.token.len() == 64 && first.token.bytes().all(|b| b.is_ascii_hexdigit()), "{}", first.token);
+    assert!(!after_stop, "a stopped engine removes its token file");
+    assert_ne!(first.token, second.token, "each engine makes a new token");
+}
+
+#[test]
+fn a_command_whose_token_file_names_a_port_another_program_took_starts_an_engine() {
+    let home = Home::new();
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let left = Access { port: other.local_addr().unwrap().port(), token: "5a".repeat(32) };
+    std::fs::create_dir_all(home.state()).unwrap();
+    left.write(&home.token_file()).unwrap();
+    // It closes each connection without a word, as a BitTorrent listener does with an HTTP request.
+    std::thread::spawn(move || other.incoming().for_each(drop));
+
+    let run = home.run(&["status"]);
+
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_ne!(Access::read(&home.token_file()).unwrap(), Some(left), "the new engine wrote its own");
+}
+
+#[test]
+fn an_engine_stop_stops_an_engine_it_cannot_reach() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    // As an engine from before 0.6 leaves none.
+    std::fs::remove_file(home.token_file()).unwrap();
+
+    let stop = home.run(&["engine", "stop"]);
+
+    assert_eq!((stop.code, stop.stdout), (0, format!("result: stopped\npid:    {pid}\n")));
+    assert!(!alive(pid));
+    assert!(home.log().contains("stopping on a signal"), "{}", home.log());
+}
+
+#[test]
+fn a_command_that_finds_an_engine_it_cannot_reach_says_to_stop_it() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    std::fs::remove_file(home.token_file()).unwrap();
+
+    let run = home.run(&["status", "--json"]);
+
+    let state = home.state().display().to_string();
+    assert_eq!(run.code, 6, "{}", run.stderr);
+    assert_eq!(
+        (run.json()["error"]["message"].as_str(), run.json()["next"].as_str()),
+        (
+            Some(format!("another engine (pid {pid}) holds {state} and does not answer").as_str()),
+            Some("torrential engine stop")
+        )
+    );
+    assert!(alive(pid), "the engine runs until the person stops it");
+}
+
+#[test]
 fn an_engine_stop_after_the_engine_crashed_says_already_stopped_at_once() {
     let home = Home::new();
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
     unsafe { libc::kill(pid, libc::SIGKILL) };
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    let left_its_socket = home.socket().exists();
+    let left_its_token = home.token_file().exists();
 
     let started = Instant::now();
     let stop = home.run(&["engine", "stop"]);
 
-    assert!(left_its_socket, "the crashed engine left its socket");
+    assert!(left_its_token, "the crashed engine left its token file");
     assert_eq!((stop.code, stop.stdout.as_str()), (0, "result: already_stopped\n"));
     assert!(started.elapsed() < Duration::from_secs(5), "the stop took {:?}", started.elapsed());
 }
@@ -767,12 +813,13 @@ fn an_engine_stop_after_the_engine_crashed_says_already_stopped_at_once() {
 fn an_engine_stop_whose_engine_exits_before_it_answers_stops_the_engine_that_starts_next() {
     use std::process::Stdio;
     let home = Home::new();
-    let socket = home.socket();
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let leaving = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let leaving = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let access = Access { port: leaving.local_addr().unwrap().port(), token: "5a".repeat(32) };
+    std::fs::create_dir_all(home.state()).unwrap();
+    access.write(&home.token_file()).unwrap();
     let stop = home.process(&["engine", "stop"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let (mut taken, _) = leaving.accept().unwrap();
-    let hello = receive(&mut taken).unwrap();
+    let hello: Value = serde_json::from_slice(&read_post(&mut taken).1).unwrap();
 
     let log = home.dir.path().join("next.log");
     let mut next = home.process(&["daemon", "run"]).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();

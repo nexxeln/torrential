@@ -25,7 +25,7 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                         engine: "running",
                         pid: Some(conn.pid),
                         version: Some(conn.engine_version.clone()),
-                        socket: paths.socket().display().to_string(),
+                        address: Some(format!("http://127.0.0.1:{}", conn.http_port)),
                         log: paths.log().display().to_string(),
                         downloads,
                     }
@@ -34,7 +34,7 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     engine: "stopped",
                     pid: None,
                     version: None,
-                    socket: paths.socket().display().to_string(),
+                    address: None,
                     log: paths.log().display().to_string(),
                     downloads: None,
                 },
@@ -104,7 +104,8 @@ pub struct DaemonReport {
     pub engine: &'static str,
     pub pid: Option<u32>,
     pub version: Option<String>,
-    pub socket: String,
+    /// Where the engine serves the web app and this user's torrential.
+    pub address: Option<String>,
     pub log: String,
     pub downloads: Option<usize>,
 }
@@ -121,7 +122,9 @@ pub fn daemon_status(report: &DaemonReport) -> Doc {
     if let Some(downloads) = report.downloads {
         fields.push(("downloads", Cell::new(downloads.to_string())));
     }
-    fields.push(("socket", Cell::new(report.socket.clone())));
+    if let Some(address) = &report.address {
+        fields.push(("address", Cell::new(address.clone())));
+    }
     fields.push(("log", Cell::new(report.log.clone())));
     Doc {
         body: Body::Fields { title: Vec::new(), fields },

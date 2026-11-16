@@ -16,7 +16,7 @@ use torrential_core::{Error, ErrorCode};
 use crate::env::{Env, hooks};
 use crate::fsutil::{Writes, sha256};
 use crate::paths::Paths;
-use crate::wire;
+use crate::wire::{self, Access, Client};
 
 use super::{Checked, Version, tag_version, target};
 
@@ -327,36 +327,32 @@ async fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> 
 /// Waits until `engine`, in `paths`, answers a status request, then asks it to stop.
 async fn serves(engine: &mut Child, paths: &Paths, env: &Env) -> Result<(), String> {
     let deadline = Instant::now() + TRIAL_WITHIN;
-    let mut socket = loop {
+    let access = loop {
         if let Ok(Some(status)) = engine.try_wait() {
             return Err(format!("does not start an engine ({status})"));
         }
-        if let Ok(socket) = tokio::net::UnixStream::connect(paths.socket()).await {
-            break socket;
+        if let Ok(Some(access)) = Access::read(&paths.engine_token()) {
+            break access;
         }
         if Instant::now() > deadline {
             return Err(format!("does not start an engine within {}s", TRIAL_WITHIN.as_secs()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let answered = async {
-        ask(&mut socket, &Request::Hello { client_version: env.version(), wire: WIRE_VERSION }).await?;
-        ask(&mut socket, &Request::Status { refs: Vec::new() }).await
-    };
-    match tokio::time::timeout(TRIAL_WITHIN, answered).await {
-        Ok(Ok(Some(Response::Jobs { .. }))) => {}
+    let version = env.version();
+    let answered = tokio::task::spawn_blocking(move || {
+        let client = Client { version: &version, wire: WIRE_VERSION };
+        let status = wire::ask(&access, client, &Request::Hello)
+            .and_then(|_| wire::ask(&access, client, &Request::Status { refs: Vec::new() }));
+        let _ = wire::ask(&access, client, &Request::Shutdown { asked: true });
+        status
+    });
+    match tokio::time::timeout(2 * TRIAL_WITHIN, answered).await {
+        Ok(Ok(Ok(Response::Jobs { .. }))) => Ok(()),
         // A release with another protocol refuses this torrential's requests, which shows it runs.
-        Ok(Ok(Some(Response::Error { error }))) if error.code == ErrorCode::DaemonVersion => {}
-        _ => return Err("starts an engine that does not answer".into()),
+        Ok(Ok(Ok(Response::Error { error }))) if error.code == ErrorCode::DaemonVersion => Ok(()),
+        _ => Err("starts an engine that does not answer".into()),
     }
-    let _ = tokio::time::timeout(TRIAL_WITHIN, ask(&mut socket, &Request::Shutdown { asked: true })).await;
-    Ok(())
-}
-
-/// Sends `request` to the engine on `socket` and reads its answer.
-async fn ask(socket: &mut tokio::net::UnixStream, request: &Request) -> std::io::Result<Option<Response>> {
-    wire::write_async(socket, request).await?;
-    wire::read_async(socket).await
 }
 
 /// A folder removed when this drops.
