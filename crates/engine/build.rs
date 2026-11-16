@@ -38,8 +38,15 @@ fn main() {
     let openssl_include = required_env("OPENSSL_INCLUDE_DIR");
     let openssl_lib = required_env("OPENSSL_LIB_DIR");
     let [ssl, crypto] = linking.openssl;
+    let ssl_file = Path::new(&openssl_lib).join((linking.archive)(ssl));
+    let crypto_file = Path::new(&openssl_lib).join((linking.archive)(crypto));
 
-    let install = cmake::Config::new(&libtorrent_src)
+    let mut cmake = cmake::Config::new(&libtorrent_src);
+    if target_os == "windows" {
+        // CMake's FindOpenSSL sets the library paths from these names under MSVC.
+        cmake.define("SSL_EAY_RELEASE", &ssl_file).define("LIB_EAY_RELEASE", &crypto_file);
+    }
+    let install = cmake
         .generator("Ninja")
         .profile("Release")
         .define("BUILD_SHARED_LIBS", "OFF")
@@ -50,8 +57,8 @@ fn main() {
         .define("webtorrent", "OFF")
         .define("Boost_ROOT", &boost_root)
         .define("OPENSSL_INCLUDE_DIR", &openssl_include)
-        .define("OPENSSL_SSL_LIBRARY", Path::new(&openssl_lib).join((linking.archive)(ssl)))
-        .define("OPENSSL_CRYPTO_LIBRARY", Path::new(&openssl_lib).join((linking.archive)(crypto)))
+        .define("OPENSSL_SSL_LIBRARY", &ssl_file)
+        .define("OPENSSL_CRYPTO_LIBRARY", &crypto_file)
         .build();
 
     let defines = exported_defines(&install.join("lib/cmake/LibtorrentRasterbar/LibtorrentRasterbarTargets.cmake"));
