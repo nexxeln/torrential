@@ -8,6 +8,7 @@ pub mod disk;
 pub mod env;
 pub mod exit;
 pub mod ffmpeg;
+pub mod folder;
 pub mod fsutil;
 pub mod log;
 pub mod machine;

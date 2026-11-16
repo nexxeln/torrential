@@ -1,11 +1,9 @@
-//! Files written whole or not at all, and folders opened without following a link.
+//! Files written whole or not at all.
 
 use std::io::{self, Write};
-use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
 use torrential_core::{Error, ErrorCode};
 
@@ -76,14 +74,4 @@ pub fn temporary(path: &Path) -> PathBuf {
 
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Opens the folder `name` in `dir`, never through a link.
-pub fn open_folder(dir: impl AsFd, name: impl rustix::path::Arg) -> rustix::io::Result<OwnedFd> {
-    rustix::fs::openat(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
 }
