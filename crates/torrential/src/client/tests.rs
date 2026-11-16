@@ -657,11 +657,12 @@ fn daemon_status_running_and_stopped() {
         engine: "running",
         pid: Some(4242),
         version: Some("0.1.0".into()),
-        socket: "/tmp/torrential-501/engine.sock".into(),
+        address: Some("http://127.0.0.1:47919".into()),
         log: "/Users/ada/.local/state/torrential/engine.log".into(),
         downloads: Some(2),
     };
-    let stopped = DaemonReport { engine: "stopped", pid: None, version: None, downloads: None, ..running.clone() };
+    let stopped =
+        DaemonReport { engine: "stopped", pid: None, version: None, address: None, downloads: None, ..running.clone() };
     let mut out = String::new();
     for report in [running, stopped] {
         out.push_str(&both(&daemon_status(&report), &crate::output::Typed { kind: DocKind::Daemon, body: &report }));
@@ -826,15 +827,10 @@ fn sample(code: ErrorCode) -> Error {
             "cannot write /Users/ada/Library/LaunchAgents/dev.torrential.engine.plist: operation not permitted",
             "run torrential engine install from a terminal outside any sandbox",
         ),
-        ErrorCode::DaemonUnavailable => {
-            let deep = format!("/tmp/{}", "d".repeat(120));
-            torrential_daemon::paths::Paths::resolve(
-                &torrential_daemon::env::Env::from_pairs([("HOME", "/Users/ada"), ("TORRENTIAL_HOME", deep.as_str())]),
-                501,
-                None,
-            )
-            .unwrap_err()
-        }
+        ErrorCode::DaemonUnavailable => crate::client::connect::lost(
+            std::io::ErrorKind::TimedOut.into(),
+            "/Users/ada/.local/state/torrential/engine.log",
+        ),
         ErrorCode::DaemonVersion => given(
             code,
             "the engine uses protocol version 2, but this client uses 1",
@@ -900,8 +896,7 @@ fn every_error_class() {
             serde_json::to_string_pretty(&value).unwrap()
         ));
     }
-    let limit = format!("over the {}-byte limit", torrential_daemon::paths::MAX_SOCKET_PATH);
-    insta::assert_snapshot!(out.replace(&limit, "over the <max>-byte limit"));
+    insta::assert_snapshot!(out);
 }
 
 #[test]
@@ -954,7 +949,7 @@ fn a_tab_in_a_path_stays_inside_its_column() {
         engine: "stopped",
         pid: None,
         version: None,
-        socket: "/run/my\ttorrential/engine.sock".into(),
+        address: None,
         log: "/state/my\ntorrential/engine.log".into(),
         downloads: None,
     };
@@ -973,8 +968,7 @@ fn a_tab_in_a_path_stays_inside_its_column() {
     );
     assert_eq!(
         daemon_status(&report).plain(),
-        "engine: stopped\nsocket: /run/my torrential/engine.sock\nlog:    /state/my torrential/engine.log\nnext:   \
-         torrential status\n"
+        "engine: stopped\nlog:    /state/my torrential/engine.log\nnext:   torrential status\n"
     );
     let row: Vec<String> = wait_row(Duration::from_secs(3), "9b5212", &named).into_iter().map(|c| c.text).collect();
     assert_eq!(row.join("\t"), "3s\t9b5212\tpaused\t?\t?\t-\t-\t-\tarch linux.iso");

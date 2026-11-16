@@ -1,7 +1,8 @@
-//! The engine's HTTP server. It serves downloads to video players, and the web app with its API.
-//! It listens on 127.0.0.1, and on the home network too while a phone or TV is paired. A request
-//! for bytes that have not arrived asks the engine for their pieces first and waits for them, so a
-//! player can start and seek while the rest of the file downloads.
+//! The engine's HTTP server. It serves downloads to video players, the web app with its API, and
+//! the requests of this user's torrential at `wire::PATH`. It listens on 127.0.0.1, and on the home
+//! network too while a phone or TV is paired. A request for bytes that have not arrived asks the
+//! engine for their pieces first and waits for them, so a player can start and seek while the rest
+//! of the file downloads.
 
 use std::collections::VecDeque;
 use std::io::{self, SeekFrom};
@@ -23,6 +24,7 @@ use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, Lease, StreamFile};
 use super::web;
 use crate::log::log;
+use crate::wire;
 
 /// Fixed so a file's URL stays the same across engine runs. Players remember where playback
 /// stopped by URL.
@@ -46,6 +48,7 @@ const STRANGERS: usize = 64;
 const BACKOFF: Duration = Duration::from_secs(1);
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
+const MAX_FRAME: usize = torrential_core::protocol::MAX_FRAME;
 /// Smaller chunks of a streamed answer go out in one write with their framing.
 const ONE_WRITE: usize = 8 * 1024;
 
@@ -309,6 +312,8 @@ pub struct Request {
     from: Sender,
     /// The device token in the request's cookie.
     pub cookie: Option<String>,
+    /// The token in an `Authorization: Bearer` header, which this user's torrential sends.
+    bearer: Option<String>,
     /// The User-Agent, lowercased.
     pub agent: Option<String>,
     keep_alive: bool,
@@ -359,14 +364,17 @@ impl Connection<'_> {
                     false
                 }
                 Some(Head::Request(mut request)) => {
-                    if request.length > MAX_BODY {
-                        self.empty("413 Content Too Large", "", false).await?;
-                        return Ok(());
-                    }
                     let (ctx, peer) = (self.ctx, self.peer);
                     let ask_now = |request: &Request| {
                         ask(peer, request, ctx.http_port, &ctx.devices, torrential_core::time::now())
                     };
+                    // This user's torrential may name every file of a large torrent.
+                    let most =
+                        if request.path == wire::PATH && ask_now(&request).is_ok() { MAX_FRAME } else { MAX_BODY };
+                    if request.length > most {
+                        self.empty("413 Content Too Large", "", false).await?;
+                        return Ok(());
+                    }
                     // Before the body, so strangers that come while a slow body arrives cannot
                     // close a paired device's connection.
                     if let Ok(Asker::Device(_) | Asker::Cast(_)) = ask_now(&request)
@@ -450,6 +458,12 @@ impl Connection<'_> {
                 let dlna = self.ctx.casts.served(&request.path);
                 return self.file(request, granted.id, granted.index, dlna.as_ref()).await;
             }
+            Asker::Local if request.path == wire::PATH => {
+                if request.method != Method::Post {
+                    return self.empty("405 Method Not Allowed", "", false).await;
+                }
+                return super::server::answer(self, &request).await;
+            }
             Asker::Local | Asker::Device(_) => {}
         }
         if let Some(route) = request.path.strip_prefix("/api/") {
@@ -482,6 +496,9 @@ impl Connection<'_> {
     async fn refuse(&mut self, refusal: Refusal) -> io::Result<()> {
         let (status, text) = match refusal {
             Refusal::Forbidden => return self.empty("403 Forbidden", "", false).await.map(drop),
+            Refusal::Unauthorized => {
+                return self.empty("401 Unauthorized", "WWW-Authenticate: Bearer\r\n", false).await.map(drop);
+            }
             Refusal::Elsewhere(address) => (
                 "403 Forbidden",
                 format!(
@@ -750,6 +767,7 @@ fn head(parsed: &httparse::Request) -> Head {
         let token = cookies.split(';').find_map(|cookie| cookie.trim().strip_prefix(COOKIE)?.strip_prefix('='));
         token.map(String::from)
     });
+    let bearer = header("authorization").and_then(|value| Some(value.strip_prefix("bearer ")?.trim().to_string()));
     let method = match parsed.method {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
@@ -782,6 +800,7 @@ fn head(parsed: &httparse::Request) -> Head {
         body: Vec::new(),
         from,
         cookie,
+        bearer,
         agent: header("user-agent"),
         keep_alive,
         chunks,
@@ -793,6 +812,8 @@ fn head(parsed: &httparse::Request) -> Head {
 enum Refusal {
     /// Over loopback, a request another website made, or one that names another host.
     Forbidden,
+    /// A request for `wire::PATH` without this user's token, or from another machine.
+    Unauthorized,
     /// From the home network, a request another website made, or one that names another host. It
     /// holds the address to open instead.
     Elsewhere(String),
@@ -804,8 +825,9 @@ enum Refusal {
 }
 
 /// Who sent `request`. Over loopback, a request that names this Mac's .local name moves to
-/// 127.0.0.1 first. A cast URL is let in by its grant alone, anything else over loopback is this
-/// Mac, and from the network a paired device's cookie lets it in.
+/// 127.0.0.1 first. Only this user's token over loopback lets a request in at `wire::PATH`. A cast
+/// URL is let in by its grant alone, anything else over loopback is this Mac, and from the network a
+/// paired device's cookie lets it in.
 fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
     let name = devices.local_name();
     let named = |host: &str| name.as_deref() == Some(split_host(host).0);
@@ -825,6 +847,11 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
             }
         }
         Peer::Loopback => {}
+    }
+    if request.path == wire::PATH {
+        let token = request.bearer.as_deref();
+        let local = peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token));
+        return if local { Ok(Asker::Local) } else { Err(Refusal::Unauthorized) };
     }
     if request.path.starts_with(CAST) {
         return devices.granted(&request.path).map(Asker::Cast).ok_or(Refusal::CastEnded);

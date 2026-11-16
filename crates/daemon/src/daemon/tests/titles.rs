@@ -679,11 +679,11 @@ async fn a_title_downloaded_with_get_comes_in_plain_order_until_it_is_played() {
     let (h, night) = night();
     let id = night[3].info_hash.id();
     let ask = || TitleRequest { video: "tt0063350".parse().unwrap(), source: Some(prefix(&night[3])) };
-    let Response::GetTitle { reply, .. } = h.ask_socket(Request::GetTitle(ask())).await else {
+    let Response::GetTitle { reply, .. } = h.ask_cli(Request::GetTitle(ask())).await else {
         panic!("get answers a title")
     };
     assert_eq!((reply.job.id, h.swarm.streamed(id)), (id, false));
-    let Response::PlayTitle { reply, .. } = h.ask_socket(Request::PlayTitle(ask())).await else {
+    let Response::PlayTitle { reply, .. } = h.ask_cli(Request::PlayTitle(ask())).await else {
         panic!("play answers a title")
     };
     assert_eq!((reply.job.id, h.swarm.streamed(id)), (id, true));
@@ -1189,7 +1189,7 @@ async fn a_download_found_by_its_torrent_link_is_listed_once_and_still_answers_t
     );
 
     let ask = TitleRequest { video: "tt0063350".parse().unwrap(), source: Some("uededed".into()) };
-    let Response::PlayTitle { reply, .. } = h.ask_socket(Request::PlayTitle(ask)).await else {
+    let Response::PlayTitle { reply, .. } = h.ask_cli(Request::PlayTitle(ask)).await else {
         panic!("a source named by the ID it was listed under before its download plays")
     };
     assert_eq!(reply.job.id, night.info_hash.id());

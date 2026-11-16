@@ -37,7 +37,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use torrential_core::protocol::WRITES_STOP_WITHIN;
 use torrential_core::{Error, ErrorCode, Preferences};
@@ -49,6 +48,7 @@ use crate::fsutil;
 use crate::log::{log, persist};
 use crate::paths::{self, Paths};
 use crate::service;
+use crate::wire::Access;
 use ctx::{Ctx, OwnerHandle};
 use db::Db;
 use detector::Detector;
@@ -190,6 +190,13 @@ pub struct Running {
     pub http: tokio::task::JoinHandle<()>,
 }
 
+/// Where the engine listens: the first of `ports` that is free, else any. It writes the port it
+/// takes and the token of this user's torrential to `access` before it answers anything there.
+pub struct Listen<'a> {
+    pub ports: &'a [u16],
+    pub access: &'a Path,
+}
+
 pub fn start(
     runtime: &tokio::runtime::Handle,
     db: &Db,
@@ -197,14 +204,14 @@ pub fn start(
     config: OwnerConfig,
     timing: titles::Timing,
     version: String,
-    http_ports: &[u16],
+    listen: Listen,
 ) -> Result<Running, Error> {
     let store = Store::open(db)?;
     ports.search.restore(store.results(torrential_core::time::now())?);
     let devices = Arc::new(devices::Devices::open(db)?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
-    let players = http::bind(http_ports, *reach.borrow_and_update())
+    let players = http::bind(listen.ports, *reach.borrow_and_update())
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
@@ -213,6 +220,9 @@ pub fn start(
         .map_err(|e| Error::internal(format!("cannot listen for players and the web app: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
+    Access { port: http_port, token: devices.local_token() }
+        .write(listen.access)
+        .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot write {}: {e}", listen.access.display())))?;
     let shelf = Arc::new(shelf::Shelf::open(db)?);
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
@@ -298,6 +308,10 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         None => return Err(Startup::AlreadyRunning(format!("another engine owns {}", paths.state.display()))),
     };
     persist(&format!("remove {}", paths.startup_error().display()), fsutil::remove(&paths.startup_error()));
+    #[cfg(windows)]
+    if let Ok(exe) = env.installed() {
+        crate::update::release::remove_set_aside(&exe);
+    }
     prepare_runtime_dir(&paths.runtime)?;
     match service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
@@ -336,47 +350,35 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
     let version = env.version();
     let ports = Ports::from_env(env, paths, &settings)?;
     let (engine, ended) = runtime.block_on(async {
-        let socket = paths.socket();
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).map_err(|e| {
-            Error::new(ErrorCode::DaemonUnavailable, format!("cannot listen on {}: {e}", socket.display()))
-        })?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
         let wanted = http_port.or(test.and_then(|test| test.http_port())).unwrap_or(http::PORT);
         // Open pages reconnect to the address they loaded from, so the engine serves where it last did.
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
-        let running =
-            start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), &http_ports)?;
-        // Before the socket answers, so a page that reconnects the moment this engine is up says what was updated.
+        let access = paths.engine_token();
+        let listen = Listen { ports: &http_ports, access: &access };
+        let running = start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), listen)?;
         running.ctx.news.post(switch::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
             let written = fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
             persist(&format!("write {}", paths.http_port().display()), written);
         }
-        log(&format!(
-            "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
-            socket.display()
-        ));
+        log(&format!("engine {version} started, pid {pid}, web app and players http://127.0.0.1:{players}"));
         persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
-        let accept = tokio::spawn(server::accept(listener, running.ctx.clone()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(switch::follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
-        // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
+        // Before the port stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
             service::leave_switching(paths, torrential_core::time::now());
         }
-        accept.abort();
         running.http.abort();
         signals.abort();
         updates.abort();
-        // An engine that stops for a newer version leaves its socket, so a client following it
-        // finds one that refuses for a moment instead of none, and waits for the next engine.
+        // An engine that stops for a newer version leaves its token file, so a client following it
+        // finds a port that refuses for a moment instead of none, and waits for the next engine.
         if ended == Ended::Stopped {
-            persist(&format!("remove {}", socket.display()), fsutil::remove(&socket));
+            persist(&format!("remove {}", access.display()), fsutil::remove(&access));
         }
         Ok::<_, Error>((running.engine, ended))
     })?;
@@ -437,5 +439,17 @@ impl OwnerLock {
         let mut file = file;
         let _ = file.set_len(0).and_then(|()| writeln!(file, "{}", std::process::id()));
         Ok(Some(Self { _file: file }))
+    }
+
+    /// The process that holds the lock at `path`, which wrote its ID there, when one does.
+    pub fn holder(path: &Path) -> Option<u32> {
+        use std::os::fd::AsRawFd;
+        let file = File::open(path).ok()?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK)
+        {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
     }
 }

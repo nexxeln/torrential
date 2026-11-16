@@ -61,26 +61,10 @@ impl Paths {
                 downloads,
             }
         };
-        let socket = paths.socket();
-        let len = socket.as_os_str().len();
-        if len > MAX_SOCKET_PATH {
-            return Err(Error::new(
-                ErrorCode::DaemonUnavailable,
-                format!(
-                    "the engine socket path {} is {len} bytes, over the {MAX_SOCKET_PATH}-byte limit",
-                    socket.display()
-                ),
-            )
-            .with_hint("set TORRENTIAL_HOME to a shorter directory"));
-        }
         Ok(paths)
     }
 
-    pub fn socket(&self) -> PathBuf {
-        self.runtime.join("engine.sock")
-    }
-
-    /// A new path for a player's socket that says where it is, beside the engine's.
+    /// A new path for a player's socket that says where it is.
     pub fn player_socket(&self) -> PathBuf {
         static PLAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = PLAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -140,6 +124,12 @@ impl Paths {
     /// Holds the port the engine last served the web app on.
     pub fn http_port(&self) -> PathBuf {
         self.state.join("http-port")
+    }
+
+    /// Holds the port the engine serves on now and the token that lets this user's torrential in,
+    /// which only this user can read. It stays while the engine restarts for an update.
+    pub fn engine_token(&self) -> PathBuf {
+        self.state.join("engine-token")
     }
 
     /// Left by an engine that exits for the login service to start the next one.
@@ -221,7 +211,8 @@ mod tests {
     fn torrential_home_holds_everything_but_downloads() {
         let p = resolve(&[("HOME", "/Users/ada"), ("TORRENTIAL_HOME", "/tmp/th")]).unwrap();
         assert_eq!(p.state, Path::new("/tmp/th/state"));
-        assert_eq!(p.socket(), Path::new("/tmp/th/run/engine.sock"));
+        assert_eq!(p.engine_token(), Path::new("/tmp/th/state/engine-token"));
+        assert_eq!(p.runtime, Path::new("/tmp/th/run"));
         assert_eq!(p.downloads, Path::new("/Users/ada/Downloads/torrential"));
         assert_eq!(p.plays(), Path::new("/tmp/th/data/plays"));
     }
@@ -232,16 +223,8 @@ mod tests {
         assert_eq!(p.state, Path::new("/var/st/torrential"));
         assert_eq!(p.config, Path::new("/Users/ada/.config/torrential"));
         assert_eq!(p.plays(), Path::new("/Users/ada/.local/share/torrential/plays"));
-        assert_eq!(p.socket(), Path::new("/tmp/torrential-501/engine.sock"));
+        assert_eq!(p.runtime, Path::new("/tmp/torrential-501"));
         let p = resolve(&[("HOME", "/home/ada"), ("XDG_RUNTIME_DIR", "/run/user/501")]).unwrap();
-        assert_eq!(p.socket(), Path::new("/run/user/501/torrential/engine.sock"));
-    }
-
-    #[test]
-    fn refuses_a_socket_path_past_the_limit() {
-        let deep = format!("/tmp/{}", "d".repeat(120));
-        let err = resolve(&[("HOME", "/Users/ada"), ("TORRENTIAL_HOME", &deep)]).unwrap_err();
-        assert_eq!(err.code, ErrorCode::DaemonUnavailable);
-        assert_eq!(err.hint.as_deref(), Some("set TORRENTIAL_HOME to a shorter directory"));
+        assert_eq!(p.runtime, Path::new("/run/user/501/torrential"));
     }
 }

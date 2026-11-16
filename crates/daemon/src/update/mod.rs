@@ -62,7 +62,39 @@ pub fn target(os: &str, arch: &str) -> Option<&'static str> {
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
         ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-musl"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
         _ => None,
+    }
+}
+
+/// How a release packs its binary for one target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Archive {
+    /// `torrential` in a gzipped tarball.
+    TarGz,
+    /// `torrential.exe` in a zip, as Windows opens.
+    Zip,
+}
+
+impl Archive {
+    pub fn of(target: &str) -> Archive {
+        if target.ends_with("-windows-msvc") { Archive::Zip } else { Archive::TarGz }
+    }
+
+    /// The release asset that holds the binary for `target`.
+    pub fn asset(self, target: &str) -> String {
+        match self {
+            Archive::TarGz => format!("torrential-{target}.tar.gz"),
+            Archive::Zip => format!("torrential-{target}.zip"),
+        }
+    }
+
+    /// The binary's name in the archive.
+    pub fn binary(self) -> &'static str {
+        match self {
+            Archive::TarGz => "torrential",
+            Archive::Zip => "torrential.exe",
+        }
     }
 }
 
