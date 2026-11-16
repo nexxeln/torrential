@@ -28,6 +28,7 @@ use crate::log::{log, persist};
 use deleter::Deleter;
 use holds::{Before, Holds, OnDisk, PutBack};
 use plays::{Destination, Plays, Tending};
+use reach::Reach;
 pub use streams::Lease;
 use streams::Streams;
 use torrential_search::WebSeeds;
@@ -35,6 +36,7 @@ use torrential_search::WebSeeds;
 pub mod deleter;
 mod holds;
 pub mod plays;
+mod reach;
 mod streams;
 pub mod trash;
 
@@ -56,6 +58,10 @@ pub struct OwnerConfig {
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T, Error>>;
+
+/// How long the engine waits as it starts for the folders of its downloads to answer. Those that
+/// take longer start once they do.
+const FOLDERS_AT_START: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub enum Source {
@@ -225,6 +231,13 @@ pub enum Update {
     Removed(TorrentId),
 }
 
+/// A command waiting for a folder it looks in to answer.
+struct Parked {
+    dir: PathBuf,
+    since: Instant,
+    command: Command,
+}
+
 struct MetadataWaiter {
     id: TorrentId,
     deadline: Instant,
@@ -272,7 +285,10 @@ pub struct Owner {
     /// Looks up the web seeds that serve every file of a torrent the engine downloads.
     web_seeds: WebSeeds,
     parse: ParseTorrent,
-    disk: Box<dyn Disk>,
+    disk: Arc<dyn Disk>,
+    /// The folders that have answered, and those being looked in.
+    reach: Reach,
+    parked: Vec<Parked>,
     updates: broadcast::Sender<Update>,
     config: OwnerConfig,
     resume_saved_at: Instant,
@@ -286,7 +302,7 @@ impl Owner {
         engine: EngineHandle,
         web_seeds: WebSeeds,
         parse: ParseTorrent,
-        disk: Box<dyn Disk>,
+        disk: Arc<dyn Disk>,
         playing: Playing,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
@@ -326,11 +342,16 @@ impl Owner {
             engine,
             web_seeds,
             parse,
+            reach: Reach::new(disk.clone(), vec![config.plays.root.clone()]),
+            parked: Vec::new(),
             disk,
             updates,
             config,
             resume_saved_at: Instant::now(),
         };
+        // A download in a folder that has not answered yet starts once it does.
+        let folders: Vec<PathBuf> = owner.jobs.values().map(|job| job.record.dir.clone()).collect();
+        owner.reach.wait(&folders, FOLDERS_AT_START);
         // Nothing is in the engine yet, so what a removal cut short by a crash left goes now.
         owner.finish_deletions();
         owner.schedule();
@@ -381,6 +402,18 @@ impl Owner {
     }
 
     fn command(&mut self, command: Command) {
+        self.run_or_park(command, Instant::now());
+    }
+
+    /// Runs `command` once every folder it looks in has answered, which it may have waited for
+    /// since `since`.
+    fn run_or_park(&mut self, command: Command, since: Instant) {
+        let folders = self.folders(&command);
+        let mut unreached = folders.into_iter().filter(|dir| !self.reach.reach(dir));
+        if let Some(dir) = unreached.next() {
+            self.parked.push(Parked { dir, since, command });
+            return;
+        }
         match command {
             Command::Resolve { prefix, results, command, reply } => {
                 let _ = reply.send(self.resolve_any(&prefix, &results, command));
@@ -472,6 +505,55 @@ impl Owner {
             Command::RecordResults(releases) => self.record_results(releases),
             Command::Shutdown { reply } => self.begin_stop(Stopper::Exit(Some(reply))),
             Command::Restart { reply } => self.begin_stop(Stopper::Update(reply)),
+        }
+    }
+
+    /// The folders `command` looks in: where a download it makes goes, and where the downloads it
+    /// names are.
+    fn folders(&self, command: &Command) -> Vec<PathBuf> {
+        let dir_of = |id: TorrentId| self.jobs.get(&id).map(|job| job.record.dir.clone());
+        let existing = |source: &Source| match source {
+            Source::Download(id) => Some(*id),
+            Source::Magnet(m) => self.find_job(&m.info_hash).ok().flatten(),
+            Source::Torrent { metainfo, .. } => self.find_job(&metainfo.info_hash).ok().flatten(),
+        };
+        let chosen = |dir: &Option<PathBuf>| dir.clone().unwrap_or_else(|| self.config.default_dir.clone());
+        match command {
+            Command::Get { get, .. } => {
+                existing(&get.source).and_then(dir_of).into_iter().chain([chosen(&get.dir)]).collect()
+            }
+            Command::Play { play, .. } => {
+                let to = match &play.to {
+                    Destination::Folder(dir) => Some(chosen(dir)),
+                    Destination::Plays => None,
+                };
+                existing(&play.source).and_then(dir_of).into_iter().chain(to).collect()
+            }
+            Command::Remove { refs, delete: true, .. } => {
+                refs.iter().filter_map(|r| self.resolve_job(r, "rm").ok()).filter_map(dir_of).collect()
+            }
+            Command::Verify { reference, .. } => {
+                self.resolve_job(reference, "verify").ok().and_then(dir_of).into_iter().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Notes the folders that answered and runs the commands that waited for them. A command that
+    /// has waited `SAY_AFTER` for a folder answers that it is waiting.
+    fn reached_folders(&mut self, now: Instant) {
+        let answered = self.reach.catch_up(now);
+        for parked in std::mem::take(&mut self.parked) {
+            if self.reach.reached(&parked.dir) {
+                self.run_or_park(parked.command, parked.since);
+            } else if now.duration_since(parked.since) >= reach::SAY_AFTER {
+                refuse(parked.command, reach::waiting(&parked.dir));
+            } else {
+                self.parked.push(parked);
+            }
+        }
+        if answered {
+            self.schedule();
         }
     }
 
@@ -605,6 +687,8 @@ impl Owner {
             .jobs
             .values()
             .filter(|j| j.id() != except && j.record.intent == Intent::Running && !self.leaving(j.id()))
+            // A download in a folder that has not answered yet counts once it starts.
+            .filter(|j| self.reach.reached(&j.record.dir))
             .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
             .map(|job| self.space_needed(job))
             .sum())
@@ -666,7 +750,7 @@ impl Owner {
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
         if home == Home::Folder {
-            self.tending.outside_plays(&dir)?;
+            self.tending.outside_plays(&dir, self.disk.lineage(&dir))?;
         }
         let cap = Cap::new(max_size, setup_max_size);
         let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
@@ -1701,6 +1785,9 @@ impl Owner {
     }
 
     fn start(&mut self, id: TorrentId) {
+        if !self.reach.reach(&self.jobs[&id].record.dir) {
+            return;
+        }
         self.jobs.get_mut(&id).expect("scheduled").forget_sources();
         if let Err(error) = self.check_writes(id, "resume") {
             self.fail(id, error);
@@ -1786,6 +1873,7 @@ impl Owner {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.reached_folders(now);
         self.expire_metadata(now);
         self.finish_pauses();
         self.finish_stop_if_done();
@@ -1914,6 +2002,22 @@ enum Stopper {
     /// An update, which restarts the engine only once every download's progress is saved.
     /// Otherwise the engine carries on and the update tries again later.
     Update(Reply<()>),
+}
+
+/// Answers a command that did not run with `error`.
+fn refuse(command: Command, error: Error) {
+    match command {
+        Command::Get { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        Command::Play { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        Command::Remove { reply, .. } | Command::Verify { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        _ => {}
+    }
 }
 
 // Default macOS filesystems ignore case.

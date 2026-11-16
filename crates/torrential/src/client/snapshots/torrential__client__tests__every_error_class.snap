@@ -246,16 +246,16 @@ hint: run torrential engine install from a terminal outside any sandbox
   "next": null
 }
 === daemon_unavailable, exit 6
-error[daemon_unavailable]: the engine socket path /tmp/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/run/engine.sock is 141 bytes, over the <max>-byte limit
-hint: set TORRENTIAL_HOME to a shorter directory
+error[daemon_unavailable]: the engine did not respond in time
+hint: see /Users/ada/.local/state/torrential/engine.log
 --- json
 {
   "schema": 1,
   "type": "error",
   "error": {
     "code": "daemon_unavailable",
-    "message": "the engine socket path /tmp/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/run/engine.sock is 141 bytes, over the <max>-byte limit",
-    "hint": "set TORRENTIAL_HOME to a shorter directory"
+    "message": "the engine did not respond in time",
+    "hint": "see /Users/ada/.local/state/torrential/engine.log"
   },
   "next": null
 }

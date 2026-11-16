@@ -74,6 +74,8 @@ fn ranking_screens() {
     snapshots("ranking", ranking);
 }
 
+// Its screens show paths like ~/Downloads/torrential/film, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn idle_screens() {
     snapshots("idle", idle);
@@ -89,11 +91,15 @@ fn file_tree_screens() {
     snapshots("file_tree", file_tree);
 }
 
+// Its screens show paths like ~/Downloads/torrential/film, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn download_screens() {
     snapshots("download", download);
 }
 
+// Its screens show paths like ~/Downloads/torrential/film, which Windows joins with a backslash.
+#[cfg(unix)]
 #[test]
 fn download_files_screens() {
     snapshots("download_files", |size| {

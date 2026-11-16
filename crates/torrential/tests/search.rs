@@ -104,7 +104,7 @@ fn get_on_a_search_result_downloads_into_the_configured_folder() {
     let home = Home::searching(&server, &["debian"], "");
     let isos = home.path("isos");
     home.write_config(&format!(
-        "{}downloads:\n  dir: \"{}\"\n",
+        "{}downloads:\n  dir: '{}'\n",
         std::fs::read_to_string(home.path("th/config/config.yaml")).unwrap(),
         isos.display()
     ));

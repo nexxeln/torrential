@@ -190,6 +190,8 @@ mod tests {
         assert_eq!(from(&[]).as_deref(), None);
     }
 
+    // It runs /bin/sh.
+    #[cfg(unix)]
     #[test]
     fn a_command_that_fails_or_outlives_the_timeout_gives_nothing() {
         let second = Duration::from_secs(1);

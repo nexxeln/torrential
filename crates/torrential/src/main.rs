@@ -67,6 +67,9 @@ fn main() -> ExitCode {
     if let Command::Daemon { command: DaemonCommand::Launch } = command {
         return ExitCode::from(client::launch::launch_stage(&env));
     }
+    if let Command::Daemon { command: DaemonCommand::Interrupt { pid } } = command {
+        return ExitCode::from(interrupt(pid));
+    }
     let mode = Mode::detect(cli.json, stdout_is_terminal, &env);
     if let Command::Daemon { command: DaemonCommand::Run { service, http_port } } = command {
         return ExitCode::from(engine(service, http_port, mode, &env));
@@ -77,6 +80,19 @@ fn main() -> ExitCode {
         print_notices(mode, &env);
     }
     ExitCode::from(exit)
+}
+
+/// `torrential daemon interrupt`. On Windows this process attaches to the engine's console, so it
+/// is the only work it does.
+fn interrupt(pid: u32) -> u8 {
+    #[cfg(windows)]
+    let sent = torrential_daemon::process::send_interrupt(pid).is_ok();
+    #[cfg(unix)]
+    let sent = {
+        torrential_daemon::process::interrupt(pid);
+        true
+    };
+    if sent { torrential_daemon::exit::SUCCESS } else { torrential_daemon::exit::code(ErrorCode::DaemonUnavailable) }
 }
 
 /// `torrential engine run`: the engine in this process until it stops.

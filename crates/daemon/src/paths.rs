@@ -1,4 +1,3 @@
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use torrential_core::{Error, ErrorCode};
@@ -24,7 +23,12 @@ pub const MAX_SOCKET_PATH: usize = 107;
 
 impl Paths {
     pub fn from_process(env: &Env) -> Result<Self, Error> {
-        Self::resolve(env, uid(), dirs::download_dir())
+        #[cfg(unix)]
+        let uid = uid();
+        // Only the Unix runtime folder under /tmp is named for the user.
+        #[cfg(windows)]
+        let uid = 0;
+        Self::resolve(env, uid, dirs::download_dir())
     }
 
     pub fn resolve(env: &Env, uid: u32, os_downloads: Option<PathBuf>) -> Result<Self, Error> {
@@ -36,6 +40,17 @@ impl Paths {
             .or_else(|| torrential_home.as_ref().map(|r| r.join("downloads")))
             .ok_or_else(no_home)?;
         let paths = if let Some(root) = torrential_home {
+            Self {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+                data: root.join("data"),
+                runtime: root.join("run"),
+                downloads,
+            }
+        } else if cfg!(windows) {
+            // Windows keeps an app's own files under the person's local app data folder.
+            let root = env.var("LOCALAPPDATA").map(PathBuf::from).ok_or_else(no_home)?.join("torrential");
             Self {
                 config: root.join("config"),
                 state: root.join("state"),
@@ -61,30 +76,20 @@ impl Paths {
                 downloads,
             }
         };
-        let socket = paths.socket();
-        let len = socket.as_os_str().len();
-        if len > MAX_SOCKET_PATH {
-            return Err(Error::new(
-                ErrorCode::DaemonUnavailable,
-                format!(
-                    "the engine socket path {} is {len} bytes, over the {MAX_SOCKET_PATH}-byte limit",
-                    socket.display()
-                ),
-            )
-            .with_hint("set TORRENTIAL_HOME to a shorter directory"));
-        }
         Ok(paths)
     }
 
-    pub fn socket(&self) -> PathBuf {
-        self.runtime.join("engine.sock")
-    }
-
-    /// A new path for a player's socket that says where it is, beside the engine's.
+    /// A new path for a player's socket that says where it is. On Windows it is a named pipe, which
+    /// is what mpv opens there.
     pub fn player_socket(&self) -> PathBuf {
         static PLAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = PLAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.runtime.join(format!("player-{}-{n}.sock", std::process::id()))
+        let name = format!("player-{}-{n}", std::process::id());
+        if cfg!(windows) {
+            PathBuf::from(format!(r"\\.\pipe\torrential-{name}"))
+        } else {
+            self.runtime.join(format!("{name}.sock"))
+        }
     }
 
     pub fn lock(&self) -> PathBuf {
@@ -142,17 +147,29 @@ impl Paths {
         self.state.join("http-port")
     }
 
+    /// Holds the port the engine serves on now and the token that lets this user's torrential in,
+    /// which only this user can read. It stays while the engine restarts for an update.
+    pub fn engine_token(&self) -> PathBuf {
+        self.state.join("engine-token")
+    }
+
     /// Left by an engine that exits for the login service to start the next one.
     pub fn switching(&self) -> PathBuf {
         self.state.join("engine.switching")
     }
 
-    /// Makes the state folder, if it is not there, so that only this user can change it.
+    /// Makes the state folder, if it is not there, so that only this user can change it. On
+    /// Windows the local app data folder it is in is the person's alone already.
     pub fn make_state(&self) -> std::io::Result<()> {
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.state)
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&self.state)
     }
 }
 
+#[cfg(unix)]
 pub fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }
@@ -164,6 +181,7 @@ fn no_home() -> Error {
 
 /// The filesystem type of `path` when it is a network filesystem, where SQLite's locking
 /// and WAL are unreliable.
+#[cfg(unix)]
 pub fn network_filesystem(path: &Path) -> std::io::Result<Option<String>> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
@@ -172,6 +190,18 @@ pub fn network_filesystem(path: &Path) -> std::io::Result<Option<String>> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(network_kind(&stat))
+}
+
+/// Windows says only that a drive is on the network, not what kind it is.
+#[cfg(windows)]
+pub fn network_filesystem(path: &Path) -> std::io::Result<Option<String>> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    const DRIVE_REMOTE: u32 = 4;
+    let mut volume = vec![0u16; 1024];
+    unsafe { GetVolumePathNameW(&windows::core::HSTRING::from(path.as_os_str()), &mut volume) }
+        .map_err(crate::fsutil::win32)?;
+    let remote = unsafe { GetDriveTypeW(windows::core::PCWSTR(volume.as_ptr())) } == DRIVE_REMOTE;
+    Ok(remote.then(|| "network drive".to_string()))
 }
 
 #[cfg(target_os = "macos")]
@@ -221,27 +251,35 @@ mod tests {
     fn torrential_home_holds_everything_but_downloads() {
         let p = resolve(&[("HOME", "/Users/ada"), ("TORRENTIAL_HOME", "/tmp/th")]).unwrap();
         assert_eq!(p.state, Path::new("/tmp/th/state"));
-        assert_eq!(p.socket(), Path::new("/tmp/th/run/engine.sock"));
+        assert_eq!(p.engine_token(), Path::new("/tmp/th/state/engine-token"));
+        assert_eq!(p.runtime, Path::new("/tmp/th/run"));
         assert_eq!(p.downloads, Path::new("/Users/ada/Downloads/torrential"));
         assert_eq!(p.plays(), Path::new("/tmp/th/data/plays"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn xdg_directories_apply_without_torrential_home() {
         let p = resolve(&[("HOME", "/Users/ada"), ("XDG_STATE_HOME", "/var/st")]).unwrap();
         assert_eq!(p.state, Path::new("/var/st/torrential"));
         assert_eq!(p.config, Path::new("/Users/ada/.config/torrential"));
         assert_eq!(p.plays(), Path::new("/Users/ada/.local/share/torrential/plays"));
-        assert_eq!(p.socket(), Path::new("/tmp/torrential-501/engine.sock"));
+        assert_eq!(p.runtime, Path::new("/tmp/torrential-501"));
         let p = resolve(&[("HOME", "/home/ada"), ("XDG_RUNTIME_DIR", "/run/user/501")]).unwrap();
-        assert_eq!(p.socket(), Path::new("/run/user/501/torrential/engine.sock"));
+        assert_eq!(p.runtime, Path::new("/run/user/501/torrential"));
     }
 
+    #[cfg(windows)]
     #[test]
-    fn refuses_a_socket_path_past_the_limit() {
-        let deep = format!("/tmp/{}", "d".repeat(120));
-        let err = resolve(&[("HOME", "/Users/ada"), ("TORRENTIAL_HOME", &deep)]).unwrap_err();
-        assert_eq!(err.code, ErrorCode::DaemonUnavailable);
-        assert_eq!(err.hint.as_deref(), Some("set TORRENTIAL_HOME to a shorter directory"));
+    fn windows_keeps_everything_but_downloads_under_local_app_data() {
+        let local = r"C:\Users\ada\AppData\Local";
+        let p = resolve(&[("USERPROFILE", r"C:\Users\ada"), ("LOCALAPPDATA", local)]).unwrap();
+        let root = Path::new(local).join("torrential");
+        assert_eq!(
+            [&p.config, &p.state, &p.cache, &p.data, &p.runtime],
+            [&root.join("config"), &root.join("state"), &root.join("cache"), &root.join("data"), &root.join("run")]
+        );
+        assert_eq!(p.engine_token(), root.join(r"state\engine-token"));
+        assert_eq!(p.downloads, Path::new(r"/Users/ada/Downloads/torrential"));
     }
 }

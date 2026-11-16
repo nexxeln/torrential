@@ -1,5 +1,7 @@
 pub mod admission;
 pub(crate) mod book;
+#[cfg(unix)]
+pub mod bridge05;
 pub(crate) mod cast;
 pub(crate) mod ctx;
 pub(crate) mod db;
@@ -32,12 +34,10 @@ mod tests;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use torrential_core::protocol::WRITES_STOP_WITHIN;
 use torrential_core::{Error, ErrorCode, Preferences};
@@ -49,6 +49,7 @@ use crate::fsutil;
 use crate::log::{log, persist};
 use crate::paths::{self, Paths};
 use crate::service;
+use crate::wire::Access;
 use ctx::{Ctx, OwnerHandle};
 use db::Db;
 use detector::Detector;
@@ -129,7 +130,7 @@ impl Ports {
                 parse: fake::parse,
                 search: Arc::new(fake::fixture::search(torrential_core::time::now())),
                 disk: Box::new(crate::disk::RoomyDisk),
-                machine: Detector::start(env, settings.downloads_dir(paths), Box::new(crate::disk::RoomyDisk)),
+                machine: Detector::start(env, settings.downloads_dir(paths), Arc::new(crate::disk::RoomyDisk)),
                 preferences,
                 ffmpeg,
                 subtitles,
@@ -142,7 +143,7 @@ impl Ports {
             None => Network::Public,
         };
         let roomy = test.is_some_and(|test| test.roomy_disk());
-        let disk = || -> Box<dyn Disk + Sync> {
+        let disk = || -> Box<dyn Disk> {
             if roomy { Box::new(crate::disk::RoomyDisk) } else { Box::new(crate::disk::RealDisk) }
         };
         let search =
@@ -157,7 +158,7 @@ impl Ports {
             search,
             parse: libtorrent::parse,
             disk: disk(),
-            machine: Detector::start(env, settings.downloads_dir(paths), disk()),
+            machine: Detector::start(env, settings.downloads_dir(paths), Arc::from(disk())),
             preferences,
             ffmpeg,
             subtitles,
@@ -190,6 +191,13 @@ pub struct Running {
     pub http: tokio::task::JoinHandle<()>,
 }
 
+/// Where the engine listens: the first of `ports` that is free, else any. It writes the port it
+/// takes and the token of this user's torrential to `access` before it answers anything there.
+pub struct Listen<'a> {
+    pub ports: &'a [u16],
+    pub access: &'a Path,
+}
+
 pub fn start(
     runtime: &tokio::runtime::Handle,
     db: &Db,
@@ -197,14 +205,14 @@ pub fn start(
     config: OwnerConfig,
     timing: titles::Timing,
     version: String,
-    http_ports: &[u16],
+    listen: Listen,
 ) -> Result<Running, Error> {
     let store = Store::open(db)?;
     ports.search.restore(store.results(torrential_core::time::now())?);
     let devices = Arc::new(devices::Devices::open(db)?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
-    let players = http::bind(http_ports, *reach.borrow_and_update())
+    let players = http::bind(listen.ports, *reach.borrow_and_update())
         .and_then(|listener| {
             listener.set_nonblocking(true)?;
             let _entered = runtime.enter();
@@ -213,6 +221,9 @@ pub fn start(
         .map_err(|e| Error::internal(format!("cannot listen for players and the web app: {e}")))?;
     let http_port =
         players.local_addr().map_err(|e| Error::internal(format!("cannot read the player port: {e}")))?.port();
+    Access { port: http_port, token: devices.local_token() }
+        .write(listen.access)
+        .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot write {}: {e}", listen.access.display())))?;
     let shelf = Arc::new(shelf::Shelf::open(db)?);
     let (events_tx, events) = mpsc::unbounded_channel();
     let (engine, thread) = engine_port::spawn(ports.engine, events_tx);
@@ -223,7 +234,7 @@ pub fn start(
         engine.clone(),
         ports.web_seeds,
         ports.parse,
-        ports.disk,
+        Arc::from(ports.disk),
         playing.clone(),
         config,
     )?;
@@ -250,15 +261,18 @@ pub fn start(
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
-/// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd or
-/// systemd started it, a switch to an installed update.
+/// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd,
+/// systemd or Task Scheduler started it, a switch to an installed update.
 pub fn run(env: &Env, service: bool, http_port: Option<u16>) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
     match serve(env, &paths, service, http_port) {
-        Ok(Ended::Restart) if service => service::RESTART,
+        Ok(Ended::Restart) if service => {
+            service::start_next(env, &paths);
+            service::RESTART
+        }
         Ok(_) => 0,
         // The other engine serves this home, so launchd and systemd have nothing to start again.
         Err(Startup::AlreadyRunning(message)) => {
@@ -298,6 +312,10 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         None => return Err(Startup::AlreadyRunning(format!("another engine owns {}", paths.state.display()))),
     };
     persist(&format!("remove {}", paths.startup_error().display()), fsutil::remove(&paths.startup_error()));
+    #[cfg(windows)]
+    if let Ok(exe) = env.installed() {
+        crate::update::release::remove_set_aside(&exe);
+    }
     prepare_runtime_dir(&paths.runtime)?;
     match service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
@@ -336,47 +354,40 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
     let version = env.version();
     let ports = Ports::from_env(env, paths, &settings)?;
     let (engine, ended) = runtime.block_on(async {
-        let socket = paths.socket();
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).map_err(|e| {
-            Error::new(ErrorCode::DaemonUnavailable, format!("cannot listen on {}: {e}", socket.display()))
-        })?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| io(&format!("protect {}", socket.display()), e))?;
         let wanted = http_port.or(test.and_then(|test| test.http_port())).unwrap_or(http::PORT);
         // Open pages reconnect to the address they loaded from, so the engine serves where it last did.
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
-        let running =
-            start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), &http_ports)?;
-        // Before the socket answers, so a page that reconnects the moment this engine is up says what was updated.
+        let access = paths.engine_token();
+        let listen = Listen { ports: &http_ports, access: &access };
+        let running = start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), listen)?;
         running.ctx.news.post(switch::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
             let written = fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
             persist(&format!("write {}", paths.http_port().display()), written);
         }
-        log(&format!(
-            "engine {version} started, pid {pid}, socket {}, web app and players http://127.0.0.1:{players}",
-            socket.display()
-        ));
+        log(&format!("engine {version} started, pid {pid}, web app and players http://127.0.0.1:{players}"));
         persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
-        let accept = tokio::spawn(server::accept(listener, running.ctx.clone()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(switch::follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
+        // Remove in 0.7
+        #[cfg(unix)]
+        let bridge = tokio::spawn(bridge05::answer(paths.clone(), running.ctx.owner.clone(), version.clone()));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
-        // Before the socket stops answering, so a stop that finds it refusing waits for the next engine.
+        // Before the port stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
             service::leave_switching(paths, torrential_core::time::now());
         }
-        accept.abort();
         running.http.abort();
         signals.abort();
         updates.abort();
-        // An engine that stops for a newer version leaves its socket, so a client following it
-        // finds one that refuses for a moment instead of none, and waits for the next engine.
+        #[cfg(unix)]
+        bridge.abort();
+        // An engine that stops for a newer version leaves its token file, so a client following it
+        // finds a port that refuses for a moment instead of none, and waits for the next engine.
         if ended == Ended::Stopped {
-            persist(&format!("remove {}", socket.display()), fsutil::remove(&socket));
+            persist(&format!("remove {}", access.display()), fsutil::remove(&access));
         }
         Ok::<_, Error>((running.engine, ended))
     })?;
@@ -387,14 +398,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
 }
 
 async fn stop_on_signal(owner: OwnerHandle) {
-    use tokio::signal::unix::{SignalKind, signal};
-    let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
-        return;
-    };
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
-    }
+    crate::process::asked_to_stop().await;
     log("stopping on a signal");
     let (reply, _) = tokio::sync::oneshot::channel();
     owner.tell(owner::Command::Shutdown { reply });
@@ -405,37 +409,66 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), Error> {
         |why: String| Error::new(ErrorCode::DaemonUnavailable, why).with_hint("remove it, or set XDG_RUNTIME_DIR");
     std::fs::create_dir_all(dir).map_err(|e| refuse(format!("cannot create {}: {e}", dir.display())))?;
     let meta = dir.symlink_metadata().map_err(|e| refuse(format!("cannot inspect {}: {e}", dir.display())))?;
-    if !meta.is_dir() || meta.uid() != paths::uid() {
-        return Err(refuse(format!("{} is not a directory owned by you", dir.display())));
+    if !meta.is_dir() {
+        return Err(refuse(format!("{} is not a directory", dir.display())));
     }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| refuse(format!("cannot protect {}: {e}", dir.display())))
+    // On Windows the folder is under the person's local app data folder, which is theirs alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if meta.uid() != paths::uid() {
+            return Err(refuse(format!("{} is not a directory owned by you", dir.display())));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| refuse(format!("cannot protect {}: {e}", dir.display())))?;
+    }
+    Ok(())
 }
 
+/// The lock that makes one engine the owner of a state folder. The engine's process ID is in the
+/// lock file on Unix. Windows lets no other process read a locked file, so there it is beside it.
 pub struct OwnerLock {
     _file: File,
 }
 
 impl OwnerLock {
     pub fn acquire(path: &Path) -> Result<Option<Self>, Error> {
-        use std::os::fd::AsRawFd;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
             .open(path)
             .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot open {}: {e}", path.display())))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Ok(None);
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(Error::new(ErrorCode::StateCorrupt, format!("cannot lock {}: {e}", path.display())));
             }
-            return Err(Error::new(ErrorCode::StateCorrupt, format!("cannot lock {}: {e}", path.display())));
         }
-        let mut file = file;
-        let _ = file.set_len(0).and_then(|()| writeln!(file, "{}", std::process::id()));
+        let pid = std::process::id();
+        if cfg!(windows) {
+            let _ = std::fs::write(pid_file(path), format!("{pid}\n"));
+        } else {
+            let _ = file.set_len(0).and_then(|()| writeln!(file, "{pid}"));
+        }
         Ok(Some(Self { _file: file }))
     }
+
+    /// The process that holds the lock at `path`, which wrote its ID, when one does.
+    pub fn holder(path: &Path) -> Option<u32> {
+        let file = File::open(path).ok()?;
+        match file.try_lock_shared() {
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            _ => return None,
+        }
+        let written = if cfg!(windows) { pid_file(path) } else { path.to_path_buf() };
+        std::fs::read_to_string(written).ok()?.trim().parse().ok()
+    }
+}
+
+/// Where the engine that holds the lock at `lock` writes its process ID on Windows.
+fn pid_file(lock: &Path) -> PathBuf {
+    lock.with_extension("pid")
 }

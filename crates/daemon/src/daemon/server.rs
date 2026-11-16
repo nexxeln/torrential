@@ -1,16 +1,16 @@
-//! The socket: the hello, then each request framed by length, and the streams that follow.
+//! The requests of this user's torrential: each a POST to the engine's HTTP port, answered in
+//! frames, with the updates of a request that streams before its reply.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::io;
 use std::time::{Duration, Instant};
 
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{UnixListener, UnixStream};
+use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use torrential_core::error::Details;
 use torrential_core::protocol::{
     Event, Frame, GetOutcome, GetReply, METADATA_WAIT, PlayReply, Request, Response, TitlePlayed, TitleRequest,
-    TitleStep, WIRE_VERSION,
+    TitleStep, WIRE_VERSION, encode_frame,
 };
 use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, Plays, SearchQuery, TorrentId};
 
@@ -18,6 +18,7 @@ use super::ctx::Ctx;
 use super::downloads::{
     Answer, JobEvents, Searching, files, get, listed, metadata, pause, play, remove, resume, search, streams,
 };
+use super::http::{Connection, Request as Http};
 use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::search_port::Progress;
@@ -30,11 +31,9 @@ use crate::wire;
 pub async fn handle(ctx: &Ctx, request: Request) -> Response {
     let owner = &ctx.owner;
     let result = match request {
-        Request::Hello { .. }
-        | Request::Watch { .. }
-        | Request::PlayTitle(_)
-        | Request::GetTitle(_)
-        | Request::Cast(_) => Err(Error::new(ErrorCode::Usage, "this request streams, so it is not a single request")),
+        Request::Hello | Request::Watch { .. } | Request::PlayTitle(_) | Request::GetTitle(_) | Request::Cast(_) => {
+            Err(Error::new(ErrorCode::Usage, "this request streams, so it is not a single request"))
+        }
         Request::Search { query, .. } => search(ctx, query).await.map(|result| Response::Search { result }),
         Request::Files { target, timeout_ms } => {
             files(ctx, target, Duration::from_millis(timeout_ms.into())).await.map(|files| Response::Files { files })
@@ -84,18 +83,66 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
     result.unwrap_or_else(|error| Response::Error { error })
 }
 
-async fn stream_search(ctx: &Ctx, query: SearchQuery, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
-    let mut search = Searching::start(ctx, query);
-    let response = loop {
+/// Answers a request at `wire::PATH`, whose token the guard has checked, with its frames. The
+/// query says the client's version and protocol. Every engine answers hello and shutdown, and
+/// refuses the rest when the protocols differ. The connection closes after the reply.
+pub async fn answer(conn: &mut Connection<'_>, http: &Http) -> io::Result<bool> {
+    let ctx = conn.ctx;
+    let speaks = http.param("wire").and_then(|wire| wire.parse::<u32>().ok());
+    let (Some(version), Some(speaks)) = (http.param("version"), speaks) else {
+        return conn.empty("400 Bad Request", "", false).await;
+    };
+    let request = serde_json::from_slice::<Request>(&http.body);
+    conn.begin(wire::FRAMES, http).await?;
+    let reply = match request {
+        Ok(Request::Hello) => hello(ctx),
+        Ok(Request::Shutdown { asked: false }) => switch(ctx, &version).await,
+        Ok(request @ Request::Shutdown { asked: true }) => handle(ctx, request).await,
+        _ if speaks != WIRE_VERSION => {
+            let error = Error::new(
+                ErrorCode::DaemonVersion,
+                format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {speaks}"),
+            )
+            .with_hint("run torrential engine stop, then run the command again")
+            .with_next("torrential engine stop");
+            Response::Error { error }
+        }
+        Err(e) => Response::Error { error: Error::internal(format!("the engine cannot read the request: {e}")) },
+        Ok(Request::Watch { refs }) => {
+            watch(conn, refs).await?;
+            return conn.end().await;
+        }
+        Ok(Request::Search { query, stream: true }) => stream_search(conn, query).await?,
+        Ok(Request::PlayTitle(request)) => title_frames(conn, request, Destination::Plays).await?,
+        Ok(Request::GetTitle(request)) => title_frames(conn, request, Destination::Folder(None)).await?,
+        Ok(Request::Cast(request)) => cast_frames(conn, request).await?,
+        Ok(request) => handle(ctx, request).await,
+    };
+    send(conn, &reply).await?;
+    conn.end().await
+}
+
+fn hello(ctx: &Ctx) -> Response {
+    Response::Hello { engine_version: ctx.version.clone(), wire: WIRE_VERSION, pid: std::process::id() }
+}
+
+/// Sends one frame.
+async fn send(conn: &mut Connection<'_>, message: &impl Serialize) -> io::Result<()> {
+    conn.chunk(&encode_frame(message).map_err(io::Error::other)?).await
+}
+
+/// Sends the results as each source answers, and returns the whole search.
+async fn stream_search(conn: &mut Connection<'_>, query: SearchQuery) -> io::Result<Response> {
+    let mut search = Searching::start(conn.ctx, query);
+    loop {
         match search.next().await {
             Answer::SoFar(Progress { result, pending }) => {
-                wire::write_async(wr, &Event::SearchUpdate { result: Box::new(result), pending }).await?;
+                send(conn, &Event::SearchUpdate { result: Box::new(result), pending }).await?;
             }
-            Answer::Done(Ok(result)) => break Response::Search { result },
-            Answer::Done(Err(error)) => break Response::Error { error },
+            Answer::Done(Ok(result)) => return Ok(Response::Search { result }),
+            Answer::Done(Err(error)) => return Ok(Response::Error { error }),
         }
-    };
-    wire::write_async(wr, &response).await
+    }
 }
 
 /// Plays a film or an episode into `to` from the first of its sources that starts, sending each
@@ -142,42 +189,32 @@ async fn play_title(
     }
 }
 
-/// A title play over the socket: a frame for each step, then the reply. The play stops, and the
-/// source under test is given up, if the client goes away first.
-async fn title_frames(
-    ctx: &Ctx,
-    request: TitleRequest,
-    to: Destination,
-    rd: &mut OwnedReadHalf,
-    wr: &mut OwnedWriteHalf,
-) -> std::io::Result<()> {
+/// A title play: a frame for each step, and returns the reply. The play stops, and the source
+/// under test is given up, if the client goes away first.
+async fn title_frames(conn: &mut Connection<'_>, request: TitleRequest, to: Destination) -> io::Result<Response> {
     let (steps_tx, mut steps) = mpsc::unbounded_channel();
-    let play = play_title(ctx, request, to, steps_tx);
+    let play = play_title(conn.ctx, request, to, steps_tx);
     tokio::pin!(play);
-    let mut probe = [0u8; 1];
     let reply = loop {
         tokio::select! {
             biased;
-            Some(step) = steps.recv() => wire::write_async(wr, &Frame::Update(TitleStep { step: Box::new(step) })).await?,
+            Some(step) = steps.recv() => send(conn, &Frame::Update(TitleStep { step: Box::new(step) })).await?,
             reply = &mut play => break reply,
-            read = tokio::io::AsyncReadExt::read(rd, &mut probe) => match read {
-                Ok(0) | Err(_) => return Ok(()),
-                Ok(_) => {}
-            },
+            gone = conn.gone() => return Err(gone),
         }
     };
     while let Ok(step) = steps.try_recv() {
-        wire::write_async(wr, &Frame::Update(TitleStep { step: Box::new(step) })).await?;
+        send(conn, &Frame::Update(TitleStep { step: Box::new(step) })).await?;
     }
-    wire::write_async(wr, &reply.unwrap_or_else(|error| Response::Error { error })).await
+    Ok(reply.unwrap_or_else(|error| Response::Error { error }))
 }
 
-/// A cast over the socket: a frame for each step of finding a title's source, then the cast once
-/// the TV plays it. The cast goes on after the client leaves.
-async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -> std::io::Result<()> {
-    let (mut view, mut steps) = match ctx.casts.start(request).await {
+/// A cast: a frame for each step of finding a title's source, and returns the cast once the TV
+/// plays it. The cast goes on after the client leaves.
+async fn cast_frames(conn: &mut Connection<'_>, request: CastRequest) -> io::Result<Response> {
+    let (mut view, mut steps) = match conn.ctx.casts.start(request).await {
         Ok(started) => started,
-        Err(error) => return wire::write_async(wr, &Response::Error { error }).await,
+        Err(error) => return Ok(Response::Error { error }),
     };
     let playing = super::cast::playing(&mut view);
     tokio::pin!(playing);
@@ -185,73 +222,14 @@ async fn cast_frames(ctx: &Ctx, request: CastRequest, wr: &mut OwnedWriteHalf) -
         tokio::select! {
             biased;
             step = steps.recv() => match step {
-                Ok(step) => wire::write_async(wr, &Frame::Update(TitleStep { step: Box::new(step) })).await?,
+                Ok(step) => send(conn, &Frame::Update(TitleStep { step: Box::new(step) })).await?,
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break (&mut playing).await,
             },
             cast = &mut playing => break cast,
         }
     };
-    let reply = reply.map_or_else(|error| Response::Error { error }, |cast| Response::Cast { cast: Box::new(cast) });
-    wire::write_async(wr, &reply).await
-}
-
-/// Answers each connection to `listener` from this user, until the listener fails.
-pub async fn accept(listener: UnixListener, ctx: Arc<Ctx>) {
-    let uid = crate::paths::uid();
-    while let Ok((stream, _)) = listener.accept().await {
-        if stream.peer_cred().is_ok_and(|cred| cred.uid() == uid) {
-            tokio::spawn(connection(ctx.clone(), stream));
-        }
-    }
-}
-
-pub async fn connection(ctx: Arc<Ctx>, stream: UnixStream) {
-    let _ = serve(&ctx, stream).await;
-}
-
-async fn serve(ctx: &Ctx, stream: UnixStream) -> std::io::Result<()> {
-    let (mut rd, mut wr) = stream.into_split();
-    let Some(Request::Hello { client_version, wire: client_wire }) = wire::read_async::<Request>(&mut rd).await? else {
-        return Ok(());
-    };
-    let hello = Response::Hello {
-        engine_version: ctx.version.clone(),
-        wire: WIRE_VERSION,
-        pid: std::process::id(),
-        http_port: ctx.http_port,
-    };
-    wire::write_async(&mut wr, &hello).await?;
-    while let Some(request) = wire::read_async::<Request>(&mut rd).await? {
-        if request == (Request::Shutdown { asked: false }) {
-            wire::write_async(&mut wr, &switch(ctx, &client_version).await).await?;
-            continue;
-        }
-        if client_wire != WIRE_VERSION && !matches!(request, Request::Shutdown { .. }) {
-            let error = Error::new(
-                ErrorCode::DaemonVersion,
-                format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {client_wire}"),
-            )
-            .with_hint("run torrential engine stop, then run the command again")
-            .with_next("torrential engine stop");
-            wire::write_async(&mut wr, &Response::Error { error }).await?;
-            continue;
-        }
-        match request {
-            Request::Watch { refs } => return watch(ctx, refs, rd, wr).await,
-            Request::Search { query, stream: true } => stream_search(ctx, query, &mut wr).await?,
-            Request::PlayTitle(request) => title_frames(ctx, request, Destination::Plays, &mut rd, &mut wr).await?,
-            Request::GetTitle(request) => {
-                title_frames(ctx, request, Destination::Folder(None), &mut rd, &mut wr).await?
-            }
-            Request::Cast(request) => cast_frames(ctx, request, &mut wr).await?,
-            request => {
-                let response = handle(ctx, request).await;
-                wire::write_async(&mut wr, &response).await?;
-            }
-        }
-    }
-    Ok(())
+    Ok(reply.map_or_else(|error| Response::Error { error }, |cast| Response::Cast { cast: Box::new(cast) }))
 }
 
 /// Answers a stop that a client sends without the person asking, to run its own version instead. An
@@ -277,24 +255,20 @@ async fn switch(ctx: &Ctx, client: &str) -> Response {
     }
 }
 
-async fn watch(ctx: &Ctx, refs: Vec<String>, mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf) -> std::io::Result<()> {
-    let (mut events, snapshot) = match JobEvents::start(ctx, refs).await {
+/// Sends the downloads `refs` names, then each change to them, until the client goes away.
+async fn watch(conn: &mut Connection<'_>, refs: Vec<String>) -> io::Result<()> {
+    let (mut events, snapshot) = match JobEvents::start(conn.ctx, refs).await {
         Ok(started) => started,
-        Err(error) => return wire::write_async(&mut wr, &Response::Error { error }).await,
+        Err(error) => return send(conn, &Response::Error { error }).await,
     };
-    wire::write_async(&mut wr, &snapshot).await?;
-    let mut probe = [0u8; 1];
+    send(conn, &snapshot).await?;
     loop {
-        let event = tokio::select! {
+        tokio::select! {
             event = events.next() => match event {
-                Some(event) => event,
+                Some(event) => send(conn, &event).await?,
                 None => return Ok(()),
             },
-            read = tokio::io::AsyncReadExt::read(&mut rd, &mut probe) => match read {
-                Ok(0) | Err(_) => return Ok(()),
-                Ok(_) => continue,
-            },
-        };
-        wire::write_async(&mut wr, &event).await?;
+            gone = conn.gone() => return Err(gone),
+        }
     }
 }

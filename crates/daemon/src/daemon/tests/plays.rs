@@ -1,6 +1,7 @@
 //! Where plays download, how they leave the plays folder, and what `rm` deletes.
 
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -97,7 +98,7 @@ async fn rm_deletes_a_plays_folder_and_trashes_the_files_of_a_download_in_the_pe
     let folder = h.play_folder(&film);
     written(&folder.join("film/film.mp4"), MIB);
     h.get(h.torrent_file(&iso), &[]).await.unwrap();
-    let disc = h.downloads().join("iso/disc.iso");
+    let disc = h.downloads().join("iso").join("disc.iso");
     written(&disc, MIB);
     h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
 
@@ -129,8 +130,7 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
             let mut store = Store::open(&db::connect(&database).unwrap()).unwrap();
             let tomb = Tombstone { id: film.info_hash.id(), name: None, path: None, removed_at: 1 };
             let name = PlayName::parse(folder.file_name().unwrap().to_str().unwrap()).unwrap();
-            let made = std::fs::metadata(&folder).unwrap();
-            let folder = Identity { device: made.dev(), inode: made.ino() };
+            let folder: Identity = crate::folder::identity(&folder).unwrap();
             store.remove(&tomb, Some((&name, folder, MIB))).unwrap();
         })
         .await;
@@ -195,6 +195,8 @@ async fn a_play_no_one_streams_pauses_and_streaming_it_again_resumes_it_but_a_sa
     h.until("streaming the film again resumes it", |jobs| jobs[1].status.name() == "downloading").await;
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plays_folder_moved_away_and_replaced_by_a_link_while_the_engine_runs_has_nothing_deleted() {
     let h = Harness::new();
@@ -223,6 +225,8 @@ async fn a_plays_folder_moved_away_and_replaced_by_a_link_while_the_engine_runs_
     );
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn get_refuses_a_folder_inside_the_plays_folder_even_through_a_link() {
     let h = Harness::new();
@@ -240,6 +244,8 @@ async fn get_refuses_a_folder_inside_the_plays_folder_even_through_a_link() {
     assert!(h.status().await.is_empty());
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder() {
     let h = Harness::new();
@@ -260,6 +266,8 @@ async fn rm_delete_keeps_a_file_another_download_writes_through_a_linked_folder(
     assert_eq!(std::fs::read(&file).unwrap().len(), MIB as usize);
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn rm_delete_keeps_a_file_a_download_the_engine_has_not_let_go_of_writes() {
     let gate =
@@ -298,7 +306,7 @@ async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names
     let iso = torrent(0x41, "iso", &[("disc.iso", 4 * GIB)]);
     h.swarm.publish(iso.clone());
     h.get_into(&iso, h.downloads()).await.unwrap();
-    let disc = h.downloads().join("iso/disc.iso");
+    let disc = h.downloads().join("iso").join("disc.iso");
     written(&disc, MIB);
     h.until("it downloads", |jobs| jobs[0].status.name() == "downloading").await;
     gate.close();
@@ -392,6 +400,8 @@ async fn resume_all_starts_the_idle_clock_again_for_the_plays_it_resumes() {
     assert_eq!(h.states().await, ["downloading"]);
 }
 
+// It shuts a folder with permission bits, which Windows does not have.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_folder_that_cannot_be_deleted_yet_counts_toward_the_limit_and_goes_once_it_can() {
     if unsafe { libc::geteuid() } == 0 {
@@ -446,7 +456,8 @@ async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_tr
     h.swarm.set_rate(100 * GIB);
     let set = torrent(0xc4, "set", &[("a.mkv", MIB), ("docs/b.txt", 2)]);
     h.get(h.torrent_file(&set), &[]).await.unwrap();
-    let (a, b) = (h.downloads().join("set/a.mkv"), h.downloads().join("set/docs/b.txt"));
+    let folder = h.downloads().join("set");
+    let (a, b) = (folder.join("a.mkv"), folder.join("docs").join("b.txt"));
     let film = written(&a, MIB);
     written(&b, 2);
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
@@ -458,7 +469,10 @@ async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_tr
     assert_eq!(std::fs::read(trash.join("files/a.mkv")).unwrap(), film);
     let info = std::fs::read_to_string(trash.join("info/b.txt.trashinfo")).unwrap();
     let lines: Vec<&str> = info.lines().collect();
-    assert_eq!(lines[..2], ["[Trash Info]".to_string(), format!("Path={}", b.display())]);
+    assert_eq!(lines[0], "[Trash Info]");
+    // The note holds the path as the freedesktop spec has a Unix path escaped.
+    #[cfg(unix)]
+    assert_eq!(lines[1], format!("Path={}", b.display()));
     let date = lines[2].strip_prefix("DeletionDate=").unwrap();
     assert_eq!((date.len(), &date[4..5], &date[10..11]), (19, "-", "T"), "{info}");
 }
@@ -547,6 +561,8 @@ async fn plays_in_a_plays_folder_replaced_while_the_engine_was_stopped_stop_and_
     );
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn rm_delete_keeps_a_file_that_a_finished_download_the_engine_has_not_let_go_of_writes() {
     let gate =
@@ -610,6 +626,8 @@ async fn a_play_too_large_to_get_is_refused_before_any_play_leaves_for_it() {
     assert!(h.play_folder(&older).exists());
 }
 
+// It shuts a folder with permission bits, which Windows does not have.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_play_on_a_full_disk_stops_for_want_of_room_when_the_older_play_cannot_be_deleted() {
     if unsafe { libc::geteuid() } == 0 {
@@ -658,6 +676,8 @@ async fn rm_delete_puts_back_a_file_saved_over_between_its_check_and_its_move_to
     assert_eq!(trashed, 0);
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plays_folder_replaced_by_a_link_while_the_engine_is_stopped_stops_every_play_and_says_why() {
     let h = Harness::new();

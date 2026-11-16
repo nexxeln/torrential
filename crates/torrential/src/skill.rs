@@ -170,7 +170,8 @@ impl Layout {
     }
 
     pub fn under(root: &Path) -> Self {
-        Self { copy: root.join(".agents/skills/torrential"), link: root.join(".claude/skills/torrential") }
+        let skill = |agent: &str| root.join(agent).join("skills").join("torrential");
+        Self { copy: skill(".agents"), link: skill(".claude") }
     }
 
     fn link_kind(&self) -> Link {
@@ -285,7 +286,7 @@ pub fn uninstall(layout: &Layout, agent: AgentArg, shipped: Shipped, writes: &Wr
         Link::ToCopy => match kept(copy) {
             Some(kept) => kept,
             None => {
-                std::fs::remove_file(&layout.link).map_err(|e| writes.error(&layout.link, e))?;
+                remove_link(&layout.link).map_err(|e| writes.error(&layout.link, e))?;
                 "removed"
             }
         },
@@ -366,13 +367,40 @@ fn write_link(link: &Path, writes: &Writes) -> Result<(), Error> {
     let parent = link.parent().expect("the link lives in a skills folder");
     std::fs::create_dir_all(parent).map_err(|e| writes.error(parent, e))?;
     let partial = temporary(link);
-    let _ = std::fs::remove_file(&partial);
-    std::os::unix::fs::symlink(LINK, &partial)
+    let _ = remove_link(&partial);
+    make_link(&partial)
         .and_then(|()| std::fs::rename(&partial, link))
         .inspect_err(|_| {
-            let _ = std::fs::remove_file(&partial);
+            let _ = remove_link(&partial);
         })
         .map_err(|e| writes.error(link, e))
+}
+
+/// Removes the link at `link`. A junction, which Windows links with, goes the way a folder does.
+fn remove_link(link: &Path) -> io::Result<()> {
+    if cfg!(windows) { std::fs::remove_dir(link) } else { std::fs::remove_file(link) }
+}
+
+/// Makes `at` a link to the shared copy, `LINK` from where it is.
+#[cfg(unix)]
+fn make_link(at: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(LINK, at)
+}
+
+/// Windows makes a symbolic link only for an administrator or in Developer Mode, so `at` is a
+/// junction, which anyone can make, to the shared copy's full path.
+#[cfg(windows)]
+fn make_link(at: &Path) -> io::Result<()> {
+    // mklink takes only \ between a path's parts, which `absolute` gives on Windows.
+    let target = std::path::absolute(at.parent().unwrap_or(Path::new(".")).join(LINK))?;
+    let made = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(std::path::absolute(at)?)
+        .arg(&target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if made.success() { Ok(()) } else { Err(io::Error::other(format!("mklink /J failed for {}", at.display()))) }
 }
 
 fn replace_with_link(link: &Path, writes: &Writes) -> Result<(), Error> {
@@ -485,6 +513,8 @@ mod tests {
         assert_eq!(home.install(NOW, false).unwrap(), [("agents", "installed"), ("claude", "installed")]);
         assert_eq!(home.states(), BOTH_UP_TO_DATE);
         assert_eq!(home.skill(), SKILL);
+        // Windows links the folder with a junction, which holds the copy's full path.
+        #[cfg(unix)]
         assert_eq!(std::fs::read_link(&home.layout.link).unwrap(), Path::new("../../.agents/skills/torrential"));
         assert_eq!(home.layout.link.canonicalize().unwrap(), home.layout.copy.canonicalize().unwrap());
         let sidecar: serde_json::Value =
@@ -572,6 +602,8 @@ mod tests {
         assert_eq!(home.states(), [("agents", "up_to_date"), ("claude", "missing")]);
     }
 
+    // It shuts a folder with permission bits, which Windows does not have.
+    #[cfg(unix)]
     #[test]
     fn a_blocked_write_in_a_sandbox_names_the_command_for_the_human() {
         use std::os::unix::fs::PermissionsExt;

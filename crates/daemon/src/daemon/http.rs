@@ -1,7 +1,8 @@
-//! The engine's HTTP server. It serves downloads to video players, and the web app with its API.
-//! It listens on 127.0.0.1, and on the home network too while a phone or TV is paired. A request
-//! for bytes that have not arrived asks the engine for their pieces first and waits for them, so a
-//! player can start and seek while the rest of the file downloads.
+//! The engine's HTTP server. It serves downloads to video players, the web app with its API, and
+//! the requests of this user's torrential at `wire::PATH`. It listens on 127.0.0.1, and on the home
+//! network too while a phone or TV is paired. A request for bytes that have not arrived asks the
+//! engine for their pieces first and waits for them, so a player can start and seek while the rest
+//! of the file downloads.
 
 use std::collections::VecDeque;
 use std::io::{self, SeekFrom};
@@ -23,6 +24,7 @@ use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, Lease, StreamFile};
 use super::web;
 use crate::log::log;
+use crate::wire;
 
 /// Fixed so a file's URL stays the same across engine runs. Players remember where playback
 /// stopped by URL.
@@ -46,6 +48,10 @@ const STRANGERS: usize = 64;
 const BACKOFF: Duration = Duration::from_secs(1);
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
+/// The most of a refused body the engine reads, and for how long, before it closes the connection.
+const LINGER_MOST: usize = 1 << 20;
+const LINGER: Duration = Duration::from_secs(1);
+const MAX_FRAME: usize = torrential_core::protocol::MAX_FRAME;
 /// Smaller chunks of a streamed answer go out in one write with their framing.
 const ONE_WRITE: usize = 8 * 1024;
 
@@ -55,10 +61,34 @@ const JSON: &str = "application/json";
 /// hold them all.
 pub fn bind(ports: &[u16], reach: Reach) -> io::Result<TcpListener> {
     let ip = address(reach);
-    match ports.iter().find_map(|&port| TcpListener::bind((ip, port)).ok()) {
+    match ports.iter().find_map(|&port| listener(ip, port).ok()) {
         Some(listener) => Ok(listener),
-        None => TcpListener::bind((ip, 0)),
+        None => listener(ip, 0),
     }
+}
+
+/// A listening socket on `ip` and `port`.
+#[cfg(unix)]
+fn listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind((ip, port))
+}
+
+/// A listening socket on `ip` and `port` that no other program may share. Windows otherwise lets a
+/// socket on every address take a port another program holds on one, and that program keeps
+/// what comes to its address.
+#[cfg(windows)]
+fn listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOCKET, SOL_SOCKET, setsockopt};
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    let on = 1i32.to_ne_bytes();
+    // The socket is open, and `on` outlives the call.
+    if unsafe { setsockopt(SOCKET(socket.as_raw_socket() as usize), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, Some(&on)) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    socket.bind(&std::net::SocketAddr::from((ip, port)).into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
 }
 
 fn address(reach: Reach) -> Ipv4Addr {
@@ -259,7 +289,7 @@ fn reach_of(listener: &tokio::net::TcpListener) -> Reach {
 async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: &Devices) -> tokio::net::TcpListener {
     drop(old);
     let open = |ip: Ipv4Addr| {
-        let listener = TcpListener::bind((ip, port))?;
+        let listener = listener(ip, port)?;
         listener.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(listener)
     };
@@ -309,6 +339,8 @@ pub struct Request {
     from: Sender,
     /// The device token in the request's cookie.
     pub cookie: Option<String>,
+    /// The token in an `Authorization: Bearer` header, which this user's torrential sends.
+    bearer: Option<String>,
     /// The User-Agent, lowercased.
     pub agent: Option<String>,
     keep_alive: bool,
@@ -359,14 +391,18 @@ impl Connection<'_> {
                     false
                 }
                 Some(Head::Request(mut request)) => {
-                    if request.length > MAX_BODY {
-                        self.empty("413 Content Too Large", "", false).await?;
-                        return Ok(());
-                    }
                     let (ctx, peer) = (self.ctx, self.peer);
                     let ask_now = |request: &Request| {
                         ask(peer, request, ctx.http_port, &ctx.devices, torrential_core::time::now())
                     };
+                    // This user's torrential may name every file of a large torrent.
+                    let most =
+                        if request.path == wire::PATH && ask_now(&request).is_ok() { MAX_FRAME } else { MAX_BODY };
+                    if request.length > most {
+                        self.empty("413 Content Too Large", "", false).await?;
+                        self.linger(request.length).await;
+                        return Ok(());
+                    }
                     // Before the body, so strangers that come while a slow body arrives cannot
                     // close a paired device's connection.
                     if let Ok(Asker::Device(_) | Asker::Cast(_)) = ask_now(&request)
@@ -450,6 +486,12 @@ impl Connection<'_> {
                 let dlna = self.ctx.casts.served(&request.path);
                 return self.file(request, granted.id, granted.index, dlna.as_ref()).await;
             }
+            Asker::Local if request.path == wire::PATH => {
+                if request.method != Method::Post {
+                    return self.empty("405 Method Not Allowed", "", false).await;
+                }
+                return super::server::answer(self, &request).await;
+            }
             Asker::Local | Asker::Device(_) => {}
         }
         if let Some(route) = request.path.strip_prefix("/api/") {
@@ -482,6 +524,9 @@ impl Connection<'_> {
     async fn refuse(&mut self, refusal: Refusal) -> io::Result<()> {
         let (status, text) = match refusal {
             Refusal::Forbidden => return self.empty("403 Forbidden", "", false).await.map(drop),
+            Refusal::Unauthorized => {
+                return self.empty("401 Unauthorized", "WWW-Authenticate: Bearer\r\n", false).await.map(drop);
+            }
             Refusal::Elsewhere(address) => (
                 "403 Forbidden",
                 format!(
@@ -624,6 +669,22 @@ impl Connection<'_> {
         Ok(keep)
     }
 
+    /// Ends the answer, then reads and drops what is left of a body of `length` bytes, up to
+    /// `LINGER_MOST` and for at most `LINGER`. Closing on an unread body resets the connection, and
+    /// Windows then drops the answer before the client reads it.
+    async fn linger(&mut self, length: usize) {
+        let _ = self.wr.shutdown().await;
+        let mut left = length.min(LINGER_MOST).saturating_sub(self.pending.len());
+        let deadline = tokio::time::Instant::now() + LINGER;
+        let mut buf = vec![0; 16 * 1024];
+        while left > 0 {
+            match tokio::time::timeout_at(deadline, self.rd.read(&mut buf)).await {
+                Ok(Ok(read)) if read > 0 => left = left.saturating_sub(read),
+                _ => return,
+            }
+        }
+    }
+
     pub async fn empty(&mut self, status: &str, extra: &str, keep: bool) -> io::Result<bool> {
         let close = if keep { "" } else { "Connection: close\r\n" };
         let head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\n{extra}{close}\r\n");
@@ -750,6 +811,7 @@ fn head(parsed: &httparse::Request) -> Head {
         let token = cookies.split(';').find_map(|cookie| cookie.trim().strip_prefix(COOKIE)?.strip_prefix('='));
         token.map(String::from)
     });
+    let bearer = header("authorization").and_then(|value| Some(value.strip_prefix("bearer ")?.trim().to_string()));
     let method = match parsed.method {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
@@ -782,6 +844,7 @@ fn head(parsed: &httparse::Request) -> Head {
         body: Vec::new(),
         from,
         cookie,
+        bearer,
         agent: header("user-agent"),
         keep_alive,
         chunks,
@@ -793,6 +856,8 @@ fn head(parsed: &httparse::Request) -> Head {
 enum Refusal {
     /// Over loopback, a request another website made, or one that names another host.
     Forbidden,
+    /// A request for `wire::PATH` without this user's token, or from another machine.
+    Unauthorized,
     /// From the home network, a request another website made, or one that names another host. It
     /// holds the address to open instead.
     Elsewhere(String),
@@ -804,8 +869,9 @@ enum Refusal {
 }
 
 /// Who sent `request`. Over loopback, a request that names this Mac's .local name moves to
-/// 127.0.0.1 first. A cast URL is let in by its grant alone, anything else over loopback is this
-/// Mac, and from the network a paired device's cookie lets it in.
+/// 127.0.0.1 first. Only this user's token over loopback lets a request in at `wire::PATH`. A cast
+/// URL is let in by its grant alone, anything else over loopback is this Mac, and from the network a
+/// paired device's cookie lets it in.
 fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
     let name = devices.local_name();
     let named = |host: &str| name.as_deref() == Some(split_host(host).0);
@@ -825,6 +891,11 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
             }
         }
         Peer::Loopback => {}
+    }
+    if request.path == wire::PATH {
+        let token = request.bearer.as_deref();
+        let local = peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token));
+        return if local { Ok(Asker::Local) } else { Err(Refusal::Unauthorized) };
     }
     if request.path.starts_with(CAST) {
         return devices.granted(&request.path).map(Asker::Cast).ok_or(Refusal::CastEnded);

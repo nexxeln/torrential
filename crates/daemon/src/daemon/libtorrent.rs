@@ -575,15 +575,17 @@ fn metainfo(m: lt::Metainfo) -> Result<Metainfo, Error> {
     let single_file = matches!(m.files(), [only] if only.path == Path::new(&name));
     let mut files = Vec::with_capacity(m.files().len());
     for f in m.files() {
-        let path =
-            if single_file { Some(name.as_str()) } else { f.path.strip_prefix(&name).ok().and_then(Path::to_str) };
+        // A torrent's own paths have / between their parts, as BitTorrent writes them, on every system.
+        let inside =
+            |path: &Path| path.iter().map(|part| part.to_str()).collect::<Option<Vec<_>>>().map(|p| p.join("/"));
+        let path = if single_file { Some(name.clone()) } else { f.path.strip_prefix(&name).ok().and_then(inside) };
         let path = path.ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidTorrent,
                 format!("libtorrent placed {} outside the torrent's folder", f.path.display()),
             )
         })?;
-        files.push(MetaFile { path: path.to_string(), size: f.size });
+        files.push(MetaFile { path, size: f.size });
     }
     let web_seeds = m.web_seeds().to_vec();
     Ok(Metainfo::new(m.info_hash(), name, files, single_file, m.into_bytes())?.with_web_seeds(web_seeds))
@@ -628,10 +630,21 @@ fn missing(session: &lt::Session, id: TorrentId, t: &Torrent) -> Option<Missing>
     Some(Missing { pieces: m.missing, unavailable: m.unavailable })
 }
 
+/// The codes libtorrent's system errors give for a full disk or quota: errno, and on Windows also
+/// its own codes.
+#[cfg(unix)]
+const DISK_FULL: &[i32] = &[libc::ENOSPC, libc::EDQUOT];
+#[cfg(windows)]
+const DISK_FULL: &[i32] = &[
+    libc::ENOSPC,
+    windows::Win32::Foundation::ERROR_DISK_FULL.0 as i32,
+    windows::Win32::Foundation::ERROR_HANDLE_DISK_FULL.0 as i32,
+];
+
 fn storage_error(id: TorrentId, file: Option<&Path>, error: &lt::NativeError) -> Error {
     let errno = matches!(error.category.as_str(), "system" | "generic");
     let place = file.map(|f| format!(" ({})", f.display())).unwrap_or_default();
-    if errno && [libc::ENOSPC, libc::EDQUOT].contains(&error.code) {
+    if errno && DISK_FULL.contains(&error.code) {
         Error::new(ErrorCode::DiskFull, format!("the disk is full{place}"))
             .with_hint(format!("free some space, then run torrential resume {}", short(id)))
     } else {

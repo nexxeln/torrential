@@ -285,21 +285,7 @@ pub fn to_start<'a>(
     now
 }
 
-/// Which file or folder something is, whatever path reaches it. A folder moved away keeps its
-/// identity. A link, or another folder, put in its place has another.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Identity {
-    pub device: u64,
-    pub inode: u64,
-}
-
-impl Identity {
-    // A device number is signed on macOS.
-    #[allow(clippy::unnecessary_cast)]
-    pub fn of(stat: &rustix::fs::Stat) -> Self {
-        Self { device: stat.st_dev as u64, inode: stat.st_ino }
-    }
-}
+pub use crate::folder::Identity;
 
 const STEM: usize = 16;
 

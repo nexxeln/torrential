@@ -56,3 +56,77 @@ jobs:
           target: ${{ matrix.target }}
           kind: test
       - run: scripts/release.sh test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      # Tests compare files byte for byte, and libtorrent's submodules have long paths.
+      - run: git config --global core.autocrlf false; git config --global core.longpaths true
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/toolchain
+        with:
+          target: x86_64-pc-windows-msvc
+          kind: test
+      - run: cargo test --workspace --locked --no-fail-fast
+      - name: The logon task starts the engine, and uninstalling it stops the engine
+        shell: pwsh
+        run: |
+          cargo build --locked -p torrential
+          $exe = (Resolve-Path target\debug\torrential.exe).Path
+          function Engine { (& $exe engine status --json | ConvertFrom-Json).engine }
+          & $exe engine install
+          if ($LASTEXITCODE) { throw 'engine install failed' }
+          schtasks /Query /TN 'torrential engine' /V /FO LIST
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Engine) -ne 'running') {
+            if ((Get-Date) -gt $deadline) {
+              Get-Content "$env:LOCALAPPDATA\torrential\state\engine.log" -ErrorAction SilentlyContinue
+              throw 'the logon task did not start the engine within 60 s'
+            }
+            Start-Sleep 2
+          }
+          & $exe engine status
+          & $exe engine uninstall
+          if ($LASTEXITCODE) { throw 'engine uninstall failed' }
+          schtasks /Query /TN 'torrential engine' 2>$null
+          if (-not $LASTEXITCODE) { throw 'the task is still registered' }
+          if ((Engine) -ne 'stopped') { throw 'the engine still runs after uninstall' }
+          $global:LASTEXITCODE = 0
+
+  # A fresh runner installs this build the way a person does, and the engine downloads Sintel.
+  windows-install:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false; git config --global core.longpaths true
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/toolchain
+        with:
+          target: x86_64-pc-windows-msvc
+          kind: build
+      - run: scripts/release.ps1
+      - name: Install with install.ps1, download Sintel, and stop the engine
+        run: |
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'dist' -PassThru
+          Start-Sleep 2
+          $env:TORRENTIAL_DOWNLOAD_URL = 'http://127.0.0.1:8765'
+          ./install.ps1
+          Stop-Process $server
+          $torrential = "$env:LOCALAPPDATA\Programs\torrential\torrential.exe"
+          $sintel = 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fexplodie.org%3A6969&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F'
+          & $torrential get $sintel --json
+          if ($LASTEXITCODE) { throw 'torrential get failed' }
+          $deadline = (Get-Date).AddMinutes(5)
+          do {
+            Start-Sleep 5
+            $job = (& $torrential status --json | ConvertFrom-Json).jobs[0]
+            Write-Host "$($job.name): $($job.progress.verified) of $($job.progress.size) bytes, $($job.progress.peers) peers"
+            if ((Get-Date) -gt $deadline) { throw 'no verified bytes of Sintel within 5 minutes' }
+          } until ($job.progress.verified -gt 0)
+          & $torrential engine stop
+          if ($LASTEXITCODE) { throw 'engine stop failed' }
+          if ((& $torrential engine status --json | ConvertFrom-Json).engine -ne 'stopped') { throw 'the engine still runs' }

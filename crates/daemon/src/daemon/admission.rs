@@ -305,6 +305,8 @@ mod tests {
         assert_eq!(flagged.message, "the selection is 2.1 GiB, over the 1 GiB cap");
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn links_below_the_download_folder_are_found_though_the_folder_itself_may_be_one() {
         use std::os::unix::fs::symlink;
@@ -372,6 +374,8 @@ mod tests {
         assert_eq!(only_a.needed(0), GIB / 2, "unselected files contribute no reusable space");
     }
 
+    // NTFS allocates the whole length of a file that grows, so it makes no sparse file unasked.
+    #[cfg(unix)]
     #[test]
     fn sparse_files_do_not_count_their_unallocated_length_as_reusable_space() {
         let tmp = tempfile::tempdir().unwrap();
@@ -384,7 +388,10 @@ mod tests {
         assert_eq!(plan.allocated_size, 0);
         assert_eq!(plan.needed(0), 2 * GIB);
         assert_eq!(RealDisk.allocated_file_bytes(&tmp.path().join("set")), None);
-        std::os::unix::fs::symlink(&path, tmp.path().join("link")).unwrap();
-        assert_eq!(RealDisk.allocated_file_bytes(&tmp.path().join("link")), None);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&path, tmp.path().join("link")).unwrap();
+            assert_eq!(RealDisk.allocated_file_bytes(&tmp.path().join("link")), None);
+        }
     }
 }

@@ -1,4 +1,6 @@
 //! Films and series from the command line, against the fake engine and its fake catalog.
+// Its stand-in mpv is a shell script, and the player's socket a Unix socket.
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
@@ -9,7 +11,7 @@ use serde_json::{Value, json};
 use torrential_core::protocol::WIRE_VERSION;
 
 mod common;
-use common::{Home, eventually, hooks, portless, receive, send};
+use common::{Home, eventually, hooks, portless};
 
 /// The archive.org release of Night of the Living Dead, which a play tries first.
 const ARCHIVE: &str = "4c1e9a5d3b8e2f1c4a5d3b8e2f1c4a5d3b8e2f1c";
@@ -429,43 +431,29 @@ fn a_bad_or_unknown_title_or_episode_says_how_to_find_one() {
     assert_eq!(doc["next"], "torrential sources tt0063350");
 }
 
-/// Plays an engine one protocol version older at `socket`: it answers hello with its version,
-/// refuses every request but shutdown as such an engine does, and records what it was sent.
-fn older_engine(socket: &Path) -> std::thread::JoinHandle<Vec<String>> {
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(socket).unwrap();
-    let gone = std::process::Command::new("true").spawn().unwrap();
+/// Plays an engine one protocol version older: it answers hello with its version, refuses every
+/// request but shutdown as such an engine does, and records what it was sent.
+fn older_engine(home: &Home) -> std::thread::JoinHandle<Vec<String>> {
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
     let pid = gone.id();
-    let mut gone = gone;
     gone.wait().unwrap();
-    std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
-        let mut asked = Vec::new();
-        let old = WIRE_VERSION - 1;
-        while let Some(request) = receive(&mut conn) {
-            let op = request["op"].as_str().unwrap().to_string();
-            asked.push(op.clone());
-            let reply = match op.as_str() {
-                "hello" => {
-                    json!({"type": "hello", "engine_version": env!("CARGO_PKG_VERSION"), "wire": old, "pid": pid})
-                }
-                "shutdown" => json!({"type": "ok"}),
-                _ => json!({"type": "error", "error": {"code": "daemon_version",
-                    "message": format!("the engine uses protocol version {old}, but this client uses {}", request["wire"])}}),
-            };
-            send(&mut conn, &reply);
-            if op == "shutdown" {
-                break;
-            }
+    let old = WIRE_VERSION - 1;
+    home.stand_in(move |request| match request["op"].as_str().unwrap() {
+        "hello" => {
+            (json!({"type": "hello", "engine_version": env!("CARGO_PKG_VERSION"), "wire": old, "pid": pid}), false)
         }
-        asked
+        "shutdown" => (json!({"type": "ok"}), true),
+        _ => {
+            let message = format!("the engine uses protocol version {old}, but this client uses {WIRE_VERSION}");
+            (json!({"type": "error", "error": {"code": "daemon_version", "message": message}}), false)
+        }
     })
 }
 
 #[test]
 fn a_client_one_version_newer_stops_the_older_engine_rather_than_ask_it_for_titles() {
     let home = Home::playing();
-    let old = older_engine(&home.socket());
+    let old = older_engine(&home);
     let run = home.run(&["titles", "harbor", "lights", "--json"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(old.join().unwrap(), ["hello", "shutdown"], "only hello and shutdown reached the older engine");

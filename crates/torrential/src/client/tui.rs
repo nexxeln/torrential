@@ -1,4 +1,3 @@
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use torrential_core::protocol::{
@@ -29,12 +28,27 @@ pub fn run(env: &Env) -> Result<u8, Error> {
     let exit = torrential_tui::run(backend, colors, home);
     match exit.map_err(|e| Error::internal(format!("the terminal UI stopped: {e}")))? {
         Exit::Quit => Ok(0),
-        Exit::Restart => {
-            let exe = env.installed()?;
-            let error = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).exec();
-            Err(Error::internal(format!("cannot start the new torrential at {}: {error}", exe.display())))
-        }
+        Exit::Restart => restart(&env.installed()?),
     }
+}
+
+/// Runs the torrential an update installed in place of this one.
+#[cfg(unix)]
+fn restart(exe: &Path) -> Result<u8, Error> {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    Err(Error::internal(format!("cannot start the new torrential at {}: {error}", exe.display())))
+}
+
+/// Windows cannot run another program in this process's place, so the new torrential runs in
+/// this terminal until it ends, and this one ends as it does.
+#[cfg(windows)]
+fn restart(exe: &Path) -> Result<u8, Error> {
+    let status = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .status()
+        .map_err(|e| Error::internal(format!("cannot start the new torrential at {}: {e}", exe.display())))?;
+    Ok(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1))
 }
 
 pub(crate) struct EngineBackend {

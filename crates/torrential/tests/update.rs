@@ -1,3 +1,6 @@
+// Its releases are shell scripts that run the real binary under another version.
+#![cfg(unix)]
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -652,7 +655,7 @@ impl Install {
         log.lines()
             .filter_map(|line| {
                 let (version, rest) = line.split_once(" engine ")?.1.split_once(" started, pid ")?;
-                let (pid, rest) = rest.split_once(", socket ")?;
+                let (pid, rest) = rest.split_once(", ")?;
                 let (_, port) = rest.rsplit_once("http://127.0.0.1:")?;
                 Some((version.to_string(), pid.parse().ok()?, port.parse().ok()?))
             })

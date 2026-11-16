@@ -3,18 +3,19 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sha2::Digest;
-use torrential_core::protocol::{PlayRequest, Request, WIRE_VERSION, encode_frame, read_frame};
+use torrential_core::protocol::{PlayRequest, Request};
 use torrential_core::{Target, TorrentId};
 use torrential_engine as lt;
 
 mod common;
-use common::{Home, hooks};
+use common::{Home, alive, hooks, kill};
 
 const PIECE: u32 = 16 * 1024;
 const SLOW: Option<NonZeroU32> = NonZeroU32::new(256 * 1024);
@@ -59,9 +60,9 @@ impl Home {
 
     fn kill_engine(&self) {
         let pid = self.pid();
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        kill(pid);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while unsafe { libc::kill(pid, 0) } == 0 {
+        while alive(pid) {
             assert!(Instant::now() < deadline, "the killed engine is still alive");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -501,11 +502,13 @@ fn a_download_whose_seeder_lacks_the_rest_stops_with_no_source_and_keeps_what_it
     assert_eq!(verified(&home.job(&fixture.id())), a_alone, "what it verified outlived the engine");
 }
 
+#[cfg(unix)]
 struct Locked {
     path: PathBuf,
     restore: u32,
 }
 
+#[cfg(unix)]
 impl Locked {
     /// `None` as root, which reads and writes past any mode.
     fn new(path: PathBuf, mode: u32) -> Option<Self> {
@@ -518,12 +521,15 @@ impl Locked {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Locked {
     fn drop(&mut self) {
         let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.restore));
     }
 }
 
+// It shuts a folder with permission bits, which Windows does not have.
+#[cfg(unix)]
 #[test]
 fn after_a_storage_error_resume_downloads_what_never_reached_the_disk() {
     let fixture = Fixture::new("set", &[("a.bin", 4_000_000), ("b.bin", 300_000)], 14);
@@ -546,6 +552,8 @@ fn after_a_storage_error_resume_downloads_what_never_reached_the_disk() {
     assert!(fixture.intact(&home, "b.bin"), "b.bin pieces that passed their check but failed to write came again");
 }
 
+// It shuts a file with permission bits, which Windows does not have.
+#[cfg(unix)]
 #[test]
 fn a_check_that_cannot_read_a_file_fails_and_keeps_what_was_verified() {
     let fixture = Fixture::new("set", &SET, 15);
@@ -635,6 +643,8 @@ fn a_failed_check_outlives_the_engine_and_resume_repairs_the_damage() {
     assert!(fixture.intact(&home, "a.bin"), "resume downloaded the damaged piece again");
 }
 
+// Windows makes links only for an administrator or in Developer Mode.
+#[cfg(unix)]
 #[test]
 fn a_symbolic_link_inside_the_download_folder_is_refused_and_nothing_lands_where_it_points() {
     let fixture = Fixture::new("set", &SET, 16);
@@ -695,17 +705,16 @@ fn a_download_to_files_a_queued_download_will_write_is_refused() {
     assert_eq!(error["code"], "path_conflict");
     assert_eq!(
         error["message"],
-        format!("1 file under {dir}/pack is already a file of download {} (pack)", first.short())
+        format!(
+            "1 file under {} is already a file of download {} (pack)",
+            Path::new(&dir).join("pack").display(),
+            first.short()
+        )
     );
     assert_eq!(
         error["hint"],
         format!("choose another folder with --dir, or remove {0} with torrential rm {0}", first.short())
     );
-}
-
-fn ask(socket: &mut std::os::unix::net::UnixStream, request: &Request) -> Value {
-    socket.write_all(&encode_frame(request).unwrap()).unwrap();
-    read_frame(socket).unwrap().expect("the engine answered")
 }
 
 /// The status line and headers, and the body, of one GET with a `Range` header.
@@ -726,14 +735,12 @@ fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
     let seeder = Seeder::start(&fixture, SLOW);
     let home = Home::seeded_by(&[&seeder]);
     home.ok(&["status"]);
-    let mut socket = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
     let play = PlayRequest {
         target: Target::TorrentFile(fixture.torrent_file().into()),
         dir: Some(home.downloads()),
         files: vec![0],
     };
-    let reply = ask(&mut socket, &Request::Play(play));
+    let reply = home.ask(&Request::Play(play));
     let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
     assert!(url.ends_with(&format!("/{}/0/film.mkv", fixture.id())), "{url}");
 
@@ -745,6 +752,8 @@ fn a_player_reads_the_middle_of_a_file_long_before_the_download_finishes() {
     assert!(verified(&job) < fixture.total() / 2, "{} of {} bytes verified", verified(&job), fixture.total());
 }
 
+// libtorrent renames files only on Linux without a UTF-8 locale; Windows keeps names as they are.
+#[cfg(unix)]
 #[test]
 fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
     let kept = lt::on_disk(Path::new("ç")) == Path::new("ç");
@@ -754,14 +763,12 @@ fn a_file_libtorrent_names_differently_on_disk_plays_and_shows_where_it_is() {
     let mut home = Home::seeded_by(&[&seeder]);
     home.set("LANG", "C");
     home.ok(&["status"]);
-    let mut socket = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    ask(&mut socket, &Request::Hello { client_version: "test".into(), wire: WIRE_VERSION });
     let play = PlayRequest {
         target: Target::TorrentFile(fixture.torrent_file().into()),
         dir: Some(home.dir.path().join("Téléchargements")),
         files: vec![0],
     };
-    let reply = ask(&mut socket, &Request::Play(play));
+    let reply = home.ask(&Request::Play(play));
     let url = reply["reply"]["streams"][0]["url"].as_str().unwrap_or_else(|| panic!("{reply:#}")).to_string();
 
     let (head, body) = get_range(&url, "bytes=0-299999");

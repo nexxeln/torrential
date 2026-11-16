@@ -1,10 +1,15 @@
+// Some imports serve only the tests that run on Unix.
+#![cfg_attr(windows, allow(unused_imports))]
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use torrential_core::protocol::WIRE_VERSION;
+use serde_json::{Value, json};
+use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame, read_frame};
+use torrential_daemon::wire::{Access, Client};
 
 mod common;
-use common::{Home, alive, eventually, hooks, portless, receive};
+use common::{Home, alive, eventually, hooks, kill, portless, read_post};
 
 const ARCH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 
@@ -36,7 +41,9 @@ fn status_starts_an_engine_that_outlives_the_call() {
     let (pid, version) = home.engine().expect("the engine is still running");
     assert!(alive(pid));
     assert_eq!(version, env!("CARGO_PKG_VERSION"));
-    let lock = std::fs::read_to_string(home.state().join("engine.lock")).unwrap();
+    // Windows lets no other process read a locked file, so there the engine writes its ID beside it.
+    let lock =
+        std::fs::read_to_string(home.state().join(if cfg!(windows) { "engine.pid" } else { "engine.lock" })).unwrap();
     assert_eq!(lock.trim(), pid.to_string());
     let log = std::fs::read_to_string(home.state().join("engine.log")).unwrap();
     assert!(log.contains(&format!("started, pid {pid}")), "{log}");
@@ -72,10 +79,41 @@ fn a_version_mismatch_restarts_the_engine() {
     assert!(!alive(old_pid), "the old engine exited after saving its state");
 }
 
-fn frame(json: &str) -> Vec<u8> {
-    let mut bytes = (json.len() as u32).to_be_bytes().to_vec();
-    bytes.extend_from_slice(json.as_bytes());
-    bytes
+/// An older engine that the login service started exits for the service to start this release,
+/// as systemd and launchd do a moment later from the binary an update installed. An engine the
+/// command started in that moment would hold the state folder, and the service's would exit.
+// On Windows the engine starts the next one itself, since Task Scheduler does not, so no service stands in.
+#[cfg(unix)]
+#[test]
+fn a_command_waits_for_the_login_service_to_start_the_engine_it_replaces() {
+    use std::process::Stdio;
+    let mut home = Home::new().with(hooks::VERSION, "0.1.0");
+    let service = |home: &Home| {
+        let mut engine = home.process(&["daemon", "run", "--service"]);
+        engine.stdout(Stdio::null()).stderr(Stdio::null());
+        engine
+    };
+    let mut old = service(&home).spawn().unwrap();
+    eventually("the service's engine answers", Duration::from_secs(20), || home.engine().is_some());
+    home.unset(hooks::VERSION);
+    let mut next = service(&home);
+    let (started, restarted) = std::sync::mpsc::channel();
+    let systemd = std::thread::spawn(move || {
+        let exited = old.wait().unwrap().code();
+        std::thread::sleep(Duration::from_secs(1));
+        let mut next = next.spawn().unwrap();
+        started.send(next.id() as i32).unwrap();
+        next.wait().unwrap();
+        exited
+    });
+
+    let run = home.run(&["status", "--json"]);
+    let restarted = restarted.recv().unwrap();
+
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    assert_eq!(home.engine(), Some((restarted, env!("CARGO_PKG_VERSION").into())), "the service's engine runs");
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    assert_eq!(systemd.join().unwrap(), Some(75), "the old engine exited for the service to start the next");
 }
 
 #[test]
@@ -97,21 +135,22 @@ fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves
 }
 
 #[test]
-fn a_stop_that_torrential_0_4_sends_for_its_own_version_leaves_a_newer_engine_running() {
-    use std::io::Write;
+fn a_stop_that_an_older_torrential_sends_for_its_own_version_leaves_a_newer_engine_running() {
     let home = Home::new().with(hooks::VERSION, "9.0.0");
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
 
-    // Byte for byte what torrential 0.4.0 sends when it meets an engine of another version.
-    let mut old = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    old.write_all(&frame(r#"{"op":"hello","client_version":"0.4.0","wire":5}"#)).unwrap();
-    let hello = receive(&mut old).unwrap();
-    old.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
-    let answer = receive(&mut old);
+    let old = Client { version: "0.6.0", wire: WIRE_VERSION - 1 };
+    let hello = home.ask_as(old, &Request::Hello);
+    let status = home.ask_as(old, &Request::Status { refs: Vec::new() });
+    let answer = home.ask_as(old, &Request::Shutdown { asked: false });
 
     assert_eq!((hello["engine_version"].as_str(), hello["pid"].as_i64()), (Some("9.0.0"), Some(pid.into())));
-    assert_eq!(answer.unwrap()["error"]["code"], "daemon_version");
+    assert_eq!(
+        status["error"]["message"],
+        format!("the engine uses protocol version {WIRE_VERSION}, but this client uses {}", WIRE_VERSION - 1)
+    );
+    assert_eq!(answer["error"]["code"], "daemon_version");
     assert_eq!(home.engine(), Some((pid, "9.0.0".into())), "the engine kept running");
     let stop = home.run(&["engine", "stop", "--json"]);
     assert_eq!(stop.code, 0, "{}", stop.stderr);
@@ -138,11 +177,9 @@ fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film
     let mut head = [0; 12];
     player.read_exact(&mut head).unwrap();
 
-    let mut newer = std::os::unix::net::UnixStream::connect(home.socket()).unwrap();
-    newer.write_all(&frame(r#"{"op":"hello","client_version":"0.1.1","wire":5}"#)).unwrap();
-    receive(&mut newer).unwrap();
-    newer.write_all(&frame(r#"{"op":"shutdown"}"#)).unwrap();
-    let answer = receive(&mut newer).unwrap();
+    let newer = Client { version: "0.1.1", wire: WIRE_VERSION };
+    home.ask_as(newer, &Request::Hello);
+    let answer = home.ask_as(newer, &Request::Shutdown { asked: false });
     home.set(hooks::VERSION, "0.1.1");
     let during = home.run(&["status", "--json"]);
     let kept = home.engine();
@@ -163,29 +200,10 @@ fn a_newer_client_uses_an_engine_that_plays_a_film_and_switches_it_once_the_film
 
 #[test]
 fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_switches() {
-    use std::io::Write;
     let home = Home::new();
-    let socket = home.socket();
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    let asked = std::thread::spawn(move || {
-        let mut ops = Vec::new();
-        for stream in listener.incoming().take(1) {
-            let mut stream = stream.unwrap();
-            while let Some(request) = receive(&mut stream) {
-                let op = request["op"].as_str().unwrap().to_string();
-                let reply = match op.as_str() {
-                    "hello" => format!(
-                        r#"{{"type":"hello","engine_version":"0.1.0","wire":99,"pid":{},"http_port":0}}"#,
-                        std::process::id()
-                    ),
-                    _ => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
-                };
-                ops.push(op);
-                stream.write_all(&frame(&reply)).unwrap();
-            }
-        }
-        ops
+    let asked = home.stand_in(|request| match request["op"].as_str().unwrap() {
+        "hello" => (json!({"type": "hello", "engine_version": "0.1.0", "wire": 99, "pid": std::process::id()}), false),
+        _ => (refused_switch(), true),
     });
 
     let run = home.run(&["status"]);
@@ -200,38 +218,35 @@ fn a_newer_client_that_cannot_talk_to_an_engine_playing_a_film_says_when_it_swit
 const NEWER_ENGINE: &str =
     "error[daemon_version]: the engine runs the newer torrential 9.0.0, so restart this torrential\n";
 
-/// A stand-in engine on `socket` that answers one connection per version in `versions`, each as
-/// that torrential: hello with the version, a refused switch to shutdown, and no downloads to the rest.
-fn stand_in(socket: &Path, versions: &'static [&'static str]) -> std::thread::JoinHandle<()> {
-    use std::io::Write;
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
-    std::thread::spawn(move || {
-        for (version, stream) in versions.iter().zip(listener.incoming()) {
-            let mut stream = stream.unwrap();
-            while let Some(request) = receive(&mut stream) {
-                let reply = match request["op"].as_str().unwrap() {
-                    "hello" => format!(
-                        r#"{{"type":"hello","engine_version":"{version}","wire":{WIRE_VERSION},"pid":{},"http_port":0}}"#,
-                        std::process::id()
-                    ),
-                    "shutdown" => r#"{"type":"error","error":{"code":"daemon_version","message":"torrential switches to 0.4.0 when the film ends"}}"#.to_string(),
-                    _ => r#"{"type":"jobs","jobs":[]}"#.to_string(),
-                };
-                stream.write_all(&frame(&reply)).unwrap();
-            }
+fn refused_switch() -> Value {
+    json!({"type": "error", "error": {"code": "daemon_version", "message": "torrential switches to 0.4.0 when the film ends"}})
+}
+
+/// A stand-in engine that answers as each torrential of `versions` in turn: hello with the version,
+/// a refused switch to shutdown, which hands over to the next version, and no downloads to the rest.
+/// It stops after the last version's hello.
+fn stand_in(home: &Home, versions: &'static [&'static str]) -> std::thread::JoinHandle<Vec<String>> {
+    let mut at = 0;
+    home.stand_in(move |request| match request["op"].as_str().unwrap() {
+        "hello" => {
+            let hello = json!({"type": "hello", "engine_version": versions[at], "wire": WIRE_VERSION, "pid": std::process::id()});
+            (hello, at + 1 == versions.len())
         }
+        "shutdown" => {
+            at += 1;
+            (refused_switch(), false)
+        }
+        _ => (json!({"type": "jobs", "jobs": []}), false),
     })
 }
 
 #[test]
 fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrential() {
-    use std::os::fd::AsRawFd;
     let home = Home::new();
     std::fs::create_dir_all(home.state()).unwrap();
     // A newer engine holds the home's lock as it starts, so the engine this client launches gives way.
     let lock = std::fs::File::create(home.state().join("engine.lock")).unwrap();
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    lock.lock().unwrap();
     let client = home
         .process(&["status"])
         .stdout(std::process::Stdio::piped())
@@ -241,7 +256,7 @@ fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrentia
     eventually("the launched engine gave way", Duration::from_secs(10), || {
         std::fs::read_to_string(home.state().join("engine.log")).is_ok_and(|log| log.contains("another engine owns"))
     });
-    let newer = stand_in(&home.socket(), &["9.0.0"]);
+    let newer = stand_in(&home, &["9.0.0"]);
 
     let client = client.wait_with_output().unwrap();
 
@@ -252,7 +267,7 @@ fn a_client_whose_engine_gives_way_to_a_newer_one_says_to_restart_this_torrentia
 #[test]
 fn a_client_that_an_engine_playing_a_film_turns_away_never_uses_a_newer_one_it_finds_next() {
     let home = Home::new();
-    let engines = stand_in(&home.socket(), &["0.1.0", "9.0.0"]);
+    let engines = stand_in(&home, &["0.1.0", "9.0.0"]);
 
     let run = home.run(&["status"]);
 
@@ -281,6 +296,8 @@ fn a_sandboxed_client_refuses_to_start_an_engine() {
     assert_eq!(home.engine(), None, "no engine was started");
 }
 
+// It checks file descriptors a child inherits, which Windows does not pass on.
+#[cfg(unix)]
 #[test]
 fn the_engine_holds_no_descriptor_its_client_inherited() {
     use std::io::Read;
@@ -314,12 +331,14 @@ fn the_engine_holds_no_descriptor_its_client_inherited() {
 
 /// A default-home engine with stand-ins for launchctl and systemctl, which record how they were
 /// called, and the paths of its login service.
+#[cfg(unix)]
 struct Service {
     home: Home,
     unit: PathBuf,
     calls: PathBuf,
 }
 
+#[cfg(unix)]
 impl Service {
     fn new() -> Self {
         let mut home = Home::new().with(hooks::ENGINE, "fake").with(hooks::HTTP_PORT, "0").with("CLAUDECODE", "1");
@@ -355,6 +374,8 @@ impl Service {
     }
 }
 
+// Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
+#[cfg(unix)]
 #[test]
 fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
     let Service { home, unit, calls } = Service::new();
@@ -400,6 +421,8 @@ fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), expected, "adding the service at start ran neither");
 }
 
+// Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
+#[cfg(unix)]
 #[test]
 fn engine_install_starts_the_service_the_engine_added_at_its_first_start() {
     let service = Service::new();
@@ -422,6 +445,8 @@ fn engine_install_starts_the_service_the_engine_added_at_its_first_start() {
     assert_eq!(service.calls(), expected, "the unit was there, and install still started it");
 }
 
+// Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
+#[cfg(unix)]
 #[test]
 fn a_login_service_left_half_written_is_finished_at_the_next_start() {
     let service = Service::new();
@@ -449,6 +474,8 @@ fn a_login_service_left_half_written_is_finished_at_the_next_start() {
     assert_eq!(left, [service.unit.file_name().unwrap()], "no partial file is left behind");
 }
 
+// Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
+#[cfg(unix)]
 #[test]
 fn a_login_service_someone_else_wrote_is_left_alone() {
     let service = Service::new();
@@ -506,7 +533,7 @@ fn wait_follows_a_download_again_when_the_engine_comes_back() {
     let (pid, _) = home.engine().unwrap();
     let wait = home.start(&["wait", "9b5212", "--timeout", "8s", "--json"]);
 
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
     assert_eq!(home.run(&["status"]).code, 0);
     let wait = wait.finish();
@@ -523,7 +550,7 @@ fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrentia
     let (pid, _) = home.engine().unwrap();
     let wait = home.start(&["wait", "9b5212", "--timeout", "20s"]);
 
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
     home.set(hooks::VERSION, "0.1.1");
     assert_eq!(home.run(&["status"]).code, 0);
@@ -641,6 +668,8 @@ fn play_refuses_a_torrent_without_a_video() {
     );
 }
 
+// Its stand-in mpv is a shell script.
+#[cfg(unix)]
 #[test]
 fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language() {
     let mut home = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "1MiB");
@@ -676,7 +705,7 @@ fn a_killed_engine_comes_back_with_the_download_running() {
     let home = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "1MiB");
     assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
     let (pid, _) = home.engine().unwrap();
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
     let resume = home.run(&["resume", "9b5212"]);
     assert_eq!(resume.code, 0, "{}", resume.stderr);
@@ -686,6 +715,8 @@ fn a_killed_engine_comes_back_with_the_download_running() {
     );
 }
 
+// It checks permission bits, which Windows does not have.
+#[cfg(unix)]
 #[test]
 fn a_new_engine_keeps_its_state_where_only_its_user_can_change_it() {
     use std::os::unix::fs::PermissionsExt;
@@ -747,18 +778,171 @@ fn daemon_stop_is_idempotent() {
 }
 
 #[test]
+fn the_engine_writes_its_port_and_a_new_token_where_only_this_user_can_read_them() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let first = Access::read(&home.token_file()).unwrap().unwrap();
+    // Windows has no mode; the daemon's own test reads the file's ACL there.
+    #[cfg(unix)]
+    let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(home.token_file()).unwrap().permissions());
+    let web = home.json(&["engine", "status", "--json"])["address"].as_str().unwrap().to_string();
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let after_stop = home.token_file().exists();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let second = Access::read(&home.token_file()).unwrap().unwrap();
+
+    #[cfg(unix)]
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(web, format!("http://127.0.0.1:{}", first.port));
+    assert!(first.token.len() == 64 && first.token.bytes().all(|b| b.is_ascii_hexdigit()), "{}", first.token);
+    assert!(!after_stop, "a stopped engine removes its token file");
+    assert_ne!(first.token, second.token, "each engine makes a new token");
+}
+
+#[test]
+fn a_command_whose_token_file_names_a_port_another_program_took_starts_an_engine() {
+    let home = Home::new();
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let left = Access { port: other.local_addr().unwrap().port(), token: "5a".repeat(32) };
+    std::fs::create_dir_all(home.state()).unwrap();
+    left.write(&home.token_file()).unwrap();
+    // It closes each connection without a word, as a BitTorrent listener does with an HTTP request.
+    std::thread::spawn(move || other.incoming().for_each(drop));
+
+    let run = home.run(&["status"]);
+
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_ne!(Access::read(&home.token_file()).unwrap(), Some(left), "the new engine wrote its own");
+}
+
+#[test]
+fn an_engine_stop_stops_an_engine_it_cannot_reach() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    // As an engine from before 0.6 leaves none.
+    std::fs::remove_file(home.token_file()).unwrap();
+
+    let stop = home.run(&["engine", "stop"]);
+
+    assert_eq!((stop.code, stop.stdout), (0, format!("result: stopped\npid:    {pid}\n")));
+    assert!(!alive(pid));
+    assert!(home.log().contains("stopping on a signal"), "{}", home.log());
+}
+
+#[test]
+fn a_command_that_finds_an_engine_it_cannot_reach_says_to_stop_it() {
+    let home = Home::new();
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    std::fs::remove_file(home.token_file()).unwrap();
+
+    let run = home.run(&["status", "--json"]);
+
+    let state = home.state().display().to_string();
+    assert_eq!(run.code, 6, "{}", run.stderr);
+    assert_eq!(
+        (run.json()["error"]["message"].as_str(), run.json()["next"].as_str()),
+        (
+            Some(format!("another engine (pid {pid}) holds {state} and does not answer").as_str()),
+            Some("torrential engine stop")
+        )
+    );
+    assert!(alive(pid), "the engine runs until the person stops it");
+}
+
+/// What torrential 0.5.2 asks a release's engine at 0.5's socket before it installs the release.
+/// It takes jobs or a `daemon_version` error as the answer to the status, then waits for a clean exit.
+// Remove in 0.7
+// It plays an engine from before 0.6, which listened on a Unix socket.
+#[cfg(unix)]
+#[test]
+fn an_engine_passes_the_trial_torrential_0_5_runs_before_it_installs_a_release() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let home = Home::new();
+    let mut engine = home
+        .process(&["daemon", "run", "--http-port", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let socket = home.path("th/run/engine.sock");
+    let mut found = None;
+    eventually("the engine listens at 0.5's socket", Duration::from_secs(20), || {
+        found = std::os::unix::net::UnixStream::connect(&socket).ok();
+        found.is_some()
+    });
+    let mut stream = found.unwrap();
+    let mut ask = |json: &str| {
+        stream.write_all(&[&(json.len() as u32).to_be_bytes()[..], json.as_bytes()].concat()).unwrap();
+        read_frame::<Value>(&mut stream)
+    };
+
+    let hello = ask(r#"{"op":"hello","client_version":"0.5.2","wire":10}"#).unwrap();
+    let status = ask(r#"{"op":"status","refs":[]}"#).unwrap();
+    let _ = ask(r#"{"op":"shutdown","asked":true}"#);
+
+    let message =
+        format!("the engine runs the newer torrential {}, so restart this torrential", env!("CARGO_PKG_VERSION"));
+    let refusal = json!({"type": "error", "error": {"code": "daemon_version", "message": message}});
+    assert_eq!([hello, status], [Some(refusal.clone()), Some(refusal)]);
+    let mut exited = None;
+    eventually("the engine stops", Duration::from_secs(20), || {
+        exited = engine.try_wait().unwrap();
+        exited.is_some()
+    });
+    assert!(exited.unwrap().success(), "{:?}", exited);
+    assert!(!socket.exists(), "the engine removed 0.5's socket");
+}
+
+/// A torrential 0.5 engine still runs after `torrential update` installs this release, and answers
+/// only at 0.5's socket. It stops when a newer client asks it to make way.
+// Remove in 0.7
+// It plays an engine from before 0.6, which listened on a Unix socket.
+#[cfg(unix)]
+#[test]
+fn a_command_asks_an_engine_from_torrential_0_5_to_make_way_and_starts_its_own() {
+    use std::io::Write;
+    let home = Home::new();
+    std::fs::create_dir_all(home.path("th/run")).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(home.path("th/run/engine.sock")).unwrap();
+    let mut old = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let stand_in = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let hello: Value = read_frame(&mut stream).unwrap().unwrap();
+        let reply = json!({"type": "hello", "engine_version": "0.5.2", "wire": 10, "pid": old.id(), "http_port": 0});
+        stream.write_all(&encode_frame(&reply).unwrap()).unwrap();
+        let stop: Value = read_frame(&mut stream).unwrap().unwrap();
+        old.kill().unwrap();
+        old.wait().unwrap();
+        stream.write_all(&encode_frame(&json!({"type": "ok"})).unwrap()).unwrap();
+        [hello, stop]
+    });
+
+    let run = home.run(&["status"]);
+
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(stand_in.is_finished(), "the command never asked the 0.5 engine to make way");
+    let [hello, stop] = stand_in.join().unwrap();
+    assert_eq!(hello, json!({"op": "hello", "client_version": env!("CARGO_PKG_VERSION"), "wire": 10}));
+    assert_eq!(stop, json!({"op": "shutdown", "asked": false}));
+    assert_eq!(home.engine().map(|(_, version)| version).as_deref(), Some(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn an_engine_stop_after_the_engine_crashed_says_already_stopped_at_once() {
     let home = Home::new();
     assert_eq!(home.run(&["status"]).code, 0);
     let (pid, _) = home.engine().unwrap();
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    let left_its_socket = home.socket().exists();
+    let left_its_token = home.token_file().exists();
 
     let started = Instant::now();
     let stop = home.run(&["engine", "stop"]);
 
-    assert!(left_its_socket, "the crashed engine left its socket");
+    assert!(left_its_token, "the crashed engine left its token file");
     assert_eq!((stop.code, stop.stdout.as_str()), (0, "result: already_stopped\n"));
     assert!(started.elapsed() < Duration::from_secs(5), "the stop took {:?}", started.elapsed());
 }
@@ -767,12 +951,13 @@ fn an_engine_stop_after_the_engine_crashed_says_already_stopped_at_once() {
 fn an_engine_stop_whose_engine_exits_before_it_answers_stops_the_engine_that_starts_next() {
     use std::process::Stdio;
     let home = Home::new();
-    let socket = home.socket();
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let leaving = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let leaving = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let access = Access { port: leaving.local_addr().unwrap().port(), token: "5a".repeat(32) };
+    std::fs::create_dir_all(home.state()).unwrap();
+    access.write(&home.token_file()).unwrap();
     let stop = home.process(&["engine", "stop"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let (mut taken, _) = leaving.accept().unwrap();
-    let hello = receive(&mut taken).unwrap();
+    let hello: Value = serde_json::from_slice(&read_post(&mut taken).1).unwrap();
 
     let log = home.dir.path().join("next.log");
     let mut next = home.process(&["daemon", "run"]).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();
@@ -812,14 +997,15 @@ fn skill_install_links_claude_to_the_shared_copy_and_twice_changes_nothing() {
     let home = Home::new();
     let installed = home.skill_results(&["skill", "install", "--json"]);
     assert_eq!(installed, pairs(&[("agents", "installed"), ("claude", "installed")]));
-    let root = home.dir.path().display().to_string();
+    let shown = |rest: &str| home.path(rest).display().to_string();
+    let (agents, claude) = (shown(".agents/skills/torrential"), shown(".claude/skills/torrential"));
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(
         home.run(&["skill", "status"]).stdout,
         format!(
             "TARGET\tSTATE\tVERSION\tPATH\n\
-             agents\tup_to_date\t{version}\t{root}/.agents/skills/torrential\n\
-             claude\tup_to_date\t{version}\t{root}/.claude/skills/torrential\n\
+             agents\tup_to_date\t{version}\t{agents}\n\
+             claude\tup_to_date\t{version}\t{claude}\n\
              # this binary includes the skill from torrential {version}\n"
         )
     );
@@ -853,7 +1039,7 @@ fn doctor_reports_whether_the_skill_is_installed() {
 #[test]
 fn setup_shows_the_detected_machine_and_saves_and_clears_overrides() {
     let home = Home::new();
-    let config = home.dir.path().join("th/config/config.yaml");
+    let config = home.path("th/config/config.yaml");
     let file = config.display().to_string();
     let flags = "torrential setup --screen phone|laptop|tv|tv-4k|auto --max-size 8GB|none --playback \
                  hevc-hdr|hevc|h264|auto --updates notify|auto|off";
@@ -964,6 +1150,8 @@ fn errors_name_a_reference_by_its_hash_or_kind_never_its_url() {
     );
 }
 
+// Its stand-in browser opener is a shell script.
+#[cfg(unix)]
 #[test]
 fn web_prints_the_address_of_the_web_app_and_opens_it_unless_told_not_to() {
     use std::io::{Read, Write};

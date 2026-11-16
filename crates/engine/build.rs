@@ -2,6 +2,25 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// How static OpenSSL and libtorrent's system dependencies are linked on one target.
+struct Linking {
+    /// OpenSSL's libraries, as named for `rustc-link-lib`.
+    openssl: [&'static str; 2],
+    /// The file name a static library called `name` has on disk.
+    archive: fn(&str) -> String,
+    /// System libraries and frameworks libtorrent and OpenSSL call into.
+    system: &'static [&'static str],
+}
+
+const UNIX: Linking = Linking { openssl: ["ssl", "crypto"], archive: |name| format!("lib{name}.a"), system: &[] };
+const MACOS: Linking = Linking { system: &["framework=CoreFoundation", "framework=SystemConfiguration"], ..UNIX };
+// vcpkg names static OpenSSL libssl.lib and libcrypto.lib.
+const WINDOWS: Linking = Linking {
+    openssl: ["libssl", "libcrypto"],
+    archive: |name| format!("{name}.lib"),
+    system: &["bcrypt", "mswsock", "ws2_32", "iphlpapi", "crypt32", "advapi32", "user32"],
+};
+
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let libtorrent_src = manifest.join("../../vendor/libtorrent");
@@ -9,11 +28,27 @@ fn main() {
         panic!("vendor/libtorrent is missing or incomplete; run `git submodule update --init --recursive`");
     }
 
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("cargo sets CARGO_CFG_TARGET_OS");
+    let linking = match target_os.as_str() {
+        "windows" => WINDOWS,
+        "macos" => MACOS,
+        _ => UNIX,
+    };
     let boost_root = required_env("BOOST_ROOT");
     let openssl_include = required_env("OPENSSL_INCLUDE_DIR");
     let openssl_lib = required_env("OPENSSL_LIB_DIR");
+    let [ssl, crypto] = linking.openssl;
+    let ssl_file = Path::new(&openssl_lib).join((linking.archive)(ssl));
+    let crypto_file = Path::new(&openssl_lib).join((linking.archive)(crypto));
 
-    let install = cmake::Config::new(&libtorrent_src)
+    let mut cmake = cmake::Config::new(&libtorrent_src);
+    if target_os == "windows" {
+        // CMake's FindOpenSSL sets the library paths from these names under MSVC.
+        cmake.define("SSL_EAY_RELEASE", &ssl_file).define("LIB_EAY_RELEASE", &crypto_file);
+        let static_crt = env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|f| f == "crt-static"));
+        cmake.define("static_runtime", if static_crt { "ON" } else { "OFF" });
+    }
+    let install = cmake
         .generator("Ninja")
         .profile("Release")
         .define("BUILD_SHARED_LIBS", "OFF")
@@ -24,11 +59,11 @@ fn main() {
         .define("webtorrent", "OFF")
         .define("Boost_ROOT", &boost_root)
         .define("OPENSSL_INCLUDE_DIR", &openssl_include)
-        .define("OPENSSL_SSL_LIBRARY", Path::new(&openssl_lib).join("libssl.a"))
-        .define("OPENSSL_CRYPTO_LIBRARY", Path::new(&openssl_lib).join("libcrypto.a"))
+        .define("OPENSSL_SSL_LIBRARY", &ssl_file)
+        .define("OPENSSL_CRYPTO_LIBRARY", &crypto_file)
         .build();
 
-    let defines = exported_defines(&install.join("lib/pkgconfig/libtorrent-rasterbar.pc"));
+    let defines = exported_defines(&install.join("lib/cmake/LibtorrentRasterbar/LibtorrentRasterbarTargets.cmake"));
     for required in ["TORRENT_USE_OPENSSL", "TORRENT_ABI_VERSION=100", "TORRENT_USE_RTC=0"] {
         assert!(
             defines.iter().any(|d| d == required),
@@ -48,16 +83,21 @@ fn main() {
             None => shim.define(define, None),
         };
     }
+    if target_os == "windows" {
+        // libtorrent sets this for its own sources only, and Boost.Asio's types depend on it.
+        shim.define("_WIN32_WINNT", "0x0A00");
+        // Without C++ exceptions Boost hides the libtorrent calls that throw.
+        shim.flag("/EHsc");
+    }
     shim.compile("torrential-shim");
 
     println!("cargo:rustc-link-search=native={}", install.join("lib").display());
     println!("cargo:rustc-link-lib=static=torrent-rasterbar");
     println!("cargo:rustc-link-search=native={openssl_lib}");
-    println!("cargo:rustc-link-lib=static=ssl");
-    println!("cargo:rustc-link-lib=static=crypto");
-    if cfg!(target_os = "macos") {
-        println!("cargo:rustc-link-lib=framework=CoreFoundation");
-        println!("cargo:rustc-link-lib=framework=SystemConfiguration");
+    println!("cargo:rustc-link-lib=static={ssl}");
+    println!("cargo:rustc-link-lib=static={crypto}");
+    for lib in linking.system {
+        println!("cargo:rustc-link-lib={lib}");
     }
 
     for path in ["cpp/shim.h", "cpp/shim.cpp", "src/bridge.rs"] {
@@ -76,12 +116,14 @@ fn required_env(name: &str) -> String {
         .unwrap_or_else(|_| panic!("{name} is not set; run cargo inside `nix develop` from the workspace root"))
 }
 
-/// The shim must use libtorrent's build definitions to preserve ABI compatibility.
-fn exported_defines(pc: &Path) -> Vec<String> {
-    let text = fs::read_to_string(pc).unwrap_or_else(|e| panic!("reading {}: {e}", pc.display()));
-    let cflags = text
+/// The shim must use libtorrent's build definitions to preserve ABI compatibility. CMake's export
+/// lists them on every platform; MSVC builds get no pkg-config file. Entries that are generator
+/// expressions apply only to Debug builds, and libtorrent is built for Release.
+fn exported_defines(targets: &Path) -> Vec<String> {
+    let text = fs::read_to_string(targets).unwrap_or_else(|e| panic!("reading {}: {e}", targets.display()));
+    let list = text
         .lines()
-        .find_map(|line| line.strip_prefix("Cflags:"))
-        .unwrap_or_else(|| panic!("{} has no Cflags line", pc.display()));
-    cflags.split_whitespace().filter_map(|flag| flag.strip_prefix("-D")).map(str::to_owned).collect()
+        .find_map(|line| line.trim().strip_prefix("INTERFACE_COMPILE_DEFINITIONS "))
+        .unwrap_or_else(|| panic!("{} has no INTERFACE_COMPILE_DEFINITIONS", targets.display()));
+    list.trim_matches('"').split(';').filter(|d| !d.contains('$')).map(str::to_owned).collect()
 }

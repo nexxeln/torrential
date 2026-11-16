@@ -5,14 +5,14 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use serde_json::Value;
-use torrential_core::protocol::{encode_frame, read_frame};
+use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame};
+use torrential_daemon::wire::{self, Access, Client};
 
 #[path = "../../../daemon/src/env/hooks.rs"]
 pub mod hooks;
@@ -22,9 +22,25 @@ pub const MAC: &str =
     r#"{"os": "macos", "display": {"width": 3024, "height": 1964, "hdr": true}, "arch": "arm64", "language": "en"}"#;
 
 /// What a command passes on from the test's own environment: how to run the binary and how to
-/// spell file names. Everything else torrential reads comes from the home.
-const PASSED_ON: [&str; 8] =
-    ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "RUST_BACKTRACE"];
+/// spell file names, and on Windows what the system's own libraries need, such as `SystemRoot`,
+/// without which no socket opens. Everything else torrential reads comes from the home.
+const PASSED_ON: [&str; 15] = [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "RUST_BACKTRACE",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "TEMP",
+    "TMP",
+    "ComSpec",
+    "PATHEXT",
+];
 
 pub struct Home {
     pub dir: tempfile::TempDir,
@@ -70,8 +86,9 @@ impl Home {
         self.vars.retain(|(k, _)| *k != key);
     }
 
+    /// `rest`, with / between its parts, inside the home, with the platform's separator.
     pub fn path(&self, rest: &str) -> PathBuf {
-        self.dir.path().join(rest)
+        rest.split('/').fold(self.dir.path().to_path_buf(), |path, part| path.join(part))
     }
 
     pub fn write_config(&self, text: &str) {
@@ -81,6 +98,7 @@ impl Home {
     }
 
     /// Writes an executable `bin/<name>` that runs `script`, and returns the folder.
+    #[cfg(unix)]
     pub fn stub(&self, name: &str, script: &str) -> PathBuf {
         let bin = self.path("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -123,8 +141,50 @@ impl Home {
         run.json()
     }
 
-    pub fn socket(&self) -> PathBuf {
-        self.path("th/run/engine.sock")
+    /// Where the engine writes its port and the token that lets this home's torrential in.
+    pub fn token_file(&self) -> PathBuf {
+        self.path("th/state/engine-token")
+    }
+
+    /// What the engine of this home answers `request`, sent as this torrential sends it.
+    pub fn ask(&self, request: &Request) -> Value {
+        self.ask_as(Client { version: env!("CARGO_PKG_VERSION"), wire: WIRE_VERSION }, request)
+    }
+
+    /// What the engine of this home answers `request` from `client`.
+    pub fn ask_as(&self, client: Client, request: &Request) -> Value {
+        let access = Access::read(&self.token_file()).unwrap().expect("an engine wrote its token file");
+        serde_json::to_value(wire::ask(&access, client, request).unwrap()).unwrap()
+    }
+
+    /// An engine stand-in on 127.0.0.1 that this home's torrential finds by the token file. It answers
+    /// each request with the reply `answer` gives, and stops after the one `answer` says is the last.
+    /// It returns the op of each request it was sent.
+    pub fn stand_in(
+        &self,
+        mut answer: impl FnMut(&Value) -> (Value, bool) + Send + 'static,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let access = Access { port: listener.local_addr().unwrap().port(), token: "5a".repeat(32) };
+        std::fs::create_dir_all(self.path("th/state")).unwrap();
+        access.write(&self.token_file()).unwrap();
+        std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let (head, body) = read_post(&mut stream);
+                assert!(head.contains(&format!("\r\nAuthorization: Bearer {}\r\n", access.token)), "{head}");
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let (reply, last) = answer(&request);
+                asked.push(request["op"].as_str().unwrap().to_string());
+                stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").unwrap();
+                stream.write_all(&encode_frame(&reply).unwrap()).unwrap();
+                if last {
+                    return asked;
+                }
+            }
+            asked
+        })
     }
 
     pub fn log(&self) -> String {
@@ -169,7 +229,17 @@ impl Drop for Home {
 }
 
 pub fn alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    torrential_daemon::process::alive(pid as u32)
+}
+
+/// Ends the process `pid` at once, as a crash would.
+pub fn kill(pid: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, libc::SIGKILL)
+    };
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
 }
 
 pub fn eventually(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
@@ -193,13 +263,31 @@ pub fn portless(text: &str) -> String {
     out + rest
 }
 
-pub fn send(socket: &mut UnixStream, message: &impl serde::Serialize) {
-    socket.write_all(&encode_frame(message).unwrap()).unwrap();
-}
-
-/// The next frame, or `None` once the other side closes.
-pub fn receive(socket: &mut UnixStream) -> Option<Value> {
-    read_frame(socket).ok().flatten()
+/// The head and the body of the next request on `stream`, which says how long its body is.
+pub fn read_post(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    let mut read = Vec::new();
+    let end = loop {
+        if let Some(i) = read.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0, "the request ended before its head did");
+        read.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&read[..end]).to_string();
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ")?.trim().parse().ok())
+        .unwrap_or(0);
+    let mut body = read[end..].to_vec();
+    while body.len() < length {
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0, "the request ended before its body did");
+        body.extend_from_slice(&chunk[..n]);
+    }
+    (head, body)
 }
 
 #[derive(Clone)]

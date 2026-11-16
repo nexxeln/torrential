@@ -1,7 +1,7 @@
 //! Phones and TVs on the home network. This Mac lets a device in with a short code it shows, and
 //! the device holds a token in a cookie from then on. A TV that plays a cast keeps no cookie, so it
-//! fetches its one file through a grant in the URL instead. The HTTP guard asks this who sent each
-//! request.
+//! fetches its one file through a grant in the URL instead. This user's torrential sends the token
+//! the engine writes for it when it starts. The HTTP guard asks this who sent each request.
 
 use std::collections::HashMap;
 use std::io;
@@ -38,7 +38,7 @@ pub const CAST: &str = "/cast/";
 /// Who sent a request, which decides what it may reach.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Asker {
-    /// This Mac, over loopback: everything.
+    /// This Mac: the web app over loopback, or this user's torrential with its token. Everything.
     Local,
     /// A paired phone or TV, by device ID: everything but adding and removing devices.
     Device(String),
@@ -244,6 +244,8 @@ pub struct Devices {
     reach: watch::Sender<Reach>,
     /// Counts removed devices and dropped grants, so a connection can end once its access does.
     revocations: watch::Sender<u64>,
+    /// The token this user's torrential sends, new each time the engine starts.
+    local: Token,
 }
 
 impl Devices {
@@ -284,7 +286,20 @@ impl Devices {
             state: Mutex::new(state),
             reach,
             revocations: watch::Sender::new(0),
+            local: Token::new()?,
         })
+    }
+
+    /// The token this user's torrential sends, as 64 hex digits, for the engine to write where only
+    /// this user can read it.
+    pub fn local_token(&self) -> String {
+        self.local.hex()
+    }
+
+    /// Whether `token` is the one this user's torrential sends. It compares hashes, as `holder`
+    /// does, so the time it takes says nothing about the token.
+    pub fn is_local(&self, token: &str) -> bool {
+        Token::parse(token).is_some_and(|token| token.key() == self.local.key())
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
