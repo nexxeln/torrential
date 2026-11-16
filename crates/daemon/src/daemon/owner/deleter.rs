@@ -15,7 +15,7 @@ use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::book::{Identity, PlayName};
 use super::super::store::{Store, Tombstone};
-use super::trash::{Stays, Trash};
+use super::trash::{Stays, Trash, Trashed};
 use crate::folder::{self, Folder, Kind, lineage};
 use crate::log::log;
 
@@ -101,7 +101,7 @@ pub enum Doom {
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Report {
     pub deleted: Vec<PathBuf>,
-    pub trashed: Vec<PathBuf>,
+    pub trashed: Vec<(PathBuf, Trashed)>,
     /// What it left, and why.
     pub kept: Vec<(PathBuf, String)>,
 }
@@ -276,10 +276,10 @@ impl Deleter {
     }
 
     /// Refuses a folder for a download the person chose when it is the plays folder or inside it,
-    /// whatever names or links lead there.
-    pub fn outside_plays(&self, dir: &Path) -> Result<(), Error> {
+    /// whatever names or links lead there. `lineage` is the folder's lineage.
+    pub fn outside_plays(&self, dir: &Path, lineage: io::Result<Vec<Identity>>) -> Result<(), Error> {
         let Ok(root) = &self.plays else { return Ok(()) };
-        if !lineage(dir).is_ok_and(|lineage| lineage.contains(&root.identity)) {
+        if !lineage.is_ok_and(|lineage| lineage.contains(&root.identity)) {
             return Ok(());
         }
         let message =
@@ -350,8 +350,12 @@ impl Deleter {
             for path in &report.deleted {
                 log(&format!("deleted {}", path.display()));
             }
-            for path in &report.trashed {
-                log(&format!("moved {} to the Trash", path.display()));
+            for (path, trashed) in &report.trashed {
+                let unchecked = match trashed {
+                    Trashed::Moved => "",
+                    Trashed::Unchecked => ", which torrential cannot look in to check it took that file",
+                };
+                log(&format!("moved {} to the Trash{unchecked}", path.display()));
             }
             if pending.failed.as_ref() != Some(&report.kept) {
                 for (path, why) in &report.kept {
@@ -490,7 +494,7 @@ impl Deleter {
                         Ok(_) => {
                             (self.trash_pause.0)(&path);
                             match self.trash.put(&parent, last, &path, pin.file) {
-                                Ok(()) => report.trashed.push(path),
+                                Ok(trashed) => report.trashed.push((path, trashed)),
                                 Err(Stays::Busy(why)) => {
                                     report.kept.push((path, why));
                                     busy.push((file.clone(), pinned.clone()));
@@ -822,7 +826,7 @@ mod tests {
         let mut deleter = Deleter::open(&root.join("plays"), Trash::Finder, TrashPause::default(), store).unwrap();
         deleter.remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv"]) })).unwrap();
 
-        let trashed = vec![dir.join("Set/a.mkv")];
+        let trashed = vec![(dir.join("Set/a.mkv"), Trashed::Moved)];
         assert_eq!(run(&mut deleter, store, &InUse::default()), [Report { trashed, ..Report::default() }]);
         let trash = root.join(format!("disk/.Trashes/{}", crate::paths::uid()));
         assert_eq!(std::fs::read_to_string(trash.join("a.mkv")).unwrap(), "a");
@@ -954,7 +958,7 @@ mod tests {
             ("../mine.txt", "its path leaves the download's folder"),
         ]
         .map(|(file, why)| (dir.join(file), why.to_string()));
-        let trashed = vec![dir.join("Set/a.mkv"), dir.join("Set/docs/b.txt")];
+        let trashed = vec![(dir.join("Set/a.mkv"), Trashed::Moved), (dir.join("Set/docs/b.txt"), Trashed::Moved)];
         assert_eq!(reports, [Report { trashed, kept: kept.to_vec(), ..Report::default() }]);
         assert_eq!(std::fs::read_to_string(root.join("trash/files/b.txt")).unwrap(), "b");
         assert!(!dir.join("Set/docs").exists(), "a folder it left empty goes");
@@ -1001,7 +1005,7 @@ mod tests {
 
         let why = "another program has it open, so torrential tries again once it lets go";
         let first = Report {
-            trashed: vec![dir.join("Set/b.srt")],
+            trashed: vec![(dir.join("Set/b.srt"), Trashed::Moved)],
             kept: vec![(dir.join("Set/a.mkv"), why.into())],
             ..Report::default()
         };

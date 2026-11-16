@@ -11,7 +11,7 @@ use torrential_core::protocol::{Change, ChangeResult, Kept};
 use torrential_core::{Error, TorrentId};
 
 use super::super::admission;
-use super::super::book::{Home, Intent, JobEntry, Observed, Play};
+use super::super::book::{Home, Identity, Intent, JobEntry, Observed, Play};
 use super::super::files;
 use super::super::store::{Store, Tombstone};
 use super::deleter::{Deleter, Doom, InUse};
@@ -102,9 +102,9 @@ impl Tending {
         }
     }
 
-    /// Refuses a folder the person chose inside the plays folder.
-    pub(super) fn outside_plays(&self, dir: &Path) -> Result<(), Error> {
-        self.deleter.outside_plays(dir)
+    /// Refuses a folder the person chose inside the plays folder. `lineage` is the folder's lineage.
+    pub(super) fn outside_plays(&self, dir: &Path, lineage: std::io::Result<Vec<Identity>>) -> Result<(), Error> {
+        self.deleter.outside_plays(dir, lineage)
     }
 
     /// Puts the removal of a download on record, with what of it is to be deleted.
@@ -265,7 +265,7 @@ impl Owner {
                         && let Some(change) = removal.changes.iter_mut().find(|change| change.id == id)
                     {
                         change.deleted.extend(done.deleted.iter().cloned());
-                        change.trashed.extend(done.trashed.iter().cloned());
+                        change.trashed.extend(done.trashed.iter().map(|(path, _)| path.clone()));
                         let kept = done.kept.iter().map(|(path, why)| Kept { path: path.clone(), reason: why.clone() });
                         change.kept.extend(kept);
                     }
@@ -305,7 +305,11 @@ impl Owner {
 
     /// What the downloads on the list, and those the engine has yet to let go of, write, found by
     /// what each file and folder is rather than by its path, so no other name or link hides one.
-    fn in_use(&self) -> Result<InUse, String> {
+    fn in_use(&mut self) -> Result<InUse, String> {
+        let dirs: Vec<PathBuf> = self.jobs.values().map(|job| job.record.dir.clone()).collect();
+        if let Some(dir) = dirs.iter().filter(|dir| !self.reach.reach(dir)).last() {
+            return Err(format!("torrential is waiting for access to {}, where another download is", dir.display()));
+        }
         let mut in_use = InUse::default();
         let listed = self.jobs.values().map(Self::writes);
         for (dir, targets) in listed.chain(self.tending.letting_go.values().cloned()) {
