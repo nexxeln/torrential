@@ -73,7 +73,7 @@ fn total_and_free(path: &Path) -> std::io::Result<(u64, u64)> {
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let (mut free, mut total) = (0u64, 0u64);
     let path = windows::core::HSTRING::from(path.as_os_str());
-    unsafe { GetDiskFreeSpaceExW(&path, Some(&mut free), Some(&mut total), None) }?;
+    unsafe { GetDiskFreeSpaceExW(&path, Some(&mut free), Some(&mut total), None) }.map_err(crate::fsutil::win32)?;
     Ok((total, free))
 }
 

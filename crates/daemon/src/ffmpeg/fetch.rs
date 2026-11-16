@@ -759,6 +759,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     /// Unpacks the programs in `bin` from a .tar.xz of `files`, each a path and its text, and `links`,
     /// each a path and where it points. Answers what unpacking said, and each file it wrote as
     /// `name: text`.
@@ -796,6 +797,8 @@ mod tests {
         (said, wrote)
     }
 
+    // The builds they unpack are the Linux and macOS ones, whose programs have no .exe.
+    #[cfg(unix)]
     #[test]
     fn only_the_ffmpeg_and_ffprobe_in_the_builds_folder_come_out_of_its_archive() {
         let btbn = [
@@ -816,12 +819,40 @@ mod tests {
         assert_eq!(wrote, ["ffmpeg: ffmpeg", "ffprobe: ffprobe"]);
     }
 
+    // The builds they unpack are the Linux and macOS ones, whose programs have no .exe.
+    #[cfg(unix)]
     #[test]
     fn a_link_in_the_archive_is_not_unpacked_as_a_program() {
         let files = [("ffmpeg-n8.1/bin/ffmpeg", "ffmpeg"), ("ffmpeg-n8.1/bin/real", "ffprobe")];
         let (said, wrote) = unpacked(&files, &[("ffmpeg-n8.1/bin/ffprobe", "real")], "ffmpeg-n8.1/bin");
         assert_eq!(said, Err("the archive has no ffprobe".to_string()));
         assert_eq!(wrote, ["ffmpeg: ffmpeg"]);
+    }
+
+    #[test]
+    fn the_programs_come_out_of_a_zip_build_as_windows_builds_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let (archive, into) = (dir.path().join(ARCHIVE), dir.path().join("into"));
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        let bin = |name: &str| format!("ffmpeg-n8.1/bin/{}", program_file(name));
+        let files = [
+            (bin("ffmpeg"), "ffmpeg"),
+            (bin("ffprobe"), "ffprobe"),
+            (bin("ffplay"), "ffplay"),
+            ("LICENSE.txt".into(), "GPL"),
+        ];
+        for (name, text) in files {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        std::fs::create_dir(&into).unwrap();
+        unpack(&archive, Packing::Zip, Path::new("ffmpeg-n8.1/bin"), &into).unwrap();
+        let read = |name: &str| std::fs::read_to_string(into.join(program_file(name))).ok();
+        assert_eq!(
+            [read("ffmpeg"), read("ffprobe"), read("ffplay")],
+            [Some("ffmpeg".into()), Some("ffprobe".into()), None]
+        );
     }
 
     #[cfg(target_os = "macos")]

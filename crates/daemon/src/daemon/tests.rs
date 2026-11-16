@@ -706,7 +706,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
     }
     let set = torrent(48, "set", &[("a.bin", GIB), ("docs/b.bin", GIB)]);
     assert_eq!(h.get(h.torrent_file(&set), &[]).await.unwrap().outcome, GetOutcome::Queued);
-    h.disk.link(h.downloads().join("set/docs"));
+    h.disk.link(h.downloads().join("set").join("docs"));
     h.changes(Request::Remove { refs: vec![prefix(&busy[0])], delete: false }).await.unwrap();
     let jobs = h.until("the queued download stopped", |jobs| jobs[2].status.name() != "queued").await;
     let JobStatus::Error { error } = &jobs[2].status else { panic!("{jobs:#?}") };
@@ -716,7 +716,7 @@ async fn a_symbolic_link_stops_a_download_when_its_file_list_arrives_or_before_i
             ErrorCode::PathConflict,
             format!(
                 "{} is a symbolic link, and torrential writes only inside {}",
-                h.downloads().join("set/docs").display(),
+                h.downloads().join("set").join("docs").display(),
                 h.downloads().display()
             ),
             Some("remove the link, then run torrential resume 303030")
@@ -736,12 +736,12 @@ async fn a_download_cannot_take_files_another_download_claims_whatever_their_cas
     assert_eq!(h.get(h.torrent_file(&second), &[]).await.unwrap().outcome, GetOutcome::Started);
     let third = torrent(52, "PACK", &[("same.bin", GIB)]);
     let err = h.get(h.torrent_file(&third), &[]).await.unwrap_err();
-    let downloads = h.downloads().display().to_string();
+    let pack = h.downloads().join("PACK");
     assert_eq!(
         (err.code, err.message, err.hint.as_deref()),
         (
             ErrorCode::PathConflict,
-            format!("1 file under {downloads}/PACK is already a file of download 333333 (Pack)"),
+            format!("1 file under {} is already a file of download 333333 (Pack)", pack.display()),
             Some("choose another folder with --dir, or remove 333333 with torrential rm 333333")
         )
     );
@@ -755,7 +755,11 @@ async fn a_download_cannot_take_files_another_download_claims_whatever_their_cas
     assert_eq!(
         (error.message.as_str(), error.hint.as_deref()),
         (
-            format!("1 file under {downloads}/pack is already a file of download 333333 (Pack)").as_str(),
+            format!(
+                "1 file under {} is already a file of download 333333 (Pack)",
+                h.downloads().join("pack").display()
+            )
+            .as_str(),
             Some("remove 333333 with torrential rm 333333, then run torrential resume 323232")
         )
     );

@@ -198,7 +198,8 @@ pub fn network_filesystem(path: &Path) -> std::io::Result<Option<String>> {
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
     const DRIVE_REMOTE: u32 = 4;
     let mut volume = vec![0u16; 1024];
-    unsafe { GetVolumePathNameW(&windows::core::HSTRING::from(path.as_os_str()), &mut volume) }?;
+    unsafe { GetVolumePathNameW(&windows::core::HSTRING::from(path.as_os_str()), &mut volume) }
+        .map_err(crate::fsutil::win32)?;
     let remote = unsafe { GetDriveTypeW(windows::core::PCWSTR(volume.as_ptr())) } == DRIVE_REMOTE;
     Ok(remote.then(|| "network drive".to_string()))
 }

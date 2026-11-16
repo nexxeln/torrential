@@ -99,7 +99,8 @@ pub fn owner_only(path: &Path) -> io::Result<()> {
             &mut descriptor,
             None,
         )
-    }?;
+    }
+    .map_err(win32)?;
     let (mut present, mut dacl, mut defaulted) = (BOOL(0), std::ptr::null_mut::<ACL>(), BOOL(0));
     let set =
         unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }.and_then(|()| {
@@ -118,5 +119,18 @@ pub fn owner_only(path: &Path) -> io::Result<()> {
             .ok()
         });
     let _ = unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-    Ok(set?)
+    set.map_err(win32)
+}
+
+/// The I/O error of a failed Windows call, with its Win32 code, so its kind says what failed. The
+/// `windows` crate's own conversion keeps the HRESULT that wraps the code.
+#[cfg(windows)]
+pub fn win32(error: windows::core::Error) -> io::Error {
+    let code = error.code().0 as u32;
+    // FACILITY_WIN32, failed.
+    if code & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((code & 0xFFFF) as i32)
+    } else {
+        io::Error::other(error)
+    }
 }

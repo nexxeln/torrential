@@ -419,14 +419,15 @@ mod tests {
 
     #[test]
     fn config_names_a_player_or_an_absolute_path() {
-        let parsed = ["iina", "mpv", "vlc", "/usr/local/bin/play", "celluloid", "bin/play", "IINA"].map(Choice::parse);
+        let absolute = if cfg!(windows) { r"C:\Tools\play.exe" } else { "/usr/local/bin/play" };
+        let parsed = ["iina", "mpv", "vlc", absolute, "celluloid", "bin/play", "IINA"].map(Choice::parse);
         assert_eq!(
             parsed,
             [
                 Some(Choice::Iina),
                 Some(Choice::Mpv),
                 Some(Choice::Vlc),
-                Some(Choice::Program("/usr/local/bin/play".into())),
+                Some(Choice::Program(absolute.into())),
                 None,
                 None,
                 None,

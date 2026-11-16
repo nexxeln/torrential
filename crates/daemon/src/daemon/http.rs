@@ -58,10 +58,34 @@ const JSON: &str = "application/json";
 /// hold them all.
 pub fn bind(ports: &[u16], reach: Reach) -> io::Result<TcpListener> {
     let ip = address(reach);
-    match ports.iter().find_map(|&port| TcpListener::bind((ip, port)).ok()) {
+    match ports.iter().find_map(|&port| listener(ip, port).ok()) {
         Some(listener) => Ok(listener),
-        None => TcpListener::bind((ip, 0)),
+        None => listener(ip, 0),
     }
+}
+
+/// A listening socket on `ip` and `port`.
+#[cfg(unix)]
+fn listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind((ip, port))
+}
+
+/// A listening socket on `ip` and `port` that no other program may share. Windows otherwise lets a
+/// socket on every address take a port another program holds on one, and that program keeps
+/// what comes to its address.
+#[cfg(windows)]
+fn listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOCKET, SOL_SOCKET, setsockopt};
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    let on = 1i32.to_ne_bytes();
+    // The socket is open, and `on` outlives the call.
+    if unsafe { setsockopt(SOCKET(socket.as_raw_socket() as usize), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, Some(&on)) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    socket.bind(&std::net::SocketAddr::from((ip, port)).into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
 }
 
 fn address(reach: Reach) -> Ipv4Addr {
@@ -262,7 +286,7 @@ fn reach_of(listener: &tokio::net::TcpListener) -> Reach {
 async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: &Devices) -> tokio::net::TcpListener {
     drop(old);
     let open = |ip: Ipv4Addr| {
-        let listener = TcpListener::bind((ip, port))?;
+        let listener = listener(ip, port)?;
         listener.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(listener)
     };

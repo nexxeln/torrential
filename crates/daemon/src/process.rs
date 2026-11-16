@@ -62,13 +62,13 @@ pub fn send_interrupt(pid: u32) -> std::io::Result<()> {
     use windows::Win32::System::Console::{
         AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
     };
-    unsafe {
+    let sent = unsafe {
         let _ = FreeConsole();
-        AttachConsole(pid)?;
-        SetConsoleCtrlHandler(None, true)?;
-        GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)?;
-    }
-    Ok(())
+        AttachConsole(pid)
+            .and_then(|()| SetConsoleCtrlHandler(None, true))
+            .and_then(|()| GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0))
+    };
+    sent.map_err(crate::fsutil::win32)
 }
 
 /// Waits until this process is asked to stop: Ctrl-C or Ctrl-Break on its console, its console

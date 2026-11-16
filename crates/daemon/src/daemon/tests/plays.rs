@@ -98,7 +98,7 @@ async fn rm_deletes_a_plays_folder_and_trashes_the_files_of_a_download_in_the_pe
     let folder = h.play_folder(&film);
     written(&folder.join("film/film.mp4"), MIB);
     h.get(h.torrent_file(&iso), &[]).await.unwrap();
-    let disc = h.downloads().join("iso/disc.iso");
+    let disc = h.downloads().join("iso").join("disc.iso");
     written(&disc, MIB);
     h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
 
@@ -306,7 +306,7 @@ async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names
     let iso = torrent(0x41, "iso", &[("disc.iso", 4 * GIB)]);
     h.swarm.publish(iso.clone());
     h.get_into(&iso, h.downloads()).await.unwrap();
-    let disc = h.downloads().join("iso/disc.iso");
+    let disc = h.downloads().join("iso").join("disc.iso");
     written(&disc, MIB);
     h.until("it downloads", |jobs| jobs[0].status.name() == "downloading").await;
     gate.close();
@@ -456,7 +456,8 @@ async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_tr
     h.swarm.set_rate(100 * GIB);
     let set = torrent(0xc4, "set", &[("a.mkv", MIB), ("docs/b.txt", 2)]);
     h.get(h.torrent_file(&set), &[]).await.unwrap();
-    let (a, b) = (h.downloads().join("set/a.mkv"), h.downloads().join("set/docs/b.txt"));
+    let folder = h.downloads().join("set");
+    let (a, b) = (folder.join("a.mkv"), folder.join("docs").join("b.txt"));
     let film = written(&a, MIB);
     written(&b, 2);
     h.until("it is done", |jobs| jobs[0].status.name() == "done").await;
@@ -468,7 +469,10 @@ async fn rm_delete_moves_the_files_of_a_download_in_the_persons_folder_to_the_tr
     assert_eq!(std::fs::read(trash.join("files/a.mkv")).unwrap(), film);
     let info = std::fs::read_to_string(trash.join("info/b.txt.trashinfo")).unwrap();
     let lines: Vec<&str> = info.lines().collect();
-    assert_eq!(lines[..2], ["[Trash Info]".to_string(), format!("Path={}", b.display())]);
+    assert_eq!(lines[0], "[Trash Info]");
+    // The note holds the path as the freedesktop spec has a Unix path escaped.
+    #[cfg(unix)]
+    assert_eq!(lines[1], format!("Path={}", b.display()));
     let date = lines[2].strip_prefix("DeletionDate=").unwrap();
     assert_eq!((date.len(), &date[4..5], &date[10..11]), (19, "-", "T"), "{info}");
 }

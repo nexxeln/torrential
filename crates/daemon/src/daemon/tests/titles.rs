@@ -219,14 +219,15 @@ fn write(path: &Path) {
     std::fs::write(path, b"payload").unwrap();
 }
 
-/// Every file, folder, and link below `root`, relative to it and sorted.
+/// Every file, folder, and link below `root`, relative to it with / between its parts, and sorted.
 fn tree(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
         for entry in std::fs::read_dir(&folder).unwrap() {
             let path = entry.unwrap().path();
-            found.push(path.strip_prefix(root).unwrap().display().to_string());
+            let parts: Vec<_> = path.strip_prefix(root).unwrap().iter().map(|part| part.to_string_lossy()).collect();
+            found.push(parts.join("/"));
             if path.symlink_metadata().unwrap().is_dir() {
                 folders.push(path);
             }

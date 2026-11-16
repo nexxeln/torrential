@@ -16,6 +16,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::PCWSTR;
 
 use super::{Entry, Identity, Kind};
+use crate::fsutil::win32;
 
 /// A folder held open without sharing delete, so it cannot be moved or deleted while held. What
 /// is done in it goes through the path the system gives for the handle now.
@@ -24,7 +25,7 @@ pub struct Folder(File);
 fn information(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // `file` is open for as long as the call runs.
-    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }?;
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.map_err(win32)?;
     Ok(info)
 }
 
@@ -151,7 +152,7 @@ impl Folder {
     pub fn rename_new(&self, name: &OsStr, into: &Folder, to: &OsStr) -> io::Result<()> {
         let (from, to) = (wide(&self.at(name)?), wide(&into.at(to)?));
         // Both are paths ending in a nul, alive for the call.
-        unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }?;
+        unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }.map_err(win32)?;
         Ok(())
     }
 

@@ -28,7 +28,7 @@ const MOST_FROM_ONE: usize = 4;
 pub enum Find {
     /// The UPnP multicast group, from each address on the home network.
     Multicast,
-    /// One address, from 127.0.0.1, for a test's fake renderer.
+    /// One address, for a test's fake renderer.
     At(SocketAddr),
 }
 
@@ -71,7 +71,8 @@ pub async fn search(find: Find, sources: &[Ipv4Addr]) -> io::Result<Answers> {
             let sockets: Vec<UdpSocket> = sources.iter().filter_map(|ip| multicast_socket(*ip).ok()).collect();
             (sockets, SocketAddr::V4(GROUP))
         }
-        Find::At(address) => (vec![UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?], address),
+        // Windows sends nothing from 127.0.0.1 to this machine's other addresses.
+        Find::At(address) => (vec![UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?], address),
     };
     if sockets.is_empty() {
         return Ok(Answers::default());

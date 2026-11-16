@@ -374,6 +374,8 @@ mod tests {
         assert_eq!(only_a.needed(0), GIB / 2, "unselected files contribute no reusable space");
     }
 
+    // NTFS allocates the whole length of a file that grows, so it makes no sparse file unasked.
+    #[cfg(unix)]
     #[test]
     fn sparse_files_do_not_count_their_unallocated_length_as_reusable_space() {
         let tmp = tempfile::tempdir().unwrap();
