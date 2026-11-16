@@ -7,20 +7,16 @@
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::io;
-use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
-use rustix::io::Errno;
 use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::book::{Identity, PlayName};
 use super::super::store::{Store, Tombstone};
-use super::trash::Trash;
-use crate::fsutil::open_folder;
+use super::trash::{Stays, Trash};
+use crate::folder::{self, Folder, Kind, lineage};
 use crate::log::log;
 
 /// What happens to a file between the check that it is the file to move to the Trash and the
@@ -53,16 +49,12 @@ impl std::fmt::Debug for TrashPause {
     }
 }
 
-fn folder_flags() -> OFlags {
-    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC
-}
-
 const MOVED: &str = "the plays folder was moved or replaced since the engine started";
 
 /// The plays folder as the engine opened it when it started.
 struct Root {
     path: PathBuf,
-    fd: OwnedFd,
+    folder: Folder,
     identity: Identity,
 }
 
@@ -71,20 +63,21 @@ impl Root {
     fn open(path: &Path) -> Result<Root, String> {
         let unusable = |why: String| format!("torrential cannot use the plays folder {}: {why}", path.display());
         std::fs::create_dir_all(path).map_err(|e| unusable(e.to_string()))?;
-        let fd = open_folder(CWD, path).map_err(|e| match e {
-            Errno::LOOP | Errno::NOTDIR => {
+        let folder = Folder::open_nofollow(path).map_err(|e| {
+            if folder::is_link(&e) {
                 unusable("it is a link, and torrential deletes plays only in a folder of its own".into())
+            } else {
+                unusable(e.to_string())
             }
-            e => unusable(io::Error::from(e).to_string()),
         })?;
-        let stat = rustix::fs::fstat(&fd).map_err(|e| unusable(io::Error::from(e).to_string()))?;
-        Ok(Root { path: path.to_path_buf(), fd, identity: Identity::of(&stat) })
+        let identity = folder.identity().map_err(|e| unusable(e.to_string()))?;
+        Ok(Root { path: path.to_path_buf(), folder, identity })
     }
 
     /// Fails once `path` no longer names the folder opened.
     fn intact(&self) -> Result<(), &'static str> {
-        match rustix::fs::statat(CWD, &self.path, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) if Identity::of(&stat) == self.identity => Ok(()),
+        match Folder::open_nofollow(&self.path).and_then(|folder| folder.identity()) {
+            Ok(identity) if identity == self.identity => Ok(()),
             _ => Err(MOVED),
         }
     }
@@ -133,45 +126,11 @@ impl InUse {
     pub fn add(&mut self, dir: &Path, targets: &[PathBuf]) -> io::Result<()> {
         self.folders.extend(lineage(dir)?);
         for target in targets {
-            if let Ok(stat) = rustix::fs::stat(target) {
-                self.files.insert(Identity::of(&stat));
+            if let Ok(identity) = folder::identity(target) {
+                self.files.insert(identity);
             }
         }
         Ok(())
-    }
-}
-
-/// The identities of the folder `path` names, or of the nearest one above it that exists, and of
-/// every folder above that, as the system finds them, whatever links or names lead there.
-pub fn lineage(path: &Path) -> io::Result<Vec<Identity>> {
-    let start = if path.is_absolute() { "/" } else { "." };
-    let mut fd = rustix::fs::openat(CWD, start, folder_flags(), Mode::empty())?;
-    // How many parts deep `path` goes below `fd` into folders not made yet.
-    let mut unmade = 0usize;
-    for part in path.components() {
-        match part {
-            Component::Normal(name) if unmade == 0 => {
-                match rustix::fs::openat(&fd, name, folder_flags(), Mode::empty()) {
-                    Ok(next) => fd = next,
-                    Err(Errno::NOENT | Errno::NOTDIR) => unmade = 1,
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Component::Normal(_) => unmade += 1,
-            Component::ParentDir if unmade > 0 => unmade -= 1,
-            Component::ParentDir => fd = rustix::fs::openat(&fd, "..", folder_flags(), Mode::empty())?,
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-        }
-    }
-    let mut lineage = Vec::new();
-    loop {
-        let identity = Identity::of(&rustix::fs::fstat(&fd)?);
-        // The root's parent is itself.
-        if lineage.last() == Some(&identity) {
-            return Ok(lineage);
-        }
-        lineage.push(identity);
-        fd = rustix::fs::openat(&fd, "..", folder_flags(), Mode::empty())?;
     }
 }
 
@@ -286,20 +245,19 @@ impl Deleter {
         })?;
         for n in 0u32.. {
             let name = PlayName::new(id, n).as_str().to_owned();
-            let unmade = |e: Errno| {
-                let message = format!("cannot make a folder in {}: {}", root.path.display(), io::Error::from(e));
+            let unmade = |e: io::Error| {
+                let message = format!("cannot make a folder in {}: {e}", root.path.display());
                 Error::new(ErrorCode::StorageError, message)
             };
-            match rustix::fs::mkdirat(&root.fd, name.as_str(), Mode::from_raw_mode(0o755)) {
+            match root.folder.make(name.as_ref(), 0o755) {
                 Ok(()) => {}
-                Err(Errno::EXIST) => continue,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(unmade(e)),
             }
-            let made = open_folder(&root.fd, name.as_str()).and_then(|folder| rustix::fs::fstat(&folder));
-            return match made {
-                Ok(stat) => Ok((root.path.join(name), Identity::of(&stat))),
+            return match root.folder.open_in(name.as_ref()).and_then(|made| made.identity()) {
+                Ok(identity) => Ok((root.path.join(name), identity)),
                 Err(e) => {
-                    let _ = rustix::fs::unlinkat(&root.fd, name.as_str(), AtFlags::REMOVEDIR);
+                    let _ = root.folder.remove_folder(name.as_ref());
                     Err(unmade(e))
                 }
             };
@@ -313,7 +271,7 @@ impl Deleter {
         if let Ok(root) = self.root()
             && let Some(name) = root.name(dir)
         {
-            let _ = rustix::fs::unlinkat(&root.fd, name.as_str(), AtFlags::REMOVEDIR);
+            let _ = root.folder.remove_folder(name.as_str().as_ref());
         }
     }
 
@@ -445,27 +403,28 @@ impl Deleter {
                     Ok(in_use) => in_use,
                     Err(why) => return Outcome::Again(kept(why.to_string())),
                 };
-                let folder = match open_folder(&root.fd, name.as_str()) {
+                let folder = match root.folder.open_in(name.as_str().as_ref()) {
                     Ok(folder) => folder,
-                    Err(Errno::NOENT) => return Outcome::Done(Report::default()),
-                    Err(Errno::LOOP | Errno::NOTDIR) => {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Outcome::Done(Report::default()),
+                    Err(e) if folder::is_link(&e) => {
                         return Outcome::Refused(kept("it is a link or a file, not a folder".into()));
                     }
-                    Err(e) => return Outcome::Again(kept(format!("it cannot be opened: {}", io::Error::from(e)))),
+                    Err(e) => return Outcome::Again(kept(format!("it cannot be opened: {e}"))),
                 };
-                match rustix::fs::fstat(&folder) {
-                    Ok(stat) if Identity::of(&stat) != *made => {
+                match folder.identity() {
+                    Ok(identity) if identity != *made => {
                         return Outcome::Refused(kept("it is not the folder torrential made for the play".into()));
                     }
-                    Ok(stat) if in_use.folders.contains(&Identity::of(&stat)) => {
+                    Ok(identity) if in_use.folders.contains(&identity) => {
                         return Outcome::Again(kept("another download uses it".into()));
                     }
                     Ok(_) => {}
-                    Err(e) => return Outcome::Again(kept(format!("it cannot be read: {}", io::Error::from(e)))),
+                    Err(e) => return Outcome::Again(kept(format!("it cannot be read: {e}"))),
                 }
                 let left = empty(&folder, &in_use.files, made.device);
+                // Windows deletes no folder while it is held open.
                 drop(folder);
-                if left.why.is_none() && rustix::fs::unlinkat(&root.fd, name.as_str(), AtFlags::REMOVEDIR).is_ok() {
+                if left.why.is_none() && root.folder.remove_folder(name.as_str().as_ref()).is_ok() {
                     *bytes = 0;
                     return Outcome::Done(Report { deleted: vec![dir.clone()], ..Report::default() });
                 }
@@ -486,15 +445,17 @@ impl Deleter {
                     }
                 };
                 // The download's folder itself may be a link, as ~/Downloads often is.
-                let folder = match rustix::fs::openat(CWD, dir.as_path(), folder_flags(), Mode::empty()) {
+                let folder = match Folder::open(dir) {
                     Ok(folder) => folder,
-                    Err(Errno::NOENT) => return Outcome::Done(report),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Outcome::Done(report),
                     Err(e) => {
-                        let why = format!("the download's folder cannot be opened: {}", io::Error::from(e));
+                        let why = format!("the download's folder cannot be opened: {e}");
                         report.kept = files.iter().map(|(file, _)| (dir.join(file), why.clone())).collect();
                         return Outcome::Refused(report);
                     }
                 };
+                // Files another program has open, tried again at the next run.
+                let mut busy = Vec::new();
                 for (file, pinned) in files.iter() {
                     let path = dir.join(file);
                     let pin = match pinned {
@@ -512,25 +473,29 @@ impl Deleter {
                             continue;
                         }
                     };
-                    if !rustix::fs::fstat(&parent).is_ok_and(|stat| Identity::of(&stat) == pin.folder) {
+                    if !parent.identity().is_ok_and(|identity| identity == pin.folder) {
                         let why = "the folder it is in was moved or replaced after you asked to delete it";
                         report.kept.push((path, why.into()));
                         continue;
                     }
-                    match rustix::fs::statat(&parent, last, AtFlags::SYMLINK_NOFOLLOW) {
-                        Err(Errno::NOENT) => continue,
-                        Err(e) => report.kept.push((path, format!("it cannot be read: {}", io::Error::from(e)))),
-                        Ok(stat) if Identity::of(&stat) != pin.file => {
+                    match parent.entry(last) {
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => report.kept.push((path, format!("it cannot be read: {e}"))),
+                        Ok(entry) if entry.identity != pin.file => {
                             report.kept.push((path, "it was replaced after you asked to delete it".into()))
                         }
-                        Ok(stat) if in_use.files.contains(&Identity::of(&stat)) => {
+                        Ok(entry) if in_use.files.contains(&entry.identity) => {
                             report.kept.push((path, "another download uses it".into()))
                         }
                         Ok(_) => {
                             (self.trash_pause.0)(&path);
                             match self.trash.put(&parent, last, &path, pin.file) {
                                 Ok(()) => report.trashed.push(path),
-                                Err(why) => report.kept.push((path, why)),
+                                Err(Stays::Busy(why)) => {
+                                    report.kept.push((path, why));
+                                    busy.push((file.clone(), pinned.clone()));
+                                }
+                                Err(Stays::For(why)) => report.kept.push((path, why)),
                             }
                         }
                     }
@@ -538,7 +503,11 @@ impl Deleter {
                 for (file, _) in files.iter() {
                     prune(&folder, file);
                 }
-                Outcome::Done(report)
+                if busy.is_empty() {
+                    return Outcome::Done(report);
+                }
+                *files = busy;
+                Outcome::Again(report)
             }
         }
     }
@@ -546,11 +515,11 @@ impl Deleter {
 
 /// Each of `files` in `dir` as it is now, or why it stays. Files not there are left out.
 fn pin(dir: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Result<Pin, String>)> {
-    let folder = match rustix::fs::openat(CWD, dir, folder_flags(), Mode::empty()) {
+    let folder = match Folder::open(dir) {
         Ok(folder) => folder,
-        Err(Errno::NOENT) => return vec![],
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return vec![],
         Err(e) => {
-            let why = format!("the download's folder cannot be opened: {}", io::Error::from(e));
+            let why = format!("the download's folder cannot be opened: {e}");
             return files.into_iter().map(|file| (file, Err(why.clone()))).collect();
         }
     };
@@ -559,17 +528,17 @@ fn pin(dir: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Result<Pin, String>)> {
             Ok(found) => found?,
             Err(why) => return Some(Err(why.into())),
         };
-        let unreadable = |e: Errno| Some(Err(format!("it cannot be read: {}", io::Error::from(e))));
-        let stat = match rustix::fs::statat(&parent, last, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(Errno::NOENT) => return None,
+        let unreadable = |e: io::Error| Some(Err(format!("it cannot be read: {e}")));
+        let entry = match parent.entry(last) {
+            Ok(entry) => entry,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
             Err(e) => return unreadable(e),
         };
-        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        if entry.kind != Kind::File {
             return Some(Err("it is not a regular file".into()));
         }
-        match rustix::fs::fstat(&parent) {
-            Ok(folder) => Some(Ok(Pin { folder: Identity::of(&folder), file: Identity::of(&stat) })),
+        match parent.identity() {
+            Ok(folder) => Some(Ok(Pin { folder, file: entry.identity })),
             Err(e) => unreadable(e),
         }
     };
@@ -585,7 +554,7 @@ struct Left {
 
 /// Deletes everything in `folder` on the disk `device` without following a link, and keeps the
 /// files `keep` names. It never goes into another disk mounted inside.
-fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
+fn empty(folder: &Folder, keep: &HashSet<Identity>, device: u64) -> Left {
     let mut left = Left { bytes: Some(0), why: None };
     fn fail(left: &mut Left, why: &'static str) {
         left.why.get_or_insert(why);
@@ -594,37 +563,30 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
         left.bytes = None;
         fail(left, why);
     }
-    fn count(left: &mut Left, stat: &rustix::fs::Stat) {
-        left.bytes = left.bytes.map(|bytes| bytes + stat.st_blocks as u64 * 512);
+    fn count(left: &mut Left, bytes: u64) {
+        left.bytes = left.bytes.map(|total| total + bytes);
     }
-    let listed = rustix::fs::Dir::read_from(folder).and_then(|mut entries| {
-        std::iter::from_fn(|| entries.read())
-            .map(|entry| entry.map(|entry| entry.file_name().to_bytes().to_vec()))
-            .filter(|name| !matches!(name, Ok(name) if name == b"." || name == b".."))
-            .collect::<rustix::io::Result<Vec<Vec<u8>>>>()
-    });
-    let Ok(names) = listed else {
+    let Ok(names) = folder.names() else {
         unmeasured(&mut left, "it cannot be read");
         return left;
     };
     for name in names {
-        let name = OsStr::from_bytes(&name);
-        let stat = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(Errno::NOENT) => continue,
+        let entry = match folder.entry(&name) {
+            Ok(entry) => entry,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => {
                 unmeasured(&mut left, "a file in it cannot be read");
                 continue;
             }
         };
-        let directory = FileType::from_raw_mode(stat.st_mode) == FileType::Directory;
-        if Identity::of(&stat).device != device || mount_root(folder, name) {
+        let directory = entry.kind == Kind::Folder;
+        if entry.identity.device != device || folder.mount_root(&name) {
             fail(
                 &mut left,
                 if directory { "a folder in it is on another disk" } else { "a file in it is on another disk" },
             );
         } else if directory {
-            match open_folder(folder, name) {
+            match folder.open_in(&name) {
                 Ok(inner) => {
                     let inside = empty(&inner, keep, device);
                     left.bytes = left.bytes.zip(inside.bytes).map(|(bytes, inside)| bytes + inside);
@@ -638,42 +600,30 @@ fn empty(folder: &OwnedFd, keep: &HashSet<Identity>, device: u64) -> Left {
                     continue;
                 }
             }
-            if rustix::fs::unlinkat(folder, name, AtFlags::REMOVEDIR).is_err() {
+            if folder.remove_folder(&name).is_err() {
                 fail(&mut left, "a folder in it could not be deleted");
             }
-        } else if keep.contains(&Identity::of(&stat)) {
-            count(&mut left, &stat);
+        } else if keep.contains(&entry.identity) {
+            count(&mut left, entry.bytes);
             fail(&mut left, "another download uses a file in it");
-        } else if rustix::fs::unlinkat(folder, name, AtFlags::empty()).is_err() {
-            count(&mut left, &stat);
-            fail(&mut left, "a file in it could not be deleted");
+        } else if let Err(e) = folder.remove_file(&name) {
+            count(&mut left, entry.bytes);
+            fail(
+                &mut left,
+                if folder::is_locked(&e) {
+                    "another program has a file in it open"
+                } else {
+                    "a file in it could not be deleted"
+                },
+            );
         }
     }
     left
 }
 
-/// Whether `name` in `folder` is where a file system, or a part of one, is mounted. Only Linux
-/// tells, and only Linux mounts a part of the same disk, which needs root.
-fn mount_root(folder: &OwnedFd, name: &OsStr) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        use rustix::fs::{StatxAttributes, StatxFlags};
-        let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
-        rustix::fs::statx(folder, name, flags, StatxFlags::empty()).is_ok_and(|found| {
-            found.stx_attributes_mask.contains(StatxAttributes::MOUNT_ROOT)
-                && found.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
-        })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (folder, name);
-        false
-    }
-}
-
 /// Opens the folder `inside` leads to below `folder` and names its last part, going down one
 /// folder at a time without following a link. `None` when a folder on the way is missing.
-fn open_parent<'a>(folder: &OwnedFd, inside: &'a Path) -> Result<Option<(OwnedFd, &'a OsStr)>, &'static str> {
+fn open_parent<'a>(folder: &Folder, inside: &'a Path) -> Result<Option<(Folder, &'a OsStr)>, &'static str> {
     let leaves = "its path leaves the download's folder";
     let mut parts = Vec::new();
     for part in inside.components() {
@@ -683,26 +633,25 @@ fn open_parent<'a>(folder: &OwnedFd, inside: &'a Path) -> Result<Option<(OwnedFd
         }
     }
     let Some((last, folders)) = parts.split_last() else { return Err(leaves) };
-    let mut fd = rustix::fs::openat(folder, ".", folder_flags(), Mode::empty())
-        .map_err(|_| "the download's folder cannot be opened")?;
+    let mut at = folder.try_clone().map_err(|_| "the download's folder cannot be opened")?;
     for name in folders {
-        fd = match open_folder(&fd, *name) {
+        at = match at.open_in(name) {
             Ok(next) => next,
-            Err(Errno::NOENT) => return Ok(None),
-            Err(Errno::LOOP | Errno::NOTDIR) => return Err("a folder on its path is a link"),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if folder::is_link(&e) => return Err("a folder on its path is a link"),
             Err(_) => return Err("a folder on its path cannot be opened"),
         };
     }
-    Ok(Some((fd, last)))
+    Ok(Some((at, last)))
 }
 
 /// Removes the folders on the way to `inside` below `folder` that are left empty, deepest first.
-fn prune(folder: &OwnedFd, inside: &Path) {
+fn prune(folder: &Folder, inside: &Path) {
     let mut at = inside.parent();
     while let Some(path) = at.filter(|p| !p.as_os_str().is_empty()) {
         let Ok(Some((parent, name))) = open_parent(folder, path) else { return };
         // Removes only an empty folder, and never through a link.
-        if rustix::fs::unlinkat(&parent, name, AtFlags::REMOVEDIR).is_err() {
+        if parent.remove_folder(name).is_err() {
             return;
         }
         at = path.parent();
@@ -712,6 +661,7 @@ fn prune(folder: &OwnedFd, inside: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     struct Place {
@@ -762,6 +712,8 @@ mod tests {
         }
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn a_play_folder_goes_and_a_link_inside_it_is_removed_without_touching_what_it_points_to() {
         let Place { root, store, .. } = &mut place();
@@ -894,9 +846,9 @@ mod tests {
         write(&dir.join(".notes.txt.swp"), "the person's own notes");
         std::fs::rename(dir.join(".notes.txt.swp"), dir.join("notes.txt")).unwrap();
 
-        let folder = rustix::fs::openat(CWD, &dir, folder_flags(), Mode::empty()).unwrap();
+        let folder = Folder::open(&dir).unwrap();
         let why = Trash::Finder.put(&folder, OsStr::new("notes.txt"), &dir.join("notes.txt"), checked);
-        assert_eq!(why, Err("it was replaced after you asked to delete it".to_string()));
+        assert_eq!(why, Err(Stays::For("it was replaced after you asked to delete it".to_string())));
         assert_eq!(std::fs::read_to_string(dir.join("notes.txt")).unwrap(), "the person's own notes");
         let trash = root.join(format!("disk/.Trashes/{}", crate::paths::uid()));
         assert!(!trash.join("notes.txt").exists());
@@ -908,14 +860,17 @@ mod tests {
         let Place { root, .. } = &place();
         write(&root.join("play/film.mp4"), "film");
         // A descriptor that names the folder but cannot read it fails once its entries are read.
+        use rustix::fs::{CWD, Mode, OFlags};
         let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
-        let unreadable = rustix::fs::openat(CWD, root.join("play"), flags, Mode::empty()).unwrap();
-        let device = Identity::of(&rustix::fs::fstat(&unreadable).unwrap()).device;
+        let unreadable = Folder::from(rustix::fs::openat(CWD, root.join("play"), flags, Mode::empty()).unwrap());
+        let device = unreadable.identity().unwrap().device;
         let left = empty(&unreadable, &HashSet::new(), device);
         assert_eq!((left.bytes, left.why), (None, Some("it cannot be read")));
         assert_eq!(std::fs::read_to_string(root.join("play/film.mp4")).unwrap(), "film");
     }
 
+    // Windows has no permission bits to shut a folder with.
+    #[cfg(unix)]
     #[test]
     fn a_play_folder_left_that_cannot_be_measured_counts_what_it_took_up_even_after_a_restart() {
         use std::os::unix::fs::PermissionsExt;
@@ -938,6 +893,8 @@ mod tests {
         assert_eq!((deleter.play_bytes(), restarted), (took, took));
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn a_plays_folder_that_is_a_link_is_never_used() {
         let Place { root, store, .. } = &mut place();
@@ -960,6 +917,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("disk/plays/0101010101010101-0/film.mp4")).unwrap(), "film");
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn files_in_a_chosen_folder_go_to_the_trash_but_links_and_what_another_download_uses_stay() {
         let Place { root, store, .. } = &mut place();
@@ -1006,6 +965,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("Set/shared.nfo")).unwrap(), "s");
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn the_lineage_of_a_folder_not_made_yet_starts_where_its_path_really_goes() {
         let Place { root, .. } = &place();
@@ -1017,5 +978,59 @@ mod tests {
         assert_eq!(of(&root.join("a/b/new/..")), of(&root.join("a/b")));
         assert_eq!(of(&root.join("a/b/new/../..")), of(&root.join("a")), "a .. past what is not made yet climbs");
         assert_eq!(of(Path::new("/")).len(), 1);
+    }
+
+    /// Opens `path` as a media player does on Windows: sharing reads and writes, but not deletion.
+    #[cfg(windows)]
+    fn hold(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2).open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_another_program_holds_open_goes_to_the_trash_once_it_lets_go() {
+        let Place { root, store, .. } = &mut place();
+        let dir = root.join("Downloads");
+        write(&dir.join("Set/a.mkv"), "a");
+        write(&dir.join("Set/b.srt"), "b");
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
+        let held = hold(&dir.join("Set/a.mkv"));
+        let doom = Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv", "Set/b.srt"]) };
+        deleter.remove(store, &tomb(1), Some(doom)).unwrap();
+
+        let why = "another program has it open, so torrential tries again once it lets go";
+        let first = Report {
+            trashed: vec![dir.join("Set/b.srt")],
+            kept: vec![(dir.join("Set/a.mkv"), why.into())],
+            ..Report::default()
+        };
+        assert_eq!(run(&mut deleter, store, &InUse::default()), [first]);
+        assert!(deleter.ready(&BTreeSet::new()), "it waits to go");
+        drop(held);
+        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new(), "the rm heard already");
+        assert!(!deleter.ready(&BTreeSet::new()));
+        assert_eq!(std::fs::read_to_string(root.join("trash/files/a.mkv")).unwrap(), "a");
+        assert!(!dir.join("Set").exists(), "the folder it left empty goes too");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_play_folder_with_a_file_another_program_holds_open_goes_once_it_lets_go() {
+        let Place { root, store, .. } = &mut place();
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
+        let (folder, made) = deleter.make_play(id(1)).unwrap();
+        write(&folder.join("Film/film.mp4"), "film");
+        let held = hold(&folder.join("Film/film.mp4"));
+        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 })).unwrap();
+
+        let why = "another program has a file in it open, so torrential tries again";
+        let kept = Report { kept: vec![(folder.clone(), why.into())], ..Report::default() };
+        assert_eq!(run(&mut deleter, store, &InUse::default()), [kept]);
+        assert_eq!(store.deletions().unwrap().len(), 1, "it stays on record for after a restart");
+        drop(held);
+        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
+        assert!(!folder.exists());
+        assert_eq!((deleter.play_bytes(), store.deletions().unwrap()), (0, vec![]));
     }
 }
