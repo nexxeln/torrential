@@ -130,6 +130,8 @@ async fn merges_two_indexes_into_one_ranked_list() {
     assert_eq!((escaped.seeders, escaped.leechers), (Some(13), Some(3)));
 }
 
+// Windows retries a refused connection for about two seconds, past the search's deadline, so it reads as a timeout.
+#[cfg(unix)]
 #[tokio::test]
 async fn every_source_failing_is_providers_unavailable() {
     let refused = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();

@@ -285,7 +285,7 @@ pub fn uninstall(layout: &Layout, agent: AgentArg, shipped: Shipped, writes: &Wr
         Link::ToCopy => match kept(copy) {
             Some(kept) => kept,
             None => {
-                std::fs::remove_file(&layout.link).map_err(|e| writes.error(&layout.link, e))?;
+                remove_link(&layout.link).map_err(|e| writes.error(&layout.link, e))?;
                 "removed"
             }
         },
@@ -366,13 +366,18 @@ fn write_link(link: &Path, writes: &Writes) -> Result<(), Error> {
     let parent = link.parent().expect("the link lives in a skills folder");
     std::fs::create_dir_all(parent).map_err(|e| writes.error(parent, e))?;
     let partial = temporary(link);
-    let _ = std::fs::remove_file(&partial);
+    let _ = remove_link(&partial);
     make_link(&partial)
         .and_then(|()| std::fs::rename(&partial, link))
         .inspect_err(|_| {
-            let _ = std::fs::remove_file(&partial);
+            let _ = remove_link(&partial);
         })
         .map_err(|e| writes.error(link, e))
+}
+
+/// Removes the link at `link`. A junction, which Windows links with, goes the way a folder does.
+fn remove_link(link: &Path) -> io::Result<()> {
+    if cfg!(windows) { std::fs::remove_dir(link) } else { std::fs::remove_file(link) }
 }
 
 /// Makes `at` a link to the shared copy, `LINK` from where it is.
