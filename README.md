@@ -1,6 +1,6 @@
 <h1 align="center">torrential</h1>
 
-<p align="center">Find films and shows, and watch them on your Mac, phone, or TV while they download.</p>
+<p align="center">Find films and shows, and watch them on your computer, phone, or TV while they download.</p>
 
 <p align="center">
   <img src="docs/home.webp" alt="The web app's home page on a Mac, with two titles to continue watching and four saved titles" width="560">
@@ -32,7 +32,7 @@ nix develop -c cargo install --path crates/torrential
 
 </details>
 
-## Watch on the Mac
+## Watch on your computer
 
 ```sh
 torrential web
@@ -40,7 +40,7 @@ torrential web
 
 Search by name. Each film or show is one card, not a list of torrents. Press Play. torrential picks the torrent that suits your language and the screen you watch on, and moves to the next one if it does not start. While you watch, the film gets the bandwidth before other downloads.
 
-What you play goes to a folder that only torrential uses, capped at 20 GiB. When it fills, torrential deletes the plays you watched longest ago, but never the film you watched last or a title you saved. When you remove a download you started yourself, its files go to the Trash.
+What you play goes to a folder that only torrential uses, capped at 20 GiB. When it fills, torrential deletes the plays you watched longest ago, but never the film you watched last or a title you saved. When you remove a download you started yourself, its files go to the Trash, or the Recycle Bin on Windows.
 
 torrential converts MKV files and surround sound for the browser with [ffmpeg](https://ffmpeg.org), and fetches ffmpeg the first time a file needs it.
 
@@ -50,7 +50,7 @@ torrential converts MKV files and surround sound for the browser with [ffmpeg](h
   <img src="docs/add-device.webp" alt="The Devices page on the Mac, with a QR code, the address mac-mini.local:47919, a six-digit code, and one paired iPhone" width="800">
 </p>
 
-On the Mac, open **Devices** and choose **Add a device**, or run `torrential devices add`. On a phone, scan the QR code. On a TV, open the address in its browser and enter the code. The device needs no account and stores nothing. The web app works with a touch screen and with a TV remote. A device you did not add sees the pairing page and nothing else.
+On your computer, open **Devices** and choose **Add a device**, or run `torrential devices add`. On a phone, scan the QR code. On a TV, open the address in its browser and enter the code. The device needs no account and stores nothing. The web app works with a touch screen and with a TV remote. A device you did not add sees the pairing page and nothing else.
 
 ## Play on TV
 
@@ -58,7 +58,7 @@ On the Mac, open **Devices** and choose **Add a device**, or run `torrential dev
   <img src="docs/play-on-tv.webp" alt="Night of the Living Dead on a phone, with the Play on TV list showing an LG TV and a Samsung TV" width="280">
 </p>
 
-LG, Samsung, Sony, and most other smart TVs play over DLNA. On a title page, on the Mac or a phone you added, choose **Play on TV** and pick the TV. The phone then works as the remote. torrential sends the TV only copies in a format it plays.
+LG, Samsung, Sony, and most other smart TVs play over DLNA. On a title page, on your computer or a phone you added, choose **Play on TV** and pick the TV. The phone then works as the remote. torrential sends the TV only copies in a format it plays.
 
 ```sh
 torrential tv                    # list the TVs on the home network
@@ -95,7 +95,7 @@ The skill teaches Claude Code, Codex, Gemini CLI, Cursor, and other agents to us
 
 ## Settings
 
-`torrential setup` shows the screen and language torrential found on the Mac and lets you change them. Film and show details come from Cinemeta and IMDb. Set everything else in `~/.config/torrential/config.yaml`:
+`torrential setup` shows the screen and language torrential found on your computer and lets you change them. Film and show details come from Cinemeta and IMDb. Set everything else in `~/.config/torrential/config.yaml`, or `%LOCALAPPDATA%\torrential\config\config.yaml` on Windows:
 
 ```yaml
 downloads:
