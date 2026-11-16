@@ -272,7 +272,7 @@ pub struct Owner {
     /// Looks up the web seeds that serve every file of a torrent the engine downloads.
     web_seeds: WebSeeds,
     parse: ParseTorrent,
-    disk: Box<dyn Disk>,
+    disk: Arc<dyn Disk>,
     updates: broadcast::Sender<Update>,
     config: OwnerConfig,
     resume_saved_at: Instant,
@@ -286,7 +286,7 @@ impl Owner {
         engine: EngineHandle,
         web_seeds: WebSeeds,
         parse: ParseTorrent,
-        disk: Box<dyn Disk>,
+        disk: Arc<dyn Disk>,
         playing: Playing,
         config: OwnerConfig,
     ) -> Result<Self, Error> {
@@ -666,7 +666,7 @@ impl Owner {
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
         if home == Home::Folder {
-            self.tending.outside_plays(&dir)?;
+            self.tending.outside_plays(&dir, self.disk.lineage(&dir))?;
         }
         let cap = Cap::new(max_size, setup_max_size);
         let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;

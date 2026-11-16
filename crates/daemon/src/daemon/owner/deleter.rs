@@ -276,10 +276,10 @@ impl Deleter {
     }
 
     /// Refuses a folder for a download the person chose when it is the plays folder or inside it,
-    /// whatever names or links lead there.
-    pub fn outside_plays(&self, dir: &Path) -> Result<(), Error> {
+    /// whatever names or links lead there. `lineage` is the folder's lineage.
+    pub fn outside_plays(&self, dir: &Path, lineage: io::Result<Vec<Identity>>) -> Result<(), Error> {
         let Ok(root) = &self.plays else { return Ok(()) };
-        if !lineage(dir).is_ok_and(|lineage| lineage.contains(&root.identity)) {
+        if !lineage.is_ok_and(|lineage| lineage.contains(&root.identity)) {
             return Ok(());
         }
         let message =

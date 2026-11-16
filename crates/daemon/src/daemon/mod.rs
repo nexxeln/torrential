@@ -234,7 +234,7 @@ pub fn start(
         engine.clone(),
         ports.web_seeds,
         ports.parse,
-        ports.disk,
+        Arc::from(ports.disk),
         playing.clone(),
         config,
     )?;

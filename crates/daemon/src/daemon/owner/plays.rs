@@ -11,7 +11,7 @@ use torrential_core::protocol::{Change, ChangeResult, Kept};
 use torrential_core::{Error, TorrentId};
 
 use super::super::admission;
-use super::super::book::{Home, Intent, JobEntry, Observed, Play};
+use super::super::book::{Home, Identity, Intent, JobEntry, Observed, Play};
 use super::super::files;
 use super::super::store::{Store, Tombstone};
 use super::deleter::{Deleter, Doom, InUse};
@@ -102,9 +102,9 @@ impl Tending {
         }
     }
 
-    /// Refuses a folder the person chose inside the plays folder.
-    pub(super) fn outside_plays(&self, dir: &Path) -> Result<(), Error> {
-        self.deleter.outside_plays(dir)
+    /// Refuses a folder the person chose inside the plays folder. `lineage` is the folder's lineage.
+    pub(super) fn outside_plays(&self, dir: &Path, lineage: std::io::Result<Vec<Identity>>) -> Result<(), Error> {
+        self.deleter.outside_plays(dir, lineage)
     }
 
     /// Puts the removal of a download on record, with what of it is to be deleted.
