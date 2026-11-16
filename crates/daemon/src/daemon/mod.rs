@@ -130,7 +130,7 @@ impl Ports {
                 parse: fake::parse,
                 search: Arc::new(fake::fixture::search(torrential_core::time::now())),
                 disk: Box::new(crate::disk::RoomyDisk),
-                machine: Detector::start(env, settings.downloads_dir(paths), Box::new(crate::disk::RoomyDisk)),
+                machine: Detector::start(env, settings.downloads_dir(paths), Arc::new(crate::disk::RoomyDisk)),
                 preferences,
                 ffmpeg,
                 subtitles,
@@ -143,7 +143,7 @@ impl Ports {
             None => Network::Public,
         };
         let roomy = test.is_some_and(|test| test.roomy_disk());
-        let disk = || -> Box<dyn Disk + Sync> {
+        let disk = || -> Box<dyn Disk> {
             if roomy { Box::new(crate::disk::RoomyDisk) } else { Box::new(crate::disk::RealDisk) }
         };
         let search =
@@ -158,7 +158,7 @@ impl Ports {
             search,
             parse: libtorrent::parse,
             disk: disk(),
-            machine: Detector::start(env, settings.downloads_dir(paths), disk()),
+            machine: Detector::start(env, settings.downloads_dir(paths), Arc::from(disk())),
             preferences,
             ffmpeg,
             subtitles,

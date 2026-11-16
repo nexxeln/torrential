@@ -199,7 +199,7 @@ impl Harness {
                     language: None,
                 },
                 dir.path().join("downloads"),
-                Box::new(disk.clone()),
+                Arc::new(disk.clone()),
             ),
             preferences: Arc::new({
                 let preferences = outside.preferences;
