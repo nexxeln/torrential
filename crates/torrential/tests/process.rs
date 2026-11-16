@@ -74,6 +74,41 @@ fn a_version_mismatch_restarts_the_engine() {
     assert!(!alive(old_pid), "the old engine exited after saving its state");
 }
 
+/// An older engine that the login service started exits for the service to start this release,
+/// as systemd and launchd do a moment later from the binary an update installed. An engine the
+/// command started in that moment would hold the state folder, and the service's would exit.
+#[test]
+fn a_command_waits_for_the_login_service_to_start_the_engine_it_replaces() {
+    use std::process::Stdio;
+    let mut home = Home::new().with(hooks::VERSION, "0.1.0");
+    let service = |home: &Home| {
+        let mut engine = home.process(&["daemon", "run", "--service"]);
+        engine.stdout(Stdio::null()).stderr(Stdio::null());
+        engine
+    };
+    let mut old = service(&home).spawn().unwrap();
+    eventually("the service's engine answers", Duration::from_secs(20), || home.engine().is_some());
+    home.unset(hooks::VERSION);
+    let mut next = service(&home);
+    let (started, restarted) = std::sync::mpsc::channel();
+    let systemd = std::thread::spawn(move || {
+        let exited = old.wait().unwrap().code();
+        std::thread::sleep(Duration::from_secs(1));
+        let mut next = next.spawn().unwrap();
+        started.send(next.id() as i32).unwrap();
+        next.wait().unwrap();
+        exited
+    });
+
+    let run = home.run(&["status", "--json"]);
+    let restarted = restarted.recv().unwrap();
+
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    assert_eq!(home.engine(), Some((restarted, env!("CARGO_PKG_VERSION").into())), "the service's engine runs");
+    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    assert_eq!(systemd.join().unwrap(), Some(75), "the old engine exited for the service to start the next");
+}
+
 #[test]
 fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves_it_running() {
     let mut home = Home::new().with(hooks::VERSION, "9.0.0");
