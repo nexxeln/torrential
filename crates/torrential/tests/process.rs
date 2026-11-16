@@ -741,6 +741,22 @@ fn the_engine_writes_its_port_and_a_new_token_where_only_this_user_can_read_them
 }
 
 #[test]
+fn a_command_whose_token_file_names_a_port_another_program_took_starts_an_engine() {
+    let home = Home::new();
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let left = Access { port: other.local_addr().unwrap().port(), token: "5a".repeat(32) };
+    std::fs::create_dir_all(home.state()).unwrap();
+    left.write(&home.token_file()).unwrap();
+    // It closes each connection without a word, as a BitTorrent listener does with an HTTP request.
+    std::thread::spawn(move || other.incoming().for_each(drop));
+
+    let run = home.run(&["status"]);
+
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_ne!(Access::read(&home.token_file()).unwrap(), Some(left), "the new engine wrote its own");
+}
+
+#[test]
 fn an_engine_stop_stops_an_engine_it_cannot_reach() {
     let home = Home::new();
     assert_eq!(home.run(&["status"]).code, 0);

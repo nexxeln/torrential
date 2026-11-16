@@ -127,17 +127,18 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
         let client = Client { version: &version, wire: WIRE_VERSION };
         match wire::post(&access, client, &Request::Hello, Request::Hello.within()) {
             Ok(Answer::Frames(frames)) => break frames,
-            Ok(Answer::Status(_)) => match read()? {
-                // An engine that started since took the port, and wrote its own token first.
-                Some(newer) if newer != access => access = newer,
-                // The engine that wrote the file is gone, and another program has its port.
-                _ => return Ok(None),
-            },
-            Err(e) if e.kind() == ErrorKind::ConnectionRefused => return Ok(None),
             Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
                 return Err(launch::sandbox_error(Blocked::Loopback { port: access.port }, env));
             }
-            Err(e) => return Err(lost(e, &log)),
+            // A port that takes the request and never answers, as a stuck engine's does.
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => return Err(lost(e, &log)),
+            // Not the engine that wrote the file: none listens at its port, or another program does.
+            Ok(Answer::Status(_)) | Err(_) => {}
+        }
+        match read()? {
+            // An engine that started since took the port, and wrote its own token first.
+            Some(newer) if newer != access => access = newer,
+            _ => return Ok(None),
         }
     };
     let mut conn = Conn {
