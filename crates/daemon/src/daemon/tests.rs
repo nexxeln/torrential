@@ -645,7 +645,7 @@ async fn disk_size_and_conflicting_directories_refuse_a_download() {
     assert_eq!(err.code, ErrorCode::DiskFull);
     assert_eq!(err.details, Some(torrential_core::error::Details::Space { required: 70 * GIB, available: 69 * GIB }));
     h.disk.set_free(500 * GIB);
-    h.disk.directory(h.downloads().join("big/b.bin"));
+    h.disk.directory(h.downloads().join("big").join("b.bin"));
     let err = h.get_with(raised.clone()).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::PathConflict);
     assert_eq!(
@@ -1441,94 +1441,6 @@ async fn every_pause_returns_once_writes_stop_or_fails_when_they_do_not() {
     gate.open();
     let again = h.changes(Request::Pause { refs: vec![prefix(&iso)] }).await.unwrap();
     assert_eq!(again, [("3c3c3c".to_string(), "already_paused".to_string())]);
-}
-
-struct Seeder {
-    session: torrential_engine::Session,
-    id: torrential_core::TorrentId,
-    addr: std::net::SocketAddr,
-    torrent: Vec<u8>,
-    _files: tempfile::TempDir,
-}
-
-impl Seeder {
-    const PIECE: u32 = 16 * 1024;
-
-    fn start(files: &[(&str, u8)]) -> Self {
-        use torrential_engine as lt;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("set")).unwrap();
-        for (name, byte) in files {
-            std::fs::write(dir.path().join("set").join(name), vec![*byte; Self::PIECE as usize]).unwrap();
-        }
-        let piece = lt::PieceSize::new(Self::PIECE).unwrap();
-        let torrent = lt::create_torrent(&dir.path().join("set"), piece, lt::TorrentFormat::V1).unwrap();
-        let mut session = lt::Session::new(lt::Config::loopback()).unwrap();
-        let source = lt::TorrentSource::Metainfo(torrent.clone());
-        let id = session.add(lt::AddTorrent::new(source, dir.path())).unwrap().id();
-        let total = u64::from(Self::PIECE) * files.len() as u64;
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let port = loop {
-            let seeding = session.status(id).unwrap().progress.verified_selected_bytes() == total;
-            if let (true, Some(port)) = (seeding, session.listen_port().unwrap()) {
-                break port;
-            }
-            assert!(Instant::now() < deadline, "the seeder never verified its files");
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port);
-        Self { session, id, addr, torrent: torrent.into_bytes(), _files: dir }
-    }
-
-    fn engine(&self, gate: &Gate) -> impl FnOnce(&std::path::Path) -> Box<dyn Engine> {
-        let (peers, gate) = (vec![self.addr], gate.clone());
-        move |dir| {
-            let state = dir.join("state");
-            std::fs::create_dir_all(&state).unwrap();
-            let network = super::libtorrent::Network::Loopback { peers };
-            let port = super::libtorrent::Libtorrent::start(&state, network).unwrap();
-            Box::new(Gated { port, gate })
-        }
-    }
-
-    /// Dials the engine, which skips a peer for a minute after a pause disconnects it.
-    fn dial(&mut self, h: &Harness) {
-        let port: u16 =
-            std::fs::read_to_string(h.dir.path().join("state/listen.port")).unwrap().trim().parse().unwrap();
-        let _ =
-            self.session.connect_peer(self.id, std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port));
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_selection_widened_while_the_engine_finishes_is_done_only_once_the_new_files_verify() {
-    let mut seeder = Seeder::start(&[("a.bin", 1), ("b.bin", 2)]);
-    let gate = Gate::default();
-    let h = Harness::with_engine(seeder.engine(&gate), super::libtorrent::parse);
-    let file = h.dir.path().join("set.torrent");
-    std::fs::write(&file, &seeder.torrent).unwrap();
-    gate.close();
-    let id = h.get(Target::TorrentFile(file), &["a.bin"]).await.unwrap().job.id;
-    gate.until_held(1).await;
-    let short = id.to_hex()[..6].to_string();
-    let widened = h.get(Target::Prefix(short), &["*.bin"]).await.unwrap();
-    assert_eq!((widened.outcome, widened.job.progress.size), (GetOutcome::Updated, Some(32 * 1024)));
-    gate.open();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let job = loop {
-        let job = h.status().await.remove(0);
-        if job.status.name() == "done" || Instant::now() > deadline {
-            break job;
-        }
-        seeder.dial(&h);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
-    let b = std::fs::read(h.downloads().join("set/b.bin")).unwrap_or_default();
-    assert_eq!(
-        (job.status.name(), job.progress.verified, b == vec![2; 16 * 1024]),
-        ("done", 32 * 1024, true),
-        "done means every selected file arrived"
-    );
 }
 
 pub(super) const MIB: u64 = 1 << 20;

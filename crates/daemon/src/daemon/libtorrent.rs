@@ -575,15 +575,17 @@ fn metainfo(m: lt::Metainfo) -> Result<Metainfo, Error> {
     let single_file = matches!(m.files(), [only] if only.path == Path::new(&name));
     let mut files = Vec::with_capacity(m.files().len());
     for f in m.files() {
-        let path =
-            if single_file { Some(name.as_str()) } else { f.path.strip_prefix(&name).ok().and_then(Path::to_str) };
+        // A torrent's own paths have / between their parts, as BitTorrent writes them, on every system.
+        let inside =
+            |path: &Path| path.iter().map(|part| part.to_str()).collect::<Option<Vec<_>>>().map(|p| p.join("/"));
+        let path = if single_file { Some(name.clone()) } else { f.path.strip_prefix(&name).ok().and_then(inside) };
         let path = path.ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidTorrent,
                 format!("libtorrent placed {} outside the torrent's folder", f.path.display()),
             )
         })?;
-        files.push(MetaFile { path: path.to_string(), size: f.size });
+        files.push(MetaFile { path, size: f.size });
     }
     let web_seeds = m.web_seeds().to_vec();
     Ok(Metainfo::new(m.info_hash(), name, files, single_file, m.into_bytes())?.with_web_seeds(web_seeds))
