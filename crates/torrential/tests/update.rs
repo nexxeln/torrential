@@ -1,3 +1,6 @@
+// Its releases are shell scripts that run the real binary under another version.
+#![cfg(unix)]
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

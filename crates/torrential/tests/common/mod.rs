@@ -22,9 +22,25 @@ pub const MAC: &str =
     r#"{"os": "macos", "display": {"width": 3024, "height": 1964, "hdr": true}, "arch": "arm64", "language": "en"}"#;
 
 /// What a command passes on from the test's own environment: how to run the binary and how to
-/// spell file names. Everything else torrential reads comes from the home.
-const PASSED_ON: [&str; 8] =
-    ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "RUST_BACKTRACE"];
+/// spell file names, and on Windows what the system's own libraries need, such as `SystemRoot`,
+/// without which no socket opens. Everything else torrential reads comes from the home.
+const PASSED_ON: [&str; 15] = [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "RUST_BACKTRACE",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "TEMP",
+    "TMP",
+    "ComSpec",
+    "PATHEXT",
+];
 
 pub struct Home {
     pub dir: tempfile::TempDir,
@@ -70,8 +86,9 @@ impl Home {
         self.vars.retain(|(k, _)| *k != key);
     }
 
+    /// `rest`, with / between its parts, inside the home, with the platform's separator.
     pub fn path(&self, rest: &str) -> PathBuf {
-        self.dir.path().join(rest)
+        rest.split('/').fold(self.dir.path().to_path_buf(), |path, part| path.join(part))
     }
 
     pub fn write_config(&self, text: &str) {
@@ -81,6 +98,7 @@ impl Home {
     }
 
     /// Writes an executable `bin/<name>` that runs `script`, and returns the folder.
+    #[cfg(unix)]
     pub fn stub(&self, name: &str, script: &str) -> PathBuf {
         let bin = self.path("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -211,7 +229,17 @@ impl Drop for Home {
 }
 
 pub fn alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    torrential_daemon::process::alive(pid as u32)
+}
+
+/// Ends the process `pid` at once, as a crash would.
+pub fn kill(pid: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, libc::SIGKILL)
+    };
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
 }
 
 pub fn eventually(what: &str, within: Duration, mut done: impl FnMut() -> bool) {

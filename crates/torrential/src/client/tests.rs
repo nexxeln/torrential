@@ -1,3 +1,6 @@
+// Some imports serve only the rendering tests that run on Unix.
+#![cfg_attr(windows, allow(unused_imports))]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -1,4 +1,6 @@
 //! Films and series from the command line, against the fake engine and its fake catalog.
+// Its stand-in mpv is a shell script, and the player's socket a Unix socket.
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
