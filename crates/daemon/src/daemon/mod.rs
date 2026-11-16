@@ -1,5 +1,7 @@
 pub mod admission;
 pub(crate) mod book;
+#[cfg(unix)]
+pub mod bridge05;
 pub(crate) mod cast;
 pub(crate) mod ctx;
 pub(crate) mod db;
@@ -363,6 +365,9 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(switch::follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
+        // Remove in 0.7
+        #[cfg(unix)]
+        let bridge = tokio::spawn(bridge05::answer(paths.clone(), running.ctx.owner.clone(), version.clone()));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         // Before the port stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
@@ -371,6 +376,8 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         running.http.abort();
         signals.abort();
         updates.abort();
+        #[cfg(unix)]
+        bridge.abort();
         // An engine that stops for a newer version leaves its token file, so a client following it
         // finds a port that refuses for a moment instead of none, and waits for the next engine.
         if ended == Ended::Stopped {
