@@ -170,7 +170,8 @@ impl Layout {
     }
 
     pub fn under(root: &Path) -> Self {
-        Self { copy: root.join(".agents/skills/torrential"), link: root.join(".claude/skills/torrential") }
+        let skill = |agent: &str| root.join(agent).join("skills").join("torrential");
+        Self { copy: skill(".agents"), link: skill(".claude") }
     }
 
     fn link_kind(&self) -> Link {

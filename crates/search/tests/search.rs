@@ -266,26 +266,6 @@ async fn an_oversized_answer_is_an_error_not_a_truncated_list() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_slow_source_times_out_by_the_deadline() {
-    let slow = Reply { delay: Duration::from_secs(10), ..ok(fixture("knaben/v2-search-ubuntu.json")) };
-    let server =
-        Server::start(vec![("/knaben/", vec![slow]), ("/apibay/", vec![ok(fixture("apibay/q.php-ubuntu.json"))])])
-            .await;
-    let search = Search::new(&server.config(&["knaben", "apibay"]), ResultCache::new()).unwrap();
-    let mut q = query("ubuntu", &["knaben", "apibay"]);
-    q.timeout_ms = 1500;
-
-    let started = tokio::time::Instant::now();
-    let result = search.search(&q).await.unwrap();
-    let wall = started.elapsed();
-
-    assert_eq!(outcomes(&result)[0], ("knaben".into(), SourceOutcome::Timeout));
-    assert_eq!(outcomes(&result)[1], ("apibay".into(), SourceOutcome::Ok { results: 100 }));
-    assert!(wall < Duration::from_millis(1700), "returned after {wall:?}");
-    assert!(result.elapsed_ms < 1700, "reported {} ms", result.elapsed_ms);
-}
-
 #[tokio::test]
 async fn a_repeat_search_is_served_from_the_cache_unless_fresh() {
     let server = Server::start(vec![

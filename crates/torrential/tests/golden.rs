@@ -2,6 +2,8 @@
 //! its downloads held still. A change detector for moves that keep behavior the same: any change in
 //! a field, a word, or an exit code shows as a snapshot diff. Times, ports, PIDs, pairing codes and
 //! the test's own folder are taken out, so two runs give the same snapshots.
+// Its stand-in mpv, ffmpeg and ffprobe are shell scripts.
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
