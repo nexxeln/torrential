@@ -69,7 +69,10 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
         DaemonCommand::Uninstall => {
             let report = service::uninstall(env, &paths)?;
             // Task Scheduler leaves running the engine its task started.
-            if matches!((report.manager, report.result), (service::Manager::TaskScheduler, service::Change::Uninstalled)) {
+            if matches!(
+                (report.manager, report.result),
+                (service::Manager::TaskScheduler, service::Change::Uninstalled)
+            ) {
                 connect::stop_asked(&paths, env)?;
             }
             service_report(report, mode)
