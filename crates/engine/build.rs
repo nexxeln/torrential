@@ -45,6 +45,8 @@ fn main() {
     if target_os == "windows" {
         // CMake's FindOpenSSL sets the library paths from these names under MSVC.
         cmake.define("SSL_EAY_RELEASE", &ssl_file).define("LIB_EAY_RELEASE", &crypto_file);
+        let static_crt = env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|f| f == "crt-static"));
+        cmake.define("static_runtime", if static_crt { "ON" } else { "OFF" });
     }
     let install = cmake
         .generator("Ninja")

@@ -13,7 +13,9 @@
 curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh | sh
 ```
 
-The script puts one file at `~/.local/bin/torrential`. torrential runs on macOS 14 or later on Apple silicon, and on 64-bit Linux.
+On Windows, in PowerShell: `irm https://raw.githubusercontent.com/nexxeln/torrential/main/install.ps1 | iex`
+
+The script puts one file at `~/.local/bin/torrential`, or `%LOCALAPPDATA%\Programs\torrential` on Windows. torrential runs on macOS 14 or later on Apple silicon, on 64-bit Linux, and on 64-bit Windows 10 or later.
 
 The engine starts at login and keeps running, so your phone and TV can always reach it. It resumes downloads after a restart and installs updates when nothing is playing. To stop it starting at login, run `torrential engine uninstall`.
 
