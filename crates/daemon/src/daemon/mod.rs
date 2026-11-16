@@ -298,6 +298,10 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         None => return Err(Startup::AlreadyRunning(format!("another engine owns {}", paths.state.display()))),
     };
     persist(&format!("remove {}", paths.startup_error().display()), fsutil::remove(&paths.startup_error()));
+    #[cfg(windows)]
+    if let Ok(exe) = env.installed() {
+        crate::update::release::remove_set_aside(&exe);
+    }
     prepare_runtime_dir(&paths.runtime)?;
     match service::add_at_start(env, paths) {
         Ok(Some(unit)) => log(&format!("added a login service at {}, so the engine starts at login", unit.display())),
