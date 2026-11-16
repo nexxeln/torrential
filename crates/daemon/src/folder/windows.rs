@@ -120,7 +120,7 @@ impl Folder {
     }
 
     /// Makes the folder `name`. Windows has no permission bits; the folder takes its parent's.
-    pub fn make(&self, name: &OsStr, _mode: u32) -> io::Result<()> {
+    pub fn make(&self, name: &OsStr, _mode: u16) -> io::Result<()> {
         std::fs::create_dir(self.at(name)?)
     }
 

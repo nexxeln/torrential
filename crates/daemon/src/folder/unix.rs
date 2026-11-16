@@ -71,8 +71,8 @@ impl Folder {
     }
 
     /// Makes the folder `name` with the permission bits `mode`.
-    pub fn make(&self, name: &OsStr, mode: u32) -> io::Result<()> {
-        Ok(rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(mode))?)
+    pub fn make(&self, name: &OsStr, mode: u16) -> io::Result<()> {
+        Ok(rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(mode.into()))?)
     }
 
     /// Makes the file `name`, readable by the person alone, failing when the name is taken.
