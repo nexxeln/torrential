@@ -10,6 +10,7 @@ use super::launch::{self, Blocked};
 use torrential_daemon::daemon::OwnerLock;
 use torrential_daemon::env::Env;
 use torrential_daemon::paths::Paths;
+use torrential_daemon::process;
 use torrential_daemon::update::Version;
 use torrential_daemon::wire::{self, Access, Answer, Client};
 
@@ -127,7 +128,7 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
         let client = Client { version: &version, wire: WIRE_VERSION };
         match wire::post(&access, client, &Request::Hello, Request::Hello.within()) {
             Ok(Answer::Frames(frames)) => break frames,
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
                 return Err(launch::sandbox_error(Blocked::Loopback { port: access.port }, env));
             }
             // A port that takes the request and never answers, as a stuck engine's does.
@@ -203,7 +204,7 @@ pub fn stop(mut conn: Conn, why: Stop) -> Result<u32, Error> {
 
 /// Waits up to `within` for the engine `pid` to exit.
 fn exits(pid: u32, within: Duration) -> Result<u32, Error> {
-    let exited = poll(within, || Ok((!alive(pid)).then_some(())))?;
+    let exited = poll(within, || Ok((!process::alive(pid)).then_some(())))?;
     exited.map(|()| pid).ok_or_else(|| {
         Error::new(ErrorCode::DaemonUnavailable, format!("the engine (pid {pid}) did not exit"))
             .with_hint(format!("kill {pid}, then run the command again"))
@@ -214,7 +215,7 @@ fn exits(pid: u32, within: Duration) -> Result<u32, Error> {
 /// An engine that exits for the login service to start an update says so in its state folder, so
 /// this waits across the gap until the new engine starts and stops that one too. An engine that
 /// holds the state folder but does not answer, such as one from a torrential before 0.6, gets a
-/// SIGTERM, which it takes as a stop.
+/// SIGTERM, or Ctrl-C on its console on Windows, which it takes as a stop.
 pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
     let deadline = Instant::now() + BACK_WITHIN;
     let mut stopped = None;
@@ -225,7 +226,7 @@ pub fn stop_asked(paths: &Paths, env: &Env) -> Result<Option<u32>, Error> {
                 if let Some(conn) = found {
                     stopped = Some(stop(conn, Stop::Asked)?);
                 } else if !switching && let Some(pid) = OwnerLock::holder(&paths.lock()) {
-                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                    process::interrupt(pid);
                     stopped = Some(exits(pid, Request::Shutdown { asked: true }.within())?);
                 }
                 if !switching {
@@ -261,10 +262,6 @@ pub fn poll<T>(within: Duration, mut ready: impl FnMut() -> Result<Option<T>, Er
 
 fn pause(waited: Duration) -> Duration {
     (waited / 10).clamp(Duration::from_millis(2), Duration::from_millis(20))
-}
-
-pub fn alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 pub fn unexpected(response: &Response) -> Error {

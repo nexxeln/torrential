@@ -1,5 +1,4 @@
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -146,7 +145,7 @@ impl Store {
                 id: id.parse().map_err(|_| bad("id"))?,
                 info_hash: serde_json::from_str(&hash).map_err(|_| bad("info hash"))?,
                 name,
-                dir: PathBuf::from(std::ffi::OsString::from_vec(dir)),
+                dir: path_from(dir),
                 selection: serde_json::from_str::<Selection>(&selection).map_err(|_| bad("selection"))?,
                 cap: Cap { bytes: max_size as u64, from_setup },
                 magnet,
@@ -182,7 +181,7 @@ impl Store {
                     record.id.to_hex(),
                     json(&record.info_hash),
                     record.name,
-                    record.dir.as_os_str().as_bytes(),
+                    path_bytes(&record.dir),
                     json(&record.selection),
                     record.cap.bytes as i64,
                     record.magnet,
@@ -353,12 +352,7 @@ impl Store {
             };
             tx.execute(
                 "INSERT OR REPLACE INTO tombstones (id, name, path, removed_at) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    id,
-                    tombstone.name,
-                    tombstone.path.as_ref().map(|p| p.as_os_str().as_bytes().to_vec()),
-                    tombstone.removed_at
-                ],
+                params![id, tombstone.name, tombstone.path.as_deref().map(path_bytes), tombstone.removed_at],
             )?;
             tx.execute("DELETE FROM tombstones WHERE removed_at < ?1", [tombstone.removed_at - TOMBSTONE_SECS])?;
             evict_metainfo(tx, tombstone.removed_at)?;
@@ -475,7 +469,7 @@ impl Store {
             out.push(Tombstone {
                 id: id.parse().map_err(|_| corrupt(&self.path, "a tombstone has an unreadable id"))?,
                 name,
-                path: path.map(|p| PathBuf::from(std::ffi::OsString::from_vec(p))),
+                path: path.map(path_from),
                 removed_at,
             });
         }
@@ -533,6 +527,29 @@ impl Store {
 }
 
 /// A file's identity as the store keeps it, in two signed columns.
+/// A path as the database keeps it: the system's own bytes on Unix, and UTF-8 on Windows.
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn path_from(bytes: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+}
+
+#[cfg(windows)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().into_owned().into_bytes()
+}
+
+#[cfg(windows)]
+fn path_from(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn identity(device: i64, inode: i64) -> Identity {
     Identity { device: device as u64, inode: inode as u64 }
 }

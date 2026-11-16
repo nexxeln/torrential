@@ -25,12 +25,13 @@ fn local_name() -> Option<String> {
     scutil.and_then(|name| dot_local(&name)).or_else(|| dot_local(&host_name()?))
 }
 
-/// Avahi answers for the host name with `.local` after it.
+/// Avahi, and Windows itself, answer for the host name with `.local` after it.
 #[cfg(not(target_os = "macos"))]
 fn local_name() -> Option<String> {
     dot_local(&host_name()?)
 }
 
+#[cfg(unix)]
 fn host_name() -> Option<String> {
     let mut buf = [0u8; 256];
     if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
@@ -51,7 +52,33 @@ fn dot_local(name: &str) -> Option<String> {
     valid.then(|| format!("{label}.local"))
 }
 
+/// The computer's DNS host name, as Windows answers for it over mDNS.
+#[cfg(windows)]
+fn host_name() -> Option<String> {
+    use windows::Win32::System::SystemInformation::{ComputerNamePhysicalDnsHostname, GetComputerNameExW};
+    use windows::core::PWSTR;
+    let mut size = 0u32;
+    // The first call only says how long the name is.
+    let _ = unsafe { GetComputerNameExW(ComputerNamePhysicalDnsHostname, None, &mut size) };
+    let mut name = vec![0u16; size as usize];
+    unsafe { GetComputerNameExW(ComputerNamePhysicalDnsHostname, Some(PWSTR(name.as_mut_ptr())), &mut size) }.ok()?;
+    Some(String::from_utf16_lossy(&name[..size as usize]))
+}
+
 fn lan_addresses() -> Vec<Ipv4Addr> {
+    let mut found = Vec::new();
+    for ip in up_ipv4() {
+        if !ip.is_loopback() && !ip.is_unspecified() && !found.contains(&ip) {
+            found.push(ip);
+        }
+    }
+    found.sort_by_key(|ip| rank(*ip));
+    found
+}
+
+/// The IPv4 addresses of the network interfaces that are up.
+#[cfg(unix)]
+fn up_ipv4() -> Vec<Ipv4Addr> {
     let mut found = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
@@ -66,13 +93,52 @@ fn lan_addresses() -> Vec<Ipv4Addr> {
             continue;
         }
         let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in>() };
-        let ip = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
-        if !ip.is_loopback() && !ip.is_unspecified() && !found.contains(&ip) {
-            found.push(ip);
-        }
+        found.push(Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr)));
     }
     unsafe { libc::freeifaddrs(list) };
-    found.sort_by_key(|ip| rank(*ip));
+    found
+}
+
+/// The IPv4 addresses of the network adapters that are up.
+#[cfg(windows)]
+fn up_ipv4() -> Vec<Ipv4Addr> {
+    use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses,
+        IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size = 16 * 1024u32;
+    // u64s, so the adapters the call writes there are aligned.
+    let mut buffer = vec![0u64; size as usize / 8];
+    loop {
+        let list = Some(buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>());
+        match unsafe { GetAdaptersAddresses(u32::from(AF_INET.0), flags, None, list, &mut size) } {
+            code if code == NO_ERROR.0 => break,
+            code if code == ERROR_BUFFER_OVERFLOW.0 => buffer.resize(size as usize / 8 + 1, 0),
+            _ => return Vec::new(),
+        }
+    }
+    let mut found = Vec::new();
+    let mut adapter = buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    // Each pointer is null or points into `buffer`, which outlives the walk.
+    while let Some(entry) = unsafe { adapter.as_ref() } {
+        adapter = entry.Next;
+        if entry.OperStatus != IfOperStatusUp {
+            continue;
+        }
+        let mut unicast = entry.FirstUnicastAddress;
+        while let Some(address) = unsafe { unicast.as_ref() } {
+            unicast = address.Next;
+            let socket = address.Address.lpSockaddr;
+            if unsafe { socket.as_ref() }.is_some_and(|socket| socket.sa_family == AF_INET) {
+                let socket = unsafe { &*socket.cast::<SOCKADDR_IN>() };
+                found.push(Ipv4Addr::from(u32::from_be(unsafe { socket.sin_addr.S_un.S_addr })));
+            }
+        }
+    }
     found
 }
 

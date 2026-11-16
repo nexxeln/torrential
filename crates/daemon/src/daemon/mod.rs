@@ -32,7 +32,6 @@ mod tests;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -389,14 +388,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
 }
 
 async fn stop_on_signal(owner: OwnerHandle) {
-    use tokio::signal::unix::{SignalKind, signal};
-    let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
-        return;
-    };
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
-    }
+    crate::process::asked_to_stop().await;
     log("stopping on a signal");
     let (reply, _) = tokio::sync::oneshot::channel();
     owner.tell(owner::Command::Shutdown { reply });
@@ -407,49 +399,66 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), Error> {
         |why: String| Error::new(ErrorCode::DaemonUnavailable, why).with_hint("remove it, or set XDG_RUNTIME_DIR");
     std::fs::create_dir_all(dir).map_err(|e| refuse(format!("cannot create {}: {e}", dir.display())))?;
     let meta = dir.symlink_metadata().map_err(|e| refuse(format!("cannot inspect {}: {e}", dir.display())))?;
-    if !meta.is_dir() || meta.uid() != paths::uid() {
-        return Err(refuse(format!("{} is not a directory owned by you", dir.display())));
+    if !meta.is_dir() {
+        return Err(refuse(format!("{} is not a directory", dir.display())));
     }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| refuse(format!("cannot protect {}: {e}", dir.display())))
+    // On Windows the folder is under the person's local app data folder, which is theirs alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if meta.uid() != paths::uid() {
+            return Err(refuse(format!("{} is not a directory owned by you", dir.display())));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| refuse(format!("cannot protect {}: {e}", dir.display())))?;
+    }
+    Ok(())
 }
 
+/// The lock that makes one engine the owner of a state folder. The engine's process ID is in the
+/// lock file on Unix. Windows lets no other process read a locked file, so there it is beside it.
 pub struct OwnerLock {
     _file: File,
 }
 
 impl OwnerLock {
     pub fn acquire(path: &Path) -> Result<Option<Self>, Error> {
-        use std::os::fd::AsRawFd;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
             .open(path)
             .map_err(|e| Error::new(ErrorCode::StateCorrupt, format!("cannot open {}: {e}", path.display())))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Ok(None);
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(Error::new(ErrorCode::StateCorrupt, format!("cannot lock {}: {e}", path.display())));
             }
-            return Err(Error::new(ErrorCode::StateCorrupt, format!("cannot lock {}: {e}", path.display())));
         }
-        let mut file = file;
-        let _ = file.set_len(0).and_then(|()| writeln!(file, "{}", std::process::id()));
+        let pid = std::process::id();
+        if cfg!(windows) {
+            let _ = std::fs::write(pid_file(path), format!("{pid}\n"));
+        } else {
+            let _ = file.set_len(0).and_then(|()| writeln!(file, "{pid}"));
+        }
         Ok(Some(Self { _file: file }))
     }
 
-    /// The process that holds the lock at `path`, which wrote its ID there, when one does.
+    /// The process that holds the lock at `path`, which wrote its ID, when one does.
     pub fn holder(path: &Path) -> Option<u32> {
-        use std::os::fd::AsRawFd;
         let file = File::open(path).ok()?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0
-            || std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK)
-        {
-            return None;
+        match file.try_lock_shared() {
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            _ => return None,
         }
-        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+        let written = if cfg!(windows) { pid_file(path) } else { path.to_path_buf() };
+        std::fs::read_to_string(written).ok()?.trim().parse().ok()
     }
+}
+
+/// Where the engine that holds the lock at `lock` writes its process ID on Windows.
+fn pid_file(lock: &Path) -> PathBuf {
+    lock.with_extension("pid")
 }

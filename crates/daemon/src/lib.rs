@@ -15,6 +15,7 @@ pub mod machine;
 pub mod paths;
 pub mod playback;
 pub mod player;
+pub mod process;
 pub mod qr;
 pub mod selection;
 pub mod service;

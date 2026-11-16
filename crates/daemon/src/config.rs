@@ -690,6 +690,8 @@ sources:
         assert!(!missing.save(Preferences::default()), "clearing a config that does not exist writes nothing");
     }
 
+    // Windows makes links only for an administrator or in Developer Mode.
+    #[cfg(unix)]
     #[test]
     fn setup_writes_through_a_linked_config() {
         let folder = Folder::new();
@@ -707,6 +709,8 @@ sources:
         );
     }
 
+    // It shuts a folder with permission bits, which Windows does not have.
+    #[cfg(unix)]
     #[test]
     fn setup_keeps_the_config_file_private() {
         use std::os::unix::fs::PermissionsExt;

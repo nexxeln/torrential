@@ -23,15 +23,18 @@ pub use torrent::{
 
 /// Where libtorrent reads and writes `path`. On Linux, unless `LANG` ends in `.UTF-8`, libtorrent
 /// writes each character outside ASCII as `.`, so `Français.mkv` is `Fran.ais.mkv` on disk.
-#[cfg(unix)]
 pub fn on_disk(path: &Path) -> PathBuf {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    PathBuf::from(OsString::from_vec(bridge::ffi::native_path(path.as_os_str().as_bytes())))
+    from_native(bridge::ffi::native_path(path.as_os_str().as_encoded_bytes()))
 }
 
-/// Where libtorrent reads and writes `path`. On Windows it widens UTF-8 paths, so that is `path`.
+#[cfg(unix)]
+fn from_native(bytes: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+}
+
+/// libtorrent widens UTF-8 paths on Windows itself, so it hands back what it was given.
 #[cfg(windows)]
-pub fn on_disk(path: &Path) -> PathBuf {
-    path.to_path_buf()
+fn from_native(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }

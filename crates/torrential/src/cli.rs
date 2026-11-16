@@ -429,6 +429,10 @@ pub enum DaemonCommand {
     /// The short-lived middle process of the detached start
     #[command(hide = true)]
     Launch,
+    /// Asks the engine with this process ID to stop, as `engine stop` does with one that does not
+    /// answer: SIGTERM, or Ctrl-C on its console on Windows
+    #[command(hide = true)]
+    Interrupt { pid: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]

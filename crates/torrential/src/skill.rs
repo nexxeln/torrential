@@ -367,12 +367,33 @@ fn write_link(link: &Path, writes: &Writes) -> Result<(), Error> {
     std::fs::create_dir_all(parent).map_err(|e| writes.error(parent, e))?;
     let partial = temporary(link);
     let _ = std::fs::remove_file(&partial);
-    std::os::unix::fs::symlink(LINK, &partial)
+    make_link(&partial)
         .and_then(|()| std::fs::rename(&partial, link))
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&partial);
         })
         .map_err(|e| writes.error(link, e))
+}
+
+/// Makes `at` a link to the shared copy, `LINK` from where it is.
+#[cfg(unix)]
+fn make_link(at: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(LINK, at)
+}
+
+/// Windows makes a symbolic link only for an administrator or in Developer Mode, so `at` is a
+/// junction, which anyone can make, to the shared copy's full path.
+#[cfg(windows)]
+fn make_link(at: &Path) -> io::Result<()> {
+    let target = std::path::absolute(at.parent().unwrap_or(Path::new(".")).join(LINK))?;
+    let made = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(at)
+        .arg(&target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if made.success() { Ok(()) } else { Err(io::Error::other(format!("mklink /J failed for {}", at.display()))) }
 }
 
 fn replace_with_link(link: &Path, writes: &Writes) -> Result<(), Error> {
@@ -572,6 +593,8 @@ mod tests {
         assert_eq!(home.states(), [("agents", "up_to_date"), ("claude", "missing")]);
     }
 
+    // It shuts a folder with permission bits, which Windows does not have.
+    #[cfg(unix)]
     #[test]
     fn a_blocked_write_in_a_sandbox_names_the_command_for_the_human() {
         use std::os::unix::fs::PermissionsExt;

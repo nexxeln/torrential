@@ -628,10 +628,21 @@ fn missing(session: &lt::Session, id: TorrentId, t: &Torrent) -> Option<Missing>
     Some(Missing { pieces: m.missing, unavailable: m.unavailable })
 }
 
+/// The codes libtorrent's system errors give for a full disk or quota: errno, and on Windows also
+/// its own codes.
+#[cfg(unix)]
+const DISK_FULL: &[i32] = &[libc::ENOSPC, libc::EDQUOT];
+#[cfg(windows)]
+const DISK_FULL: &[i32] = &[
+    libc::ENOSPC,
+    windows::Win32::Foundation::ERROR_DISK_FULL.0 as i32,
+    windows::Win32::Foundation::ERROR_HANDLE_DISK_FULL.0 as i32,
+];
+
 fn storage_error(id: TorrentId, file: Option<&Path>, error: &lt::NativeError) -> Error {
     let errno = matches!(error.category.as_str(), "system" | "generic");
     let place = file.map(|f| format!(" ({})", f.display())).unwrap_or_default();
-    if errno && [libc::ENOSPC, libc::EDQUOT].contains(&error.code) {
+    if errno && DISK_FULL.contains(&error.code) {
         Error::new(ErrorCode::DiskFull, format!("the disk is full{place}"))
             .with_hint(format!("free some space, then run torrential resume {}", short(id)))
     } else {

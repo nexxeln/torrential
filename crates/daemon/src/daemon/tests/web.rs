@@ -1,9 +1,14 @@
 //! The web app's side of the engine's HTTP server: its pages, its API, and what it asks ffmpeg for.
+// Some helpers serve only the tests that run shell scripts, which run only on Unix.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -23,7 +28,7 @@ use super::super::fake;
 use super::super::search_port::SearchPort;
 use super::super::titles::catalog_port::{self, CatalogPort};
 use super::{Harness, MIB, Outside, magnet, prefix, titles, torrent, written};
-use crate::ffmpeg::fetch::{Build, Fetch};
+use crate::ffmpeg::fetch::{Build, Fetch, Packing};
 use crate::ffmpeg::{INSTALL, Tools};
 
 /// Where a browser in a test runs.
@@ -463,11 +468,13 @@ async fn without_ffmpeg_a_file_goes_by_its_name_and_its_header() {
 }
 
 /// Programs that stand in for ffmpeg and ffprobe. The stand-in ffprobe prints `probe`, and each
-/// appends its arguments to `calls`.
+/// appends its arguments to `calls`. They are shell scripts, so they run only on Unix.
+#[cfg(unix)]
 struct StandIns {
     dir: PathBuf,
 }
 
+#[cfg(unix)]
 impl StandIns {
     fn install(h: &Harness, probe: &str, ffmpeg: &str) -> Self {
         let dir = h.dir.path().join("tools");
@@ -511,6 +518,8 @@ async fn playing(h: &Harness, n: u8) -> String {
     film.info_hash.id().to_hex()
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes() {
     let h = Harness::new();
@@ -592,6 +601,7 @@ const BIN: &str = "ffmpeg-8.1-test/bin";
 
 /// A .tar.xz holding stand-ins for ffmpeg and ffprobe in `BIN`, as a pinned build does. The
 /// stand-in ffprobe prints `probe`, and each appends its arguments to `calls`.
+#[cfg(unix)]
 fn archive(calls: &Path, probe: &str, ffmpeg: &str) -> Vec<u8> {
     let script = |name: &str, body: &str| format!("#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n", calls.display());
     let mut tar = tar::Builder::new(Vec::new());
@@ -647,6 +657,7 @@ fn build(url: String, archive: &[u8]) -> Build {
         bin: BIN.into(),
         sha256: format!("{:x}", sha2::Sha256::digest(archive)),
         size: archive.len() as u64,
+        packing: Packing::TarXz,
     }
 }
 
@@ -659,12 +670,15 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
 }
 
 const FETCH: [&str; 1] = ["Content-Type: application/json"];
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
     let calls = tempfile::tempdir().unwrap();
@@ -722,6 +736,8 @@ async fn the_first_file_to_convert_fetches_ffmpeg_once_for_everyone_who_asks() {
     assert_eq!(asked.load(Ordering::SeqCst), 1, "a fetched ffmpeg is not fetched again");
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_whose_file_the_browser_cannot_read_starts_the_ffmpeg_fetch_as_it_starts() {
     let calls = tempfile::tempdir().unwrap();
@@ -746,6 +762,8 @@ async fn a_title_whose_file_the_browser_cannot_read_starts_the_ffmpeg_fetch_as_i
     assert_eq!(asked.load(Ordering::SeqCst), 1, "the player follows the fetch the play began");
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paired_device_may_fetch_ffmpeg_and_a_stranger_may_not() {
     let calls = tempfile::tempdir().unwrap();
@@ -768,6 +786,8 @@ async fn a_paired_device_may_fetch_ffmpeg_and_a_stranger_may_not() {
     assert_eq!(asked.load(Ordering::SeqCst), 1);
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_download_that_is_not_the_pinned_build_leaves_nothing_behind() {
     let calls = tempfile::tempdir().unwrap();
@@ -813,6 +833,8 @@ async fn fetch_ffmpeg(h: &Harness) -> Value {
     lines(&body).pop().unwrap()
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fetched_ffmpeg_that_changed_on_disk_is_fetched_again() {
     let calls = tempfile::tempdir().unwrap();
@@ -845,6 +867,8 @@ async fn a_fetched_ffmpeg_that_changed_on_disk_is_fetched_again() {
     assert_eq!(asked.load(Ordering::SeqCst), 3, "an ffmpeg as it was fetched is used again");
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_build_that_does_not_run_here_is_fetched_once_for_each_engine_run() {
     let calls = tempfile::tempdir().unwrap();
@@ -871,6 +895,8 @@ async fn a_build_that_does_not_run_here_is_fetched_once_for_each_engine_run() {
     assert_eq!(asked.load(Ordering::SeqCst), 2, "a new engine run tries once more");
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn ffmpeg_is_not_fetched_into_a_folder_other_users_can_change() {
     let calls = tempfile::tempdir().unwrap();
@@ -906,6 +932,8 @@ async fn ffmpeg_is_not_fetched_into_a_folder_other_users_can_change() {
     assert!(names(elsewhere.path()).is_empty(), "nothing is written through the link");
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn ffmpeg_stops_when_the_player_stops_reading() {
     let h = Harness::new();
@@ -928,6 +956,8 @@ async fn ffmpeg_stops_when_the_player_stops_reading() {
     }
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_ffmpeg_cannot_read_is_an_error_and_not_an_empty_video() {
     let h = Harness::new();
@@ -1177,6 +1207,8 @@ fn second_of(run: usize) -> u32 {
     (run * 5400 / 200) as u32
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_player_sees_which_parts_of_a_file_have_arrived_and_gets_pictures_only_of_those() {
     let h = Harness::new();
@@ -1976,6 +2008,8 @@ async fn first_tried(h: &Harness, on: &On, viewer: &Value) -> String {
     trying["release"]["name"].as_str().unwrap().to_string()
 }
 
+// Its ffmpeg and ffprobe stand-ins are shell scripts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_download_here_plays_first_only_where_the_browser_decodes_it_or_ffmpeg_converts_it() {
     let (h, night) = titles::night();

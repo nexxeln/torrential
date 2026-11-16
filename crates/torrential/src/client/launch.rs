@@ -1,8 +1,8 @@
 //! Codex kills a tool call's process group when the call returns, so the engine starts
-//! from a launcher in a new session.
+//! from a launcher in a new session. On Windows the engine starts with a console of its own that
+//! has no window, so it outlives the terminal and can hear Ctrl-C from `engine stop`.
 
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ pub fn sandbox_signal(env: &Env, send_udp: impl FnOnce() -> std::io::Result<()>)
         return Some("CODEX_SANDBOX_NETWORK_DISABLED=1".to_string());
     }
     match send_udp() {
-        Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Some(format!("sending a UDP datagram failed: {e}"))
         }
         _ => None,
@@ -90,10 +90,7 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
     let exe = env.executable().map_err(|e| unavailable(e.message))?;
     let mut launcher = Command::new(exe);
     launcher.args(["daemon", "launch"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    // SAFETY: setsid is async-signal-safe, the only kind of call allowed between fork and exec.
-    unsafe {
-        launcher.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
-    }
+    on_its_own(&mut launcher);
     let mut child = launcher.spawn().map_err(|e| unavailable(format!("cannot start the engine: {e}")))?;
     let mut out = String::new();
     let _ = child.stdout.take().map(|mut s| s.read_to_string(&mut out));
@@ -106,7 +103,7 @@ pub fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         if let Some(conn) = connect::existing(paths, env)? {
             return Ok(Some(conn));
         }
-        if !connect::alive(pid)
+        if !torrential_daemon::process::alive(pid)
             && let Some(recorded) = paths.recorded_startup_error()
         {
             return Err(recorded.unwrap_or_else(|_| unavailable("the engine failed to start".into())));
@@ -138,14 +135,14 @@ pub fn launch_stage(env: &Env) -> u8 {
         }
         let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| e.to_string())?;
         let exe = env.executable().map_err(|e| e.message)?;
-        let engine = Command::new(exe)
+        let mut engine = Command::new(exe);
+        engine
             .args(["daemon", "run"])
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok(engine.id())
+            .stderr(log);
+        on_its_own(&mut engine);
+        Ok(engine.spawn().map_err(|e| e.to_string())?.id())
     })();
     match result {
         Ok(pid) => {
@@ -159,6 +156,31 @@ pub fn launch_stage(env: &Env) -> u8 {
     }
 }
 
+/// Starts `command` in a session of its own.
+#[cfg(unix)]
+fn on_its_own(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe, the only kind of call allowed between fork and exec.
+    unsafe {
+        command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+}
+
+/// Starts `command` with a console of its own that has no window, in a process group of its own,
+/// so neither the terminal closing nor its Ctrl-C stops it.
+#[cfg(windows)]
+fn on_its_own(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
+/// Windows passes a child no handles but its standard ones.
+#[cfg(windows)]
+fn close_inherited_descriptors() {}
+
+#[cfg(unix)]
 fn close_inherited_descriptors() {
     let listed: Option<Vec<libc::c_int>> = std::fs::read_dir("/dev/fd")
         .ok()
@@ -189,13 +211,15 @@ mod tests {
 
     #[test]
     fn only_a_denied_send_counts_as_a_sandbox() {
-        let denied = || Err(std::io::Error::from_raw_os_error(libc::EPERM));
-        let unreachable = || Err(std::io::Error::from_raw_os_error(libc::ENETUNREACH));
+        let denied = || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let unreachable = || Err(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable));
         assert!(sandbox_signal(&env(&[]), denied).unwrap().starts_with("sending a UDP datagram failed"));
         assert_eq!(sandbox_signal(&env(&[]), unreachable), None);
         assert_eq!(sandbox_signal(&env(&[]), || Ok(())), None);
     }
 
+    // The stand-in for the installed binary is a shell script.
+    #[cfg(unix)]
     #[test]
     fn the_engine_starts_from_the_binary_this_process_started_from() {
         use std::os::unix::fs::PermissionsExt;

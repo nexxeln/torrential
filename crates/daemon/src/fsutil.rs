@@ -1,7 +1,6 @@
 //! Files written whole or not at all.
 
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -22,7 +21,7 @@ impl Writes {
     }
 
     pub fn error(&self, path: &Path, e: io::Error) -> Error {
-        let denied = matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES | libc::EROFS));
+        let denied = matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem);
         let message = format!("cannot write {}: {e}", path.display());
         if denied && self.sandboxed {
             Error::new(ErrorCode::SandboxWriteBlocked, message).with_hint(format!(
@@ -41,7 +40,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let partial = temporary(path);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
     if let Some(permissions) = &kept {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         options.mode(permissions.mode());
     }
     options
@@ -74,4 +75,48 @@ pub fn temporary(path: &Path) -> PathBuf {
 
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Leaves only the owner of the file at `path` any access to it, whatever its folder grants, as
+/// mode 0600 does on Unix.
+#[cfg(windows)]
+pub fn owner_only(path: &Path) -> io::Result<()> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+    use windows::core::{BOOL, HSTRING, w};
+    // Full access for the file's owner, and no entries inherited from the folder.
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            w!("D:P(A;;FA;;;OW)"),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+    }?;
+    let (mut present, mut dacl, mut defaulted) = (BOOL(0), std::ptr::null_mut::<ACL>(), BOOL(0));
+    let set =
+        unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }.and_then(|()| {
+            let info = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+            unsafe {
+                SetNamedSecurityInfoW(
+                    &HSTRING::from(path.as_os_str()),
+                    SE_FILE_OBJECT,
+                    info,
+                    None,
+                    None,
+                    Some(dacl),
+                    None,
+                )
+            }
+            .ok()
+        });
+    let _ = unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    Ok(set?)
 }

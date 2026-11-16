@@ -313,8 +313,7 @@ async fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> 
         |e: std::io::Error| Error::new(ErrorCode::StorageError, format!("cannot prepare {}: {e}", home.0.display()));
     private_folder(&home.0.join("config")).map_err(unprepared)?;
     std::fs::write(home.0.join("config/config.yaml"), "updates: off\n").map_err(unprepared)?;
-    let paths =
-        Paths::resolve(&env.clone().with("TORRENTIAL_HOME", &home.0.display().to_string()), crate::paths::uid(), None)?;
+    let paths = Paths::from_process(&env.clone().with("TORRENTIAL_HOME", &home.0.display().to_string()))?;
     // Killed if the trial drops before it exits, as it does when the engine stops mid-update.
     let mut engine = tokio::process::Command::new(binary)
         .args(["daemon", "run", "--http-port", "0"])

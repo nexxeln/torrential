@@ -50,9 +50,7 @@ impl Access {
             #[cfg(unix)]
             file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
             #[cfg(windows)]
-            {
-                // TODO(W2): an ACL that lets only the file's owner read it.
-            }
+            crate::fsutil::owner_only(&partial)?;
             file.write_all(&serde_json::to_vec(self).map_err(io::Error::other)?)?;
             std::fs::rename(&partial, path)
         })();
@@ -119,5 +117,25 @@ pub fn ask(access: &Access, client: Client, request: &Request) -> io::Result<Res
     match post(access, client, request, request.within())? {
         Answer::Frames(mut frames) => read_frame(&mut frames)?.ok_or_else(|| io::ErrorKind::UnexpectedEof.into()),
         Answer::Status(status) => Err(io::Error::other(format!("the engine answered {status}"))),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_token_files_owner_can_open_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine-token");
+        let written = Access { port: 47919, token: "ab".repeat(32) };
+        written.write(&path).unwrap();
+        let listed = std::process::Command::new("icacls").arg(&path).output().unwrap();
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        // icacls prints one access entry a line, the first after the file's path.
+        let entries: Vec<&str> = listed.lines().filter(|line| line.contains(":(")).collect();
+        assert_eq!(entries.len(), 1, "{listed}");
+        assert!(entries[0].ends_with("OWNER RIGHTS:(F)"), "{listed}");
+        assert_eq!(Access::read(&path).unwrap(), Some(written));
     }
 }
