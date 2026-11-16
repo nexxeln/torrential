@@ -199,7 +199,7 @@ impl Harness {
                     language: None,
                 },
                 dir.path().join("downloads"),
-                Box::new(disk.clone()),
+                Arc::new(disk.clone()),
             ),
             preferences: Arc::new({
                 let preferences = outside.preferences;
@@ -493,6 +493,39 @@ async fn every_command_answers_usage_for_a_title() {
             usage("verify", "tt0903747:3:5"),
         ]
     );
+}
+
+/// macOS has a program it has not seen before wait to open ~/Downloads until the person answers
+/// a prompt. Opening a FIFO to read waits the same way, until something opens it to write.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_answers_while_a_download_folder_keeps_a_get_waiting() {
+    let h = Harness::new();
+    let prompt = h.disk.stall(h.downloads(), h.dir.path().join("prompt"));
+    let film = torrent(1, "film", &[("film.mkv", GIB)]);
+    let request = GetRequest {
+        target: magnet(&film),
+        dir: Some(h.downloads()),
+        files: Vec::new(),
+        max_size: None,
+        dry_run: false,
+    };
+    let ctx = h.running.ctx.clone();
+    let waiting = tokio::spawn(async move { server::handle(&ctx, Request::Get(request)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = Instant::now();
+    let answered = tokio::time::timeout(Duration::from_secs(3), h.status()).await;
+    let took = asked.elapsed();
+    assert!(answered.is_ok() && took < Duration::from_secs(2), "status took {took:?} while get waited for the folder");
+    match waiting.await.unwrap() {
+        Response::Error { error } => assert_eq!(
+            (error.code, error.message),
+            (ErrorCode::StorageError, format!("torrential is waiting for access to {}", h.downloads().display()))
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+    prompt.release();
+    assert_eq!(h.get(magnet(&film), &[]).await.unwrap().outcome, GetOutcome::Started);
 }
 
 #[tokio::test(flavor = "multi_thread")]

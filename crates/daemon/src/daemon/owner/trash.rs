@@ -23,6 +23,17 @@ pub enum Trash {
     At(PathBuf),
 }
 
+/// What a move to the Trash did with a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Trashed {
+    /// The file is in the Trash.
+    Moved,
+    /// The Trash says it took the file, but torrential cannot look in the Trash to check it took
+    /// that file and not another put in its place. macOS keeps a program without Full Disk Access
+    /// out of ~/.Trash.
+    Unchecked,
+}
+
 /// Why a file stays where it is.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Stays {
@@ -52,9 +63,9 @@ impl Trash {
 
     /// Moves the file `name` in `folder` to the Trash, while it is the file `file`. `path` is
     /// where the person knows it to be. A file that cannot go stays where it is, and says why.
-    pub fn put(&self, folder: &Folder, name: &OsStr, path: &Path, file: Identity) -> Result<(), Stays> {
-        match self {
-            Self::Finder => finder(folder, name, file).map_err(Stays::For),
+    pub fn put(&self, folder: &Folder, name: &OsStr, path: &Path, file: Identity) -> Result<Trashed, Stays> {
+        let moved = match self {
+            Self::Finder => return finder(folder, name, file).map_err(Stays::For),
             Self::RecycleBin => recycle_bin::put(folder, name, file),
             Self::Freedesktop { home } => {
                 let (trash, from) = freedesktop(home, folder, path).map_err(Stays::For)?;
@@ -64,7 +75,8 @@ impl Trash {
                 std::fs::create_dir_all(dir).map_err(|_| Stays::For(NO_TRASH.into()))?;
                 put_in(&open(dir).map_err(Stays::For)?, folder, name, path, file, Folder::rename_new)
             }
-        }
+        };
+        moved.map(|()| Trashed::Moved)
     }
 }
 
@@ -116,10 +128,25 @@ fn check_moved(into: &Folder, to: &OsStr, folder: &Folder, name: &OsStr, file: I
     }
 }
 
+/// What became of the file `file` at `name` in `folder` once the Trash said it took it to `at`,
+/// if it said where. It is the file, or it goes back where it was. A Trash torrential cannot look
+/// in, as macOS keeps ~/.Trash from a program without Full Disk Access, took it unchecked.
+#[cfg(any(target_os = "macos", test))]
+fn in_trash(at: Option<&Path>, folder: &Folder, name: &OsStr, file: Identity) -> Result<Trashed, String> {
+    let Some((dir, to)) = at.and_then(|at| Some((at.parent()?, at.file_name()?))) else {
+        return Ok(Trashed::Unchecked);
+    };
+    let Ok(trash) = open(dir) else { return Ok(Trashed::Unchecked) };
+    if trash.entry(to).is_err() {
+        return Ok(Trashed::Unchecked);
+    }
+    check_moved(&trash, to, folder, name, file).map(|()| Trashed::Moved).map_err(Replaced::why)
+}
+
 /// NSFileManager's `trashItemAtURL`, as Finder moves a file to the Trash, never deletes: on a
 /// disk with no Trash it fails.
 #[cfg(target_os = "macos")]
-fn finder(folder: &Folder, name: &OsStr, file: Identity) -> Result<(), String> {
+fn finder(folder: &Folder, name: &OsStr, file: Identity) -> Result<Trashed, String> {
     use objc2_foundation::{NSFileManager, NSURL};
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -143,15 +170,13 @@ fn finder(folder: &Folder, name: &OsStr, file: Identity) -> Result<(), String> {
                 }
             },
         )?;
-        let unchecked = "it is in the Trash, which did not say where, so torrential cannot check it was the file";
-        let at = moved.and_then(|url| url.path()).map(|path| PathBuf::from(path.to_string())).ok_or(unchecked)?;
-        let (Some(dir), Some(to)) = (at.parent(), at.file_name()) else { return Err(unchecked.into()) };
-        check_moved(&open(dir).map_err(|_| unchecked)?, to, folder, name, file).map_err(Replaced::why)
+        let at = moved.and_then(|url| url.path()).map(|path| PathBuf::from(path.to_string()));
+        in_trash(at.as_deref(), folder, name, file)
     })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn finder(_: &Folder, _: &OsStr, _: Identity) -> Result<(), String> {
+fn finder(_: &Folder, _: &OsStr, _: Identity) -> Result<Trashed, String> {
     Err(NO_TRASH.to_string())
 }
 
@@ -595,6 +620,36 @@ mod tests {
         assert_eq!(names(&trash.join("info")), Vec::<String>::new());
     }
 
+    #[test]
+    fn a_file_the_trash_says_it_took_is_trashed_even_where_torrential_cannot_look() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, trash) = (tmp.path().join("Downloads"), tmp.path().join("Trash"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(dir.join("film.mkv"), "the download's film").unwrap();
+        let (downloads, file) = (folder(&dir), identity(&dir.join("film.mkv")));
+        // The Trash moves the file, as trashItemAtURL does.
+        std::fs::rename(dir.join("film.mkv"), trash.join("film.mkv")).unwrap();
+        std::fs::write(trash.join("other.mkv"), "the person's own film").unwrap();
+        let outcome = |at: Option<&Path>| in_trash(at, &downloads, OsStr::new("film.mkv"), file);
+        assert_eq!(
+            [
+                outcome(Some(&trash.join("film.mkv"))),
+                outcome(None),
+                outcome(Some(&tmp.path().join("Locked/film.mkv"))),
+                outcome(Some(&trash.join("other.mkv"))),
+            ],
+            [
+                Ok(Trashed::Moved),
+                Ok(Trashed::Unchecked),
+                Ok(Trashed::Unchecked),
+                Err("it was replaced after you asked to delete it".to_string()),
+            ]
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("film.mkv")).unwrap(), "the person's own film");
+        assert_eq!(names(&trash), ["film.mkv"]);
+    }
+
     // The note holds a Unix path.
     #[cfg(unix)]
     #[test]
@@ -652,7 +707,7 @@ mod tests {
         assert_eq!(put(), Err(Stays::Busy(BUSY.into())));
         assert_eq!(std::fs::read_to_string(&film).unwrap(), "film");
         drop(held);
-        assert_eq!(put(), Ok(()));
+        assert_eq!(put(), Ok(Trashed::Moved));
         assert!(!film.exists());
     }
 }
