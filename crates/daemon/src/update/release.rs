@@ -1,8 +1,7 @@
 //! Fetching a release, checking it, trying it as an engine, and installing it.
 
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, TryLockError};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -18,7 +17,7 @@ use crate::fsutil::{Writes, sha256};
 use crate::paths::Paths;
 use crate::wire::{self, Access, Client};
 
-use super::{Checked, Version, tag_version, target};
+use super::{Archive, Checked, Version, tag_version, target};
 
 const RELEASES: &str = "https://github.com/nexxeln/torrential/releases";
 const ISSUES: &str = "https://github.com/nexxeln/torrential/issues";
@@ -201,24 +200,34 @@ pub(crate) async fn put_release(
 
 /// An exclusive lock on a folder, held until it drops.
 struct FolderLock {
-    _folder: std::fs::File,
+    _held: std::fs::File,
 }
 
 impl FolderLock {
     async fn take(dir: &Path) -> Result<FolderLock, Error> {
-        use std::os::fd::AsRawFd;
         let failed =
             |e: std::io::Error| Error::new(ErrorCode::StorageError, format!("cannot lock {}: {e}", dir.display()));
-        let folder = std::fs::File::open(dir).map_err(failed)?;
-        while unsafe { libc::flock(folder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(failed(e));
+        let held = lockable(dir).map_err(failed)?;
+        loop {
+            match held.try_lock() {
+                Ok(()) => return Ok(FolderLock { _held: held }),
+                Err(TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(TryLockError::Error(e)) => return Err(failed(e)),
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Ok(FolderLock { _folder: folder })
     }
+}
+
+/// What stands for the folder `dir` in a lock: the folder itself.
+#[cfg(unix)]
+fn lockable(dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(dir)
+}
+
+/// What stands for the folder `dir` in a lock: a file in it, as Windows locks only files.
+#[cfg(windows)]
+fn lockable(dir: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("torrential.update.lock"))
 }
 
 /// Where this torrential is installed and which release asset fits this machine, or why it cannot
@@ -244,11 +253,12 @@ pub(crate) fn installed(env: &Env) -> Result<(PathBuf, &'static str), Error> {
 
 /// Downloads the binary of release `version` for `target` and checks it against its published checksum.
 async fn fetch(releases: &Releases, version: Version, target: &str) -> Result<Vec<u8>, Error> {
-    let asset = format!("torrential-{target}.tar.gz");
-    let tarball = releases.download(version, &asset).await?;
+    let archive = Archive::of(target);
+    let asset = archive.asset(target);
+    let packed = releases.download(version, &asset).await?;
     let sums = releases.download(version, &format!("{asset}.sha256")).await?;
-    verify(&asset, &tarball, &sums)?;
-    unpack(&asset, &tarball)
+    verify(&asset, &packed, &sums)?;
+    unpack(archive, &asset, &packed)
 }
 
 /// Runs `binary --version` and accepts it only when it says it is torrential `version`. A binary
@@ -301,7 +311,7 @@ async fn trial(binary: &Path, version: Version, env: &Env) -> Result<(), Error> 
     let _ = std::fs::remove_dir_all(&home.0);
     let unprepared =
         |e: std::io::Error| Error::new(ErrorCode::StorageError, format!("cannot prepare {}: {e}", home.0.display()));
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home.0.join("config")).map_err(unprepared)?;
+    private_folder(&home.0.join("config")).map_err(unprepared)?;
     std::fs::write(home.0.join("config/config.yaml"), "updates: off\n").map_err(unprepared)?;
     let paths =
         Paths::resolve(&env.clone().with("TORRENTIAL_HOME", &home.0.display().to_string()), crate::paths::uid(), None)?;
@@ -384,16 +394,32 @@ fn verify(asset: &str, tarball: &[u8], sums: &[u8]) -> Result<(), Error> {
     .with_hint(format!("run torrential update again later; if it fails again, report it at {ISSUES}")))
 }
 
-fn unpack(asset: &str, tarball: &[u8]) -> Result<Vec<u8>, Error> {
+/// The binary in the release asset `asset`, packed as `archive`.
+fn unpack(archive: Archive, asset: &str, packed: &[u8]) -> Result<Vec<u8>, Error> {
     let bad = |e: std::io::Error| Error::new(ErrorCode::FetchFailed, format!("cannot unpack {asset}: {e}"));
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
-    for entry in archive.entries().map_err(bad)? {
-        let mut entry = entry.map_err(bad)?;
-        let path = entry.path().map_err(bad)?.into_owned();
-        if entry.header().entry_type().is_file() && path.strip_prefix(".").unwrap_or(&path) == Path::new("torrential") {
-            let mut binary = Vec::new();
-            entry.read_to_end(&mut binary).map_err(bad)?;
-            return Ok(binary);
+    let name = Path::new(archive.binary());
+    let mut binary = Vec::new();
+    match archive {
+        Archive::TarGz => {
+            let mut tarball = tar::Archive::new(flate2::read::GzDecoder::new(packed));
+            for entry in tarball.entries().map_err(bad)? {
+                let mut entry = entry.map_err(bad)?;
+                let path = entry.path().map_err(bad)?.into_owned();
+                if entry.header().entry_type().is_file() && path.strip_prefix(".").unwrap_or(&path) == name {
+                    entry.read_to_end(&mut binary).map_err(bad)?;
+                    return Ok(binary);
+                }
+            }
+        }
+        Archive::Zip => {
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(packed)).map_err(|e| bad(e.into()))?;
+            for index in 0..zip.len() {
+                let mut entry = zip.by_index(index).map_err(|e| bad(e.into()))?;
+                if entry.is_file() && entry.enclosed_name().as_deref() == Some(name) {
+                    entry.read_to_end(&mut binary).map_err(bad)?;
+                    return Ok(binary);
+                }
+            }
         }
     }
     Err(Error::new(ErrorCode::FetchFailed, format!("{asset} contains no torrential binary")))
@@ -406,8 +432,12 @@ struct Partial {
 impl Partial {
     fn create(exe: &Path, writes: &Writes) -> Result<Partial, Error> {
         let dir = exe.parent().unwrap_or(Path::new("/"));
-        let path = dir.join(format!(".torrential.{}.update", std::process::id()));
-        OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&path).map_err(|e| {
+        let path = dir.join(format!(".torrential.{}.update{}", std::process::id(), std::env::consts::EXE_SUFFIX));
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o755);
+        options.open(&path).map_err(|e| {
             let error = writes.error(dir, e);
             match error.code {
                 ErrorCode::StorageError => error.with_hint(format!(
@@ -429,18 +459,65 @@ impl Partial {
             .open(&self.path)
             .and_then(|mut file| {
                 file.write_all(binary)?;
-                file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+                #[cfg(unix)]
+                file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
                 file.sync_all()
             })
             .map_err(|e| writes.error(at, e))
     }
 
     /// Moves the binary to `at` and syncs the folder, so the move outlasts a power cut.
+    #[cfg(unix)]
     fn place(self, at: &Path, writes: &Writes) -> Result<(), Error> {
         std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))?;
         let dir = at.parent().unwrap_or(Path::new("/"));
         std::fs::File::open(dir).and_then(|folder| folder.sync_all()).map_err(|e| writes.error(dir, e))
     }
+
+    /// Moves the binary to `at`. Windows replaces no program while it runs but lets it be renamed,
+    /// so the binary at `at` moves aside first, and `remove_set_aside` deletes it at a later start.
+    #[cfg(windows)]
+    fn place(self, at: &Path, writes: &Writes) -> Result<(), Error> {
+        set_aside(at).map_err(|e| writes.error(at, e))?;
+        std::fs::rename(&self.path, at).map_err(|e| writes.error(at, e))
+    }
+}
+
+/// Moves the binary `exe` aside to `torrential.old`, or to `torrential.<pid>.old` while an earlier
+/// one still runs from `torrential.old`.
+#[cfg(windows)]
+fn set_aside(exe: &Path) -> std::io::Result<()> {
+    let old = exe.with_extension("old");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(exe, &old)
+        .or_else(|_| std::fs::rename(exe, exe.with_extension(format!("{}.old", std::process::id()))))
+}
+
+/// Deletes the binaries updates moved aside next to `exe`, except those still running.
+#[cfg(windows)]
+pub fn remove_set_aside(exe: &Path) {
+    let (Some(dir), Some(stem)) = (exe.parent(), exe.file_stem().and_then(|stem| stem.to_str())) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(middle) = name.to_str().and_then(|name| name.strip_prefix(stem)?.strip_suffix("old")) else {
+            continue;
+        };
+        if middle == "."
+            || middle.strip_prefix('.').and_then(|n| n.strip_suffix('.')).is_some_and(|n| n.parse::<u32>().is_ok())
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Makes the folder `path` and those above it, for the person alone.
+fn private_folder(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(path)
 }
 
 impl Drop for Partial {
@@ -469,8 +546,11 @@ mod tests {
         assert_eq!(base(&[(hooks::NETWORK, "loopback"), local]).as_deref(), Some("http://127.0.0.1:8080"));
     }
 
+    // The stand-in releases are shell scripts.
+    #[cfg(unix)]
     #[test]
     fn a_binary_counts_only_when_it_says_it_is_the_release() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = |name: &str, text: &str| {
             let path = dir.path().join(name);
@@ -488,5 +568,54 @@ mod tests {
         );
         let garbage = said(&script("garbage", "\u{7f}ELF garbage")).unwrap_err();
         assert!(garbage.starts_with("the binary of torrential 0.1.1 does not run here ("), "{garbage}");
+    }
+
+    #[test]
+    fn the_binary_comes_out_of_a_tarball_or_a_zip() {
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        for (name, text) in [("LICENSE", "MIT"), ("torrential", "unix binary")] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(text.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, name, text.as_bytes()).unwrap();
+        }
+        let tarball = tar.into_inner().unwrap().finish().unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, text) in [("LICENSE", "MIT"), ("torrential.exe", "windows binary")] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        let zipped = zip.finish().unwrap().into_inner();
+        let unpacked = |archive: Archive, packed: &[u8]| unpack(archive, "asset", packed).map_err(|e| e.message);
+        assert_eq!(unpacked(Archive::TarGz, &tarball), Ok(b"unix binary".to_vec()));
+        assert_eq!(unpacked(Archive::Zip, &zipped), Ok(b"windows binary".to_vec()));
+        let wrong = unpacked(Archive::Zip, &tarball).unwrap_err();
+        assert!(wrong.starts_with("cannot unpack asset: "), "{wrong}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_running_binary_moves_aside_for_the_new_one_and_goes_once_it_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("torrential.exe");
+        // Any program will do, as long as it runs from the file being replaced.
+        std::fs::copy(r"C:\Windows\System32\PING.EXE", &exe).unwrap();
+        let mut running =
+            std::process::Command::new(&exe).args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null()).spawn().unwrap();
+        let writes = Writes { sandboxed: false, rerun: "torrential update".into() };
+        let partial = Partial::create(&exe, &writes).unwrap();
+        partial.write(b"new binary", &exe, &writes).unwrap();
+        partial.place(&exe, &writes).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new binary");
+        let old = dir.path().join("torrential.old");
+        assert!(old.exists(), "the running binary waits beside it");
+        remove_set_aside(&exe);
+        assert!(old.exists(), "it stays while it runs");
+        running.kill().unwrap();
+        running.wait().unwrap();
+        remove_set_aside(&exe);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new binary");
     }
 }

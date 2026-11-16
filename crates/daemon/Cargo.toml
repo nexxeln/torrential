@@ -29,6 +29,7 @@ socket2 = "0.6"
 tar = { version = "0.4", default-features = false }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "signal", "macros", "io-util", "fs", "process"] }
 url = "2.5"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
