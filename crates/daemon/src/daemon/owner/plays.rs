@@ -4,17 +4,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::oneshot;
 use torrential_core::protocol::{Change, ChangeResult, Kept};
 use torrential_core::{Error, TorrentId};
 
-use super::super::admission;
 use super::super::book::{Home, Identity, Intent, JobEntry, Observed, Play};
 use super::super::files;
 use super::super::store::{Store, Tombstone};
 use super::deleter::{Deleter, Doom, InUse};
+use super::reach::Reach;
 use super::{Finish, Owner, Removing, Reply, Shelving, now};
 use crate::disk::Space;
 use crate::log::log;
@@ -108,8 +109,14 @@ impl Tending {
     }
 
     /// Puts the removal of a download on record, with what of it is to be deleted.
-    pub(super) fn remove(&mut self, store: &mut Store, tombstone: &Tombstone, doom: Option<Doom>) -> Result<(), Error> {
-        self.deleter.remove(store, tombstone, doom)
+    pub(super) fn remove(
+        &mut self,
+        store: &mut Store,
+        tombstone: &Tombstone,
+        doom: Option<Doom>,
+        reach: &Reach,
+    ) -> Result<(), Error> {
+        self.deleter.remove(store, tombstone, doom, reach)
     }
 
     /// The engine has yet to let go of a removed download, whose folder and files are these.
@@ -256,9 +263,8 @@ impl Owner {
     /// deletions are done.
     pub(super) fn finish_deletions(&mut self) {
         if self.tending.deleter.ready(&self.draining) {
-            let in_use = self.in_use();
-            let in_use = in_use.as_ref().map_err(String::as_str);
-            for (job, done) in self.tending.deleter.run(&self.draining, in_use, &mut self.store) {
+            let in_use = self.in_use().map(Arc::new);
+            for (job, done) in self.tending.deleter.run(&self.draining, in_use, &mut self.store, &self.reach) {
                 let id = job.to_hex();
                 for removal in &mut self.tending.removals {
                     if removal.waiting.remove(&job)
@@ -305,17 +311,24 @@ impl Owner {
 
     /// What the downloads on the list, and those the engine has yet to let go of, write, found by
     /// what each file and folder is rather than by its path, so no other name or link hides one.
-    fn in_use(&mut self) -> Result<InUse, String> {
-        let dirs: Vec<PathBuf> = self.jobs.values().map(|job| job.record.dir.clone()).collect();
-        if let Some(dir) = dirs.iter().filter(|dir| !self.reach.reach(dir)).last() {
-            return Err(format!("torrential is waiting for access to {}, where another download is", dir.display()));
-        }
-        let mut in_use = InUse::default();
+    /// Each folder is looked in once, for every download in it.
+    fn in_use(&self) -> Result<InUse, String> {
+        let mut folders: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
         let listed = self.jobs.values().map(Self::writes);
         for (dir, targets) in listed.chain(self.tending.letting_go.values().cloned()) {
-            in_use
-                .add(&dir, &targets)
-                .map_err(|e| format!("torrential cannot tell whether another download uses it: {e}"))?;
+            folders.entry(dir).or_default().extend(targets);
+        }
+        let mut in_use = InUse::default();
+        for (dir, targets) in folders {
+            let at = dir.clone();
+            let found = self.reach.ask(&dir, move |disk| {
+                let mut found = InUse::default();
+                found.add(disk, &at, &targets).map(|()| found)
+            });
+            let found = found.map_err(|_| {
+                format!("torrential is waiting for access to {}, where another download is", dir.display())
+            })?;
+            in_use.merge(found.map_err(|e| format!("torrential cannot tell whether another download uses it: {e}"))?);
         }
         Ok(in_use)
     }
@@ -374,7 +387,7 @@ impl Owner {
     /// Whether plays leaving the plays folder will free room on the disk `space` is on.
     pub(super) fn reclaiming(&self, space: Space) -> bool {
         !self.tending.leaving.is_empty()
-            && self.disk.space(&self.config.plays.root).is_ok_and(|plays| plays.device == space.device)
+            && self.space(&self.config.plays.root).is_some_and(|plays| plays.device == space.device)
     }
 
     /// Whether `job` is a play that may pause and leave by itself: not one the person got by
@@ -518,12 +531,10 @@ impl Owner {
         Ok(())
     }
 
-    /// What a play takes up on disk now.
+    /// What a play takes up on disk now, or what the engine verified of it while its folder does
+    /// not answer.
     fn play_bytes(&self, job: &JobEntry) -> u64 {
-        let allocated = job.metainfo.as_deref().zip(job.wanted()).map_or(0, |(metainfo, wanted)| {
-            admission::allocated_bytes(metainfo, &job.record.dir, &wanted, self.disk.as_ref())
-        });
-        allocated.max(job.verified())
+        self.reach.ask(&job.record.dir, super::allocated(job)).unwrap_or(0).max(job.verified())
     }
 
     fn named(&self, id: TorrentId) -> String {
