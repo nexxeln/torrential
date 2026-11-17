@@ -291,6 +291,8 @@ pub struct Owner {
     updates: broadcast::Sender<Update>,
     config: OwnerConfig,
     resume_saved_at: Instant,
+    /// The network interface torrents are bound to, while it is missing or down.
+    waiting_for: Option<String>,
 }
 
 impl Owner {
@@ -346,6 +348,7 @@ impl Owner {
             updates,
             config,
             resume_saved_at: Instant::now(),
+            waiting_for: None,
         };
         // A download in a folder that has not answered yet starts once it does.
         let folders: Vec<PathBuf> = owner.jobs.values().map(|job| job.record.dir.clone()).collect();
@@ -557,7 +560,7 @@ impl Owner {
     }
 
     fn views(&self, ids: &[TorrentId]) -> Vec<Job> {
-        ids.iter().filter_map(|id| self.jobs.get(id)).map(JobEntry::view).collect()
+        ids.iter().filter_map(|id| self.jobs.get(id)).map(|job| job.view(self.waiting_for.as_deref())).collect()
     }
 
     fn stream_file(&self, id: TorrentId, index: u32) -> Result<StreamFile, Error> {
@@ -577,7 +580,7 @@ impl Owner {
 
     fn publish(&self, id: TorrentId) {
         if let Some(job) = self.jobs.get(&id) {
-            let _ = self.updates.send(Update::Job(Box::new(job.view())));
+            let _ = self.updates.send(Update::Job(Box::new(job.view(self.waiting_for.as_deref()))));
         }
     }
 
@@ -788,7 +791,7 @@ impl Owner {
             home,
         };
         if dry_run {
-            let job = JobEntry::new(record, metainfo, Observed::Absent).view();
+            let job = JobEntry::new(record, metainfo, Observed::Absent).view(None);
             return Ok(GetReply {
                 outcome: GetOutcome::Planned,
                 job,
@@ -807,7 +810,12 @@ impl Owner {
         self.publish(id);
         let job = &self.jobs[&id];
         let outcome = if job.observed.in_engine() { GetOutcome::Started } else { GetOutcome::Queued };
-        Ok(GetReply { outcome, job: job.view(), plan: plan.map(|p| p.public(cap)), previous_selection: None })
+        Ok(GetReply {
+            outcome,
+            job: job.view(self.waiting_for.as_deref()),
+            plan: plan.map(|p| p.public(cap)),
+            previous_selection: None,
+        })
     }
 
     fn get_existing(
@@ -835,7 +843,12 @@ impl Owner {
         let unchanged = selection == Selection::All || selection == job.record.selection;
         if unchanged && cap == job.record.cap && !too_large && !recheck {
             let plan = self.current_plan(job);
-            return Ok(GetReply { outcome: GetOutcome::Existing, job: job.view(), plan, previous_selection: None });
+            return Ok(GetReply {
+                outcome: GetOutcome::Existing,
+                job: job.view(self.waiting_for.as_deref()),
+                plan,
+                previous_selection: None,
+            });
         }
         let previous = (!unchanged).then(|| job.record.selection.clone());
         let selection = if unchanged { job.record.selection.clone() } else { selection };
@@ -843,7 +856,7 @@ impl Owner {
             if dry_run {
                 return Ok(GetReply {
                     outcome: GetOutcome::Planned,
-                    job: job.view(),
+                    job: job.view(self.waiting_for.as_deref()),
                     plan: None,
                     previous_selection: previous,
                 });
@@ -851,7 +864,7 @@ impl Owner {
             self.store.set_selection(id, &selection)?;
             self.jobs.get_mut(&id).expect("found above").record.selection = selection;
             self.publish(id);
-            let job = self.jobs[&id].view();
+            let job = self.jobs[&id].view(self.waiting_for.as_deref());
             return Ok(GetReply { outcome: GetOutcome::Updated, job, plan: None, previous_selection: previous });
         };
         let plan = self.plan(&metainfo, &selection, &job.record.dir)?;
@@ -866,7 +879,7 @@ impl Owner {
         if dry_run {
             let mut preview = job.clone();
             preview.record.selection = selection;
-            let job = preview.view();
+            let job = preview.view(None);
             return Ok(GetReply {
                 outcome: GetOutcome::Planned,
                 job,
@@ -916,7 +929,12 @@ impl Owner {
             (None, true) => GetOutcome::Queued,
             (None, false) => GetOutcome::Existing,
         };
-        Ok(GetReply { outcome, job: job.view(), plan: Some(plan.public(cap)), previous_selection: previous })
+        Ok(GetReply {
+            outcome,
+            job: job.view(self.waiting_for.as_deref()),
+            plan: Some(plan.public(cap)),
+            previous_selection: previous,
+        })
     }
 
     /// Whether a selected file of the download is gone from disk or shorter than the torrent says.
@@ -1031,7 +1049,7 @@ impl Owner {
         }
         self.schedule();
         self.publish(id);
-        Ok((self.jobs[&id].view(), metainfo))
+        Ok((self.jobs[&id].view(self.waiting_for.as_deref()), metainfo))
     }
 
     /// Marks a download as having played. Every test of it is over, and it stays as it is. The
@@ -1300,7 +1318,7 @@ impl Owner {
                 Removing::Download(id) if !self.jobs.contains_key(&id) => {}
                 Removing::Download(id) => {
                     let job = &self.jobs[&id];
-                    let view = job.view();
+                    let view = job.view(self.waiting_for.as_deref());
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
                     let doom = self.doom(job, delete);
@@ -1465,6 +1483,11 @@ impl Owner {
                 } else if self.jobs.get(&id).is_some_and(|j| j.observed.in_engine()) {
                     self.fail(id, error);
                 }
+            }
+            EngineEvent::Interface { name, up } => {
+                self.waiting_for = (!up).then_some(name);
+                let ids: Vec<TorrentId> = self.jobs.keys().copied().collect();
+                ids.into_iter().for_each(|id| self.publish(id));
             }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);

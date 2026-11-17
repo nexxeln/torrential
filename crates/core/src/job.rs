@@ -30,6 +30,10 @@ pub struct Job {
     pub title: Option<TitleLink>,
     #[serde(default)]
     pub place: Place,
+    /// The network interface this download reaches peers through, named while it is missing or
+    /// down. Nothing arrives until it is back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
 }
 
 /// Where a download's files live, which says who deletes them.
@@ -307,6 +311,7 @@ mod tests {
             added_at: 7,
             title: None,
             place: Place::Folder,
+            waiting_for: None,
         };
         let json = serde_json::to_value(&job).unwrap();
         let keys: std::collections::BTreeSet<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();

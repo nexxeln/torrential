@@ -4,7 +4,7 @@ use torrential_core::text::sanitize;
 use torrential_core::units::format_size;
 use torrential_core::{ErrorCode, Job, JobStatus};
 
-use super::rows::{job_row, next_for_stopped, selection, short_ids, state_cell};
+use super::rows::{job_row, job_state_cell, next_for_stopped, selection, short_ids, state_name, waiting_line};
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc};
@@ -24,7 +24,7 @@ pub fn jobs(jobs: &[Job]) -> Doc {
     let rows = jobs.iter().zip(&ids).map(|(job, id)| job_row(id, job)).collect();
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for job in jobs {
-        let name = job.status.name();
+        let name = state_name(job);
         match counts.iter_mut().find(|(n, _)| *n == name) {
             Some((_, count)) => *count += 1,
             None => counts.push((name, 1)),
@@ -33,6 +33,7 @@ pub fn jobs(jobs: &[Job]) -> Doc {
     let mut line = vec![format::count(jobs.len(), "download")];
     line.extend(counts.iter().map(|(name, count)| format!("{count} {name}")));
     let mut summary = vec![line.join(" · ")];
+    summary.extend(waiting_line(jobs));
     for (job, id) in jobs.iter().zip(&ids) {
         if let JobStatus::Error { error } = &job.status {
             summary.push(format!("{id} error[{}]: {}", error.code, sanitize(&error.message)));
@@ -68,7 +69,7 @@ pub fn job(job: &Job) -> Doc {
     let mut fields = vec![
         ("id", Cell::styled(job.id.to_hex(), Token::Accent)),
         ("name", job.name.as_deref().map_or_else(|| Cell::styled(format::UNKNOWN, Token::Muted), Cell::new)),
-        ("state", state_cell(&job.status)),
+        ("state", job_state_cell(job)),
     ];
     let progress = match p.size {
         Some(size) => {
@@ -77,7 +78,7 @@ pub fn job(job: &Job) -> Doc {
         None => format::UNKNOWN.to_string(),
     };
     fields.push(("progress", Cell::new(progress)));
-    let downloading = job.status == JobStatus::Downloading;
+    let downloading = job.status == JobStatus::Downloading && job.waiting_for.is_none();
     if downloading {
         fields.push(("down", Cell::new(format::rate(p.down_rate))));
     }
@@ -91,7 +92,7 @@ pub fn job(job: &Job) -> Doc {
     let path = job.path.as_deref().unwrap_or(&job.dir);
     fields.push(("path", Cell::new(path.display().to_string())));
     fields.push(("added", Cell::new(format::timestamp(job.added_at))));
-    let mut summary = Vec::new();
+    let mut summary: Vec<String> = waiting_line([job]).into_iter().collect();
     match &job.status {
         JobStatus::Done { finished_at } => fields.push(("finished", Cell::new(format::timestamp(*finished_at)))),
         JobStatus::Error { error } => {

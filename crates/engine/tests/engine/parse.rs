@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use torrential_core::TorrentId;
 use torrential_engine::{
-    AddTorrent, Alert, Config, Dht, DhtState, ErrorKind, FileIndex, FilePriority, FileSelection, Magnet, Metainfo,
-    PieceSize, Progress, ResumeData, Session, TorrentFormat, TorrentSource,
+    AddTorrent, Alert, Config, Dht, DhtState, ErrorKind, FileIndex, FilePriority, FileSelection, Listen, Magnet,
+    Metainfo, PieceSize, Progress, ResumeData, Session, TorrentFormat, TorrentSource,
 };
 
 use crate::support::{Fixture, Node, bencode, magnet};
@@ -98,7 +98,8 @@ fn saved_dht_state_keeps_the_node_id() {
 #[test]
 fn listen_failures_and_taken_ports() {
     let unassigned: SocketAddr = "192.0.2.1:6881".parse().unwrap();
-    let mut session = Session::new(Config { listen: vec![unassigned], ..Config::loopback() }).unwrap();
+    let mut session =
+        Session::new(Config { listen: Listen::Addresses(vec![unassigned]), ..Config::loopback() }).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let failure = loop {
         let alerts = session.wait_alerts(Duration::from_millis(100)).unwrap();
@@ -112,14 +113,14 @@ fn listen_failures_and_taken_ports() {
     assert_eq!(session.listen_port().unwrap(), None);
 
     let taken = Node::new(Config::loopback());
-    let next = Node::new(Config { listen: vec![taken.addr()], ..Config::loopback() });
+    let next = Node::new(Config { listen: Listen::Addresses(vec![taken.addr()]), ..Config::loopback() });
     assert_ne!(next.addr().port(), taken.addr().port(), "libtorrent moved to a free port");
 }
 
 #[test]
 fn every_interface_reports_its_address_and_scope() {
     let mut session = Session::new(Config {
-        listen: vec!["0.0.0.0:0".parse().unwrap(), "[::]:0".parse().unwrap()],
+        listen: Listen::Addresses(vec!["0.0.0.0:0".parse().unwrap(), "[::]:0".parse().unwrap()]),
         ..Config::loopback()
     })
     .unwrap();

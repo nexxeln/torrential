@@ -116,6 +116,8 @@ catalog:
 ffmpeg:
   fetch: false                # do not fetch ffmpeg when it is not installed
 updates: notify               # say when a new version is out instead of installing it, or off
+torrent_interface: wg0        # Linux and macOS: peers, trackers and the DHT use only this network
+                              # interface, such as a VPN's, and wait while it is down
 ```
 
 ## It never seeds
