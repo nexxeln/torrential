@@ -1,5 +1,4 @@
 use std::io::{BufReader, ErrorKind};
-use std::net::TcpStream;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -8,28 +7,92 @@ use torrential_core::protocol::{Frame, Reply, Request, Response, WIRE_VERSION, r
 use torrential_core::{Error, ErrorCode};
 
 use super::launch::{self, Blocked};
+use super::remote::{Remote, Remotes};
 use torrential_daemon::daemon::OwnerLock;
 use torrential_daemon::env::Env;
 use torrential_daemon::paths::Paths;
 use torrential_daemon::process;
 use torrential_daemon::service;
 use torrential_daemon::update::{Audience, Version};
-use torrential_daemon::wire::{self, Access, Answer, Client};
+use torrential_daemon::wire::{self, Access, Address, Answer, Client, Stream};
 
 /// How long an engine that refuses connections, as one does while it restarts, has to answer again.
 pub const BACK_WITHIN: Duration = Duration::from_secs(30);
 
+/// The engine a connection reaches: this machine's, whose log says what went wrong, or one on
+/// another machine that `torrential connect` chose, which this torrential never starts or stops.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Engine {
+    Local { port: u16, log: String },
+    Remote(Address),
+}
+
+impl Engine {
+    /// Where the engine serves the web app and this torrential's requests.
+    pub fn address(&self) -> Address {
+        match self {
+            Self::Local { port, .. } => Address::local(*port),
+            Self::Remote(address) => address.clone(),
+        }
+    }
+
+    /// The error for a connection to the engine that failed, ended, or did not answer in time.
+    pub fn lost(&self, e: std::io::Error) -> Error {
+        match self {
+            Self::Local { log, .. } => lost(e, log),
+            Self::Remote(address) => unreachable(address, &e),
+        }
+    }
+
+    /// The error for an answer to a request with no reply in it, such as 401 for a token the engine
+    /// does not take.
+    fn refused(&self, status: u16) -> Error {
+        match self {
+            Self::Local { port, log } => Error::new(
+                ErrorCode::DaemonUnavailable,
+                format!("the engine on 127.0.0.1:{port} refused the request with HTTP {status}"),
+            )
+            .with_hint(format!("see {log}")),
+            Self::Remote(address) if status == 401 => Error::new(
+                ErrorCode::NotPaired,
+                format!("this machine is no longer paired with the engine at {address}"),
+            )
+            .with_hint(format!(
+                "run torrential devices add on that machine, then torrential connect {address} --code <code>"
+            )),
+            Self::Remote(address) => Error::new(
+                ErrorCode::DaemonUnavailable,
+                format!("the engine at {address} refused the request with HTTP {status}"),
+            )
+            .with_hint(LOCAL_HINT),
+        }
+    }
+}
+
+const LOCAL_HINT: &str = "run torrential connect --local to use this machine's engine instead";
+
+/// Why the engine at `address` on another machine cannot be reached.
+fn unreachable(address: &Address, e: &std::io::Error) -> Error {
+    let message = match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => format!("the engine at {address} did not respond in time"),
+        ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+            format!("lost the connection to the engine at {address}")
+        }
+        _ => format!("cannot reach the engine at {address}: {e}"),
+    };
+    Error::new(ErrorCode::DaemonUnavailable, message)
+        .with_hint(format!("check that it runs and that this machine can reach it, or {LOCAL_HINT}"))
+}
+
 pub struct Conn {
-    access: Access,
+    pub engine: Engine,
+    token: String,
     version: String,
     /// The frames of the reply to the last request sent.
-    reply: Option<BufReader<TcpStream>>,
+    reply: Option<BufReader<Stream>>,
     pub engine_version: String,
     pub wire: u32,
     pub pid: u32,
-    /// Where the engine serves the web app, and downloads to players.
-    pub http_port: u16,
-    log: String,
 }
 
 impl Conn {
@@ -59,53 +122,44 @@ impl Conn {
     /// the engine closed the connection between frames.
     pub fn next<T: DeserializeOwned>(&mut self, within: Option<Duration>) -> Result<Option<T>, Error> {
         let Some(reply) = &mut self.reply else { return Err(Error::internal("no request was sent to the engine")) };
-        reply.get_ref().set_read_timeout(within).map_err(|e| lost(e, &self.log))?;
-        read_frame(reply).map_err(|e| lost(e, &self.log))
+        reply.get_ref().set_read_timeout(within).map_err(|e| self.engine.lost(e))?;
+        read_frame(reply).map_err(|e| self.engine.lost(e))
     }
 
     fn read<T: DeserializeOwned>(&mut self, within: Option<Duration>) -> Result<T, Error> {
-        self.next(within)?.ok_or_else(|| lost(ErrorKind::UnexpectedEof.into(), &self.log))
+        self.next(within)?.ok_or_else(|| self.engine.lost(ErrorKind::UnexpectedEof.into()))
     }
 
     pub fn send(&mut self, request: &Request) -> Result<(), Error> {
         self.reply = None;
         let client = Client { version: &self.version, wire: WIRE_VERSION };
-        match wire::post(&self.access, client, request, request.within()) {
+        match wire::post(&self.engine.address(), &self.token, client, request, request.within()) {
             Ok(Answer::Frames(reply)) => {
                 self.reply = Some(reply);
                 Ok(())
             }
-            Ok(Answer::Status(status)) => Err(refused(status, &self.access, &self.log)),
-            Err(e) => Err(lost(e, &self.log)),
+            Ok(Answer::Status(status)) => Err(self.engine.refused(status)),
+            Err(e) => Err(self.engine.lost(e)),
         }
     }
 
-    /// Sends `request` and hands its reply, and the engine's log, to a reader that follows it.
-    pub fn follow(mut self, request: &Request) -> Result<(BufReader<TcpStream>, String), Error> {
+    /// Sends `request` and hands its reply, and the engine it comes from, to a reader that
+    /// follows it.
+    pub fn follow(mut self, request: &Request) -> Result<(BufReader<Stream>, Engine), Error> {
         self.send(request)?;
         let reply = self.reply.take().ok_or_else(|| Error::internal("the engine sent no reply"))?;
-        Ok((reply, self.log))
+        Ok((reply, self.engine))
     }
 }
 
-/// The error for a connection to the engine that ended or did not answer in time. `log` is the
-/// engine's log, which says why.
+/// The error for a connection to this machine's engine that ended or did not answer in time.
+/// `log` is the engine's log, which says why.
 pub fn lost(e: std::io::Error, log: &str) -> Error {
     let message = match e.kind() {
         ErrorKind::WouldBlock | ErrorKind::TimedOut => "the engine did not respond in time".to_string(),
         _ => format!("lost the connection to the engine: {e}"),
     };
     Error::new(ErrorCode::DaemonUnavailable, message).with_hint(format!("see {log}"))
-}
-
-/// The error for an answer to a request with no reply in it, such as 401 for a token the engine
-/// does not take.
-fn refused(status: u16, access: &Access, log: &str) -> Error {
-    Error::new(
-        ErrorCode::DaemonUnavailable,
-        format!("the engine on 127.0.0.1:{} refused the request with HTTP {status}", access.port),
-    )
-    .with_hint(format!("see {log}"))
 }
 
 /// What `response` carries, the engine's error, or an error for a reply of another kind.
@@ -128,7 +182,7 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     let Some(mut access) = read()? else { return Ok(None) };
     let frames = loop {
         let client = Client { version: &version, wire: WIRE_VERSION };
-        match wire::post(&access, client, &Request::Hello, Request::Hello.within()) {
+        match wire::post(&access.address(), &access.token, client, &Request::Hello, Request::Hello.within()) {
             Ok(Answer::Frames(frames)) => break frames,
             Err(e) if e.kind() == ErrorKind::PermissionDenied => {
                 return Err(launch::sandbox_error(Blocked::Loopback { port: access.port }, env));
@@ -145,14 +199,13 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
         }
     };
     let mut conn = Conn {
-        http_port: access.port,
-        access,
+        engine: Engine::Local { port: access.port, log },
+        token: access.token,
         version,
         reply: Some(frames),
         engine_version: String::new(),
         wire: 0,
         pid: 0,
-        log,
     };
     (conn.engine_version, conn.wire, conn.pid) = conn.read(Some(Request::Hello.within())).and_then(reply)?;
     Ok(Some(conn))
@@ -172,10 +225,50 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     }
 }
 
+/// The engine on another machine that `remote` names. One that does not answer is an error that
+/// says so, since this torrential never starts an engine in its place.
+pub fn remote(remote: &Remote, env: &Env) -> Result<Conn, Error> {
+    let mut conn = Conn {
+        engine: Engine::Remote(remote.address.clone()),
+        token: remote.token.clone(),
+        version: env.version(),
+        reply: None,
+        engine_version: String::new(),
+        wire: 0,
+        pid: 0,
+    };
+    (conn.engine_version, conn.wire, conn.pid) = conn.ask(&Request::Hello)?;
+    if conn.wire != WIRE_VERSION {
+        return Err(Error::new(
+            ErrorCode::DaemonVersion,
+            format!(
+                "the engine at {} runs torrential {}, which speaks protocol {}, and this torrential speaks {WIRE_VERSION}",
+                remote.address, conn.engine_version, conn.wire
+            ),
+        )
+        .with_hint("run torrential update on both machines"));
+    }
+    Ok(conn)
+}
+
+/// The engine a command uses, without starting one: the one on another machine that `torrential
+/// connect` chose, or this machine's when it runs.
+pub fn found(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
+    match Remotes::using(paths)? {
+        Some(chosen) => remote(&chosen, env).map(Some),
+        None => existing(paths, env),
+    }
+}
+
 /// Why the engine a command used may not run this torrential, said once after the command.
 static MISMATCH: OnceLock<String> = OnceLock::new();
 
+/// The engine a command uses: the one on another machine that `torrential connect` chose, or this
+/// machine's, which this starts, or restarts to run this release, as needed.
 pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
+    if let Some(chosen) = Remotes::using(paths)? {
+        return remote(&chosen, env);
+    }
     let service = service::starts_another(env, paths);
     let conn = this_or_any(paths, env, service.is_some())?;
     if let Some(mismatch) = mismatch(Some(&conn.engine_version), service.as_deref(), &env.version()) {
