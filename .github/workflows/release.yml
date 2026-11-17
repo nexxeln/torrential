@@ -65,7 +65,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/toolchain
+      - id: toolchain
+        uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
           kind: build
@@ -73,6 +74,15 @@ jobs:
         run: scripts/release.sh
       - if: runner.os == 'Windows'
         run: scripts/release.ps1
+      # Pushes to next and main keep the build for every pull request; see the toolchain action.
+      - if: always() && github.event_name == 'push' && steps.toolchain.outputs.cargo-key != ''
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.toolchain.outputs.cargo-key }}
       - name: Check the binary runs
         if: runner.os != 'Windows'
         run: |

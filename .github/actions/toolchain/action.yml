@@ -8,6 +8,11 @@ inputs:
     description: test or build, so test and release builds keep separate caches
     required: true
 
+outputs:
+  cargo-key:
+    description: The key to save the cargo cache under after the build.
+    value: ${{ steps.cargo.outputs.cache-primary-key }}
+
 runs:
   using: composite
   steps:
@@ -53,7 +58,11 @@ runs:
     # cl.exe, CMake and Ninja for libtorrent's build.
     - if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
-    - uses: actions/cache@v6
+    # Restored here and saved by the workflow only on pushes to next and main, which every pull
+    # request can read. A pull request's own cache is visible to that pull request alone, and its
+    # saves would push the shared ones out of the 10 GB the repository gets.
+    - id: cargo
+      uses: actions/cache/restore@v6
       with:
         path: |
           ~/.cargo/registry
