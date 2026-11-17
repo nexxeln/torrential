@@ -203,6 +203,7 @@ torrential_core::words! {
         Progress = "progress",
         Result = "result",
         Schema = "schema",
+        Server = "server",
         Setup = "setup",
         Skill = "skill",
         SkillInstall = "skill_install",

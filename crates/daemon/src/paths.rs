@@ -142,6 +142,11 @@ impl Paths {
         self.state.join("no-login-service")
     }
 
+    /// Left by `torrential server install` when it turned lingering on, so uninstall turns it off.
+    pub fn server_lingers(&self) -> PathBuf {
+        self.state.join("server-lingers")
+    }
+
     /// Holds the port the engine last served the web app on.
     pub fn http_port(&self) -> PathBuf {
         self.state.join("http-port")

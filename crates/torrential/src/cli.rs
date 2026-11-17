@@ -109,6 +109,12 @@ pub enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Run the engine as a server on Linux: it starts at boot without a login, and paired devices reach it from anywhere
+    #[command(after_help = "Examples:\n  torrential server install\n  torrential server uninstall --json")]
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
     /// Print every command, flag, exit code, and error code as JSON
     Schema,
     /// Print shell completion setup
@@ -403,6 +409,14 @@ pub struct TvPlayArgs {
     /// Start at this time, such as 1:02:30 or 90s, instead of where you stopped
     #[arg(long, value_name = "TIME", value_parser = parse_time)]
     pub at: Option<f64>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerCommand {
+    /// Start the engine at boot, keep it on the network, and show a code that pairs the first device
+    Install,
+    /// Go back to an engine that starts at login and listens on the network only while a device is paired
+    Uninstall,
 }
 
 #[derive(Subcommand, Debug)]

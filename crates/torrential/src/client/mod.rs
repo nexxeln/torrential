@@ -9,6 +9,7 @@ pub mod launch;
 pub mod play;
 pub mod rows;
 mod search;
+mod server;
 mod setup;
 mod skill;
 mod status;
@@ -125,6 +126,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
         Command::Doctor(args) => Ok(doctor::run(env, mode, args.network)),
         Command::Tui => tui::run(env),
         Command::Daemon { command } => engine::run(command, env, mode),
+        Command::Server { command } => server::run(command, env, mode),
         Command::Schema => {
             let schema = crate::schema::build(&<crate::cli::Cli as clap::CommandFactory>::command(), env.version());
             print!("{}", output::json_document(&schema, None));

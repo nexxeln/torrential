@@ -76,7 +76,12 @@ fn lan_addresses() -> Vec<Ipv4Addr> {
     found
 }
 
-/// The IPv4 addresses of the network interfaces that are up.
+/// The prefixes of the bridges Docker, LXD and libvirt add for their containers and machines,
+/// which no phone or TV reaches this machine by.
+#[cfg(unix)]
+const BRIDGES: [&str; 6] = ["docker", "br-", "veth", "virbr", "lxdbr", "cni"];
+
+/// The IPv4 addresses of the network interfaces that are up, but for container bridges.
 #[cfg(unix)]
 fn up_ipv4() -> Vec<Ipv4Addr> {
     let mut found = Vec::new();
@@ -89,7 +94,8 @@ fn up_ipv4() -> Vec<Ipv4Addr> {
         next = entry.ifa_next;
         let up = entry.ifa_flags & libc::IFF_UP as u32 != 0;
         let Some(address) = (unsafe { entry.ifa_addr.as_ref() }) else { continue };
-        if !up || i32::from(address.sa_family) != libc::AF_INET {
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_string_lossy();
+        if !up || i32::from(address.sa_family) != libc::AF_INET || BRIDGES.iter().any(|b| name.starts_with(b)) {
             continue;
         }
         let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in>() };

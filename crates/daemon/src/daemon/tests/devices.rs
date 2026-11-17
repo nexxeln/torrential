@@ -10,9 +10,10 @@ use tokio::net::TcpStream;
 use torrential_core::protocol::{Request, Response, WIRE_VERSION};
 use torrential_core::{DeviceList, ErrorCode};
 
+use super::super::devices::Reach;
 use super::super::http;
 use super::super::names::Names;
-use super::{GIB, Harness, MIB, torrent, written};
+use super::{GIB, Harness, MIB, Outside, fake, torrent, written};
 
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
 
@@ -265,6 +266,33 @@ async fn a_request_from_the_network_must_name_this_mac_and_come_from_its_own_pag
     }
     let form = phone.send("POST", "/api/pair", &["Content-Type: text/plain"], "").await;
     assert_eq!(form.status, 415, "a cross-site form cannot send JSON");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name() {
+    let ip = lan();
+    let h = Harness::with_outside(fake::Search::new(fake::isos()), Outside { server: true, ..Outside::default() });
+    listening(&h, ip, true).await;
+    let mut phone = Browser { host: "box.example.net:8080".into(), ..Browser::on(ip, &h) };
+    let not_paired = (
+        401,
+        "not_paired".to_string(),
+        "this device is not paired with the Mac, so open /pair and enter the code that Add a device shows".to_string(),
+    );
+    assert_eq!(phone.get("/api/jobs").await.error(), not_paired);
+    assert_eq!(phone.get("/").await.header("location"), Some("/pair"));
+    assert_eq!(phone.get("/pair").await.status, 200);
+
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    assert_eq!(phone.pair(&offer.code).await.status, 200);
+    assert_eq!(phone.get("/api/jobs").await.status, 200, "a name the server cannot know");
+    let cross_site = phone.send("POST", "/api/pause", &["Sec-Fetch-Site: cross-site"], r#"{"refs":["x"]}"#).await;
+    assert_eq!(cross_site.status, 403);
+
+    let id = phone.get("/api/me").await.json()["device"]["id"].as_str().unwrap().to_string();
+    devices(&h, Request::RemoveDevice { id }).await;
+    assert_eq!(*h.running.ctx.devices.reach().borrow(), Reach::Network, "a server keeps listening");
+    assert_eq!(phone.get("/pair").await.status, 200);
 }
 
 #[tokio::test(flavor = "multi_thread")]
