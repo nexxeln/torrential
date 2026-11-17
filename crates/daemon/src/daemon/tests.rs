@@ -1639,6 +1639,7 @@ async fn a_player_gets_a_range_once_the_engine_has_its_pieces() {
         "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 1000000-1000099/4194304\ncontent-type: video/x-matroska\n"
             .to_string()
             + &tag
+            + "x-content-type-options: nosniff\n"
     );
     assert_eq!(body, bytes[1_000_000..1_000_100]);
 }
@@ -1665,7 +1666,8 @@ async fn a_player_that_asks_while_an_update_installs_hears_to_try_again() {
         refused,
         (
             503,
-            "content-length: 50\ncontent-type: text/plain; charset=utf-8\nretry-after: 5\n".into(),
+            "content-length: 50\ncontent-type: text/plain; charset=utf-8\nretry-after: 5\nx-content-type-options: nosniff\n"
+                .into(),
             b"torrential is updating, try again in a few seconds".to_vec()
         )
     );
@@ -1686,13 +1688,18 @@ async fn one_player_connection_gets_whole_files_ranges_and_refusals() {
     player.send("HEAD", &srt, &["Host: 127.0.0.1:47919"]).await;
     // The infohash and the index name the file's bytes for good, so a browser can resume with it.
     let tag = format!("etag: \"{}-0\"\n", notes.info_hash.id().to_hex());
-    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\n".to_string() + &tag;
+    let nosniff = "x-content-type-options: nosniff\n";
+    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\n".to_string()
+        + &tag
+        + nosniff;
     assert_eq!(player.answer(true).await, (200, whole, Vec::new()));
     let last = "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 9900-9999/10000\ncontent-type: application/x-subrip\n"
         .to_string()
-        + &tag;
+        + &tag
+        + nosniff;
     assert_eq!(player.get(&srt, "bytes=-100").await, (206, last, bytes[9_900..].to_vec()));
-    let past = "accept-ranges: bytes\ncontent-length: 0\ncontent-range: bytes */10000\n";
+    let past =
+        "accept-ranges: bytes\ncontent-length: 0\ncontent-range: bytes */10000\nx-content-type-options: nosniff\n";
     assert_eq!(player.get(&srt, "bytes=10000-").await, (416, past.to_string(), Vec::new()));
     let unselected = format!("/{}/1/notes.txt", notes.info_hash.id().to_hex());
     assert_eq!(player.get(&unselected, "bytes=0-").await.0, 404, "notes.txt is not selected");

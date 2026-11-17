@@ -56,6 +56,13 @@ const MAX_FRAME: usize = torrential_core::protocol::MAX_FRAME;
 const ONE_WRITE: usize = 8 * 1024;
 
 const JSON: &str = "application/json";
+/// On every answer, so a browser never reads a file as another type than the one it is sent as,
+/// such as a file name or a subtitle that holds markup.
+const NOSNIFF: &str = "X-Content-Type-Options: nosniff\r\n";
+/// The web app's page runs only the app's own scripts and styles and talks only to this engine.
+const APP_POLICY: &str = "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; \
+    img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; worker-src 'self' blob:; \
+    object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'\r\n";
 
 /// Binds the first of `ports` that is free where `reach` says, or any free port when other programs
 /// hold them all.
@@ -148,6 +155,14 @@ pub enum Peer {
 }
 
 impl Peer {
+    /// The address the request came from.
+    pub fn ip(self) -> IpAddr {
+        match self {
+            Self::Loopback => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Self::Network { remote, .. } => remote,
+        }
+    }
+
     fn of(local: SocketAddr, remote: SocketAddr) -> Self {
         let remote = remote.ip().to_canonical();
         if remote.is_loopback() { Self::Loopback } else { Self::Network { local: local.ip().to_canonical(), remote } }
@@ -455,6 +470,13 @@ impl Connection<'_> {
                     let ctx = self.ctx;
                     self.peer = self.accepted.of_request(&request, &ctx.devices.addressing());
                     let peer = self.peer;
+                    let now = torrential_core::time::now();
+                    // No token from an address that offered too many that opened nothing is checked.
+                    if (request.cookie.is_some() || request.bearer.is_some()) && ctx.devices.spent(peer.ip(), now) {
+                        self.empty("429 Too Many Requests", "Retry-After: 60\r\n", false).await?;
+                        self.linger(request.length).await;
+                        return Ok(());
+                    }
                     let ask_now = |request: &Request| {
                         ask(peer, request, ctx.http_port, &ctx.devices, torrential_core::time::now())
                     };
@@ -479,7 +501,13 @@ impl Connection<'_> {
                     request.body = self.read_body(request.length, by).await?;
                     // Asked again, since a device may have been removed, or a cast dropped, while
                     // the body arrived.
-                    let asker = match ask_now(&request) {
+                    let asker = ask_now(&request);
+                    if matches!(asker, Ok(Asker::Stranger { removed: true }))
+                        || matches!(asker, Err(Refusal::Unauthorized)) && request.bearer.is_some()
+                    {
+                        ctx.devices.missed(peer.ip(), now);
+                    }
+                    let asker = match asker {
                         Ok(asker) => asker,
                         Err(refusal) => {
                             self.refuse(refusal).await?;
@@ -571,6 +599,9 @@ impl Connection<'_> {
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
                     let mut headers = format!("Cache-Control: {}\r\n", asset.cache);
+                    if asset.content_type.starts_with("text/html") {
+                        headers.push_str(APP_POLICY);
+                    }
                     // Browsers cap a cookie at 400 days, so each visit starts the 400 days again.
                     if let (Asker::Device(_), Some(token)) = (asker, &request.cookie)
                         && asset.content_type.starts_with("text/html")
@@ -606,7 +637,7 @@ impl Connection<'_> {
             }
         };
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n{NOSNIFF}Connection: close\r\n\r\n",
             text.len()
         );
         self.wr.write_all(head.as_bytes()).await?;
@@ -624,7 +655,7 @@ impl Connection<'_> {
     ) -> io::Result<bool> {
         let close = if request.keep_alive { "" } else { "Connection: close\r\n" };
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{headers}{close}\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{NOSNIFF}{headers}{close}\r\n",
             body.len()
         );
         self.wr.write_all(head.as_bytes()).await?;
@@ -645,7 +676,7 @@ impl Connection<'_> {
         self.chunked = request.chunks;
         let encoding = if self.chunked { "Transfer-Encoding: chunked\r\n" } else { "" };
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\n{encoding}Connection: close\r\n\r\n"
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\n{NOSNIFF}{encoding}Connection: close\r\n\r\n"
         );
         self.wr.write_all(head.as_bytes()).await
     }
@@ -718,7 +749,7 @@ impl Connection<'_> {
         // and a browser that keeps it can resume a cut download.
         let tag = format!("ETag: \"{}-{index}\"\r\n", id.to_hex());
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{tag}{extra}{dlna}{}\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{tag}{NOSNIFF}{extra}{dlna}{}\r\n",
             end - start,
             if keep { "" } else { "Connection: close\r\n" },
         );
@@ -754,7 +785,8 @@ impl Connection<'_> {
 
     pub async fn empty(&mut self, status: &str, extra: &str, keep: bool) -> io::Result<bool> {
         let close = if keep { "" } else { "Connection: close\r\n" };
-        let head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\n{extra}{close}\r\n");
+        let head =
+            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\n{NOSNIFF}{extra}{close}\r\n");
         self.wr.write_all(head.as_bytes()).await?;
         Ok(keep)
     }
@@ -971,7 +1003,7 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
         if peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token)) {
             return Ok(Asker::Local);
         }
-        let device = token.and_then(|token| devices.holder(token, now));
+        let device = token.and_then(|token| devices.holder(token, peer.ip(), now));
         return device.map(|device| Asker::Device(device.id)).ok_or(Refusal::Unauthorized);
     }
     if request.path.starts_with(CAST) {
@@ -981,7 +1013,9 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
         return Ok(Asker::Local);
     }
     Ok(match request.cookie.as_deref() {
-        Some(token) => devices.holder(token, now).map_or(Asker::Stranger { removed: true }, |d| Asker::Device(d.id)),
+        Some(token) => {
+            devices.holder(token, peer.ip(), now).map_or(Asker::Stranger { removed: true }, |d| Asker::Device(d.id))
+        }
         None => Asker::Stranger { removed: false },
     })
 }

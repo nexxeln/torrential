@@ -21,12 +21,16 @@ use super::names::{Names, Tailnet};
 use crate::config::Exposure;
 
 /// How long a pairing code works.
-pub(crate) const OFFER: Duration = Duration::from_secs(5 * 60);
+pub(crate) const OFFER: Duration = Duration::from_secs(10 * 60);
 /// Wrong codes after which an offer stops working, so guessing six digits has a 5 in a million
 /// chance.
 const WRONG_CODES: u32 = 5;
 /// Pairing tries one address may make in a minute.
 const TRIES_PER_MINUTE: u32 = 10;
+/// Tokens that open nothing one address may offer in a minute, in cookies or to the command line's
+/// route, before the engine checks none from it until the minute ends. A removed phone's open page
+/// offers its old cookie a few times before it shows the pairing page.
+const MISSES_PER_MINUTE: u32 = 30;
 /// Addresses whose tries are counted at once. Past this, older minutes are forgotten.
 const TRIES_KEPT: usize = 1024;
 /// How often a device's last request is written to the database, in seconds.
@@ -180,8 +184,9 @@ struct State {
     paired: HashMap<Key, Paired>,
     offer: Option<Offer>,
     grants: HashMap<Key, Grant>,
-    /// Pairing tries by address: the minute, and the tries in it.
-    tries: HashMap<IpAddr, (i64, u32)>,
+    tries: Tries,
+    /// Tokens that opened nothing, by address.
+    misses: Tries,
     names: Names,
     tailnet: Option<Tailnet>,
     /// Why the engine's last try to listen on the home network failed, or `None` after one that
@@ -243,19 +248,30 @@ impl State {
         });
         DeviceList { devices, offer: self.offer(port), unreachable }
     }
+}
 
-    /// Counts a pairing try from `from`. False once it has made too many this minute.
-    fn count_try(&mut self, from: IpAddr, now: i64) -> bool {
+/// Tries of one kind by address: the minute, and the tries in it.
+#[derive(Default)]
+struct Tries(HashMap<IpAddr, (i64, u32)>);
+
+impl Tries {
+    /// Counts a try from `from`. False once it has made more than `most` this minute.
+    fn count(&mut self, from: IpAddr, now: i64, most: u32) -> bool {
         let minute = now.div_euclid(60);
-        if self.tries.len() >= TRIES_KEPT {
-            self.tries.retain(|_, (counted, _)| *counted == minute);
+        if self.0.len() >= TRIES_KEPT {
+            self.0.retain(|_, (counted, _)| *counted == minute);
         }
-        let tries = self.tries.entry(from).or_insert((minute, 0));
+        let tries = self.0.entry(from).or_insert((minute, 0));
         if tries.0 != minute {
             *tries = (minute, 0);
         }
         tries.1 += 1;
-        tries.1 <= TRIES_PER_MINUTE
+        tries.1 <= most
+    }
+
+    /// Whether `from` has made more than `most` tries this minute.
+    fn spent(&self, from: IpAddr, now: i64, most: u32) -> bool {
+        self.0.get(&from).is_some_and(|&(minute, tries)| minute == now.div_euclid(60) && tries > most)
     }
 }
 
@@ -278,11 +294,17 @@ impl Devices {
         let (conn, path) = (db.open()?, db.path());
         let paired = {
             let mut stmt = conn
-                .prepare("SELECT id, token_hash, name, added_at, seen_at FROM devices")
+                .prepare("SELECT id, token_hash, name, added_at, seen_at, seen_from FROM devices")
                 .map_err(|e| sql_error(path, e))?;
             let rows = stmt
                 .query_map([], |r| {
-                    let device = Device { id: r.get(0)?, name: r.get(2)?, added_at: r.get(3)?, seen_at: r.get(4)? };
+                    let device = Device {
+                        id: r.get(0)?,
+                        name: r.get(2)?,
+                        added_at: r.get(3)?,
+                        seen_at: r.get(4)?,
+                        seen_from: r.get(5)?,
+                    };
                     Ok((r.get::<_, Vec<u8>>(1)?, device))
                 })
                 .map_err(|e| sql_error(path, e))?;
@@ -300,7 +322,8 @@ impl Devices {
             paired,
             offer: None,
             grants: HashMap::new(),
-            tries: HashMap::new(),
+            tries: Tries::default(),
+            misses: Tries::default(),
             names: Names::read(),
             tailnet: Tailnet::read(),
             refused: None,
@@ -460,7 +483,7 @@ impl Devices {
     /// Lets a device in when `code` is the open offer's, and returns the token for its cookie.
     pub fn pair(&self, code: &str, agent: Option<&str>, from: IpAddr, now: i64) -> Result<(Device, String), Refused> {
         let mut state = self.state();
-        if !state.count_try(from, now) {
+        if !state.tries.count(from, now, TRIES_PER_MINUTE) {
             return Err(Refused::TooManyTries);
         }
         let Some(offer) = state.offer.as_mut().filter(|offer| offer.open()) else {
@@ -485,11 +508,12 @@ impl Devices {
                 break id;
             }
         };
-        let device = Device { id, name: unique_name(&state, device_name(agent)), added_at: now, seen_at: now };
+        let name = unique_name(&state, device_name(agent));
+        let device = Device { id, name, added_at: now, seen_at: now, seen_from: Some(from.to_string()) };
         self.conn()
             .execute(
-                "INSERT INTO devices (id, token_hash, name, added_at, seen_at) VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![device.id, token.key().0.as_slice(), device.name, now],
+                "INSERT INTO devices (id, token_hash, name, added_at, seen_at, seen_from) VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                params![device.id, token.key().0.as_slice(), device.name, now, device.seen_from],
             )
             .map_err(|e| Refused::Failed(self.fail(e)))?;
         state.offer = None;
@@ -498,23 +522,38 @@ impl Devices {
         Ok((device, token.hex()))
     }
 
-    /// The paired device whose token a cookie holds, which counts as seen `now`.
-    pub fn holder(&self, token: &str, now: i64) -> Option<Device> {
+    /// The paired device whose token a cookie holds, which counts as seen at `from` `now`.
+    pub fn holder(&self, token: &str, from: IpAddr, now: i64) -> Option<Device> {
         let key = Token::parse(token)?.key();
         let (device, write) = {
             let mut state = self.state();
             let paired = state.paired.get_mut(&key)?;
-            paired.device.seen_at = now;
-            let write = now - paired.written >= SEEN_EVERY;
+            let from = Some(from.to_string());
+            let write = now - paired.written >= SEEN_EVERY || paired.device.seen_from != from;
+            (paired.device.seen_at, paired.device.seen_from) = (now, from);
             if write {
                 paired.written = now;
             }
             (paired.device.clone(), write)
         };
         if write {
-            let _ = self.conn().execute("UPDATE devices SET seen_at = ?1 WHERE id = ?2", params![now, device.id]);
+            let _ = self.conn().execute(
+                "UPDATE devices SET seen_at = ?1, seen_from = ?2 WHERE id = ?3",
+                params![now, device.seen_from, device.id],
+            );
         }
         Some(device)
+    }
+
+    /// Counts a token from `from` that opened nothing.
+    pub fn missed(&self, from: IpAddr, now: i64) {
+        self.state().misses.count(from, now, MISSES_PER_MINUTE);
+    }
+
+    /// Whether `from` offered so many tokens that opened nothing this minute that the engine checks
+    /// none from it until the minute ends.
+    pub fn spent(&self, from: IpAddr, now: i64) -> bool {
+        self.state().misses.spent(from, now, MISSES_PER_MINUTE)
     }
 
     /// A grant that serves file `index` of download `id` to whoever has its URL, until it is

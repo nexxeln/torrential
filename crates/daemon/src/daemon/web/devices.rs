@@ -2,7 +2,6 @@
 //! devices with.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +10,7 @@ use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer};
 
 use super::super::ctx::Ctx;
 use super::super::devices::{Asker, COOKIE};
-use super::super::http::{Connection, Method, Peer, Request};
+use super::super::http::{Connection, Method, Request};
 use super::{ErrorBody, body, value};
 use crate::qr::qr;
 
@@ -67,11 +66,7 @@ async fn pair(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> 
         Ok(Pair { code }) => code,
         Err(error) => return conn.json("400 Bad Request", &ErrorBody { error: &error }, request).await,
     };
-    let from = match conn.peer {
-        Peer::Network { remote, .. } => remote,
-        Peer::Loopback => IpAddr::V4(Ipv4Addr::LOCALHOST),
-    };
-    match conn.ctx.devices.pair(&code, request.agent.as_deref(), from, now()) {
+    match conn.ctx.devices.pair(&code, request.agent.as_deref(), conn.peer.ip(), now()) {
         Ok((device, token)) => {
             let body = serde_json::to_vec(&Paired { device }).map_err(io::Error::other)?;
             let secure = conn.ctx.devices.addressing().exposure.secure(request.host());

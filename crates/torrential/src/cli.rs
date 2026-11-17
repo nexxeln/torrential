@@ -378,7 +378,7 @@ pub struct VerifyArgs {
 pub enum DevicesCommand {
     /// List the paired devices and the open code, the default
     List,
-    /// Show a code and a QR code that let one more phone or TV in for 5 minutes
+    /// Show a code and a QR code that let one more phone or TV in for 10 minutes
     Add,
     /// Lock a device out at once
     Remove {

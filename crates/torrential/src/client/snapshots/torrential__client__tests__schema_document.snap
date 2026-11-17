@@ -275,7 +275,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "add",
-          "about": "Show a code and a QR code that let one more phone or TV in for 5 minutes",
+          "about": "Show a code and a QR code that let one more phone or TV in for 10 minutes",
           "arguments": [],
           "flags": []
         },

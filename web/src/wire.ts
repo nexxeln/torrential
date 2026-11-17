@@ -275,7 +275,12 @@ added_at: number,
 /**
  * Unix seconds of its last request, to within a minute.
  */
-seen_at: number, };
+seen_at: number,
+/**
+ * The address its last request came from, such as `192.168.1.40` or `100.101.3.4`. `None`
+ * for a device paired before torrential 0.7 that has not asked since.
+ */
+seen_from: string | null, };
 
 export type Container = "mkv" | "mp4" | "webm" | "avi" | "ts" | "mov" | "mpeg" | "wmv";
 
@@ -561,7 +566,7 @@ export const PIECE_RUNS = 200;
 export const SEARCH_LIMIT = 50;
 
 /** How long a pairing code works. */
-export const PAIRING_MINUTES = 5;
+export const PAIRING_MINUTES = 10;
 
 /** Seconds of video one thumbnail stands for. */
 export const THUMBNAIL_EVERY = 10;
