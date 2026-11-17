@@ -36,7 +36,9 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                         engine: "running",
                         pid: Some(conn.pid),
                         notice: local
-                            .then(|| connect::mismatch(Some(&conn.engine_version), service_binary.as_deref(), &this_version))
+                            .then(|| {
+                                connect::mismatch(Some(&conn.engine_version), service_binary.as_deref(), &this_version)
+                            })
                             .flatten(),
                         version: Some(conn.engine_version.clone()),
                         address: Some(conn.engine.address().to_string()),
