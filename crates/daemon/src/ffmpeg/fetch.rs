@@ -14,17 +14,21 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 use torrential_core::{Error, ErrorCode};
 
-use super::{INSTALL, Programs, Tools, complaint};
+use super::{INSTALL, Programs, Tools, blocked_error, complaint};
 use crate::env::Env;
 use crate::log::log;
 
 /// jellyfin-ffmpeg's portable macOS build, which links only to `/usr/lib` and the system frameworks
 /// and leaves out fdk-aac.
 const JELLYFIN: &str = "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-2";
-/// BtbN's GPL Linux and Windows builds, which link only to the system's C library and have no
-/// nonfree parts. The pin is a month's
-/// last build, which BtbN keeps for two years. It deletes other daily builds after two weeks.
+/// BtbN's GPL Linux builds, which link only to the system's C library and have no nonfree parts.
+/// The pin is a month's last build, which BtbN keeps for two years. It deletes other daily builds
+/// after two weeks.
 const BTBN: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59";
+/// Gyan's GPL Windows release builds, the files `winget install Gyan.FFmpeg.Essentials` installs.
+/// Smart App Control runs an unsigned program only when Microsoft has seen many people run it, so
+/// the build that many people install has the best chance.
+const GYAN: &str = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1";
 
 struct Pin {
     os: &'static str,
@@ -92,12 +96,12 @@ const PINS: [Pin; 4] = [
     Pin {
         os: "windows",
         arch: "x86_64",
-        version: "n8.1.3-27-g8dca1586f4",
-        release: BTBN,
-        file: "ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1.zip",
-        bin: "ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1/bin",
-        sha256: "401dffcf14c301082e1fc03b0bc876b92ea676bfc521fc56e80a1537d137034f",
-        size: 194_182_300,
+        version: "9.0.1",
+        release: GYAN,
+        file: "ffmpeg-9.0.1-essentials_build.zip",
+        bin: "ffmpeg-9.0.1-essentials_build/bin",
+        sha256: "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
+        size: 111_253_802,
         loader: None,
         packing: Packing::Zip,
     },
@@ -106,6 +110,8 @@ const PINS: [Pin; 4] = [
 const PROGRAMS: [&str; 2] = ["ffmpeg", "ffprobe"];
 const ARCHIVE: &str = "archive";
 const MANIFEST: &str = "manifest.json";
+/// What a fetch leaves in the fetched folder when Windows blocks the build it fetched.
+const BLOCKED: &str = "blocked.json";
 /// Where a fetch puts its files until they are checked.
 const PARTIAL: &str = ".partial";
 /// A fresh program can take a while to start the first time, while macOS scans it.
@@ -268,7 +274,8 @@ enum Fetched {
     /// None, or not as it was fetched, so it needs fetching again.
     Absent,
     Running(watch::Receiver<Stage>),
-    /// The fetched build did not run here, so this engine run does not fetch it again.
+    /// The fetched build did not run here, so this engine run does not fetch it again. One Windows
+    /// blocked is not fetched again by later runs either.
     Refused(Error),
 }
 
@@ -284,12 +291,25 @@ impl Ffmpeg {
         }
         let mut fetched = self.fetched.lock().expect("no holder panics");
         if let Fetched::Unchecked = *fetched {
-            let checked = self.fetch.pin().and_then(|pin| check(&self.root, pin));
-            *fetched = checked.map_or(Fetched::Absent, Fetched::Ready);
+            *fetched = match self.fetch.pin() {
+                Some(pin) => match check(&self.root, pin) {
+                    Some(programs) => Fetched::Ready(programs),
+                    None => Blocked::read(&self.root, pin).map_or(Fetched::Absent, Fetched::Refused),
+                },
+                None => Fetched::Absent,
+            };
         }
         match &*fetched {
             Fetched::Ready(programs) => Found::Fetched(programs.clone()),
             _ => Found::Missing(self.fetch.clone()),
+        }
+    }
+
+    /// Why the fetched build does not run here, once `found` has looked and it did not.
+    pub fn refused(&self) -> Option<Error> {
+        match &*self.fetched.lock().expect("no holder panics") {
+            Fetched::Refused(error) => Some(error.clone()),
+            _ => None,
         }
     }
 
@@ -331,7 +351,7 @@ impl Ffmpeg {
             let (now, done) = match fetch(&build, &root, &report).await {
                 Ok(programs) => (Fetched::Ready(programs), Ok(())),
                 Err(Failure::Again(error)) => (Fetched::Absent, Err(error)),
-                Err(Failure::Refused(error)) => (Fetched::Refused(error.clone()), Err(error)),
+                Err(Failure::Refused(error) | Failure::Blocked(error)) => (Fetched::Refused(error.clone()), Err(error)),
             };
             *state.lock().expect("no holder panics") = now;
             report.send_replace(Stage::Done(done));
@@ -383,6 +403,27 @@ fn check(root: &Path, pin: &Build) -> Option<Programs> {
     (recorded == Manifest::of(&folder, pin).ok()?).then(|| programs(&folder))
 }
 
+/// The build Windows would not run, and what the person read about it.
+#[derive(Serialize, Deserialize)]
+struct Blocked {
+    /// The archive's SHA-256, so a new pin is fetched again.
+    build: String,
+    error: Error,
+}
+
+impl Blocked {
+    /// Why Windows blocked `pin`, when a fetch of it in `root` said so.
+    fn read(root: &Path, pin: &Build) -> Option<Error> {
+        let blocked: Blocked = serde_json::from_slice(&std::fs::read(root.join(BLOCKED)).ok()?).ok()?;
+        (blocked.build == pin.sha256).then_some(blocked.error)
+    }
+
+    fn write(&self, root: &Path) -> io::Result<()> {
+        let mut file = new_file(&root.join(BLOCKED), false)?;
+        io::Write::write_all(&mut file, &serde_json::to_vec(self)?)
+    }
+}
+
 fn programs(folder: &Path) -> Programs {
     Programs { ffmpeg: folder.join(program_file("ffmpeg")), ffprobe: folder.join(program_file("ffprobe")) }
 }
@@ -419,6 +460,8 @@ enum Failure {
     Again(Error),
     /// The build does not run on this machine, so another download would not help.
     Refused(Error),
+    /// Windows will not run the build, which stays so after the engine restarts.
+    Blocked(Error),
 }
 
 impl From<Error> for Failure {
@@ -450,7 +493,15 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
                 .with_hint("free some space or fix the folder's permissions, then try again")
         })?;
         for program in PROGRAMS {
-            runs(&partial.path.join(program_file(program))).await.map_err(Failure::Refused)?;
+            if let Err(failure) = runs(&partial.path.join(program_file(program))).await {
+                if let Failure::Blocked(error) = &failure {
+                    let blocked = Blocked { build: build.sha256.clone(), error: error.clone() };
+                    if let Err(e) = blocked.write(root) {
+                        log(&format!("cannot note that Windows blocked ffmpeg: {e}"));
+                    }
+                }
+                return Err(failure);
+            }
         }
         Ok(partial.finish(&folder)?)
     }
@@ -459,7 +510,7 @@ async fn fetch(build: &Build, root: &Path, report: &watch::Sender<Stage>) -> Res
         Ok(_) => {
             log(&format!("fetched ffmpeg {} in {} s", build.version, started.elapsed().as_secs()));
         }
-        Err(Failure::Again(error) | Failure::Refused(error)) => {
+        Err(Failure::Again(error) | Failure::Refused(error) | Failure::Blocked(error)) => {
             log(&format!("cannot fetch ffmpeg: {}", error.message));
         }
     }
@@ -555,9 +606,9 @@ fn unpack(archive: &Path, packing: Packing, bin: &Path, into: &Path) -> io::Resu
     Ok(())
 }
 
-/// Checks that a fetched program starts here, so a build macOS refuses, or one this Linux cannot
-/// load, fails now and not in the player.
-async fn runs(program: &Path) -> Result<(), Error> {
+/// Checks that a fetched program starts here, so a build macOS or Windows refuses, or one this Linux
+/// cannot load, fails now and not in the player.
+async fn runs(program: &Path) -> Result<(), Failure> {
     let run = tokio::process::Command::new(program)
         .arg("-version")
         .stdin(Stdio::null())
@@ -565,18 +616,24 @@ async fn runs(program: &Path) -> Result<(), Error> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output();
+    let name = program.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let why = match tokio::time::timeout(RUN_WITHIN, run).await {
         Ok(Ok(output)) if output.status.success() => return Ok(()),
         Ok(Ok(output)) => complaint(&String::from_utf8_lossy(&output.stderr)),
+        Ok(Err(e)) if super::blocked(&e) => {
+            let what = format!("the {name} torrential fetched");
+            return Err(Failure::Blocked(blocked_error(ErrorCode::FetchFailed, &what)));
+        }
         Ok(Err(e)) => e.to_string(),
         Err(_) => format!("it did not answer within {} s", RUN_WITHIN.as_secs()),
     };
-    let name = program.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-    Err(Error::new(
-        ErrorCode::FetchFailed,
-        format!("the {name} torrential fetched does not run on this machine: {why}"),
-    )
-    .with_hint(format!("{INSTALL}, then try again")))
+    Err(Failure::Refused(
+        Error::new(
+            ErrorCode::FetchFailed,
+            format!("the {name} torrential fetched does not run on this machine: {why}"),
+        )
+        .with_hint(format!("{INSTALL}, then try again")),
+    ))
 }
 
 /// The folder a fetch fills before its files are checked. Dropping it deletes it, and `root` with
@@ -703,6 +760,7 @@ mod tests {
         };
         assert_eq!([pinned("linux", "x86_64"), pinned("linux", "aarch64")], [None, None]);
         assert_eq!(pinned("macos", "aarch64").as_deref(), Some("jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz"));
+        assert_eq!(pinned("windows", "x86_64").as_deref(), Some("ffmpeg-9.0.1-essentials_build.zip"));
         for loader in ["lib64/ld-linux-x86-64.so.2", "lib/ld-linux-aarch64.so.1"] {
             std::fs::create_dir_all(system.path().join(loader).parent().unwrap()).unwrap();
             std::fs::write(system.path().join(loader), "").unwrap();
@@ -757,6 +815,85 @@ mod tests {
             [missing(Fetch::Build(build.clone())), missing(Fetch::Off(build)), missing(Fetch::Unavailable)],
             [Readiness::Fetch, Readiness::Missing, Readiness::Missing]
         );
+    }
+
+    #[test]
+    fn a_build_windows_blocked_is_not_fetched_again_but_a_new_pin_or_an_installed_ffmpeg_plays() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ffmpeg");
+        std::fs::create_dir(&root).unwrap();
+        let build = Build {
+            version: "9.0.1".into(),
+            url: "http://127.0.0.1:9/never".into(),
+            bin: PathBuf::new(),
+            sha256: "ab".repeat(32),
+            size: 1,
+            packing: Packing::Zip,
+        };
+        let error = blocked_error(ErrorCode::FetchFailed, "the ffprobe.exe torrential fetched");
+        Blocked { build: build.sha256.clone(), error: error.clone() }.write(&root).unwrap();
+        let ffmpeg = |installed: Tools, build: &Build| {
+            Ffmpeg::new(Arc::new(move || installed.clone()), root.clone(), Fetch::Build(build.clone()))
+        };
+
+        let blocked = ffmpeg(Tools::default(), &build);
+        assert_eq!(blocked.fetch().err(), Some(error.clone()), "no download starts");
+        assert_eq!(blocked.refused(), Some(error));
+        assert_eq!(
+            blocked.refused().unwrap().message,
+            "Windows blocked the ffprobe.exe torrential fetched (Smart App Control or an App Control policy)"
+        );
+
+        let newer = ffmpeg(Tools::default(), &Build { sha256: "cd".repeat(32), ..build.clone() });
+        assert_eq!((newer.found().readiness(), newer.refused()), (Readiness::Fetch, None));
+
+        let bin = dir.path().join("bin");
+        let installed = Tools { ffmpeg: Some(bin.join("ffmpeg")), ffprobe: Some(bin.join("ffprobe")) };
+        assert_eq!(ffmpeg(installed, &build).found(), Found::Installed(programs(&bin)));
+    }
+
+    /// Fetches this machine's pinned build and checks that it runs and has every encoder, decoder,
+    /// format, filter and option the web player's conversions use. CI runs it on Windows.
+    #[tokio::test]
+    #[ignore = "downloads the pinned ffmpeg build, about 110 MB on Windows"]
+    async fn the_pinned_build_runs_here_and_has_what_conversions_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ffmpeg");
+        let build = Build::pinned(std::env::consts::OS, std::env::consts::ARCH, Path::new("/")).expect("a pin here");
+        let (report, _) = watch::channel(Stage::Downloading { done: 0, size: build.size });
+        let programs = match fetch(&build, &root, &report).await {
+            Ok(programs) => programs,
+            Err(Failure::Again(e) | Failure::Refused(e) | Failure::Blocked(e)) => panic!("{e:?}"),
+        };
+        let list = |what: &str| {
+            let output = std::process::Command::new(&programs.ffmpeg).args(["-hide_banner", what]).output().unwrap();
+            assert!(output.status.success(), "ffmpeg {what} failed");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let named = |list: &str, at: usize| -> Vec<String> {
+            list.lines().filter_map(|line| line.split_whitespace().nth(at)).map(String::from).collect()
+        };
+        let wanted: [(&str, usize, &[&str]); 6] = [
+            ("-encoders", 1, &["libx264", "aac", "webvtt", "mjpeg"]),
+            ("-decoders", 1, &["hevc", "h264", "ac3", "eac3", "dca", "truehd", "subrip", "ass", "webvtt"]),
+            ("-muxers", 1, &["mp4", "webvtt", "mjpeg"]),
+            ("-demuxers", 1, &["matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2", "srt", "ass", "webvtt"]),
+            ("-filters", 1, &["scale", "format"]),
+            ("-protocols", 0, &["http", "pipe"]),
+        ];
+        for (what, at, names) in wanted {
+            let have = named(&list(what), at);
+            for name in names {
+                assert!(have.iter().any(|have| have == name), "the pinned ffmpeg has no {name} in {what}");
+            }
+        }
+        let help = std::process::Command::new(&programs.ffmpeg).args(["-hide_banner", "-h", "full"]).output().unwrap();
+        let help = String::from_utf8_lossy(&help.stdout);
+        for option in ["-readrate_initial_burst", "-copyts", "-avoid_negative_ts", "-movflags", "-flush_packets"] {
+            assert!(help.contains(option), "the pinned ffmpeg has no {option}");
+        }
+        let probe = std::process::Command::new(&programs.ffprobe).arg("-version").output().unwrap();
+        assert!(probe.status.success());
     }
 
     #[cfg(unix)]

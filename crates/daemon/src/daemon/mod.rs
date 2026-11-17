@@ -88,12 +88,12 @@ pub struct Ports {
 
 impl Ports {
     fn from_env(env: &Env, paths: &Paths, settings: &Config) -> Result<Self, Error> {
-        let (config, path) = (paths.clone(), env.var("PATH").map(String::from));
+        let (config, search) = (paths.clone(), env.clone());
         let preferences: Arc<dyn Fn() -> Preferences + Send + Sync> = Arc::new(move || {
             let read = crate::config::preferences(&config);
             read.inspect_err(|e| log(&format!("using the default preferences, for {}", e.message))).unwrap_or_default()
         });
-        let installed = Arc::new(move || crate::ffmpeg::Tools::find(path.as_deref()));
+        let installed = Arc::new(move || crate::ffmpeg::Tools::find(&search));
         let fetch = crate::ffmpeg::fetch::Fetch::from_env(env, settings.ffmpeg.fetch);
         let ffmpeg = crate::ffmpeg::fetch::Ffmpeg::new(installed, crate::ffmpeg::fetch::root(&paths.state), fetch);
         let test = env.test();
