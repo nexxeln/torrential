@@ -216,17 +216,23 @@ pub fn skill_check(installed: &[Installed]) -> (Check, Option<String>) {
 /// cannot read on its own: the one the engine runs, or what it does with none. `fetch` is what
 /// config.yaml says about fetching one.
 pub fn ffmpeg_check(env: &Env, paths: &Paths, fetch: bool) -> Check {
-    let path = env.var("PATH").map(String::from);
-    let installed = Arc::new(move || Tools::find(path.as_deref()));
-    let found = Ffmpeg::new(installed, fetch::root(&paths.state), Fetch::from_env(env, fetch)).found();
+    let search = env.clone();
+    let installed = Arc::new(move || Tools::find(&search));
+    let ffmpeg = Ffmpeg::new(installed, fetch::root(&paths.state), Fetch::from_env(env, fetch));
+    let found = ffmpeg.found();
+    let refused = ffmpeg.refused();
     let converts = "the web player converts what the browser cannot read";
     let reads_itself = "the web player plays only MP4 and WebM files the browser reads itself";
-    let (status, detail) = match found {
-        Found::Installed(programs) => (CheckStatus::Ok, format!("{}; {converts}", programs.ffmpeg.display())),
-        Found::Fetched(programs) => {
+    let (status, detail) = match (found, refused) {
+        (Found::Installed(programs), _) => (CheckStatus::Ok, format!("{}; {converts}", programs.ffmpeg.display())),
+        (Found::Fetched(programs), _) => {
             (CheckStatus::Ok, format!("{}, fetched by torrential; {converts}", programs.ffmpeg.display()))
         }
-        Found::Missing(Fetch::Build(build)) => (
+        (Found::Missing(Fetch::Build(_)), Some(error)) => {
+            let hint = error.hint.map(|hint| format!("; {hint}")).unwrap_or_default();
+            (CheckStatus::Warn, format!("{}{hint}", error.message))
+        }
+        (Found::Missing(Fetch::Build(build)), None) => (
             CheckStatus::Ok,
             format!(
                 "not installed; torrential fetches ffmpeg {} ({}) the first time a file needs converting",
@@ -234,10 +240,10 @@ pub fn ffmpeg_check(env: &Env, paths: &Paths, fetch: bool) -> Check {
                 torrential_core::units::format_size(build.size)
             ),
         ),
-        Found::Missing(Fetch::Off(_)) => {
+        (Found::Missing(Fetch::Off(_)), _) => {
             (CheckStatus::Warn, format!("not installed, and config.yaml turns off fetching it; {reads_itself}"))
         }
-        Found::Missing(Fetch::Unavailable) => {
+        (Found::Missing(Fetch::Unavailable), _) => {
             (CheckStatus::Warn, format!("ffmpeg and ffprobe not found; {reads_itself}"))
         }
     };

@@ -111,7 +111,7 @@ async fn pipe(
         .kill_on_drop(true);
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(e) => return fail(conn, request, &Error::internal(format!("cannot run {}: {e}", program.display()))).await,
+        Err(e) => return fail(conn, request, &crate::ffmpeg::cannot_run(&program, &e)).await,
     };
     if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
         tokio::spawn(async move {

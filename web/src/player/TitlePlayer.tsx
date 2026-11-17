@@ -246,7 +246,8 @@ function Session({ video, source, onRetry }: Props & { onRetry: () => void }) {
               backdrop={backdrop}
               kind={kind}
               error={session.error}
-              tried={session.progress.passed}
+              // A source that started and then failed, such as on ffmpeg, failed for the reason above, not those of the sources passed over before it.
+              tried={session.started ? [] : session.progress.passed}
               sources={titlePath(id, { sources: heard.video })}
               unpinned={source ? playPath(video) : null}
               onRetry={onRetry}
