@@ -8,7 +8,7 @@ use torrential_core::protocol::{Request, WIRE_VERSION};
 use torrential_daemon::wire::{self, Address, Answer, Client};
 
 mod common;
-use common::{Home, hooks};
+use common::{Home, Server, hooks, ok};
 
 const ARCH: &str = "9b521219bc48550140a666f74a29048ed78e933b";
 
@@ -88,6 +88,17 @@ fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
         assert_eq!((code, kind.as_str()), (6, "local_only"), "{args:?}");
         assert!(said.starts_with(message), "{args:?}: {said}");
     }
+    let indexer = Server::start(|_| {
+        let caps = br#"<caps><categories><category id="5000" name="TV" /></categories></caps>"#;
+        vec![("/torznab/api?t=caps&apikey=k3y", vec![ok(caps.to_vec())])]
+    });
+    let endpoint = format!("{}/torznab/api", indexer.base);
+    let added = laptop.json(&["indexers", "add", &endpoint, "--key", "k3y", "--name", "romania", "--json"]);
+    assert_eq!(added["indexers"][0]["check"]["state"], "answers", "{added:#}");
+    assert_eq!(server.json(&["indexers", "--json"])["indexers"][0]["name"], "romania", "the server's engine has it");
+    let config = std::fs::read_to_string(server.path("th/config/config.yaml")).unwrap();
+    assert!(config.contains("    - name: romania\n") && config.contains("      api_key: k3y\n"), "{config}");
+
     let removed = laptop.json(&["rm", "9b5212", "--json"]);
     assert_eq!(removed["changes"][0]["id"], ARCH, "{removed:#}");
     assert!(!ids(&server).contains(&ARCH.to_string()), "the server's engine removed it");
@@ -105,6 +116,7 @@ fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
     assert!(!laptop.path("th/state/engine-token").exists(), "no engine started on the laptop");
 
     assert_eq!(laptop.json(&["connect", "--local", "--json"])["engine"], "local");
+    assert_eq!(laptop.json(&["indexers", "--json"])["indexers"], Value::Array(vec![]), "the laptop's engine has none");
     assert!(!ids(&laptop).contains(&ARCH.to_string()), "the laptop's own engine never had it");
     assert!(laptop.path("th/state/engine-token").exists());
 }

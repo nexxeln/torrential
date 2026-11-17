@@ -36,6 +36,8 @@ Anything else, or a particular release:
 4. `torrential wait <id>`. Exit 0 means done. Exit 8 means not done yet: wait again, or run the `next:` line if it says paused. Exit 7 means a problem, and `torrential status <id>` explains it.
 5. Report the `path:` from `torrential status <id>`.
 
+`torrential indexers` lists the Torznab indexers (Prowlarr, Jackett) searched beside the built-in sources. Add one with `torrential indexers add <address> --key <key>` only with an address and key the user gives you.
+
 Downloads run in a background engine and keep going after your turn. `wait` returns within 100 seconds. Never give it a `--timeout` longer than your tool allows, and never poll with `sleep`. In Claude Code, run `torrential wait <id> --timeout 110m` with `run_in_background` and a `timeout` of 7200000: background commands may run up to 2 hours, foreground ones 10 minutes.
 
 Manage downloads with `status`, `pause`, `resume` (`--all` after a reboot), `verify` (then `wait`), and `rm`. `rm` deletes the files of a play (`"place": "plays"` in `--json`) and keeps the files of any other download unless you add `--delete`, which moves them to the Trash. Its `--json` lists what it deleted under `deleted` and what went to the Trash under `trashed`.

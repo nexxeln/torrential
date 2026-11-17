@@ -120,6 +120,17 @@ torrential status                            # list your downloads
 
 `torrential --help` lists the rest. Every command takes `--json`.
 
+## Private and local trackers
+
+To search a tracker torrential lacks, such as a private one or one in your language, run [Prowlarr](https://prowlarr.com) or [Jackett](https://github.com/Jackett/Jackett), add the tracker there, then give torrential its address and API key:
+
+```sh
+torrential indexers add http://localhost:9696 --key <api key>   # adds every tracker you set up in Prowlarr
+torrential indexers                                             # whether each answers, and what it carries
+```
+
+Search, titles and Play then use those trackers too, also when the engine runs on a server. Jackett's address works the same way, and so does any Torznab feed. The key is kept in `config.yaml`, which only you can read.
+
 ## With your agent
 
 ```sh
