@@ -1633,10 +1633,13 @@ async fn a_player_gets_a_range_once_the_engine_has_its_pieces() {
     h.swarm.set_rate(100 * GIB);
     let (status, headers, body) = fetch.await.unwrap();
     assert_eq!(status, 206);
+    let tag = format!("etag: \"{}-0\"\n", film.info_hash.id().to_hex());
     assert_eq!(
         headers,
-        "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 1000000-1000099/4194304\ncontent-type: video/x-matroska\n\
-         x-content-type-options: nosniff\n"
+        "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 1000000-1000099/4194304\ncontent-type: video/x-matroska\n"
+            .to_string()
+            + &tag
+            + "x-content-type-options: nosniff\n"
     );
     assert_eq!(body, bytes[1_000_000..1_000_100]);
 }
@@ -1683,11 +1686,18 @@ async fn one_player_connection_gets_whole_files_ranges_and_refusals() {
 
     let mut player = Player::connect(&h).await;
     player.send("HEAD", &srt, &["Host: 127.0.0.1:47919"]).await;
-    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\nx-content-type-options: nosniff\n";
-    assert_eq!(player.answer(true).await, (200, whole.to_string(), Vec::new()));
-    let last = "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 9900-9999/10000\ncontent-type: application/x-subrip\n\
-                x-content-type-options: nosniff\n";
-    assert_eq!(player.get(&srt, "bytes=-100").await, (206, last.to_string(), bytes[9_900..].to_vec()));
+    // The infohash and the index name the file's bytes for good, so a browser can resume with it.
+    let tag = format!("etag: \"{}-0\"\n", notes.info_hash.id().to_hex());
+    let nosniff = "x-content-type-options: nosniff\n";
+    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\n".to_string()
+        + &tag
+        + nosniff;
+    assert_eq!(player.answer(true).await, (200, whole, Vec::new()));
+    let last = "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 9900-9999/10000\ncontent-type: application/x-subrip\n"
+        .to_string()
+        + &tag
+        + nosniff;
+    assert_eq!(player.get(&srt, "bytes=-100").await, (206, last, bytes[9_900..].to_vec()));
     let past =
         "accept-ranges: bytes\ncontent-length: 0\ncontent-range: bytes */10000\nx-content-type-options: nosniff\n";
     assert_eq!(player.get(&srt, "bytes=10000-").await, (416, past.to_string(), Vec::new()));

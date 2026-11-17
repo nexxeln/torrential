@@ -83,6 +83,11 @@ pub enum Command {
         after_help = "Examples:\n  torrential connect http://nas.local:47919/pair#123456\n  torrential connect my-server --code 123456\n  torrential connect --local"
     )]
     Connect(ConnectArgs),
+    /// Copy a finished download from the engine on another machine to this one
+    #[command(
+        after_help = "Examples:\n  torrential pull 9b5212\n  torrential pull 4c1e9a --files '*.mp4' --dir ~/Movies"
+    )]
+    Pull(PullArgs),
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -155,6 +160,19 @@ pub struct ConnectArgs {
     /// Drive this machine's engine again
     #[arg(long)]
     pub local: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PullArgs {
+    /// A download ID from torrential status
+    #[arg(value_name = "ID", add = ArgValueCandidates::new(complete_download_ids))]
+    pub reference: String,
+    /// Copy only files matching this glob or exact path. Repeat to add more
+    #[arg(long, value_name = "GLOB")]
+    pub files: Vec<String>,
+    /// The folder to copy into. Defaults to the download folder on this machine
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
