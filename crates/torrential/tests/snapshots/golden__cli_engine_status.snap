@@ -13,6 +13,9 @@ expression: value
     "address": "[redacted]",
     "log": "[home]/th/state/engine.log",
     "downloads": 4,
+    "this_version": "[version]",
+    "service_binary": null,
+    "notice": null,
     "next": "torrential status"
   }
 }

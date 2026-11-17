@@ -135,6 +135,27 @@ fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves
 }
 
 #[test]
+fn a_client_uses_an_engine_newer_by_its_patch_and_says_so() {
+    let this = env!("CARGO_PKG_VERSION");
+    let (release, patch) = this.rsplit_once('.').unwrap();
+    let newer = format!("{release}.{}", patch.parse::<u64>().unwrap() + 1);
+    let mut home = Home::new().with(hooks::VERSION, &newer);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    home.unset(hooks::VERSION);
+    home.set("CLAUDECODE", "1");
+
+    let run = home.run(&["status"]);
+
+    let said = format!(
+        "# the engine runs the newer torrential {newer}, not this torrential {this}; run torrential update to bring \
+         this one up to date\n"
+    );
+    assert_eq!((run.code, run.stderr), (0, said));
+    assert_eq!(home.engine(), Some((pid, newer)), "the newer engine kept running");
+}
+
+#[test]
 fn a_stop_that_an_older_torrential_sends_for_its_own_version_leaves_a_newer_engine_running() {
     let home = Home::new().with(hooks::VERSION, "9.0.0");
     assert_eq!(home.run(&["status"]).code, 0);
@@ -421,6 +442,38 @@ fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), expected, "adding the service at start ran neither");
 }
 
+/// An install from another path leaves the login service starting another torrential. Each
+/// command says so with the fix, and engine status shows it, until engine install points the
+/// service at this torrential.
+// Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
+#[cfg(unix)]
+#[test]
+fn a_command_says_when_the_login_service_starts_another_torrential() {
+    let service = Service::new();
+    assert_eq!(service.home.run(&["status"]).code, 0);
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_torrential")).unwrap().display().to_string();
+    let unit = std::fs::read_to_string(&service.unit).unwrap();
+    std::fs::write(&service.unit, unit.replace(&exe, "/opt/old/torrential")).unwrap();
+
+    let run = service.home.run(&["status"]);
+    let status = service.home.json(&["engine", "status", "--json"]);
+    let install = service.home.json(&["engine", "install", "--json"]);
+    let after = service.home.run(&["status"]);
+
+    let this = env!("CARGO_PKG_VERSION");
+    let said = format!(
+        "the login service starts /opt/old/torrential, not this torrential {this}; run torrential engine install \
+         to have it start this one"
+    );
+    assert_eq!((run.code, run.stderr), (0, format!("# {said}\n")));
+    assert_eq!(
+        (&status["service_binary"], &status["this_version"], &status["notice"], &status["next"]),
+        (&json!("/opt/old/torrential"), &json!(this), &json!(said), &json!("torrential engine install"))
+    );
+    assert_eq!(install["result"], "installed");
+    assert_eq!((after.code, after.stderr.as_str()), (0, ""));
+}
+
 // Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
 #[cfg(unix)]
 #[test]
@@ -626,13 +679,13 @@ fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrentia
 
     kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    home.set(hooks::VERSION, "0.1.1");
+    home.set(hooks::VERSION, "0.2.0");
     assert_eq!(home.run(&["status"]).code, 0);
     let wait = wait.finish();
 
     assert_eq!(
         (wait.code, wait.stderr.as_str()),
-        (6, "error[daemon_version]: the engine runs the newer torrential 0.1.1, so restart this torrential\n")
+        (6, "error[daemon_version]: the engine runs the newer torrential 0.2.0, so restart this torrential\n")
     );
 }
 

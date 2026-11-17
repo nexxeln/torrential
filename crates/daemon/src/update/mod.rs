@@ -48,6 +48,14 @@ impl Version {
     pub fn newer(version: &str, than: &str) -> bool {
         Version::parse(version).is_some_and(|version| version.newer_than(than))
     }
+
+    /// Whether `version` is newer than `than` in its major or minor number, not only its patch.
+    pub fn newer_minor(version: &str, than: &str) -> bool {
+        match (Version::parse(version), Version::parse(than)) {
+            (Some(version), Some(than)) => (version.major, version.minor) > (than.major, than.minor),
+            _ => false,
+        }
+    }
 }
 
 /// GitHub answers `/releases/latest` with a redirect to `/releases/tag/<tag>`. Reading the

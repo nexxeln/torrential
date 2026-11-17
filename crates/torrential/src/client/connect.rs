@@ -1,5 +1,6 @@
 use std::io::{BufReader, ErrorKind};
 use std::net::TcpStream;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -11,7 +12,8 @@ use torrential_daemon::daemon::OwnerLock;
 use torrential_daemon::env::Env;
 use torrential_daemon::paths::Paths;
 use torrential_daemon::process;
-use torrential_daemon::update::Version;
+use torrential_daemon::service;
+use torrential_daemon::update::{Audience, Version};
 use torrential_daemon::wire::{self, Access, Answer, Client};
 
 /// How long an engine that refuses connections, as one does while it restarts, has to answer again.
@@ -156,12 +158,13 @@ pub fn running(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     Ok(Some(conn))
 }
 
-/// The engine, for a command to use. A client never uses or stops a newer engine: it runs a release
-/// installed after this torrential started, which the person restarts this torrential to run too.
-/// Every connection a command uses comes from here.
+/// The engine, for a command to use. A client never stops a newer engine, and uses one only when
+/// it is newer by its patch number alone: a newer minor release runs code this torrential does not
+/// know, which the person restarts this torrential to run too. Every connection a command uses
+/// comes from here.
 pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     match running(paths, env)? {
-        Some(conn) if Version::newer(&conn.engine_version, &env.version()) => Err(Error::new(
+        Some(conn) if Version::newer_minor(&conn.engine_version, &env.version()) => Err(Error::new(
             ErrorCode::DaemonVersion,
             format!("the engine runs the newer torrential {}, so restart this torrential", conn.engine_version),
         )),
@@ -169,9 +172,27 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
     }
 }
 
+/// Why the engine a command used may not run this torrential, said once after the command.
+static MISMATCH: OnceLock<String> = OnceLock::new();
+
 pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
+    let service = service::starts_another(env, paths);
+    let conn = this_or_any(paths, env, service.is_some())?;
+    if let Some(mismatch) = mismatch(Some(&conn.engine_version), service.as_deref(), &env.version()) {
+        let _ = MISMATCH.set(mismatch);
+    }
+    Ok(conn)
+}
+
+/// This torrential's engine, or the engine that runs when this one cannot take over. An engine
+/// newer by its patch stays, and so does one the login service would only start again from
+/// another binary.
+fn this_or_any(paths: &Paths, env: &Env, service_elsewhere: bool) -> Result<Conn, Error> {
     let Some(conn) = existing(paths, env)? else { return launch::start(paths, env) };
-    if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
+    let stays = conn.engine_version == env.version()
+        || Version::newer(&conn.engine_version, &env.version())
+        || service_elsewhere;
+    if stays && conn.wire == WIRE_VERSION {
         return Ok(conn);
     }
     let speaks = conn.wire == WIRE_VERSION;
@@ -181,6 +202,42 @@ pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         Err(staying) if speaks => existing(paths, env)?.ok_or(staying),
         Err(staying) => Err(staying),
     }
+}
+
+/// Why an engine of version `engine`, or no engine, may not run this torrential of version `this`,
+/// in plain words with the fix: the engine runs another version, or the login service starts
+/// `service`, another binary, as an install from another path leaves it.
+pub fn mismatch(engine: Option<&str>, service: Option<&str>, this: &str) -> Option<String> {
+    let install = "run torrential engine install to have it start this one";
+    match (engine.filter(|version| *version != this), service) {
+        (None, None) => None,
+        (Some(version), Some(exe)) => Some(format!(
+            "the engine runs torrential {version} from {exe}, which the login service starts, not this torrential \
+             {this}; {install}"
+        )),
+        (None, Some(exe)) => Some(format!("the login service starts {exe}, not this torrential {this}; {install}")),
+        (Some(version), None) if Version::newer(version, this) => Some(format!(
+            "the engine runs the newer torrential {version}, not this torrential {this}; run torrential update to \
+             bring this one up to date"
+        )),
+        (Some(version), None) => Some(format!(
+            "the engine still runs torrential {version}, not this torrential {this}; it switches once no film \
+             plays, or run torrential engine stop"
+        )),
+    }
+}
+
+/// Says, after a command, why the engine it used may not run this torrential.
+pub fn notice(audience: Audience) -> Option<String> {
+    let mismatch = MISMATCH.get()?;
+    Some(match audience {
+        Audience::Person => {
+            let mut said = mismatch.clone();
+            said[..1].make_ascii_uppercase();
+            format!("{said}.")
+        }
+        Audience::Agent => format!("# {mismatch}"),
+    })
 }
 
 /// This torrential's engine, in place of an older one that just exited. When the login service
@@ -286,6 +343,47 @@ pub fn unexpected(response: &Response) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mismatch_says_what_runs_and_how_to_run_this_torrential() {
+        let old = Some("/opt/old/torrential");
+        let said = [
+            mismatch(Some("0.7.0"), None, "0.7.0"),
+            mismatch(None, None, "0.7.0"),
+            mismatch(Some("0.6.1"), old, "0.7.0"),
+            mismatch(Some("0.7.0"), old, "0.7.0"),
+            mismatch(None, old, "0.7.0"),
+            mismatch(Some("0.7.1"), None, "0.7.0"),
+            mismatch(Some("0.6.1"), None, "0.7.0"),
+        ];
+        assert_eq!(
+            said.each_ref().map(Option::as_deref),
+            [
+                None,
+                None,
+                Some(
+                    "the engine runs torrential 0.6.1 from /opt/old/torrential, which the login service starts, \
+                     not this torrential 0.7.0; run torrential engine install to have it start this one"
+                ),
+                Some(
+                    "the login service starts /opt/old/torrential, not this torrential 0.7.0; run torrential \
+                     engine install to have it start this one"
+                ),
+                Some(
+                    "the login service starts /opt/old/torrential, not this torrential 0.7.0; run torrential \
+                     engine install to have it start this one"
+                ),
+                Some(
+                    "the engine runs the newer torrential 0.7.1, not this torrential 0.7.0; run torrential update \
+                     to bring this one up to date"
+                ),
+                Some(
+                    "the engine still runs torrential 0.6.1, not this torrential 0.7.0; it switches once no film \
+                     plays, or run torrential engine stop"
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn the_wait_for_the_engine_ends_when_it_answers_fails_or_runs_out() {
