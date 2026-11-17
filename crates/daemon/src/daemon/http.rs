@@ -66,21 +66,27 @@ pub fn bind(ports: &[u16], reach: Reach) -> io::Result<TcpListener> {
     }
 }
 
-/// A listening socket on `port` where `reach` says. On every address it takes IPv6 as well as IPv4
-/// where the machine has IPv6, so a device on a tailnet reaches the engine at either of its
-/// addresses there.
+/// A listening socket on `port` where `reach` says.
 fn listener(reach: Reach, port: u16) -> io::Result<TcpListener> {
     match reach {
         Reach::Loopback => socket(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
-        Reach::Network => socket(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))
-            .or_else(|_| socket(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))),
+        Reach::Network => socket(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))),
     }
+}
+
+/// A socket for IPv6 alone on `port`, beside the one on every IPv4 address, so a device on a
+/// tailnet reaches the engine at its IPv6 address there too. None where the machine has no IPv6.
+/// One socket for both would let macOS hand it the port while another program holds IPv4.
+fn ipv6(port: u16) -> Option<tokio::net::TcpListener> {
+    let listener = socket(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))).ok()?;
+    listener.set_nonblocking(true).ok()?;
+    tokio::net::TcpListener::from_std(listener).ok()
 }
 
 fn socket(address: SocketAddr) -> io::Result<TcpListener> {
     let socket = socket2::Socket::new(socket2::Domain::for_address(address), socket2::Type::STREAM, None)?;
     if address.is_ipv6() {
-        socket.set_only_v6(false)?;
+        socket.set_only_v6(true)?;
     }
     // As std's TcpListener::bind does, so a port the last engine left in TIME_WAIT is free at once.
     #[cfg(unix)]
@@ -170,10 +176,13 @@ impl Peer {
 pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut reach: watch::Receiver<Reach>) {
     let strangers = Arc::new(Strangers::default());
     let mut retry = tokio::time::Instant::now();
+    let on_network = |listener: &tokio::net::TcpListener| reach_of(listener) == Reach::Network;
+    let mut v6 = if on_network(&listener) { ipv6(ctx.http_port) } else { None };
     loop {
         let want = *reach.borrow_and_update();
         if reach_of(&listener) != want && tokio::time::Instant::now() >= retry {
             listener = listen(listener, want, ctx.http_port, &ctx.devices).await;
+            v6 = if on_network(&listener) { ipv6(ctx.http_port) } else { None };
             retry = tokio::time::Instant::now() + RETRY;
         }
         let astray = reach_of(&listener) != want;
@@ -188,6 +197,7 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
                     tokio::time::sleep(BACKOFF).await;
                 }
             },
+            Ok((stream, remote)) = accept_on(&v6) => spawn(&ctx, &strangers, stream, remote),
             changed = reach.changed() => {
                 if changed.is_err() {
                     return;
@@ -196,6 +206,14 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
             }
             () = tokio::time::sleep_until(retry), if astray => {}
         }
+    }
+}
+
+/// The next connection to `listener`, or never when there is none.
+async fn accept_on(listener: &Option<tokio::net::TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
     }
 }
 
