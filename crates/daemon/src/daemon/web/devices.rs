@@ -30,9 +30,11 @@ const PAGE_HEADERS: &str = "Cache-Control: no-store\r\n\
     connect-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'\r\n\
     Referrer-Policy: no-referrer\r\n";
 
-/// The header that gives a device its token, which only requests to this Mac carry.
-pub fn set_cookie(token: &str) -> String {
-    format!("Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={COOKIE_SECS}; HttpOnly; SameSite=Strict\r\n")
+/// The header that gives a device its token, which only requests to this Mac carry, and only over
+/// HTTPS when `secure` says the device reached it at the HTTPS public address.
+pub fn set_cookie(token: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={COOKIE_SECS}; HttpOnly; SameSite=Strict{secure}\r\n")
 }
 
 /// What a browser that is not paired may reach: the pairing page, and the request that pairs it.
@@ -72,7 +74,8 @@ async fn pair(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> 
     match conn.ctx.devices.pair(&code, request.agent.as_deref(), from, now()) {
         Ok((device, token)) => {
             let body = serde_json::to_vec(&Paired { device }).map_err(io::Error::other)?;
-            let headers = format!("Cache-Control: no-store\r\n{}", set_cookie(&token));
+            let secure = conn.ctx.devices.addressing().exposure.secure(request.host());
+            let headers = format!("Cache-Control: no-store\r\n{}", set_cookie(&token, secure));
             conn.send("200 OK", "application/json", &headers, &body, request).await
         }
         Err(refused) => {

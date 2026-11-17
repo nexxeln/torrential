@@ -505,14 +505,22 @@ code: string,
  */
 url: string,
 /**
- * What to type into a TV's browser: this machine's .local name and the port.
+ * What to type into a TV's browser, such as `http://studio-mac.local:47919`: the
+ * `public_address` in config.yaml, else this machine's .local name and the port.
  */
 address: string,
 /**
- * This machine's address on the home network and the port, for a browser that cannot open
- * .local names. `None` when the machine has no such address.
+ * This machine's address on the home network and the port, such as
+ * `http://192.168.1.23:47919`, for a browser that cannot open .local names. `None` when the
+ * machine has no such address.
  */
 lan_address: string | null,
+/**
+ * This machine's name on its Tailscale network and the port, such as
+ * `http://box.tail1234.ts.net:47919`, which a device on the tailnet opens from anywhere.
+ * `None` while Tailscale does not run.
+ */
+tailnet_address: string | null,
 /**
  * Unix seconds.
  */

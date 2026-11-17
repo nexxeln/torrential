@@ -14,6 +14,7 @@ use super::super::devices::Reach;
 use super::super::http;
 use super::super::names::Names;
 use super::{GIB, Harness, MIB, Outside, fake, torrent, written};
+use crate::config::{Exposure, PublicAddress};
 
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
 
@@ -271,7 +272,10 @@ async fn a_request_from_the_network_must_name_this_mac_and_come_from_its_own_pag
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name() {
     let ip = lan();
-    let h = Harness::with_outside(fake::Search::new(fake::isos()), Outside { server: true, ..Outside::default() });
+    let h = Harness::with_outside(
+        fake::Search::new(fake::isos()),
+        Outside { exposure: Exposure { server: true, public_address: None }, ..Outside::default() },
+    );
     listening(&h, ip, true).await;
     let mut phone = Browser { host: "box.example.net:8080".into(), ..Browser::on(ip, &h) };
     let not_paired = (
@@ -293,6 +297,51 @@ async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name(
     devices(&h, Request::RemoveDevice { id }).await;
     assert_eq!(*h.running.ctx.devices.reach().borrow(), Reach::Network, "a server keeps listening");
     assert_eq!(phone.get("/pair").await.status, 200);
+}
+
+/// Caddy in front of the engine on the same machine, at the public address.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_pairs_through_a_proxy_at_the_public_address_with_a_secure_cookie_and_is_never_this_mac() {
+    let public_address = PublicAddress::parse("https://tv.example.com");
+    let exposure = Exposure { server: false, public_address };
+    let h = Harness::with_outside(fake::Search::new(fake::isos()), Outside { exposure, ..Outside::default() });
+    let port = h.running.ctx.http_port;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    assert_eq!(
+        (offer.address.as_str(), offer.url.as_str()),
+        ("https://tv.example.com", format!("https://tv.example.com/pair#{}", offer.code).as_str())
+    );
+    listening(&h, lan(), true).await;
+    let mut phone = Browser { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), port, host: "tv.example.com".into(), cookie: None };
+    let forwarded = "X-Forwarded-For: 198.51.100.4";
+    let not_paired = |answer: Answer| answer.error().1;
+    assert_eq!(not_paired(phone.send("GET", "/api/devices", &[forwarded], "").await), "not_paired");
+    assert_eq!(not_paired(phone.get("/api/jobs").await), "not_paired", "the public address alone");
+    let rewritten = Browser { host: format!("127.0.0.1:{port}"), ..Browser::on(Ipv4Addr::LOCALHOST, &h) };
+    assert_eq!(
+        not_paired(rewritten.send("GET", "/api/jobs", &[forwarded], "").await),
+        "not_paired",
+        "a proxy that rewrites Host"
+    );
+
+    let body = format!(r#"{{"code":"{}"}}"#, offer.code);
+    let agent = format!("User-Agent: {IPHONE}");
+    let paired = phone.send("POST", "/api/pair", &[forwarded, "Origin: https://tv.example.com", &agent], &body).await;
+    assert_eq!(paired.status, 200);
+    let cookie = paired.header("set-cookie").unwrap();
+    assert!(cookie.ends_with("; HttpOnly; SameSite=Strict; Secure"), "{cookie}");
+    phone.cookie = Some(cookie.split(';').next().unwrap().to_string());
+    assert_eq!(phone.send("GET", "/api/jobs", &[forwarded], "").await.status, 200);
+    assert_eq!(phone.send("GET", "/api/devices", &[forwarded], "").await.error().1, "local_only");
+    let other_site =
+        phone.send("POST", "/api/pause", &[forwarded, "Origin: https://example.org"], r#"{"refs":["x"]}"#).await;
+    assert_eq!(other_site.status, 403);
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let token = format!("Authorization: Bearer {}", h.token());
+    let through = phone.send("POST", &path, &[forwarded, &token], r#"{"op":"hello"}"#).await;
+    assert_eq!(through.status, 401, "this user's token counts only from this Mac");
+
+    assert_eq!(mac_again(port).get("/api/devices").await.status, 200, "the web app on this Mac");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -644,11 +693,7 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
     assert!(rows.len() >= 21 && rows.iter().all(|row| row.as_str().unwrap().len() == rows.len()));
     assert_eq!(
         opened["offer"]["url"],
-        format!(
-            "http://{}/pair#{}",
-            opened["offer"]["address"].as_str().unwrap(),
-            opened["offer"]["code"].as_str().unwrap()
-        )
+        format!("{}/pair#{}", opened["offer"]["address"].as_str().unwrap(), opened["offer"]["code"].as_str().unwrap())
     );
     let missing = mac.send("POST", "/api/devices/remove", &[], r#"{"id":"0badf00d"}"#).await;
     assert_eq!(missing.error(), (404, "not_found".into(), "no device has the ID 0badf00d".into()));

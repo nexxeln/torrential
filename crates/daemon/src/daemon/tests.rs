@@ -87,8 +87,8 @@ struct Outside {
     display: Option<Display>,
     /// A search in place of the harness's fake, which keeps its catalog's order.
     search: Option<Arc<dyn SearchPort>>,
-    /// `server: true` in config.yaml.
-    server: bool,
+    /// `server` and `public_address` in config.yaml.
+    exposure: crate::config::Exposure,
 }
 
 impl Default for Outside {
@@ -107,7 +107,7 @@ impl Default for Outside {
             preferences: Preferences::default(),
             display: None,
             search: None,
-            server: false,
+            exposure: crate::config::Exposure::default(),
         }
     }
 }
@@ -222,7 +222,7 @@ impl Harness {
         };
         let db = super::db::connect(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        let listen = Listen { ports: &[0], access: &dir.path().join(TOKEN_FILE), server: outside.server };
+        let listen = Listen { ports: &[0], access: &dir.path().join(TOKEN_FILE), exposure: outside.exposure.clone() };
         start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), listen).unwrap()
     }
 

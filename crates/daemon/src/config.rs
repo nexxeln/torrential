@@ -27,12 +27,59 @@ pub struct Config {
     pub catalog: CatalogConfig,
     pub ffmpeg: FfmpegConfig,
     pub plays_max: PlaysMax,
-    /// The engine runs as a server: it listens on the network with nothing paired, and lets a
-    /// paired device in by whatever address it uses.
-    pub server: bool,
+    pub exposure: Exposure,
     /// The network interface, such as a VPN's `wg0`, that every torrent socket is bound to. The web
     /// app, pairing and casting stay on every network.
     pub torrent_interface: Option<InterfaceName>,
+}
+
+/// How devices outside the home reach the engine.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Exposure {
+    /// `server: true`: the engine listens on the network with nothing paired, and lets a paired
+    /// device in by whatever address it uses.
+    pub server: bool,
+    /// `public_address`, which pairing links and QR codes use.
+    pub public_address: Option<PublicAddress>,
+}
+
+impl Exposure {
+    /// Whether a request that names `host` came through the HTTPS public address, so the device
+    /// cookie it gets must say `Secure`.
+    pub fn secure(&self, host: Option<&str>) -> bool {
+        self.public_address.as_ref().is_some_and(|public| public.https && host == Some(public.host.as_str()))
+    }
+}
+
+/// Where devices reach the engine from outside the home, such as `https://tv.example.com` with a
+/// reverse proxy in front, or `http://box.tailnet.ts.net:47919`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PublicAddress {
+    /// The scheme, host and any port, with no slash after them.
+    pub origin: String,
+    /// What a browser sends as `Host` there, lowercased.
+    pub host: String,
+    pub https: bool,
+}
+
+impl PublicAddress {
+    /// An HTTP or HTTPS origin, with no path, query or user name.
+    pub fn parse(text: &str) -> Option<Self> {
+        let url = url::Url::parse(text.trim()).ok()?;
+        let https = match url.scheme() {
+            "https" => true,
+            "http" => false,
+            _ => return None,
+        };
+        let bare = url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none();
+        let name = url.host_str().filter(|_| bare)?;
+        let host = url.port().map_or_else(|| name.to_string(), |port| format!("{name}:{port}"));
+        Some(Self { origin: format!("{}://{host}", url.scheme()), host, https })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,6 +118,7 @@ struct File {
     plays: Plays,
     server: Option<bool>,
     torrent_interface: Option<Spanned<String>>,
+    public_address: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -446,7 +494,18 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
             (Some(referenced.line()), format!("plays.max {value:?} is not a size; use a form like 20GiB, or none"))
         })?),
     };
-    let server = file.server.unwrap_or_default();
+    let public_address = file
+        .public_address
+        .map(|Spanned { value, referenced, .. }| {
+            PublicAddress::parse(&value).ok_or_else(|| {
+                let message = format!(
+                    "public_address {value:?} is not an address such as https://tv.example.com or http://box.tailnet.ts.net:47919"
+                );
+                (Some(referenced.line()), message)
+            })
+        })
+        .transpose()?;
+    let exposure = Exposure { server: file.server.unwrap_or_default(), public_address };
     let torrent_interface =
         file.torrent_interface.map(|Spanned { value, referenced, .. }| torrent_interface(&value, referenced.line()));
     Ok(Config {
@@ -460,7 +519,7 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         catalog,
         ffmpeg,
         plays_max,
-        server,
+        exposure,
         torrent_interface: torrent_interface.transpose()?,
     })
 }
@@ -893,7 +952,7 @@ sources:
         folder.write("# indexers\nsources:\n  disabled: [nyaa]\n");
         let writes = Writes { sandboxed: false, rerun: "torrential server install".into() };
         let save = |on| save_server(&folder.paths, on, &writes).unwrap().1;
-        let server = || Config::load(&folder.paths, &env()).unwrap().server;
+        let server = || Config::load(&folder.paths, &env()).unwrap().exposure.server;
 
         assert!(!server());
         assert!(save(true));
@@ -903,6 +962,42 @@ sources:
         assert!(save(false));
         assert_eq!(folder.text(), "# indexers\nsources:\n  disabled: [nyaa]\n");
         assert!(!server());
+    }
+
+    #[test]
+    fn reads_the_public_address_as_an_origin() {
+        let read = |text: &str| parse(&format!("public_address: {text}\n"), &env()).map(|c| c.exposure.public_address);
+        let address =
+            |origin: &str, host: &str, https| Some(PublicAddress { origin: origin.into(), host: host.into(), https });
+        assert_eq!(read("https://TV.example.com/"), Ok(address("https://tv.example.com", "tv.example.com", true)));
+        assert_eq!(read("https://tv.example.com:443"), Ok(address("https://tv.example.com", "tv.example.com", true)));
+        assert_eq!(
+            read("http://box.tailnet.ts.net:47919"),
+            Ok(address("http://box.tailnet.ts.net:47919", "box.tailnet.ts.net:47919", false))
+        );
+        assert_eq!(
+            read("http://[fd7a:115c:a1e0::1]:47919"),
+            Ok(address("http://[fd7a:115c:a1e0::1]:47919", "[fd7a:115c:a1e0::1]:47919", false))
+        );
+        assert_eq!(parse("", &env()).unwrap().exposure, Exposure::default());
+        for bad in [
+            "tv.example.com",
+            "ftp://tv.example.com",
+            "https://tv.example.com/watch",
+            "https://ada@tv.example.com",
+            "https://tv.example.com/?a=1",
+        ] {
+            assert_eq!(
+                read(bad),
+                Err((
+                    Some(1),
+                    format!(
+                        "public_address {bad:?} is not an address such as https://tv.example.com or http://box.tailnet.ts.net:47919"
+                    )
+                )),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

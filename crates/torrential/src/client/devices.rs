@@ -51,10 +51,10 @@ fn list_doc(list: &DeviceList, now: i64) -> Doc {
         .collect();
     let mut summary = vec![count(list.devices.len(), "device")];
     if let Some(offer) = &list.offer {
-        summary.push(format!(
-            "code {} is open: open http://{} on the phone or TV and enter it",
-            offer.code, offer.address
-        ));
+        summary.push(format!("code {} is open: open {} on the phone or TV and enter it", offer.code, offer.address));
+        if let Some(tailnet) = offer.tailnet_address.as_ref().filter(|tailnet| **tailnet != offer.address) {
+            summary.push(format!("away from home, a device on your tailnet opens {tailnet}"));
+        }
     }
     summary.extend(list.unreachable.clone());
     let next = list.devices.is_empty().then(|| "torrential devices add".to_string());
@@ -63,11 +63,14 @@ fn list_doc(list: &DeviceList, now: i64) -> Doc {
 
 pub(super) fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
     let mut fields = vec![
-        ("address", Cell::styled(format!("http://{}", offer.address), Token::Accent)),
+        ("address", Cell::styled(&offer.address, Token::Accent)),
         ("code", Cell::styled(&offer.code, Token::Accent)),
     ];
     if let Some(lan) = offer.lan_address.as_ref().filter(|lan| **lan != offer.address) {
-        fields.push(("or", Cell::new(format!("http://{lan}"))));
+        fields.push(("or", Cell::new(lan)));
+    }
+    if let Some(tailnet) = offer.tailnet_address.as_ref().filter(|tailnet| **tailnet != offer.address) {
+        fields.push(("tailnet", Cell::new(tailnet)));
     }
     let left = offer.expires_at.saturating_sub(now).max(0) as u64;
     let expires = if left < 60 { "in under a minute".to_string() } else { format!("in {}", units::age(left)) };
@@ -113,8 +116,9 @@ mod tests {
         PairingOffer {
             code: "482913".into(),
             url: "http://studio-mac.local:47919/pair#482913".into(),
-            address: "studio-mac.local:47919".into(),
-            lan_address: Some("192.168.1.23:47919".into()),
+            address: "http://studio-mac.local:47919".into(),
+            lan_address: Some("http://192.168.1.23:47919".into()),
+            tailnet_address: Some("http://studio-mac.tail1234.ts.net:47919".into()),
             expires_at: NOW + 300,
         }
     }
@@ -135,7 +139,8 @@ mod tests {
              3f9a0c2e\tiPhone\t3d\t2m\n\
              b71d04aa\tLG TV\t1h\t1h\n\
              # 2 devices\n\
-             # code 482913 is open: open http://studio-mac.local:47919 on the phone or TV and enter it\n"
+             # code 482913 is open: open http://studio-mac.local:47919 on the phone or TV and enter it\n\
+             # away from home, a device on your tailnet opens http://studio-mac.tail1234.ts.net:47919\n"
         );
         let empty = list_doc(&DeviceList::default(), NOW).plain();
         assert_eq!(empty, "ID\tNAME\tADDED\tSEEN\n# 0 devices\nnext: torrential devices add\n");
@@ -158,6 +163,7 @@ mod tests {
             "address: http://studio-mac.local:47919\n\
              code:    482913\n\
              or:      http://192.168.1.23:47919\n\
+             tailnet: http://studio-mac.tail1234.ts.net:47919\n\
              expires: in 5m\n\
              # scan the QR code with the phone's camera, or open the address on the TV and enter the code\n\
              next:    torrential devices\n"

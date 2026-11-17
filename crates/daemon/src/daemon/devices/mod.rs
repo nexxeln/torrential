@@ -17,7 +17,8 @@ use tokio::time::Instant;
 use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer, TorrentId};
 
 use super::db::{Db, sql_error};
-use super::names::Names;
+use super::names::{Names, Tailnet};
+use crate::config::Exposure;
 
 /// How long a pairing code works.
 pub(crate) const OFFER: Duration = Duration::from_secs(5 * 60);
@@ -182,18 +183,28 @@ struct State {
     /// Pairing tries by address: the minute, and the tries in it.
     tries: HashMap<IpAddr, (i64, u32)>,
     names: Names,
+    tailnet: Option<Tailnet>,
     /// Why the engine's last try to listen on the home network failed, or `None` after one that
     /// worked.
     refused: Option<io::ErrorKind>,
-    /// `server: true` in config.yaml.
-    server: bool,
+    exposure: Exposure,
+}
+
+/// The names devices reach this machine by, and how it faces the network, which the HTTP guard
+/// reads once for each request.
+pub struct Addressing {
+    /// The .local name.
+    pub local: Option<String>,
+    /// The MagicDNS name on the tailnet.
+    pub tailnet: Option<String>,
+    pub exposure: Exposure,
 }
 
 impl State {
     fn reach(&self) -> Reach {
         let open = self.offer.as_ref().is_some_and(Offer::open);
         let wanted = open || !self.paired.is_empty() || !self.grants.is_empty();
-        if wanted || self.server { Reach::Network } else { Reach::Loopback }
+        if wanted || self.exposure.server { Reach::Network } else { Reach::Loopback }
     }
 
     fn device(&self, id: &str) -> Option<&Device> {
@@ -202,18 +213,22 @@ impl State {
 
     fn offer(&self, port: u16) -> Option<PairingOffer> {
         let offer = self.offer.as_ref().filter(|offer| offer.open())?;
-        let lan = self.names.lan.first();
-        let lan_address = lan.map(|ip| format!("{ip}:{port}"));
+        let tailnet_ip = self.tailnet.as_ref().map(|tailnet| tailnet.ip);
+        let lan = self.names.lan.iter().find(|ip| Some(IpAddr::V4(**ip)) != tailnet_ip);
+        let lan_address = lan.map(|ip| format!("http://{ip}:{port}"));
+        let tailnet_address = self.tailnet.as_ref().map(|tailnet| format!("http://{}:{port}", tailnet.host()));
         // A .local name answers only on a home network, so a server whose best address is a public
         // one offers that address.
         let home = lan.is_none_or(|ip| ip.is_private() || ip.is_link_local());
-        let local = self.names.local.as_ref().filter(|_| home).map(|name| format!("{name}:{port}"));
-        let address = local.or(lan_address.clone())?;
+        let local = self.names.local.as_ref().filter(|_| home).map(|name| format!("http://{name}:{port}"));
+        let public = self.exposure.public_address.as_ref().map(|public| public.origin.clone());
+        let address = public.or(local).or_else(|| lan_address.clone()).or_else(|| tailnet_address.clone())?;
         Some(PairingOffer {
             code: offer.code.clone(),
-            url: format!("http://{address}/pair#{}", offer.code),
+            url: format!("{address}/pair#{}", offer.code),
             address,
             lan_address,
+            tailnet_address,
             expires_at: offer.expires_at,
         })
     }
@@ -258,8 +273,8 @@ pub struct Devices {
 }
 
 impl Devices {
-    /// The devices paired before, on a server when `server` says.
-    pub fn open(db: &Db, server: bool) -> Result<Self, Error> {
+    /// The devices paired before, reached as `exposure` says.
+    pub fn open(db: &Db, exposure: Exposure) -> Result<Self, Error> {
         let (conn, path) = (db.open()?, db.path());
         let paired = {
             let mut stmt = conn
@@ -287,8 +302,9 @@ impl Devices {
             grants: HashMap::new(),
             tries: HashMap::new(),
             names: Names::read(),
+            tailnet: Tailnet::read(),
             refused: None,
-            server,
+            exposure,
         };
         let reach = watch::Sender::new(state.reach());
         Ok(Self {
@@ -355,9 +371,10 @@ impl Devices {
         self.state().names.local.clone()
     }
 
-    /// Whether the engine runs as a server, which lets a paired device in by any address.
-    pub fn server(&self) -> bool {
-        self.state().server
+    pub fn addressing(&self) -> Addressing {
+        let state = self.state();
+        let tailnet = state.tailnet.as_ref().and_then(|tailnet| tailnet.name.clone());
+        Addressing { local: state.names.local.clone(), tailnet, exposure: state.exposure.clone() }
     }
 
     /// The paired devices and the open offer.
@@ -371,10 +388,12 @@ impl Devices {
     }
 
     /// Opens a pairing offer in place of any open one, and closes it once it expires. This Mac's
-    /// names are read again for it, since a new Wi-Fi network or a renamed Mac changes them.
+    /// names are read again for it, since a new Wi-Fi network, a renamed Mac or Tailscale starting
+    /// changes them.
     pub fn add(self: &Arc<Self>, port: u16, now: i64) -> Result<DeviceList, Error> {
-        let names = Names::read();
-        if names.local.is_none() && names.lan.is_empty() {
+        let (names, tailnet) = (Names::read(), Tailnet::read());
+        let public = self.state().exposure.public_address.is_some();
+        if names.local.is_none() && names.lan.is_empty() && tailnet.is_none() && !public {
             return Err(Error::new(
                 ErrorCode::NetworkUnavailable,
                 "this Mac is on no network, so no phone or TV can reach it",
@@ -394,6 +413,7 @@ impl Devices {
         let list = {
             let mut state = self.state();
             state.names = names;
+            state.tailnet = tailnet;
             state.offer = Some(Offer { code, expires_at: now + OFFER.as_secs() as i64, deadline, wrong: 0 });
             self.publish(&state);
             state.list(port)

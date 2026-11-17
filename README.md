@@ -48,6 +48,14 @@ curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh 
 
 The engine then starts when the machine boots, with no one logged in, and listens on the network. The command ends with a QR code and a link that pair your first phone or computer. Paired devices reach the server from any network, and anyone else gets only the pairing page. `torrential server uninstall` turns this off.
 
+To watch away from home, install [Tailscale](https://tailscale.com) on the server and on your devices. The pairing link then shows the server's tailnet name too, which works from any network with no port opened. With a domain of your own, put [Caddy](https://caddyserver.com) in front, which gets the HTTPS certificate, and set `public_address` in the config file so pairing links use it:
+
+```
+tv.example.com {
+	reverse_proxy 127.0.0.1:47919
+}
+```
+
 ## Watch on your computer
 
 ```sh
@@ -128,6 +136,7 @@ ffmpeg:
 updates: notify               # say when a new version is out instead of installing it, or off
 torrent_interface: wg0        # Linux and macOS: peers, trackers and the DHT use only this network
                               # interface, such as a VPN's, and wait while it is down
+public_address: https://tv.example.com  # the address pairing links use, such as a domain in front of a server
 ```
 
 ## It never seeds

@@ -137,6 +137,8 @@ fn redact(value: Value, home: &[String]) -> Value {
                 map.into_iter()
                     .map(|(key, value)| {
                         let value = match (key.as_str(), value) {
+                            // Present only on a machine on a tailnet.
+                            ("tailnet_address", _) => json!("[redacted]"),
                             (_, Value::Null) => Value::Null,
                             (key, _) if VOLATILE.contains(&key) => json!("[redacted]"),
                             ("detail", _) if disk => json!("[redacted]"),

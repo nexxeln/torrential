@@ -37,7 +37,7 @@ fn paired() -> (Home, Home, String, Value) {
     let laptop = Home::new().with(hooks::ENGINE, "fake").with(hooks::HTTP_PORT, "0");
     let offer = server.json(&["devices", "add", "--json"]);
     let lan = offer["offer"]["lan_address"].as_str().expect("this test needs an address on a home network").to_string();
-    let link = format!("http://{lan}/pair#{}", offer["offer"]["code"].as_str().unwrap());
+    let link = format!("{lan}/pair#{}", offer["offer"]["code"].as_str().unwrap());
     let connected = laptop.json(&["connect", &link, "--json"]);
     (server, laptop, lan, connected)
 }
@@ -45,7 +45,7 @@ fn paired() -> (Home, Home, String, Value) {
 #[test]
 fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
     let (server, laptop, lan, connected) = paired();
-    let address = format!("http://{lan}");
+    let address = lan.clone();
 
     assert_eq!((&connected["engine"], &connected["address"]), (&Value::from("remote"), &Value::from(address.clone())));
     let device = connected["device"].as_str().unwrap().to_string();
@@ -92,7 +92,7 @@ fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
     assert_eq!(removed["changes"][0]["id"], ARCH, "{removed:#}");
     assert!(!ids(&server).contains(&ARCH.to_string()), "the server's engine removed it");
 
-    let (ip, port) = lan.rsplit_once(':').unwrap();
+    let (ip, port) = lan.trim_start_matches("http://").rsplit_once(':').unwrap();
     let address = Address { tls: false, host: ip.to_string(), port: port.parse().unwrap() };
     let client = Client { version: "0.1.0", wire: WIRE_VERSION };
     let stranger = wire::post(&address, &"7".repeat(64), client, &Request::Hello, Duration::from_secs(10)).unwrap();
@@ -101,7 +101,7 @@ fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
     assert_eq!(server.run(&["engine", "stop"]).code, 0);
     let (code, kind, said) = refused(&laptop, &["status"]);
     assert_eq!((code, kind.as_str()), (6, "daemon_unavailable"));
-    assert!(said.starts_with(&format!("cannot reach the engine at http://{lan}")), "{said}");
+    assert!(said.starts_with(&format!("cannot reach the engine at {lan}")), "{said}");
     assert!(!laptop.path("th/state/engine-token").exists(), "no engine started on the laptop");
 
     assert_eq!(laptop.json(&["connect", "--local", "--json"])["engine"], "local");

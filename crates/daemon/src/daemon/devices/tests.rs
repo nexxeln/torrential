@@ -18,12 +18,13 @@ struct Home {
 impl Home {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let devices = Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap(), false).unwrap());
+        let devices =
+            Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap(), Exposure::default()).unwrap());
         Self { dir, devices }
     }
 
     fn reopened(&self) -> Devices {
-        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap(), false).unwrap()
+        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap(), Exposure::default()).unwrap()
     }
 
     fn code(&self) -> String {
@@ -45,7 +46,7 @@ async fn a_phone_pairs_with_the_code_and_its_cookie_lets_it_in_from_then_on() {
     let offer = home.devices.add(PORT, NOW).unwrap().offer.unwrap();
     assert_eq!(offer.code.len(), 6);
     assert!(offer.code.bytes().all(|b| b.is_ascii_digit()));
-    assert_eq!(offer.url, format!("http://{}/pair#{}", offer.address, offer.code));
+    assert_eq!(offer.url, format!("{}/pair#{}", offer.address, offer.code));
     assert_eq!(offer.expires_at, NOW + 300);
 
     let typed = format!("{} {}", &offer.code[..3], &offer.code[3..]);
@@ -248,27 +249,53 @@ async fn a_second_iphone_is_named_iphone_2() {
 }
 
 #[test]
-fn a_server_with_a_public_address_offers_it_in_place_of_its_local_name() {
-    let offered = |lan: &str| {
+fn an_offer_leads_with_the_public_address_then_the_local_name_or_a_public_ip_and_shows_the_tailnet() {
+    let offered = |lan: &str, public: Option<&str>| {
         let offer = Offer { code: "482913".into(), expires_at: NOW + 300, deadline: Instant::now() + OFFER, wrong: 0 };
         let state = State {
             paired: HashMap::new(),
             offer: Some(offer),
             grants: HashMap::new(),
             tries: HashMap::new(),
-            names: Names { local: Some("box.local".into()), lan: vec![lan.parse().unwrap()] },
+            names: Names {
+                local: Some("box.local".into()),
+                lan: vec!["100.101.102.103".parse().unwrap(), lan.parse().unwrap()],
+            },
+            tailnet: Some(Tailnet { name: Some("box.tail1234.ts.net".into()), ip: "100.101.102.103".parse().unwrap() }),
             refused: None,
-            server: true,
+            exposure: Exposure {
+                server: true,
+                public_address: public.map(|public| crate::config::PublicAddress::parse(public).unwrap()),
+            },
         };
         let offer = state.offer(PORT).unwrap();
-        (offer.address, offer.url)
+        [offer.url, offer.address, offer.lan_address.unwrap(), offer.tailnet_address.unwrap()]
     };
     assert_eq!(
-        offered("203.0.113.7"),
-        ("203.0.113.7:47919".to_string(), "http://203.0.113.7:47919/pair#482913".to_string())
+        offered("192.168.1.23", None),
+        [
+            "http://box.local:47919/pair#482913",
+            "http://box.local:47919",
+            "http://192.168.1.23:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
     );
     assert_eq!(
-        offered("192.168.1.23"),
-        ("box.local:47919".to_string(), "http://box.local:47919/pair#482913".to_string())
+        offered("203.0.113.7", None),
+        [
+            "http://203.0.113.7:47919/pair#482913",
+            "http://203.0.113.7:47919",
+            "http://203.0.113.7:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
+    );
+    assert_eq!(
+        offered("203.0.113.7", Some("https://tv.example.com")),
+        [
+            "https://tv.example.com/pair#482913",
+            "https://tv.example.com",
+            "http://203.0.113.7:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
     );
 }
