@@ -1027,7 +1027,7 @@ fn film(dir: &Path, tools: &Tools) -> Option<Vec<u8>> {
 #[ignore = "needs an ffmpeg on the PATH that encodes H.264 and AC-3; run it with --ignored"]
 async fn a_matroska_film_plays_from_any_second_with_its_own_timestamps() {
     let h = Harness::new();
-    let tools = Tools::find(std::env::var("PATH").ok().as_deref());
+    let tools = Tools::find(&crate::env::Env::from_process());
     let made =
         tools.both().and_then(|_| film(h.dir.path(), &tools)).expect("this machine's ffmpeg makes the test film");
     *h.outside.tools.lock().unwrap() = tools;

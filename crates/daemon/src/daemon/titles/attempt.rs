@@ -550,7 +550,7 @@ fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error 
     }
     if every(|s| matches!(s, Skip::Unplayable { .. })) {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} plays in the browser without ffmpeg"))
-            .with_hint("install ffmpeg, then play it again");
+            .with_hint(format!("{}, then play it again", crate::ffmpeg::INSTALL));
     }
     if every(|s| matches!(s, Skip::NotOnTv { .. })) {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} comes in a container the TV plays"))
