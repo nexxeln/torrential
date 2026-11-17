@@ -587,6 +587,46 @@ fn a_download_whose_only_seeder_leaves_keeps_waiting() {
     assert_eq!(state(&home.job(&fixture.id())), "downloading");
 }
 
+#[cfg(target_os = "linux")]
+const LOOPBACK: &str = "lo";
+#[cfg(target_os = "macos")]
+const LOOPBACK: &str = "lo0";
+
+#[cfg(unix)]
+#[test]
+fn a_download_bound_to_a_missing_interface_waits_for_it_and_takes_nothing_from_a_peer() {
+    let fixture = Fixture::new("set", &SET, 13);
+    let seeder = Seeder::start(&fixture, None);
+    let home = Home::seeded_by(&[&seeder]);
+    home.write_config("torrent_interface: tr-missing0\n");
+    home.get(&fixture.torrent_file(), &[]);
+    let job = home.until(&fixture.id(), "it waits for the interface", |j| j["waiting_for"] == "tr-missing0");
+    assert_eq!(state(&job), "downloading");
+    let status = home.run(&["status"]);
+    assert!(
+        status.stdout.contains("waiting for tr-missing0, the torrent_interface in config.yaml, to come up"),
+        "{}",
+        status.stdout
+    );
+    // A peer on 127.0.0.1 sends this small set well within this when nothing binds the engine.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!((verified(&home.job(&fixture.id())), seeder.uploaded()), (0, 0));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_download_bound_to_the_loopback_interface_finishes_through_it() {
+    let fixture = Fixture::new("set", &SET, 14);
+    let seeder = Seeder::start(&fixture, None);
+    let home = Home::seeded_by(&[&seeder]);
+    home.write_config(&format!("torrent_interface: {LOOPBACK}\n"));
+    home.get(&fixture.torrent_file(), &[]);
+    let wait = home.run(&["wait", &fixture.short()]);
+    assert_eq!(wait.code, 0, "{}{}", wait.stdout, wait.stderr);
+    let job = home.job(&fixture.id());
+    assert_eq!((state(&job), verified(&job), &job["waiting_for"]), ("done", fixture.total(), &Value::Null));
+}
+
 #[test]
 fn verify_reports_a_corrupted_byte_and_repair_fixes_it() {
     let fixture = Fixture::new("set", &SET, 6);

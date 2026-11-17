@@ -90,6 +90,11 @@ pub enum EngineEvent {
     Removed {
         id: TorrentId,
     },
+    /// Torrents reach peers only through this network interface, which went down or came back.
+    Interface {
+        name: String,
+        up: bool,
+    },
 }
 
 /// What the engine does to downloads, on the engine thread.

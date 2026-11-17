@@ -90,6 +90,13 @@ impl Session {
         r.map_err(|e| with_id(e, id))
     }
 
+    /// Asks every tracker and the DHT for peers now, even before a tracker's minimum interval has
+    /// passed.
+    pub fn reannounce(&mut self, id: TorrentId) -> Result<(), EngineError> {
+        let r = self.native.pin_mut().reannounce(id.as_bytes());
+        r.map_err(|e| with_id(e, id))
+    }
+
     /// Asks for resume data, including the info dictionary.
     /// `Alert::ResumeDataSaved` or `Alert::ResumeDataFailed` follows. The data
     /// lists only pieces already written to disk, which can trail the verified

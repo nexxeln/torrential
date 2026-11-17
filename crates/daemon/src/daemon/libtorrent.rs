@@ -31,6 +31,9 @@ pub enum Network {
 
 pub struct Libtorrent {
     session: lt::Session,
+    bound: Option<Bound>,
+    /// Ask every torrent's trackers and the DHT for peers at the next stats tick.
+    reannounce: bool,
     torrents: BTreeMap<TorrentId, Torrent>,
     /// libtorrent forgets removed torrents at once, then confirms after their files close.
     removing: BTreeMap<TorrentId, u32>,
@@ -41,6 +44,13 @@ pub struct Libtorrent {
     peers: Vec<SocketAddr>,
     stats_at: Instant,
     dht_saved_at: Instant,
+}
+
+/// The network interface every torrent socket is bound to, as last seen.
+struct Bound {
+    name: lt::InterfaceName,
+    /// `None` before the first look.
+    up: Option<bool>,
 }
 
 #[derive(Default)]
@@ -69,13 +79,13 @@ enum Check {
 }
 
 impl Libtorrent {
-    pub fn start(state: &Path, network: Network) -> Result<Self, Error> {
+    pub fn start(state: &Path, network: Network, interface: Option<lt::InterfaceName>) -> Result<Self, Error> {
         let ip = match network {
             Network::Public => Ipv4Addr::UNSPECIFIED,
             Network::Loopback { .. } => Ipv4Addr::LOCALHOST,
         };
         let port = listen_port(&state.join(LISTEN_PORT_FILE), ip.into())?;
-        let config = config(&network, port);
+        let config = config(&network, port, interface.clone());
         let dht_state = (network == Network::Public).then(|| state.join(DHT_STATE_FILE));
         let peers = match network {
             Network::Public => Vec::new(),
@@ -93,6 +103,8 @@ impl Libtorrent {
         let now = Instant::now();
         Ok(Self {
             session,
+            bound: interface.map(|name| Bound { name, up: None }),
+            reannounce: false,
             torrents: BTreeMap::new(),
             removing: BTreeMap::new(),
             events: Vec::new(),
@@ -208,7 +220,12 @@ impl Libtorrent {
                 t.unconfirmed = t.unconfirmed.saturating_sub(1);
                 self.report_if_finished(id);
             }
-            (A::ListenSucceeded { address, transport }, _) => log(&format!("listening on {address} ({transport})")),
+            (A::ListenSucceeded { address, transport }, _) => {
+                log(&format!("listening on {address} ({transport})"));
+                // libtorrent announces only on listen sockets, so torrents added while the bound
+                // interface was missing have announced nowhere yet.
+                self.reannounce |= self.bound.is_some();
+            }
             (A::ListenFailed { interface, port, transport, operation, error }, _) => {
                 log(&format!("cannot listen on {interface} port {port} ({transport}): {operation}: {error}"));
             }
@@ -346,6 +363,21 @@ impl Libtorrent {
             self.events.push(EngineEvent::Stats { id, stats });
         }
         self.events.push(EngineEvent::Paused { id });
+    }
+
+    /// Says when the bound interface goes down or comes back. Trackers that failed meanwhile can
+    /// wait up to an hour to be asked again, so its return asks them at once.
+    fn watch_interface(&mut self) {
+        let Some(bound) = &mut self.bound else { return };
+        let up = interface_up(bound.name.as_str());
+        if bound.up == Some(up) {
+            return;
+        }
+        self.reannounce |= up && bound.up.is_some();
+        bound.up = Some(up);
+        let name = bound.name.to_string();
+        log(&if up { format!("{name} is up; torrents use it") } else { format!("torrents wait for {name}") });
+        self.events.push(EngineEvent::Interface { name, up });
     }
 
     fn save_dht_state(&mut self) {
@@ -516,6 +548,12 @@ impl Engine for Libtorrent {
         }
         if self.stats_at.elapsed() >= STATS_EVERY {
             self.stats_at = Instant::now();
+            self.watch_interface();
+            if std::mem::take(&mut self.reannounce) {
+                for &id in self.torrents.keys() {
+                    let _ = self.session.reannounce(id);
+                }
+            }
             self.stats();
         }
         if self.dht_saved_at.elapsed() >= SAVE_DHT_EVERY {
@@ -537,25 +575,64 @@ pub fn parse(bytes: &[u8]) -> Result<Metainfo, Error> {
     self::metainfo(metainfo)
 }
 
-fn config(network: &Network, port: u16) -> lt::Config {
+fn config(network: &Network, port: u16, interface: Option<lt::InterfaceName>) -> lt::Config {
+    let listen = |ips: &[IpAddr]| match &interface {
+        Some(name) => lt::Listen::Interface { name: name.clone(), port },
+        None => lt::Listen::Addresses(ips.iter().map(|&ip| SocketAddr::new(ip, port)).collect()),
+    };
     let off = lt::Config {
-        listen: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
+        listen: listen(&[Ipv4Addr::LOCALHOST.into()]),
         upload: lt::UploadPolicy::Off,
         ..lt::Config::loopback()
     };
     match network {
         Network::Loopback { .. } => off,
         Network::Public => lt::Config {
-            listen: vec![
-                SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port),
-                SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port),
-            ],
+            listen: listen(&[Ipv4Addr::UNSPECIFIED.into(), Ipv6Addr::UNSPECIFIED.into()]),
             dht: lt::Dht::On { bootstrap_nodes: BOOTSTRAP_NODES.map(String::from).to_vec() },
-            local_network: true,
+            // Finding peers and asking the router for a port happen on the home network, which a
+            // bound session stays off.
+            local_network: interface.is_none(),
             connections: lt::ConnectionLimits::default(),
             ..off
         },
     }
+}
+
+/// The interface exists, is up, and has an address peers can reach it on.
+#[cfg(unix)]
+fn interface_up(name: &str) -> bool {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return false;
+    }
+    let mut up = false;
+    let mut next = list;
+    while let Some(entry) = unsafe { next.as_ref() } {
+        next = entry.ifa_next;
+        let running = (libc::IFF_UP | libc::IFF_RUNNING) as u32;
+        let named = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_bytes() == name.as_bytes();
+        if !named || entry.ifa_flags & running != running {
+            continue;
+        }
+        let Some(address) = (unsafe { entry.ifa_addr.as_ref() }) else { continue };
+        up |= match i32::from(address.sa_family) {
+            libc::AF_INET => true,
+            libc::AF_INET6 => {
+                let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in6>() };
+                !Ipv6Addr::from(address.sin6_addr.s6_addr).is_unicast_link_local()
+            }
+            _ => false,
+        };
+    }
+    unsafe { libc::freeifaddrs(list) };
+    up
+}
+
+/// config.yaml refuses `torrent_interface` on Windows.
+#[cfg(windows)]
+fn interface_up(_: &str) -> bool {
+    false
 }
 
 fn listen_port(path: &Path, ip: IpAddr) -> Result<u16, Error> {

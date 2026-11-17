@@ -218,12 +218,17 @@ impl JobEntry {
         }
     }
 
-    pub fn view(&self) -> Job {
+    /// The download as clients see it. `waiting_for` names the network interface torrents are bound
+    /// to while it is down, which a download that needs peers waits for.
+    pub fn view(&self, waiting_for: Option<&str>) -> Job {
         let status = status(&self.record.intent, self.observed);
         let transferring = matches!(status, JobStatus::Metadata | JobStatus::Downloading);
+        let waiting_for = waiting_for.filter(|_| transferring);
         let size = self.selected_size();
         let verified = self.verified();
-        let s = if transferring { self.stats } else { Stats::default() };
+        // libtorrent's rates fade over seconds, and its peers on the interface that went down
+        // stay connected until they time out, though nothing reaches them.
+        let s = if transferring && waiting_for.is_none() { self.stats } else { Stats::default() };
         let eta = match size {
             Some(size) if s.down_rate > 0 && self.rate_settled && self.unsourced_at.is_none() => {
                 Some(size.saturating_sub(verified).div_ceil(s.down_rate))
@@ -254,6 +259,7 @@ impl JobEntry {
                 Home::Folder => Place::Folder,
                 Home::Plays(_) => Place::Plays,
             },
+            waiting_for: waiting_for.map(str::to_string),
         }
     }
 }
@@ -344,6 +350,20 @@ mod tests {
     }
 
     #[test]
+    fn a_download_waiting_for_its_interface_shows_why_and_no_stale_rate() {
+        let mut job = entry(1, 0, Intent::Running, Observed::InEngine(Phase::Downloading));
+        job.sample(Stats { down_rate: 6 << 20, peers: 13, ..Stats::default() }, Instant::now());
+        let seen = |job: &JobEntry| {
+            let view = job.view(Some("wg0"));
+            (view.waiting_for, view.progress.down_rate, view.progress.peers)
+        };
+        assert_eq!(seen(&job), (Some("wg0".to_string()), 0, 0));
+        assert_eq!(job.view(None).progress.down_rate, 6 << 20);
+        job.record.intent = Intent::Done { finished_at: 7 };
+        assert_eq!(seen(&job), (None, 0, 0), "a finished download needs no peers");
+    }
+
+    #[test]
     fn an_eta_waits_until_the_rate_has_held_for_ten_seconds() {
         let mut job = entry(1, 0, Intent::Running, Observed::InEngine(Phase::Downloading));
         let film = MetaFile { path: "film.mp4".into(), size: 600 << 20 };
@@ -354,13 +374,13 @@ mod tests {
         for (second, down_rate) in [(0, 1 << 20), (9, 2 << 20), (10, 10 << 20), (11, 0), (12, 10 << 20), (22, 10 << 20)]
         {
             job.sample(Stats { down_rate, ..Stats::default() }, start + Duration::from_secs(second));
-            etas.push(job.view().progress.eta);
+            etas.push(job.view(None).progress.eta);
         }
         assert_eq!(etas, [None, None, Some(60), None, None, Some(60)]);
         let missing = Some(Missing { pieces: 2, unavailable: 2 });
         let stats = Stats { down_rate: 10 << 20, missing, peers: 2, ..Stats::default() };
         job.sample(stats, start + Duration::from_secs(23));
-        assert_eq!(job.view().progress.eta, None, "bytes arrive, but no source has the pieces still missing");
+        assert_eq!(job.view(None).progress.eta, None, "bytes arrive, but no source has the pieces still missing");
     }
 
     #[test]
@@ -370,9 +390,9 @@ mod tests {
         let metainfo = Metainfo::new(job.record.info_hash, "Big Buck Bunny".into(), files, false, Vec::new()).unwrap();
         job.metainfo = Some(Arc::new(metainfo));
         job.record.name = Some("Big Buck Bunny".into());
-        assert_eq!(job.view().path, Some(PathBuf::from("/d/Big Buck Bunny")));
+        assert_eq!(job.view(None).path, Some(PathBuf::from("/d/Big Buck Bunny")));
         job.record.selection = Selection::Patterns(vec!["*.mp4".into()]);
-        assert_eq!(job.view().path, Some(PathBuf::from("/d/Big Buck Bunny/bbb.mp4")));
+        assert_eq!(job.view(None).path, Some(PathBuf::from("/d/Big Buck Bunny/bbb.mp4")));
     }
 
     #[test]
@@ -418,13 +438,13 @@ mod tests {
         let map = |c: &str| Some(c.repeat(64).parse::<PieceMap>().unwrap());
         let mut job = entry(1, 0, Intent::Running, Observed::InEngine(Phase::Downloading));
         job.record.piece_map = map("2");
-        assert_eq!(job.view().progress.piece_map, map("2"), "before the engine's first sample");
+        assert_eq!(job.view(None).progress.piece_map, map("2"), "before the engine's first sample");
         job.stats.piece_map = map("5");
-        assert_eq!(job.view().progress.piece_map, map("5"));
+        assert_eq!(job.view(None).progress.piece_map, map("5"));
         job.record.intent = Intent::Failed { error: Error::new(ErrorCode::DiskFull, "disk full") };
         job.observed = Observed::Absent;
-        assert_eq!(job.view().progress.piece_map, map("2"), "out of the engine, the last save's");
+        assert_eq!(job.view(None).progress.piece_map, map("2"), "out of the engine, the last save's");
         job.record.intent = Intent::Done { finished_at: 7 };
-        assert_eq!(job.view().progress.piece_map, None);
+        assert_eq!(job.view(None).progress.piece_map, None);
     }
 }

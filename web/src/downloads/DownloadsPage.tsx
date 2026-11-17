@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { type ApiError, asApiError, change, type Job } from "../api";
 import { bytes, count, percent, rate, sentence, span } from "../lib/format";
-import { STATE_WORDS, useJobs } from "../lib/jobs";
+import { STATE_WORDS, useJobs, waiting } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { Link, watchPath } from "../router";
 import { Button, buttonClass } from "../ui/Button";
@@ -14,9 +14,9 @@ function facts(job: Job): string {
   const { progress } = job;
   const size = progress.size;
   const have = size === null ? null : job.state === "done" ? bytes(size) : `${bytes(progress.verified)} of ${bytes(size)}`;
-  const moving = job.state === "downloading";
+  const moving = job.state === "downloading" && !job.waiting_for;
   return [
-    STATE_WORDS[job.state],
+    waiting(job) ?? STATE_WORDS[job.state],
     have,
     moving ? rate(progress.down_rate) : null,
     moving ? count(progress.peers, "peer") : null,

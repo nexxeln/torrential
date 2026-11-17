@@ -315,6 +315,7 @@ fn job(hex: &str, name: Option<&str>, status: JobStatus, progress: Progress) -> 
         added_at: NOW - 3600,
         title: None,
         place: torrential_core::Place::Folder,
+        waiting_for: None,
     }
 }
 

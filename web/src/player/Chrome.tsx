@@ -2,7 +2,7 @@ import { ArrowDownIcon, ArrowLeftIcon, CheckIcon } from "@heroicons/react/16/sol
 import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
 import type { ApiError, Job, PlayInfo } from "../api";
 import { bytes, count, percent, rate, sentence } from "../lib/format";
-import { useJob } from "../lib/jobs";
+import { useJob, waiting } from "../lib/jobs";
 import { readable } from "../lib/release";
 import { isTv } from "../lib/tv";
 import { Button } from "../ui/Button";
@@ -33,6 +33,8 @@ export function releaseHeading(name: string, file: string | null): Heading {
 /** How the download is doing, in a few words. Nothing once it is done. */
 export function Readout({ job }: { job: Job }) {
   const { progress } = job;
+  const waits = waiting(job);
+  if (waits) return <div>{waits}</div>;
   switch (job.state) {
     case "downloading":
       return (
