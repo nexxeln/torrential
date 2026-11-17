@@ -223,7 +223,12 @@ impl Harness {
         };
         let db = super::db::connect(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        let listen = Listen { ports: &[0], access: &dir.path().join(TOKEN_FILE), exposure: outside.exposure.clone() };
+        let listen = Listen {
+            ports: &[0],
+            access: &dir.path().join(TOKEN_FILE),
+            exposure: outside.exposure.clone(),
+            news: None,
+        };
         start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), listen).unwrap()
     }
 
