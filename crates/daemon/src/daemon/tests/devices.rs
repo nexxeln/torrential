@@ -153,7 +153,8 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let not_paired = (
         401,
         "not_paired".to_string(),
-        "this device is not paired with the Mac, so open /pair and enter the code that Add a device shows".to_string(),
+        "this device is not paired with torrential, so open /pair and enter the code that Add a device shows"
+            .to_string(),
     );
     for path in ["/api/jobs", "/api/home", "/api/devices", "/api/me", "/api/search?q=sintel", "/api/stream?id=x&file=0"]
     {
@@ -168,7 +169,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let mut idle = TcpStream::connect((ip, h.running.ctx.http_port)).await.unwrap();
     let page = phone.get("/pair").await;
     assert_eq!(page.status, 200);
-    assert!(page.text().contains("Enter the code that Add a device shows in torrential on the Mac."));
+    assert!(page.text().contains("Enter the code that Add a device shows on the computer running torrential."));
 
     let wrong = format!("{:06}", (offer.code.parse::<u32>().unwrap() + 1) % 1_000_000);
     assert_eq!(phone.pair(&wrong).await.status, 400);
@@ -186,7 +187,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let bytes = phone.send("GET", &file, &["Range: bytes=0-99"], "").await;
     assert_eq!((bytes.status, bytes.body.len()), (206, 100));
     let mac_only =
-        (403, "local_only".to_string(), "only the Mac running torrential can add or remove devices".to_string());
+        (403, "local_only".to_string(), "only the computer running torrential can add or remove devices".to_string());
     assert_eq!(phone.get("/api/devices").await.error(), mac_only);
     assert_eq!(phone.send("POST", "/api/devices/add", &[], "{}").await.error(), mac_only);
     assert_eq!(phone.get("/pair").await.header("location"), Some("/"));
@@ -222,7 +223,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let removed = (
         401,
         "not_paired".to_string(),
-        "this device was removed on the Mac, so open /pair and enter a new code from Add a device".to_string(),
+        "this device was removed from torrential, so open /pair and enter a new code from Add a device".to_string(),
     );
     assert_eq!(phone.get("/api/jobs").await.error(), removed);
     assert_eq!(phone.get(&file).await.header("location"), Some("/pair"));
@@ -281,7 +282,8 @@ async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name(
     let not_paired = (
         401,
         "not_paired".to_string(),
-        "this device is not paired with the Mac, so open /pair and enter the code that Add a device shows".to_string(),
+        "this device is not paired with torrential, so open /pair and enter the code that Add a device shows"
+            .to_string(),
     );
     assert_eq!(phone.get("/api/jobs").await.error(), not_paired);
     assert_eq!(phone.get("/").await.header("location"), Some("/pair"));
@@ -709,7 +711,8 @@ async fn a_request_whose_body_arrives_after_its_device_is_removed_is_refused_and
     let _ = tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut answer)).await;
     let answer = String::from_utf8_lossy(&answer);
     assert!(
-        answer.starts_with("HTTP/1.1 401 Unauthorized\r\n") && answer.contains("this device was removed on the Mac"),
+        answer.starts_with("HTTP/1.1 401 Unauthorized\r\n")
+            && answer.contains("this device was removed from torrential"),
         "the phone's request is answered as a removed device's: {answer:?}"
     );
     let left: Vec<_> = h.status().await.into_iter().map(|job| job.id).collect();
@@ -731,7 +734,7 @@ async fn the_engine_keeps_trying_the_home_network_while_another_program_holds_it
     let squatter = squatter(ip, port);
     devices(&h, Request::AddDevice).await;
     let why = format!(
-        "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
+        "no phone or TV can reach this computer yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
     );
     unreachable(&h, Some(&why)).await;
     let me = mac_again(port).get("/api/me").await;

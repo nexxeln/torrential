@@ -263,7 +263,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "devices",
-      "about": "List, add, or remove the phones and TVs that watch from this Mac",
+      "about": "List, add, or remove the phones and TVs that watch from this computer",
       "arguments": [],
       "flags": [],
       "subcommands": [

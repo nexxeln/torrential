@@ -62,7 +62,7 @@ pub enum Command {
     /// Open the web app, to search and watch in your browser
     #[command(after_help = "Examples:\n  torrential web\n  torrential web --no-open")]
     Web(WebArgs),
-    /// List, add, or remove the phones and TVs that watch from this Mac
+    /// List, add, or remove the phones and TVs that watch from this computer
     #[command(
         after_help = "Examples:\n  torrential devices\n  torrential devices add\n  torrential devices remove 3f9a0c2e --json"
     )]

@@ -141,11 +141,11 @@ impl Refused {
         let message = match self {
             Self::TooManyTries => "too many tries from this device, so wait a minute and enter the code again",
             Self::NoOffer => {
-                "no code is open, so choose Add a device in torrential on the Mac and enter the code it shows"
+                "no code is open, so choose Add a device on the computer running torrential and enter the code it shows"
             }
-            Self::WrongCode => "that is not the code on the Mac, so check it and enter it again",
+            Self::WrongCode => "that is not the code torrential shows, so check it and enter it again",
             Self::Burned => {
-                "that code stopped working after too many wrong tries, so make a new one with Add a device on the Mac"
+                "that code stopped working after too many wrong tries, so make a new one with Add a device on the computer running torrential"
             }
             Self::Failed(error) => return error,
         };
@@ -243,7 +243,7 @@ impl State {
         devices.sort_by(|a, b| (a.added_at, &a.id).cmp(&(b.added_at, &b.id)));
         let unreachable = self.refused.filter(|_| self.reach() == Reach::Network).map(|why| {
             format!(
-                "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} ({why}) and keeps trying"
+                "no phone or TV can reach this computer yet, because torrential cannot listen on the home network on port {port} ({why}) and keeps trying"
             )
         });
         DeviceList { devices, offer: self.offer(port), unreachable }
@@ -419,7 +419,7 @@ impl Devices {
         if names.local.is_none() && names.lan.is_empty() && tailnet.is_none() && !public {
             return Err(Error::new(
                 ErrorCode::NetworkUnavailable,
-                "this Mac is on no network, so no phone or TV can reach it",
+                "this computer is on no network, so no phone or TV can reach it",
             )
             .with_hint("join the home Wi-Fi or network, then add the device again"));
         }

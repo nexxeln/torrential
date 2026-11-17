@@ -900,8 +900,8 @@ fn sample(code: ErrorCode) -> Error {
         ErrorCode::NotPaired => torrential_daemon::daemon::devices::Refused::WrongCode.error(),
         ErrorCode::LocalOnly => given(
             code,
-            "only the Mac running torrential can add or remove devices",
-            "open torrential on the Mac to do it",
+            "only the computer running torrential can add or remove devices",
+            "open torrential on that computer to do it",
         ),
         ErrorCode::Internal => Error::internal("the engine thread stopped"),
     }

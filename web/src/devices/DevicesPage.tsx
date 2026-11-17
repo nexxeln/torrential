@@ -130,7 +130,7 @@ export function DevicesPage() {
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-medium text-ink">Devices</h1>
           <p className="max-w-[60ch] text-base text-pretty text-pencil sm:text-sm">
-            Phones and TVs on this network watch from this Mac once you add them. They need no account and store nothing.
+            Phones and TVs on this network watch from this computer once you add them. They need no account and store nothing.
           </p>
         </div>
         {state.kind === "failed" && (
@@ -177,7 +177,7 @@ export function DevicesPage() {
                 ))}
               </ul>
             ) : (
-              <p className="pt-2 text-base text-pencil sm:text-sm">No phone or TV yet. Only this Mac can reach torrential.</p>
+              <p className="pt-2 text-base text-pencil sm:text-sm">No phone or TV yet. Only this computer can reach torrential.</p>
             )}
           </section>
         )}
