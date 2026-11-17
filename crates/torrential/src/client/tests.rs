@@ -664,13 +664,14 @@ fn wait_until_done_timeout_error_and_stop() {
 }
 
 #[test]
-fn daemon_status_running_and_stopped() {
+fn daemon_status_running_stopped_and_on_another_machine() {
     let running = DaemonReport {
         engine: "running",
         pid: Some(4242),
         version: Some("0.1.0".into()),
         address: Some("http://127.0.0.1:47919".into()),
-        log: "/Users/ada/.local/state/torrential/engine.log".into(),
+        device: None,
+        log: Some("/Users/ada/.local/state/torrential/engine.log".into()),
         downloads: Some(2),
         this_version: "0.1.0".into(),
         service_binary: None,
@@ -685,8 +686,14 @@ fn daemon_status_running_and_stopped() {
         service_binary,
         ..running.clone()
     };
+    let remote = DaemonReport {
+        address: Some("http://nas.local:47919".into()),
+        device: Some("3f9a0c2e".into()),
+        log: None,
+        ..running.clone()
+    };
     let mut out = String::new();
-    for report in [running, stopped, other] {
+    for report in [running, stopped, other, remote] {
         out.push_str(&both(&daemon_status(&report), &crate::output::Typed { kind: DocKind::Daemon, body: &report }));
     }
     insta::assert_snapshot!(out);
@@ -974,7 +981,8 @@ fn a_tab_in_a_path_stays_inside_its_column() {
         pid: None,
         version: None,
         address: None,
-        log: "/state/my\ntorrential/engine.log".into(),
+        device: None,
+        log: Some("/state/my\ntorrential/engine.log".into()),
         downloads: None,
         this_version: "0.1.0".into(),
         service_binary: None,

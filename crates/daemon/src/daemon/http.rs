@@ -1,8 +1,8 @@
 //! The engine's HTTP server. It serves downloads to video players, the web app with its API, and
-//! the requests of this user's torrential at `wire::PATH`. It listens on 127.0.0.1, and on the home
-//! network too while a phone or TV is paired. A request for bytes that have not arrived asks the
-//! engine for their pieces first and waits for them, so a player can start and seek while the rest
-//! of the file downloads.
+//! the requests of torrential at `wire::PATH`, this user's and paired machines'. It listens on
+//! 127.0.0.1, and on the home network too while a phone or TV is paired. A request for bytes that
+//! have not arrived asks the engine for their pieces first and waits for them, so a player can
+//! start and seek while the rest of the file downloads.
 
 use std::collections::VecDeque;
 use std::io::{self, SeekFrom};
@@ -559,11 +559,11 @@ impl Connection<'_> {
                 let dlna = self.ctx.casts.served(&request.path);
                 return self.file(request, granted.id, granted.index, dlna.as_ref()).await;
             }
-            Asker::Local if request.path == wire::PATH => {
+            Asker::Local | Asker::Device(_) if request.path == wire::PATH => {
                 if request.method != Method::Post {
                     return self.empty("405 Method Not Allowed", "", false).await;
                 }
-                return super::server::answer(self, &request).await;
+                return super::server::answer(self, &request, asker).await;
             }
             Asker::Local | Asker::Device(_) => {}
         }
@@ -939,7 +939,7 @@ fn head(parsed: &httparse::Request) -> Head {
 enum Refusal {
     /// Over loopback, a request another website made, or one that names another host.
     Forbidden,
-    /// A request for `wire::PATH` without this user's token, or from another machine.
+    /// A request for `wire::PATH` without this user's token over loopback or a paired device's.
     Unauthorized,
     /// From the home network, a request another website made, or one that names another host. It
     /// holds the address to open instead.
@@ -952,9 +952,10 @@ enum Refusal {
 }
 
 /// Who sent `request`. Over loopback, a request that names this Mac's .local name moves to
-/// 127.0.0.1 first. Only this user's token over loopback lets a request in at `wire::PATH`. A cast
-/// URL is let in by its grant alone, anything else over loopback is this Mac, and from the network a
-/// paired device's cookie lets it in.
+/// 127.0.0.1 first. At `wire::PATH`, this user's token over loopback lets a request in, and so does
+/// a paired device's token, such as torrential's on another machine. A cast URL is let in by its
+/// grant alone, anything else over loopback is this Mac, and from the network a paired device's
+/// cookie lets it in.
 fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
     let addressing = devices.addressing();
     let name = addressing.local.clone();
@@ -978,8 +979,11 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
     }
     if request.path == wire::PATH {
         let token = request.bearer.as_deref();
-        let local = peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token));
-        return if local { Ok(Asker::Local) } else { Err(Refusal::Unauthorized) };
+        if peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token)) {
+            return Ok(Asker::Local);
+        }
+        let device = token.and_then(|token| devices.holder(token, peer.ip(), now));
+        return device.map(|device| Asker::Device(device.id)).ok_or(Refusal::Unauthorized);
     }
     if request.path.starts_with(CAST) {
         return devices.granted(&request.path).map(Asker::Cast).ok_or(Refusal::CastEnded);
