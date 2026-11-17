@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_saphyr::{Localizer, Location, SnippetMode, Spanned, UserMessageFormatter};
+use torrential_core::indexer::{ApiKey, KeyFrom};
 use torrential_core::units::{parse_size, size_text};
 use torrential_core::{Error, ErrorCode, Playback, Preferences, Screen};
 use torrential_engine::InterfaceName;
@@ -11,7 +12,7 @@ use torrential_search::subtitles::SubtitleConfig;
 use torrential_search::{SearchConfig, TorznabConfig};
 
 use crate::env::{Env, hooks};
-use crate::fsutil::{Writes, write_atomic};
+use crate::fsutil::{Writes, write_atomic, write_private};
 use crate::paths::Paths;
 use crate::player::Choice;
 
@@ -147,6 +148,12 @@ struct ServerOnly {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
+struct SourcesOnly {
+    sources: Sources,
+}
+
+#[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct Overrides {
     screen: Option<Screen>,
@@ -195,7 +202,71 @@ struct Sources {
 struct Torznab {
     name: String,
     url: String,
+    api_key: Option<Spanned<String>>,
     api_key_env: Option<Spanned<String>>,
+}
+
+impl Torznab {
+    fn entry(self) -> Result<IndexerEntry, Problem> {
+        let Torznab { name, url, api_key, api_key_env } = self;
+        let key = match (api_key, api_key_env) {
+            (None, None) => Key::None,
+            (Some(Spanned { value, referenced, .. }), None) => Key::Inline(
+                ApiKey::new(&value)
+                    .ok_or_else(|| (Some(referenced.line()), format!("the {name:?} indexer's api_key is empty")))?,
+            ),
+            (None, Some(Spanned { value, .. })) => Key::Env(value),
+            (Some(Spanned { referenced, .. }), Some(_)) => {
+                let message = format!("the {name:?} indexer has both api_key and api_key_env; keep one");
+                return Err((Some(referenced.line()), message));
+            }
+        };
+        Ok(IndexerEntry { name, url, key })
+    }
+}
+
+/// A `sources.torznab` entry as config.yaml holds it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IndexerEntry {
+    pub name: String,
+    pub url: String,
+    pub key: Key,
+}
+
+/// Where an indexer's API key is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Key {
+    None,
+    /// `api_key`, in config.yaml itself.
+    Inline(ApiKey),
+    /// `api_key_env`: the engine's environment variable that holds it.
+    Env(String),
+}
+
+impl Key {
+    /// The key itself, or `None` when there is none or its variable is not set in `env`.
+    pub fn resolve(&self, env: &Env) -> Option<ApiKey> {
+        match self {
+            Self::None => None,
+            Self::Inline(key) => Some(key.clone()),
+            Self::Env(var) => env.var(var).and_then(ApiKey::new),
+        }
+    }
+
+    pub fn origin(&self) -> KeyFrom {
+        match self {
+            Self::None => KeyFrom::None,
+            Self::Inline(_) => KeyFrom::Config,
+            Self::Env(var) => KeyFrom::Env(var.clone()),
+        }
+    }
+}
+
+/// The Torznab indexers in config.yaml, and the sources it disables.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Indexers {
+    pub entries: Vec<IndexerEntry>,
+    pub disabled: Vec<String>,
 }
 
 type Problem = (Option<u64>, String);
@@ -296,6 +367,40 @@ pub fn save_server(paths: &Paths, on: bool, writes: &Writes) -> Result<(PathBuf,
     })
 }
 
+/// The Torznab indexers in config.yaml. The rest of the file need not be valid.
+pub fn indexers(paths: &Paths) -> Result<Indexers, Error> {
+    let Some((path, text)) = read(paths)? else { return Ok(Indexers::default()) };
+    read_indexers(&text).map_err(|(line, message)| invalid(&path, line, &message))
+}
+
+/// Writes `indexers` into config.yaml. It keeps every line outside `sources`, and in the list
+/// each entry that stays as it was, with its comments. The file becomes readable by this user
+/// alone while it holds a key.
+pub fn save_indexers(paths: &Paths, indexers: &Indexers, writes: &Writes) -> Result<(PathBuf, bool), Error> {
+    save(paths, writes, "sources block", |text| {
+        let wanted = |edited: &String| read_indexers(edited).ok().as_ref() == Some(indexers);
+        edit_torznab(text, &indexers.entries).filter(wanted).or_else(|| {
+            let whole = if indexers.entries.is_empty() && indexers.disabled.is_empty() {
+                without_block(text, "sources")
+            } else {
+                with_block(text, "sources", &sources_block(indexers))
+            };
+            wanted(&whole).then_some(whole)
+        })
+    })
+}
+
+fn read_indexers(text: &str) -> Result<Indexers, Problem> {
+    let file: SourcesOnly = serde_saphyr::from_str(text).map_err(|e| problem(&e))?;
+    let entries = file.sources.torznab.into_iter().map(Torznab::entry).collect::<Result<_, _>>()?;
+    Ok(Indexers { entries, disabled: file.sources.disabled })
+}
+
+/// Whether `text` holds an API key, or may: an unreadable `sources` block counts.
+fn holds_key(text: &str) -> bool {
+    read_indexers(text).map_or(true, |indexers| indexers.entries.iter().any(|e| matches!(e.key, Key::Inline(_))))
+}
+
 fn save(
     paths: &Paths,
     writes: &Writes,
@@ -313,8 +418,147 @@ fn save(
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| writes.error(dir, e))?;
     }
-    write_atomic(&target, edited.as_bytes()).map_err(|e| writes.error(&target, e))?;
+    let write = if holds_key(&edited) { write_private } else { write_atomic };
+    write(&target, edited.as_bytes()).map_err(|e| writes.error(&target, e))?;
     Ok((path, true))
+}
+
+/// A YAML scalar for `text`: bare when nothing in it could read as anything else, else quoted.
+fn scalar(text: &str) -> String {
+    let plain = text.starts_with(|c: char| c.is_ascii_alphabetic())
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || "._/:?&=%~+@-".contains(c))
+        && !["true", "false", "yes", "no", "on", "off", "null", "y", "n"].contains(&text.to_ascii_lowercase().as_str());
+    if plain { text.to_string() } else { format!("'{}'", text.replace('\'', "''")) }
+}
+
+/// One `sources.torznab` entry, its dash at `indent` spaces.
+fn torznab_item(entry: &IndexerEntry, indent: usize) -> String {
+    let (dash, inner) = (" ".repeat(indent), " ".repeat(indent + 2));
+    let key = match &entry.key {
+        Key::None => String::new(),
+        Key::Inline(key) => format!("{inner}api_key: {}\n", scalar(key.expose())),
+        Key::Env(var) => format!("{inner}api_key_env: {}\n", scalar(var)),
+    };
+    format!("{dash}- name: {}\n{inner}url: {}\n{key}", scalar(&entry.name), scalar(&entry.url))
+}
+
+fn sources_block(indexers: &Indexers) -> String {
+    let mut block = "sources:\n".to_string();
+    if !indexers.disabled.is_empty() {
+        let names: Vec<String> = indexers.disabled.iter().map(|name| scalar(name)).collect();
+        block.push_str(&format!("  disabled: [{}]\n", names.join(", ")));
+    }
+    if !indexers.entries.is_empty() {
+        block.push_str("  torznab:\n");
+        block.extend(indexers.entries.iter().map(|entry| torznab_item(entry, 4)));
+    }
+    block
+}
+
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+fn is_comment(line: &str) -> bool {
+    line.trim_start().starts_with('#')
+}
+
+/// A line that holds YAML: not blank and not only a comment.
+fn is_content(line: &str) -> bool {
+    !line.trim().is_empty() && !is_comment(line)
+}
+
+/// Whether `line` is `key:` with nothing after it but a comment.
+fn opens(line: &str, key: &str) -> bool {
+    line.trim_start().strip_prefix(key).and_then(|rest| rest.strip_prefix(':')).is_some_and(|rest| {
+        let rest = rest.trim();
+        rest.is_empty() || rest.starts_with('#')
+    })
+}
+
+/// `text` with `sources.torznab` holding `entries`, edited line by line: entries that stay keep
+/// their lines and the comments above them. `None` when the block is in a shape this does not
+/// edit, such as a flow list.
+fn edit_torznab(text: &str, entries: &[IndexerEntry]) -> Option<String> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let Some((start, end)) = block_lines(&lines, "sources") else {
+        if entries.is_empty() {
+            return Some(text.to_string());
+        }
+        let items: String = entries.iter().map(|entry| torznab_item(entry, 4)).collect();
+        return Some(with_block(text, "sources", &format!("sources:\n  torznab:\n{items}")));
+    };
+    if !opens(lines[start], "sources") {
+        return None;
+    }
+    let child = lines[start + 1..end].iter().find(|line| is_content(line)).map(|line| indent(line))?;
+    let named = |i: &usize| indent(lines[*i]) == child && lines[*i].trim_start().starts_with("torznab:");
+    let Some(key) = (start + 1..end).find(named) else {
+        if entries.is_empty() {
+            return Some(text.to_string());
+        }
+        let items: String = entries.iter().map(|entry| torznab_item(entry, child + 2)).collect();
+        let added = format!("{}torznab:\n{items}", " ".repeat(child));
+        return Some([ended(lines[..end].concat()), added, lines[end..].concat()].concat());
+    };
+    if !opens(lines[key], "torznab") {
+        return None;
+    }
+    // The list runs to its last line of YAML: deeper than the key, or a dash beside it.
+    let inside = |line: &str| is_content(line) && (indent(line) > child || line.trim_start().starts_with('-'));
+    let last =
+        (key + 1..end).take_while(|&i| !is_content(lines[i]) || inside(lines[i])).filter(|&i| inside(lines[i])).last();
+    let stop = last.map_or(key + 1, |last| last + 1);
+    let dash = (key + 1..stop).map(|i| lines[i]).find(|line| line.trim_start().starts_with('-')).map(indent);
+    let starts: Vec<usize> =
+        (key + 1..stop).filter(|&i| Some(indent(lines[i])) == dash && lines[i].trim_start().starts_with('-')).collect();
+    // Each entry takes the comments right above its dash with it.
+    let bounds: Vec<usize> = (0..starts.len())
+        .map(|n| {
+            let floor = if n == 0 { key + 1 } else { starts[n - 1] + 1 };
+            let mut from = starts[n];
+            while from > floor && is_comment(lines[from - 1]) {
+                from -= 1;
+            }
+            from
+        })
+        .collect();
+    let mut kept: Vec<(Option<IndexerEntry>, String)> = Vec::new();
+    for (n, &from) in bounds.iter().enumerate() {
+        let to = bounds.get(n + 1).copied().unwrap_or(stop);
+        let chunk = ended(lines[from..to].concat());
+        let dedented: String = lines[from..to]
+            .iter()
+            .map(|&line| line.get(dash.unwrap_or(0).min(indent(line))..).unwrap_or(line))
+            .collect();
+        let parsed: Option<Vec<Torznab>> = serde_saphyr::from_str(&dedented).ok();
+        let entry = parsed.filter(|items| items.len() == 1).and_then(|mut items| items.pop()?.entry().ok());
+        kept.push((entry, chunk));
+    }
+    if entries.is_empty() {
+        let rest = [lines[start..key].concat(), lines[stop..end].concat()].concat();
+        if !rest.lines().skip(1).any(is_content) {
+            return Some(without_block(text, "sources"));
+        }
+        return Some([lines[..key].concat(), lines[stop..].concat()].concat());
+    }
+    let first = bounds.first().copied().unwrap_or(stop);
+    let mut list = ended(lines[key..first].concat());
+    for entry in entries {
+        match kept.iter().position(|(was, _)| was.as_ref() == Some(entry)) {
+            Some(at) => list.push_str(&kept.remove(at).1),
+            None => list.push_str(&torznab_item(entry, dash.unwrap_or(child + 2))),
+        }
+    }
+    Some([lines[..key].concat(), list, lines[stop..].concat()].concat())
+}
+
+/// `text` with a line break at its end, unless it is empty.
+fn ended(mut text: String) -> String {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
 }
 
 fn read_preferences(text: &str) -> Result<Preferences, Problem> {
@@ -451,18 +695,18 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         .sources
         .torznab
         .into_iter()
-        .map(|Torznab { name, url, api_key_env }| {
-            let api_key = match api_key_env {
-                None => None,
-                Some(Spanned { value: var, referenced, .. }) => match env.var(&var) {
-                    Some(key) => Some(key.to_string()),
-                    None => {
-                        return Err((
-                            Some(referenced.line()),
-                            format!("the {name:?} indexer takes its API key from {var}, which is not set"),
-                        ));
-                    }
-                },
+        .map(|torznab| {
+            let line = torznab.api_key_env.as_ref().map(|var| var.referenced.line());
+            let IndexerEntry { name, url, key } = torznab.entry()?;
+            let api_key = match key {
+                Key::None => None,
+                Key::Inline(key) => Some(key.expose().to_string()),
+                Key::Env(var) => Some(env.var(&var).map(str::to_string).ok_or_else(|| {
+                    let message = format!(
+                        "the {name:?} indexer takes its API key from {var}, which is not set for the engine; write the key as api_key instead"
+                    );
+                    (line, message)
+                })?),
             };
             Ok(TorznabConfig { name, url, api_key })
         })
@@ -1028,11 +1272,16 @@ sources:
             ),
             (
                 format!("{indexer}      api_key_env: NOPE\n"),
-                "line 5: the \"j\" indexer takes its API key from NOPE, which is not set",
+                "line 5: the \"j\" indexer takes its API key from NOPE, which is not set for the engine; write the key as api_key instead",
             ),
             (
-                format!("{indexer}      api_key: k3y\n"),
-                "line 5: unknown field `api_key`, expected one of name, url, api_key_env",
+                format!("{indexer}      api_key: k3y\n      api_key_env: JACKETT_KEY\n"),
+                "line 5: the \"j\" indexer has both api_key and api_key_env; keep one",
+            ),
+            (format!("{indexer}      api_key: ''\n"), "line 5: the \"j\" indexer's api_key is empty"),
+            (
+                format!("{indexer}      key: k3y\n"),
+                "line 5: unknown field `key`, expected one of name, url, api_key, api_key_env",
             ),
         ];
         for (text, expected) in cases {
@@ -1043,5 +1292,152 @@ sources:
                 "{text}"
             );
         }
+    }
+
+    fn entry(name: &str, url: &str, key: Key) -> IndexerEntry {
+        IndexerEntry { name: name.into(), url: url.into(), key }
+    }
+
+    fn inline(key: &str) -> Key {
+        Key::Inline(ApiKey::new(key).unwrap())
+    }
+
+    impl Folder {
+        fn save_indexers(&self, entries: Vec<IndexerEntry>, disabled: &[&str]) {
+            let writes = Writes { sandboxed: false, rerun: "torrential indexers add".into() };
+            let disabled = disabled.iter().map(|d| d.to_string()).collect();
+            save_indexers(&self.paths, &Indexers { entries, disabled }, &writes).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_indexer_takes_its_key_from_the_file_or_from_the_engines_environment() {
+        let text = "sources:\n  torznab:\n    - name: filelist\n      url: http://127.0.0.1:9696/3/api\n      api_key: k3y\n    - name: jackett\n      url: http://127.0.0.1:9117/api\n      api_key_env: JACKETT_KEY\n";
+        let keys: Vec<Option<String>> =
+            parse(text, &env()).unwrap().search.torznab.into_iter().map(|t| t.api_key).collect();
+        assert_eq!(keys, [Some("k3y".to_string()), Some("k3y".to_string())]);
+        let folder = Folder::new();
+        folder.write(text);
+        let listed = indexers(&folder.paths).unwrap().entries;
+        assert_eq!(listed[0].key.origin(), KeyFrom::Config);
+        assert_eq!(listed[1].key.origin(), KeyFrom::Env("JACKETT_KEY".into()));
+        assert!(!format!("{listed:?}").contains("k3y"), "{listed:?}");
+    }
+
+    #[test]
+    fn adding_and_removing_indexers_keeps_every_other_line_and_comment() {
+        let folder = Folder::new();
+        let start = "\
+# my settings
+downloads:
+  dir: ~/isos   # big disk
+
+sources:
+  disabled: [nyaa]   # too slow
+  torznab:
+    # the Romanian one
+    - name: filelist
+      url: http://127.0.0.1:9696/3/api
+      api_key_env: PROWLARR_KEY
+# after the list
+player: mpv
+";
+        folder.write(start);
+        let filelist = entry("filelist", "http://127.0.0.1:9696/3/api", Key::Env("PROWLARR_KEY".into()));
+        let tpb = entry(
+            "thepiratebay",
+            "http://127.0.0.1:9117/api/v2.0/indexers/thepiratebay/results/torznab/api",
+            inline("0a1b"),
+        );
+        folder.save_indexers(vec![filelist.clone(), tpb.clone()], &["nyaa"]);
+        assert_eq!(
+            folder.text(),
+            "\
+# my settings
+downloads:
+  dir: ~/isos   # big disk
+
+sources:
+  disabled: [nyaa]   # too slow
+  torznab:
+    # the Romanian one
+    - name: filelist
+      url: http://127.0.0.1:9696/3/api
+      api_key_env: PROWLARR_KEY
+    - name: thepiratebay
+      url: http://127.0.0.1:9117/api/v2.0/indexers/thepiratebay/results/torznab/api
+      api_key: '0a1b'
+# after the list
+player: mpv
+"
+        );
+
+        folder.save_indexers(vec![tpb.clone()], &["nyaa"]);
+        let without = folder.text();
+        assert!(!without.contains("filelist") && !without.contains("Romanian"), "{without}");
+        assert!(
+            without.contains("  disabled: [nyaa]   # too slow\n  torznab:\n    - name: thepiratebay\n"),
+            "{without}"
+        );
+
+        folder.save_indexers(vec![], &["nyaa"]);
+        assert_eq!(
+            folder.text(),
+            "# my settings\ndownloads:\n  dir: ~/isos   # big disk\n\nsources:\n  disabled: [nyaa]   # too slow\n# after the list\nplayer: mpv\n"
+        );
+    }
+
+    #[test]
+    fn a_new_list_goes_where_the_file_has_none() {
+        let tpb = entry("thepiratebay", "http://127.0.0.1:9117/api", inline("k3y"));
+        let folder = Folder::new();
+        folder.save_indexers(vec![tpb.clone()], &[]);
+        assert_eq!(
+            folder.text(),
+            "sources:\n  torznab:\n    - name: thepiratebay\n      url: http://127.0.0.1:9117/api\n      api_key: k3y\n"
+        );
+        folder.write("player: mpv\nsources:\n    disabled: [nyaa]");
+        folder.save_indexers(vec![tpb.clone()], &["nyaa"]);
+        assert_eq!(
+            folder.text(),
+            "player: mpv\nsources:\n    disabled: [nyaa]\n    torznab:\n      - name: thepiratebay\n        url: http://127.0.0.1:9117/api\n        api_key: k3y\n"
+        );
+        folder.write("sources: {torznab: [{name: old, url: 'http://x/api'}]}\nplayer: mpv\n");
+        folder.save_indexers(vec![tpb], &[]);
+        assert_eq!(
+            folder.text(),
+            "sources:\n  torznab:\n    - name: thepiratebay\n      url: http://127.0.0.1:9117/api\n      api_key: k3y\nplayer: mpv\n"
+        );
+        assert_eq!(indexers(&folder.paths).unwrap().entries[0].key, inline("k3y"));
+    }
+
+    #[test]
+    fn removing_a_disabled_indexer_takes_it_out_of_disabled_too() {
+        let folder = Folder::new();
+        folder.write("sources:\n  disabled: [nyaa, old]\n  torznab:\n    - name: old\n      url: http://x/api\n");
+        folder.save_indexers(vec![], &["nyaa"]);
+        assert_eq!(folder.text(), "sources:\n  disabled: [nyaa]\n");
+    }
+
+    // It shuts a file with permission bits, which Windows does not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_with_a_key_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = Folder::new();
+        folder.write("player: mpv\n");
+        let config = path(&folder.paths);
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mode = || std::fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+
+        folder.save_indexers(vec![entry("open", "http://127.0.0.1:3333/torznab", Key::None)], &[]);
+        assert_eq!(format!("{:o}", mode()), "644", "a list with no key stays as it was");
+        folder.save_indexers(vec![entry("filelist", "http://127.0.0.1:9696/3/api", inline("k3y"))], &[]);
+        assert_eq!(format!("{:o}", mode()), "600");
+
+        folder.write("sources:\n  torznab:\n    - name: j\n      url: http://x/api\n      api_key: k3y\n");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        folder.save(LAPTOP);
+        assert_eq!(format!("{:o}", mode()), "600", "setup closes a file that holds a key");
     }
 }

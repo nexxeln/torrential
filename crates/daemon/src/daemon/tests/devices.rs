@@ -515,6 +515,51 @@ async fn a_paired_machine_reaches_what_a_device_may_ask_and_a_stranger_reaches_n
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn only_this_machine_and_its_paired_machines_reach_the_indexers() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let config = Harness::paths(&h.dir).config.join("config.yaml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let text =
+        "# mine\nsources:\n  torznab:\n    - name: filelist\n      url: http://127.0.0.1:9/api\n      api_key: k3y\n";
+    std::fs::write(&config, text).unwrap();
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut laptop = Browser::on(ip, &h);
+    laptop.pair(&offer.code).await;
+    let token = laptop.cookie.unwrap().strip_prefix("torrential_device=").unwrap().to_string();
+    let ask = |request| from_another_machine(ip, port, &token, request);
+
+    let Ok(Response::Indexers { list }) = ask(Request::Indexers).await else { panic!("a paired machine lists them") };
+    let reply = serde_json::to_string(&list).unwrap();
+    assert!(reply.contains(r#""name":"filelist""#) && !reply.contains("k3y"), "{reply}");
+
+    let remove = Request::RemoveIndexer { name: "filelist".into() };
+    let body = serde_json::to_string(&remove).unwrap();
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let stranger = Browser::on(ip, &h).send("POST", &path, &[], &body).await;
+    assert_eq!(stranger.status, 401, "a machine with no token");
+    for (who, token) in
+        [("a token no device holds", "0".repeat(64)), ("this machine's token from another machine", h.token())]
+    {
+        assert_eq!(from_another_machine(ip, port, &token, remove.clone()).await.err(), Some(401), "{who}");
+    }
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text, "no refused request changed config.yaml");
+
+    let Ok(Response::Indexers { list }) = ask(remove.clone()).await else { panic!("a paired machine removes one") };
+    assert_eq!(list.indexers, vec![]);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
+
+    let id = devices(&h, Request::Devices).await.devices[0].id.clone();
+    // An open code keeps the engine on the network once the laptop is gone.
+    devices(&h, Request::AddDevice).await;
+    devices(&h, Request::RemoveDevice { id }).await;
+    let add = Request::AddIndexer { url: "http://127.0.0.1:9/api".into(), name: None, key: None };
+    assert_eq!(ask(add).await.err(), Some(401), "a removed machine");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cast_grant_serves_its_one_file_to_a_tv_until_it_is_dropped() {
     let ip = lan();
     let h = Harness::new();

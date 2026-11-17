@@ -12,6 +12,7 @@ mod classify;
 mod dates;
 mod http;
 mod imdb;
+pub mod indexers;
 mod metainfo;
 mod observation;
 pub mod rank;
@@ -27,7 +28,7 @@ use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures_util::future::{BoxFuture, Shared};
@@ -43,7 +44,7 @@ use crate::cache::AnswerKey;
 pub use crate::cache::ResultCache;
 use crate::http::{FetchError, Http, Retry};
 use crate::sources::{Ctx, Failure, Source, Stores, archive_org};
-pub use crate::sources::{SavedLink, lawful};
+pub use crate::sources::{SavedLink, builtin, lawful};
 use crate::terms::Terms;
 pub use crate::web_seeds::WebSeeds;
 
@@ -109,13 +110,24 @@ struct Inner {
     http: Http,
     /// For the redirects of a torrent's web seeds, which must not lead inside.
     seeds: Http,
-    sources: Vec<Arc<Source>>,
-    disabled: Vec<String>,
+    /// The sources a search may use, which [`Search::reconfigure`] replaces whole.
+    registry: RwLock<Arc<Registry>>,
     stores: Stores,
     cache: ResultCache,
     /// archive.org's answers about an item's servers, asked for as its `.torrent` file was fetched,
     /// so a download of it starts from those servers.
     servers: Mutex<VecDeque<Servers>>,
+}
+
+struct Registry {
+    enabled: Vec<Arc<Source>>,
+    disabled: Vec<String>,
+}
+
+impl Registry {
+    fn new(config: &SearchConfig) -> Result<Registry, Error> {
+        Ok(Registry { enabled: sources::registry(config)?, disabled: config.disabled.clone() })
+    }
 }
 
 type Lookup = Shared<BoxFuture<'static, Result<Vec<String>, Error>>>;
@@ -152,7 +164,17 @@ impl Search {
 
     /// Every enabled source, most authoritative first.
     pub fn sources(&self) -> Vec<SourceInfo> {
-        self.inner.sources.iter().map(|s| SourceInfo { name: s.meta.name.clone(), lawful: s.meta.lawful }).collect()
+        let registry = self.inner.registry();
+        registry.enabled.iter().map(|s| SourceInfo { name: s.meta.name.clone(), lawful: s.meta.lawful }).collect()
+    }
+
+    /// Searches the Torznab indexers and leaves out the sources `config` names from now on. Searches
+    /// under way finish with the sources they started with. Fails with `usage`, and changes nothing,
+    /// when the config names an unknown source or a bad URL.
+    pub fn reconfigure(&self, config: &SearchConfig) -> Result<(), Error> {
+        let registry = Arc::new(Registry::new(config)?);
+        *self.inner.registry.write().unwrap_or_else(|e| e.into_inner()) = registry;
+        Ok(())
     }
 
     /// Returns by the query's deadline, ranked for the query's profile. A source that has
@@ -262,18 +284,22 @@ impl Search {
                 ErrorCode::Usage,
                 format!("this result's .torrent link needs an API key for the {name} indexer, which {why}"),
             )
-            .with_hint(format!("{hint} and run torrential engine stop, or search again"))
+            .with_hint(format!("{hint}, or search again"))
         };
-        let Some(source) = self.inner.sources.iter().find(|s| s.meta.name == *name) else {
-            return Err(if self.inner.disabled.contains(name) {
-                needs_key("is disabled", format!("remove {name} from sources.disabled in the torrential config"))
+        let registry = self.inner.registry();
+        let Some(source) = registry.enabled.iter().find(|s| s.meta.name == *name) else {
+            return Err(if registry.disabled.contains(name) {
+                let hint = format!(
+                    "remove {name} from sources.disabled in the torrential config and run torrential engine stop"
+                );
+                needs_key("is disabled", hint)
             } else {
-                needs_key("is not configured", format!("add {name} back to sources.torznab in the torrential config"))
+                needs_key("is not configured", format!("add {name} back with torrential indexers add"))
             });
         };
-        let url = source
-            .link(&saved)
-            .ok_or_else(|| needs_key("has none", format!("set api_key_env for {name} in the torrential config")))?;
+        let url = source.link(&saved).ok_or_else(|| {
+            needs_key("has none", format!("give {name} its key with torrential indexers add <its address> --key <key>"))
+        })?;
         Ok(Some(url))
     }
 
@@ -286,7 +312,7 @@ impl Search {
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .ok_or_else(|| Error::new(ErrorCode::InvalidRef, "a .torrent URL must start with http:// or https://"))?;
-        if let Some(item) = self.inner.sources.iter().find_map(|s| s.archive_item_of_link(&url)) {
+        if let Some(item) = self.inner.registry().enabled.iter().find_map(|s| s.archive_item_of_link(&url)) {
             self.inner.ask_servers(item);
         }
         // A private tracker may count each request for a .torrent as a grab.
@@ -298,14 +324,15 @@ impl Search {
     }
 
     fn select(&self, names: &[String]) -> Result<Vec<Arc<Source>>, Error> {
-        let all = &self.inner.sources;
+        let registry = self.inner.registry();
+        let all = &registry.enabled;
         if names.is_empty() {
             return Ok(all.clone());
         }
         let mut chosen: Vec<Arc<Source>> = Vec::new();
         for name in names {
             let Some(source) = all.iter().find(|s| s.meta.name.eq_ignore_ascii_case(name.trim())) else {
-                if let Some(off) = self.inner.disabled.iter().find(|d| d.eq_ignore_ascii_case(name.trim())) {
+                if let Some(off) = registry.disabled.iter().find(|d| d.eq_ignore_ascii_case(name.trim())) {
                     return Err(Error::new(ErrorCode::Usage, format!("source {off:?} is disabled"))
                         .with_hint("remove it from sources.disabled in the torrential config"));
                 }
@@ -324,10 +351,13 @@ impl Search {
 impl Inner {
     fn new(config: &SearchConfig, cache: ResultCache, http: Http) -> Result<Inner, Error> {
         let seeds = Http::public(http::USER_AGENT, redirect::policy()).map_err(no_client)?;
-        let sources = sources::registry(config)?;
-        let disabled = config.disabled.clone();
+        let registry = RwLock::new(Arc::new(Registry::new(config)?));
         let stores = Stores::new(config.cache_dir.clone());
-        Ok(Inner { http, seeds, sources, disabled, stores, cache, servers: Mutex::default() })
+        Ok(Inner { http, seeds, registry, stores, cache, servers: Mutex::default() })
+    }
+
+    fn registry(&self) -> Arc<Registry> {
+        self.registry.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Starts asking archive.org for `item`'s servers, for a download of it that may start soon.
@@ -352,11 +382,12 @@ impl Inner {
     }
 
     fn saved_links(&self, linked: Vec<Linked>) -> Vec<(Release, Option<SavedLink>)> {
+        let registry = self.registry();
         linked
             .into_iter()
             .map(|(release, private)| {
                 let saved = private.and_then(|name| {
-                    let source = self.sources.iter().find(|s| s.meta.name == name)?;
+                    let source = registry.enabled.iter().find(|s| s.meta.name == name)?;
                     source.save_link(release.torrent_url.as_deref()?)
                 });
                 (release, saved)
@@ -427,8 +458,9 @@ fn no_client(e: reqwest::Error) -> Error {
 #[doc(hidden)]
 pub async fn record(config: &SearchConfig, source: &str, query: &str) -> Result<(String, http::Recorded), Error> {
     let inner = Inner::new(config, ResultCache::new(), Http::recording().map_err(no_client)?)?;
-    let source = inner
-        .sources
+    let registry = inner.registry();
+    let source = registry
+        .enabled
         .iter()
         .find(|s| s.meta.name == source)
         .ok_or_else(|| Error::new(ErrorCode::Usage, format!("unknown source {source:?}")))?;

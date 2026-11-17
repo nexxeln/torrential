@@ -219,11 +219,22 @@ impl Harness {
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
             tvs: outside.tvs,
+            indexers: super::indexers::Indexers::new(Harness::paths(dir), Harness::env(dir)).unwrap(),
         };
         let db = super::db::connect(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
         let listen = Listen { ports: &[0], access: &dir.path().join(TOKEN_FILE), exposure: outside.exposure.clone() };
         start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), listen).unwrap()
+    }
+
+    /// The environment of an engine whose home is in `dir`.
+    fn env(dir: &tempfile::TempDir) -> crate::env::Env {
+        let home = dir.path().join("home").display().to_string();
+        crate::env::Env::from_pairs([("HOME", home.as_str()), ("TORRENTIAL_HOME", home.as_str())])
+    }
+
+    fn paths(dir: &tempfile::TempDir) -> crate::paths::Paths {
+        crate::paths::Paths::resolve(&Self::env(dir), 501, None).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {

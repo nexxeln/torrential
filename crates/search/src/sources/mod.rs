@@ -275,6 +275,11 @@ impl Source {
     }
 }
 
+/// Whether a built-in source is named `name`.
+pub fn builtin(name: &str) -> bool {
+    BUILTIN.iter().any(|row| row.name == name)
+}
+
 /// Whether the built-in source named `name` is a lawful catalog. A Torznab indexer never is.
 pub fn lawful(name: &str) -> bool {
     BUILTIN.iter().any(|row| row.name == name && row.lawful)

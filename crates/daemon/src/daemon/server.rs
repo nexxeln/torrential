@@ -20,6 +20,7 @@ use super::downloads::{
     Answer, JobEvents, Searching, files, get, listed, metadata, pause, play, remove, resume, search, streams,
 };
 use super::http::{Connection, Request as Http};
+use super::indexers;
 use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::search_port::Progress;
@@ -80,6 +81,11 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             follow::follow(ctx.titles.watching.clone(), video, release, socket);
             Ok(Response::Ok)
         }
+        Request::Indexers => indexers::list(ctx).await.map(|list| Response::Indexers { list }),
+        Request::AddIndexer { url, name, key } => {
+            indexers::add(ctx, &url, name, key).await.map(|list| Response::Indexers { list })
+        }
+        Request::RemoveIndexer { name } => indexers::remove(ctx, &name).await.map(|list| Response::Indexers { list }),
     };
     result.unwrap_or_else(|error| Response::Error { error })
 }
