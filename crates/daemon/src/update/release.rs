@@ -20,6 +20,9 @@ use crate::wire::{self, Access, Client};
 use super::{Archive, Checked, Version, tag_version, target};
 
 const RELEASES: &str = "https://github.com/nexxeln/torrential/releases";
+/// Names the container image torrential runs from, which the Dockerfile sets. A newer image
+/// updates it, so it never looks for releases itself.
+const IMAGE: &str = "TORRENTIAL_IMAGE";
 const ISSUES: &str = "https://github.com/nexxeln/torrential/issues";
 const CHECK_WITHIN: Duration = Duration::from_secs(10);
 const MAX_ASSET: usize = 256 << 20;
@@ -34,6 +37,9 @@ pub struct Releases {
 impl Releases {
     /// The GitHub releases. A test reads releases only from the server it names in `RELEASES`.
     pub fn from_env(env: &Env) -> Option<Releases> {
+        if env.var(IMAGE).is_some() {
+            return None;
+        }
         let base = match env.test() {
             Some(test) => test.var(hooks::RELEASES)?,
             None => RELEASES,
@@ -42,6 +48,10 @@ impl Releases {
     }
 
     pub fn required(env: &Env) -> Result<Releases, Error> {
+        if let Some(image) = env.var(IMAGE) {
+            return Err(Error::new(ErrorCode::Usage, format!("torrential runs from the container image {image}"))
+                .with_hint(format!("pull the newer image and recreate the container: docker pull {image}")));
+        }
         Releases::from_env(env).ok_or_else(|| {
             Error::new(ErrorCode::NetworkUnavailable, "this test environment does not look for releases")
                 .with_hint(format!("set {} to a release server", hooks::RELEASES))
@@ -543,6 +553,21 @@ mod tests {
         assert_eq!(base(&[(hooks::NETWORK, "loopback")]), None);
         assert_eq!(base(&[(hooks::ENGINE, "fake")]), None);
         assert_eq!(base(&[(hooks::NETWORK, "loopback"), local]).as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn torrential_in_the_container_image_leaves_updates_to_the_image() {
+        let env = Env::from_pairs([(IMAGE, "ghcr.io/nexxeln/torrential")]);
+        assert_eq!(Releases::from_env(&env).map(|r| r.base), None, "the engine never looks for releases");
+        let refused = Releases::required(&env).err().unwrap();
+        assert_eq!(
+            (refused.code, refused.message.as_str(), refused.hint.as_deref()),
+            (
+                ErrorCode::Usage,
+                "torrential runs from the container image ghcr.io/nexxeln/torrential",
+                Some("pull the newer image and recreate the container: docker pull ghcr.io/nexxeln/torrential")
+            )
+        );
     }
 
     // The stand-in releases are shell scripts.

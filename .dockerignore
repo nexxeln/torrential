@@ -1,0 +1,3 @@
+# The image needs only the binaries the release puts in image/.
+*
+!image/

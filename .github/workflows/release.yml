@@ -1,7 +1,8 @@
 # Releases
 #   1. Bump version in Cargo.toml, run cargo update -p torrential --offline, and commit "Release X.Y.Z" on main.
 #   2. git tag vX.Y.Z && git push origin main vX.Y.Z. This workflow tests, builds every target, and opens a draft release.
-#   3. Check the draft's assets, write the notes, and publish it with --latest. install.yml then installs it on every platform.
+#   3. Check the draft's assets, write the notes, and publish it with --latest. install.yml then installs it on every platform
+#      and points ghcr.io/nexxeln/torrential:latest at the image the tag pushed.
 # workflow_dispatch, and pull requests that touch the release pipeline, build the same assets as artifacts only.
 name: release
 
@@ -16,6 +17,8 @@ on:
       - scripts/release.ps1
       - install.sh
       - install.ps1
+      - Dockerfile
+      - .dockerignore
       - flake.nix
       - flake.lock
 
@@ -107,6 +110,42 @@ jobs:
           name: torrential-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  image:
+    # A tag pushes only after the tests pass. A pull request builds the image without pushing it.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.test.result != 'failure' }}
+    needs: [test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: torrential-*-linux-musl
+          path: dist
+          merge-multiple: true
+      - name: Put each architecture's binary where the Dockerfile looks for it
+        run: |
+          mkdir -p image/amd64 image/arm64
+          tar -xzf dist/torrential-x86_64-unknown-linux-musl.tar.gz -C image/amd64
+          tar -xzf dist/torrential-aarch64-unknown-linux-musl.tar.gz -C image/arm64
+      - name: Check the amd64 image runs
+        run: |
+          docker build -t torrential:check .
+          docker run --rm torrential:check --version
+      - name: Build the image for amd64 and arm64, and push it on a tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          docker buildx create --use --driver docker-container
+          set -- --platform linux/amd64,linux/arm64
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            set -- "$@" --push -t "ghcr.io/nexxeln/torrential:${GITHUB_REF_NAME#v}"
+          fi
+          docker buildx build "$@" .
 
   draft:
     if: github.ref_type == 'tag'

@@ -53,3 +53,19 @@ jobs:
             Start-Sleep 20
           }
           exit 1
+
+  image:
+    # A version tag pushed ghcr.io/nexxeln/torrential:<version>; it becomes latest only once the release is out.
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - name: Point ghcr.io/nexxeln/torrential:latest at this release's image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t ghcr.io/nexxeln/torrential:latest "ghcr.io/nexxeln/torrential:${TAG#v}"
+          docker buildx imagetools inspect ghcr.io/nexxeln/torrential:latest

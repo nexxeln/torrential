@@ -1,0 +1,13 @@
+# TrueNAS SCALE 24.10 or later: Apps, Discover Apps, the ⋮ menu, Install via YAML, then paste this.
+# Point the two folders at datasets of yours. 568 is TrueNAS's apps user, which needs to own them.
+# To pair a phone or a TV, open the app's shell and run: torrential devices add
+services:
+  torrential:
+    image: ghcr.io/nexxeln/torrential:latest
+    # The pairing link names the NAS's own addresses, and finding TVs multicasts on the home network.
+    network_mode: host
+    user: "568:568"
+    restart: unless-stopped
+    volumes:
+      - /mnt/tank/apps/torrential:/data
+      - /mnt/tank/media/downloads:/data/Downloads

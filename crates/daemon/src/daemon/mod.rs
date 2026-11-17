@@ -262,13 +262,14 @@ pub fn start(
 }
 
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd,
-/// systemd or Task Scheduler started it, a switch to an installed update.
-pub fn run(env: &Env, service: bool, http_port: Option<u16>) -> u8 {
+/// systemd or Task Scheduler started it, a switch to an installed update. `server` runs it as a
+/// server whatever config.yaml says.
+pub fn run(env: &Env, service: bool, http_port: Option<u16>, server: bool) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
-    match serve(env, &paths, service, http_port) {
+    match serve(env, &paths, service, http_port, server) {
         Ok(Ended::Restart) if service => {
             service::start_next(env, &paths);
             service::RESTART
@@ -302,8 +303,9 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     crate::exit::code(error.code)
 }
 
-fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Result<Ended, Startup> {
-    let settings = Config::load(paths, env)?;
+fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>, server: bool) -> Result<Ended, Startup> {
+    let mut settings = Config::load(paths, env)?;
+    settings.exposure.server |= server;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
     paths.make_state().map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
     paths::check_state_filesystem(&paths.state)?;
