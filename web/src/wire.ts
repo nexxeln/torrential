@@ -103,7 +103,12 @@ added_at: number,
 /**
  * The title the download was made for, when playing a title made it.
  */
-title?: TitleLink | null, place: Place, } & ({ "state": "queued" } | { "state": "metadata" } | { "state": "checking" } | { "state": "downloading" } | { "state": "paused" } | { "state": "done", finished_at: number, } | { "state": "error", error: Error, });
+title?: TitleLink | null, place: Place,
+/**
+ * The network interface this download reaches peers through, named while it is missing or
+ * down. Nothing arrives until it is back.
+ */
+waiting_for?: string | null, } & ({ "state": "queued" } | { "state": "metadata" } | { "state": "checking" } | { "state": "downloading" } | { "state": "paused" } | { "state": "done", finished_at: number, } | { "state": "error", error: Error, });
 
 export type Event = { "event": "snapshot", jobs: Array<Job>, } | { "event": "job", job: Job, } | { "event": "removed", id: string, } | { "event": "heartbeat", at: number, } | { "event": "search_update", result: SearchResult, pending: Array<string>, };
 

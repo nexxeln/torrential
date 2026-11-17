@@ -2,7 +2,7 @@ import { XMarkIcon } from "@heroicons/react/16/solid";
 import { useState } from "react";
 import type { Job } from "../api";
 import { bytes, clock, percent, rate } from "../lib/format";
-import { STATE_WORDS, useJobs } from "../lib/jobs";
+import { STATE_WORDS, useJobs, waiting } from "../lib/jobs";
 import { fileName, readable } from "../lib/release";
 import { forgetPosition, type Position, positions } from "../lib/storage";
 import { Link, watchPath } from "../router";
@@ -40,6 +40,8 @@ function Unfinished({ entry, onForget }: { entry: Position; onForget: () => void
 
 function summary(job: Job): string {
   const { progress } = job;
+  const waits = waiting(job);
+  if (waits) return waits;
   const share = progress.size ? percent(progress.verified / progress.size) : null;
   switch (job.state) {
     case "downloading":

@@ -55,6 +55,7 @@ class Session {
                            rust::Slice<const PriorityRecord> priorities);
   void force_recheck(rust::Slice<const std::uint8_t> id);
   void announce_to_dht(rust::Slice<const std::uint8_t> id);
+  void reannounce(rust::Slice<const std::uint8_t> id);
   void save_resume_data(rust::Slice<const std::uint8_t> id);
   void save_resume_data_if_progressed(rust::Slice<const std::uint8_t> id);
   void remove(rust::Slice<const std::uint8_t> id);

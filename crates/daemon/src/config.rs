@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_saphyr::{Localizer, Location, SnippetMode, Spanned, UserMessageFormatter};
 use torrential_core::units::{parse_size, size_text};
 use torrential_core::{Error, ErrorCode, Playback, Preferences, Screen};
+use torrential_engine::InterfaceName;
 use torrential_search::catalog::CatalogConfig;
 use torrential_search::subtitles::SubtitleConfig;
 use torrential_search::{SearchConfig, TorznabConfig};
@@ -29,6 +30,9 @@ pub struct Config {
     /// The engine runs as a server: it listens on the network with nothing paired, and lets a
     /// paired device in by whatever address it uses.
     pub server: bool,
+    /// The network interface, such as a VPN's `wg0`, that every torrent socket is bound to. The web
+    /// app, pairing and casting stay on every network.
+    pub torrent_interface: Option<InterfaceName>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -66,6 +70,7 @@ struct File {
     ffmpeg: Ffmpeg,
     plays: Plays,
     server: Option<bool>,
+    torrent_interface: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -442,6 +447,8 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         })?),
     };
     let server = file.server.unwrap_or_default();
+    let torrent_interface =
+        file.torrent_interface.map(|Spanned { value, referenced, .. }| torrent_interface(&value, referenced.line()));
     Ok(Config {
         downloads,
         search,
@@ -454,7 +461,23 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         ffmpeg,
         plays_max,
         server,
+        torrent_interface: torrent_interface.transpose()?,
     })
+}
+
+#[cfg(unix)]
+fn torrent_interface(name: &str, line: u64) -> Result<InterfaceName, Problem> {
+    InterfaceName::new(name).ok_or_else(|| {
+        let message = format!("torrent_interface {name:?} is not a network interface name; use one like wg0");
+        (Some(line), message)
+    })
+}
+
+/// libtorrent names Windows adapters by GUID and binds to their addresses rather than to them, so
+/// torrent traffic could still leave by another adapter.
+#[cfg(windows)]
+fn torrent_interface(_: &str, line: u64) -> Result<InterfaceName, Problem> {
+    Err((Some(line), "torrent_interface works on Linux and macOS, not on Windows".to_string()))
 }
 
 fn describe(error: &serde_saphyr::Error) -> String {
@@ -606,6 +629,25 @@ sources:
         assert_eq!(
             max("updates: auto\nplays:\n  max: lots\n"),
             Err((Some(3), "plays.max \"lots\" is not a size; use a form like 20GiB, or none".to_string()))
+        );
+    }
+
+    #[test]
+    fn torrent_interface_names_one_interface() {
+        let read = |text: &str| parse(text, &env()).map(|c| c.torrent_interface.map(|name| name.to_string()));
+        assert_eq!(read(""), Ok(None));
+        if cfg!(windows) {
+            let refused = "torrent_interface works on Linux and macOS, not on Windows".to_string();
+            assert_eq!(read("torrent_interface: wg0\n"), Err((Some(1), refused)));
+            return;
+        }
+        assert_eq!(read("torrent_interface: wg0\n"), Ok(Some("wg0".to_string())));
+        assert_eq!(
+            read("updates: auto\ntorrent_interface: wg0,eth0\n"),
+            Err((
+                Some(2),
+                "torrent_interface \"wg0,eth0\" is not a network interface name; use one like wg0".to_string()
+            ))
         );
     }
 

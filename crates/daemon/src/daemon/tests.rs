@@ -531,6 +531,89 @@ async fn the_engine_answers_while_a_download_folder_keeps_a_get_waiting() {
     assert_eq!(h.get(magnet(&film), &[]).await.unwrap().outcome, GetOutcome::Started);
 }
 
+/// A network share that dropped, or a disk gone to sleep, leaves every call in its folder waiting.
+/// Each command that looks in a folder that answered before and then stopped says it is waiting
+/// for it, a download there starts once it answers, and the engine answers everyone else.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_that_stops_answering_holds_up_only_what_needs_it() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let share = h.dir.path().join("share");
+    let into = |target| GetRequest { dir: Some(share.clone()), ..request(&h, target) };
+    let (iso, film) = (torrent(30, "arch.iso", &[("arch.iso", GIB)]), torrent(31, "film", &[("film.mkv", GIB)]));
+    h.get_with(into(h.torrent_file(&iso))).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    h.disk.file(share.join("arch.iso"), GIB);
+    h.get_with(into(h.torrent_file(&film))).await.unwrap();
+    h.changes(Request::Pause { refs: vec![prefix(&film)] }).await.unwrap();
+    let waiting = Err((ErrorCode::StorageError, format!("torrential is waiting for access to {}", share.display())));
+    fn answer<T>(answer: Result<T, Error>) -> Result<(), (ErrorCode, String)> {
+        answer.map(drop).map_err(|e| (e.code, e.message))
+    }
+    let stalls = std::cell::Cell::new(0);
+    let stall = || {
+        stalls.set(stalls.get() + 1);
+        h.disk.stall(&share, h.dir.path().join(format!("stall-{}", stalls.get())))
+    };
+    let answers_at_once = || async {
+        let asked = Instant::now();
+        h.status().await;
+        assert!(asked.elapsed() < Duration::from_millis(500), "status took {:?}", asked.elapsed());
+    };
+
+    let stalled = stall();
+    assert_eq!(answer(h.get(Target::Prefix(prefix(&iso)), &[]).await), waiting, "get of a download there");
+    answers_at_once().await;
+    drop(stalled);
+    let stalled = stall();
+    let verify = Request::Verify { reference: prefix(&iso), repair: false };
+    assert_eq!(answer(h.changes(verify).await), waiting, "verify");
+    drop(stalled);
+    let stalled = stall();
+    let rm = Request::Remove { refs: vec![prefix(&iso)], delete: true };
+    assert_eq!(answer(h.changes(rm).await), waiting, "rm --delete");
+    drop(stalled);
+    let stalled = stall();
+    let other = torrent(32, "other", &[("other.mkv", GIB)]);
+    assert_eq!(answer(h.get_with(into(h.torrent_file(&other))).await), waiting, "get of a new download there");
+    answers_at_once().await;
+    drop(stalled);
+
+    let stalled = stall();
+    let resumed = h.changes(Request::Resume { refs: vec![prefix(&film)], all: false }).await.unwrap();
+    assert_eq!(resumed, [(prefix(&film), "resumed".into())]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.states().await, ["done", "queued"], "the download there waits to start");
+    drop(stalled);
+    h.until("it starts once the folder answers", |jobs| jobs[1].status.name() != "queued").await;
+
+    let _stalled = stall();
+    let started = h.get(h.torrent_file(&other), &[]).await.unwrap();
+    assert_eq!(started.outcome, GetOutcome::Started, "a download elsewhere counts the one there once it answers");
+    answers_at_once().await;
+}
+
+/// A file list that comes while its download's folder does not answer stops the download, which
+/// says why.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_list_that_comes_while_the_folder_does_not_answer_stops_the_download() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let outside = Outside { gate: Some(gate.clone()), ..Outside::default() };
+    let h = Harness::with_outside(fake::Search::new(vec![]), outside);
+    let film = torrent(33, "film", &[("film.mkv", GIB)]);
+    h.swarm.publish(film.clone());
+    gate.close();
+    h.get(magnet(&film), &[]).await.unwrap();
+    gate.until_held(1).await;
+    let _stalled = h.disk.stall(h.downloads(), h.dir.path().join("stall"));
+    gate.open();
+    let jobs = h.until("it stops", |jobs| jobs[0].status.name() == "error").await;
+    let JobStatus::Error { error } = &jobs[0].status else { unreachable!() };
+    assert_eq!(error.message, format!("torrential is waiting for access to {}", h.downloads().display()));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_download_running_at_a_crash_carries_on_when_the_engine_starts_again() {
     let h = Harness::new();

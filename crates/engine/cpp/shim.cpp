@@ -271,6 +271,7 @@ lt::session_params make_params(SessionSettings const& s) {
 
   lt::settings_pack& p = params.settings;
   p.set_str(lt::settings_pack::listen_interfaces, std::string(s.listen_interfaces));
+  p.set_str(lt::settings_pack::outgoing_interfaces, std::string(s.outgoing_interfaces));
   p.set_bool(lt::settings_pack::enable_dht, s.dht);
   p.set_str(lt::settings_pack::dht_bootstrap_nodes, std::string(s.dht_bootstrap_nodes));
   p.set_bool(lt::settings_pack::enable_lsd, s.local_network);
@@ -448,6 +449,12 @@ void Session::set_file_priorities(rust::Slice<const std::uint8_t> id,
 void Session::force_recheck(rust::Slice<const std::uint8_t> id) { find_with_metadata(id).force_recheck(); }
 
 void Session::announce_to_dht(rust::Slice<const std::uint8_t> id) { find(id).force_dht_announce(); }
+
+void Session::reannounce(rust::Slice<const std::uint8_t> id) {
+  lt::torrent_handle const h = find(id);
+  h.force_reannounce(0, -1, lt::torrent_handle::ignore_min_interval);
+  h.force_dht_announce();
+}
 
 void Session::save_resume_data(rust::Slice<const std::uint8_t> id) {
   find(id).save_resume_data(lt::torrent_handle::flush_disk_cache | lt::torrent_handle::save_info_dict);

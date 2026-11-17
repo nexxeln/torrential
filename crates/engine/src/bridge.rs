@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use torrential_core::InfoHash;
 
 use crate::alert::Alert;
-use crate::config::{Config, Dht, UploadPolicy};
+use crate::config::{Config, Dht, Listen, UploadPolicy};
 use crate::error::{EngineError, ErrorKind, NativeError};
 use crate::torrent::{
     AddTorrent, FileEntry, FileIndex, FilePriority, FileProgress, FileSelection, Progress, ResumeData, TorrentSource,
@@ -35,6 +35,7 @@ pub(crate) mod ffi {
 
     struct SessionSettings {
         listen_interfaces: String,
+        outgoing_interfaces: String,
         dht: bool,
         dht_bootstrap_nodes: String,
         local_network: bool,
@@ -198,6 +199,7 @@ pub(crate) mod ffi {
         fn set_file_priorities(self: Pin<&mut Session>, id: &[u8], priorities: &[PriorityRecord]) -> Result<()>;
         fn force_recheck(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn announce_to_dht(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
+        fn reannounce(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn save_resume_data(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn save_resume_data_if_progressed(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
         fn remove(self: Pin<&mut Session>, id: &[u8]) -> Result<()>;
@@ -317,7 +319,12 @@ pub(crate) fn path_str(path: &Path) -> Result<&str, EngineError> {
 }
 
 pub(crate) fn settings(config: &Config) -> ffi::SessionSettings {
-    let listen_interfaces = config.listen.iter().map(SocketAddr::to_string).collect::<Vec<_>>().join(",");
+    let (listen_interfaces, outgoing_interfaces) = match &config.listen {
+        Listen::Addresses(addresses) => {
+            (addresses.iter().map(SocketAddr::to_string).collect::<Vec<_>>().join(","), String::new())
+        }
+        Listen::Interface { name, port } => (format!("{name}:{port}"), name.to_string()),
+    };
     let (dht, dht_bootstrap_nodes) = match &config.dht {
         Dht::Off => (false, String::new()),
         Dht::On { bootstrap_nodes } => (true, bootstrap_nodes.join(",")),
@@ -329,6 +336,7 @@ pub(crate) fn settings(config: &Config) -> ffi::SessionSettings {
     };
     ffi::SessionSettings {
         listen_interfaces,
+        outgoing_interfaces,
         dht,
         dht_bootstrap_nodes,
         local_network: config.local_network,

@@ -652,6 +652,9 @@ fn failure(code: ErrorCode) -> String {
 
 fn tail_text(state: &State, job: &Job) -> String {
     let p = &job.progress;
+    if let Some(interface) = &job.waiting_for {
+        return format!("waiting for {}", torrential_core::text::sanitize(interface));
+    }
     match &job.status {
         JobStatus::Downloading => match p.eta {
             Some(secs) if p.down_rate >= 1024 => format!("{} left", format_duration(Duration::from_secs(secs))),
