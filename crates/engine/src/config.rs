@@ -5,10 +5,7 @@ use std::num::NonZeroU32;
 /// `Session::new`.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Addresses to accept peers on. Port 0 lets the OS choose. A taken port
-    /// is not an error: libtorrent tries the next 10 ports, then lets the OS
-    /// choose. `Session::listen_port` reports the port it got.
-    pub listen: Vec<SocketAddr>,
+    pub listen: Listen,
     pub dht: Dht,
     /// Find peers on the local network (BEP 14), and ask the router to forward the listen port
     /// with UPnP and NAT-PMP.
@@ -25,7 +22,7 @@ impl Config {
     /// local network, and any number of connections from 127.0.0.1.
     pub fn loopback() -> Self {
         Config {
-            listen: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)],
+            listen: Listen::Addresses(vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)]),
             dht: Dht::Off,
             local_network: false,
             upload: UploadPolicy::Normal,
@@ -33,6 +30,45 @@ impl Config {
             client: ClientIdentity::default(),
             dht_state: None,
         }
+    }
+}
+
+/// Where the session accepts peers, and which way its own connections leave. Port 0 lets the OS
+/// choose. A taken port is not an error: libtorrent tries the next 10 ports, then lets the OS
+/// choose. `Session::listen_port` reports the port it got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listen {
+    /// Accept peers on these addresses. Connections to peers, trackers and the DHT leave by the
+    /// route the system picks.
+    Addresses(Vec<SocketAddr>),
+    /// Accept peers on every address of one network interface, and send peer, tracker and DHT
+    /// traffic out through it alone. While the interface is missing, the session has no socket to
+    /// listen or send on, so nothing leaves by another interface. On Windows libtorrent binds to
+    /// the interface's addresses rather than to the interface.
+    Interface { name: InterfaceName, port: u16 },
+}
+
+/// The name of a network interface, such as `wg0`: 1 to 15 ASCII letters, digits, `.`, `-` or `_`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceName(String);
+
+impl InterfaceName {
+    const MAX_LEN: usize = 15;
+
+    pub fn new(name: &str) -> Option<Self> {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+        let fits = (1..=Self::MAX_LEN).contains(&name.len()) && !matches!(name, "." | "..");
+        (fits && name.chars().all(allowed)).then(|| InterfaceName(name.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for InterfaceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -128,7 +164,17 @@ impl std::fmt::Debug for DhtState {
 
 #[cfg(test)]
 mod tests {
-    use super::azureus_prefix;
+    use super::{InterfaceName, azureus_prefix};
+
+    #[test]
+    fn interface_names_hold_only_what_libtorrent_reads_as_one_device() {
+        for good in ["wg0", "tun0", "wg-mullvad", "proton_0", "en0.100", "fifteen-chars-x"] {
+            assert_eq!(InterfaceName::new(good).map(|n| n.to_string()), Some(good.to_string()));
+        }
+        for bad in ["", ".", "..", "wg0,eth0", "wg0:6881", "wg 0", "wg0/1", "sixteen-chars-xx", "wé0"] {
+            assert_eq!(InterfaceName::new(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn version_components_encode_as_azureus_digits() {

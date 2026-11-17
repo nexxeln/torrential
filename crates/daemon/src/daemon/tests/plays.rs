@@ -759,3 +759,65 @@ async fn a_magnet_whose_files_need_room_a_leaving_play_will_give_stops_for_want_
     let JobStatus::Error { error } = &set.status else { unreachable!() };
     assert_eq!((set.name.as_deref(), error.code), (Some("set"), ErrorCode::DiskFull));
 }
+
+/// The engine looks at what plays take up on a thread of its own, so a plays folder that stops
+/// answering holds up no command.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_answers_while_the_plays_folder_does_not() {
+    let h = Harness::new();
+    let film = torrent(0x37, "film", &[("film.mp4", GIB)]);
+    h.play_web(&film).await;
+    let _stalled = h.disk.stall(h.plays(), h.dir.path().join("stall"));
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let status = tokio::time::timeout(Duration::from_millis(500), h.status()).await;
+    assert_eq!(status.map(|jobs| jobs.len()), Ok(1), "status answers while the plays folder does not");
+}
+
+/// A title play looks at where it would write on a thread of its own, so a plays folder that
+/// stops answering makes the play say it waits for the folder.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_play_says_it_waits_for_a_plays_folder_that_does_not_answer() {
+    let (h, night) = night();
+    let _stalled = h.disk.stall(h.plays(), h.dir.path().join("stall"));
+    let steps = h.play_title("tt0063350", Some(&night[3]), None).await;
+    let tried = [
+        "resolved tt0063350 Night of the Living Dead",
+        "searched 4",
+        "trying 1 of 1 night_of_the_living_dead",
+        "check file_list",
+        "check start",
+    ];
+    assert_eq!(steps[..5], tried);
+    let waiting = format!("torrential is waiting for access to {}", h.play_folder(&night[3]).display());
+    assert!(steps[5].starts_with("skipped a4a4a4") && steps[5].contains(&waiting), "{}", steps[5]);
+}
+
+/// rm --delete cannot tell whether a download in a folder that stopped answering uses the files,
+/// so it keeps them until that folder answers.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_delete_keeps_the_files_while_another_downloads_folder_does_not_answer() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let (ours, theirs) = (torrent(0x38, "ours", &[("a.bin", MIB)]), torrent(0x39, "theirs", &[("b.bin", MIB)]));
+    let share = h.dir.path().join("share");
+    h.get_into(&ours, h.downloads()).await.unwrap();
+    h.get_into(&theirs, share.clone()).await.unwrap();
+    let file = h.downloads().join("ours/a.bin");
+    written(&file, MIB);
+    h.until("both are done", |jobs| jobs.iter().all(|job| job.status.name() == "done")).await;
+    let stalled = h.disk.stall(&share, h.dir.path().join("stall"));
+
+    let removed = h.rm(vec![prefix(&ours)], true).await;
+    let reason = format!("torrential is waiting for access to {}, where another download is", share.display());
+    assert_eq!(removed[0].kept, [Kept { path: file.clone(), reason }]);
+    assert!(file.exists());
+    drop(stalled);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while file.exists() {
+        assert!(std::time::Instant::now() < deadline, "the file goes once the folder answers");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

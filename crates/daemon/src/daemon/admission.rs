@@ -190,18 +190,18 @@ pub fn claimed(destination: &Path, owner: TorrentId, name: &str, paths: &[PathBu
 
 /// The first of `paths` that is not free, with the error when the disk could not say. Only a
 /// path the disk answers is not there is free: one it cannot read may hold a file.
-pub fn taken(paths: &[PathBuf]) -> Option<(&Path, Option<std::io::Error>)> {
-    paths.iter().find_map(|path| match path.symlink_metadata() {
-        Ok(_) => Some((path.as_path(), None)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+pub fn taken<'a>(disk: &dyn Disk, paths: &'a [PathBuf]) -> Option<(&'a Path, Option<std::io::Error>)> {
+    paths.iter().find_map(|path| match disk.found(path) {
+        Ok(true) => Some((path.as_path(), None)),
+        Ok(false) => None,
         Err(e) => Some((path.as_path(), Some(e))),
     })
 }
 
 /// Refuses the download a title play would make when any of the `paths` it writes is not free.
 /// The play writes only where nothing is, so it cannot change a file that was there before it.
-pub fn check_free(paths: &[PathBuf], id: TorrentId) -> Result<(), Error> {
-    let Some((path, unread)) = taken(paths) else { return Ok(()) };
+pub fn check_free(disk: &dyn Disk, paths: &[PathBuf], id: TorrentId) -> Result<(), Error> {
+    let Some((path, unread)) = taken(disk, paths) else { return Ok(()) };
     let message = match unread {
         None => format!("{} already exists, and playing a title writes only where nothing is", path.display()),
         Some(e) => format!(

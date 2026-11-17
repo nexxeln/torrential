@@ -8,7 +8,7 @@ use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, JobStatus, TorrentId};
 
 use super::connect::{self, Conn};
-use super::rows::{job_row, next_for_stopped, short_ids};
+use super::rows::{job_row, next_for_stopped, short_ids, state_name};
 use crate::cli::Until;
 use crate::output::format;
 use crate::output::theme::Token;
@@ -314,13 +314,13 @@ impl Show for Lines<'_> {
         for w in watched {
             self.print(self.printer.row(Duration::ZERO, &w.id, &w.job));
         }
-        self.printed = watched.iter().map(|w| w.job.status.name()).collect();
+        self.printed = watched.iter().map(|w| state_name(&w.job)).collect();
     }
 
     fn changed(&mut self, watched: &[Watched], i: usize, at: Duration) {
         let w = &watched[i];
-        if w.job.status.name() != self.printed[i] {
-            self.printed[i] = w.job.status.name();
+        if state_name(&w.job) != self.printed[i] {
+            self.printed[i] = state_name(&w.job);
             self.print(self.printer.row(at, &w.id, &w.job));
         }
     }
@@ -396,6 +396,10 @@ impl Show for Bars {
 fn live_message(job: &Job) -> String {
     use crate::output::format;
     let name = job.name.as_deref().map(torrential_core::text::sanitize).unwrap_or_default();
+    if let Some(interface) = &job.waiting_for {
+        let interface = sanitize(interface);
+        return format!("waiting for {interface}  {}  {name}", format::percent(&job.progress));
+    }
     match job.status {
         JobStatus::Downloading => format!(
             "{}  {}  {}  eta {}  {name}",
@@ -521,6 +525,7 @@ mod tests {
             added_at: 0,
             title: None,
             place: torrential_core::Place::Folder,
+            waiting_for: None,
         }
     }
 

@@ -369,6 +369,7 @@ mod tests {
             added_at: 0,
             title,
             place: torrential_core::Place::Folder,
+            waiting_for: None,
         };
         titles.failed(release(2).id, Skip::NoVideo);
         titles.failed(release(40).id, Skip::NoData { waited_s: 30 });
@@ -436,6 +437,7 @@ mod tests {
             added_at: 0,
             title: Some(TitleLink { title: "tt0063350".parse().unwrap(), span: Span::Film, release: Some(release) }),
             place: torrential_core::Place::Folder,
+            waiting_for: None,
         };
         let jobs =
             [job(50, "Night.1968.720p", by_link), job(6, "NightOfTheLivingDeadwithSpanishSubtitles_595", by_hash)];

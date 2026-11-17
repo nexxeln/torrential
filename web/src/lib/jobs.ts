@@ -81,6 +81,11 @@ export const STATE_WORDS: Record<JobState, string> = {
   error: "Failed",
 };
 
+/** Why a download that needs peers gets none: the network interface torrents are bound to is down. */
+export function waiting(job: Job): string | null {
+  return job.waiting_for ? `Waiting for ${job.waiting_for}` : null;
+}
+
 export function isActive(job: Job): boolean {
   return job.state === "downloading" || job.state === "metadata" || job.state === "checking" || job.state === "queued";
 }

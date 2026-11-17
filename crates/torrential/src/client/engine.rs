@@ -23,7 +23,11 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                 Some(chosen) => Some(connect::remote(chosen, env)?),
                 None => connect::running(&paths, env)?,
             };
-            let log = chosen.is_none().then(|| paths.log().display().to_string());
+            let local = chosen.is_none();
+            let log = local.then(|| paths.log().display().to_string());
+            // The login service starts this machine's engine, so it says nothing of one on another.
+            let service_binary = if local { service::starts_another(env, &paths) } else { None };
+            let this_version = env.version();
             let report = match found {
                 Some(mut conn) => {
                     let jobs = conn.ask::<Vec<Job>>(&Request::Status { refs: Vec::new() });
@@ -31,11 +35,16 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     DaemonReport {
                         engine: "running",
                         pid: Some(conn.pid),
+                        notice: local
+                            .then(|| connect::mismatch(Some(&conn.engine_version), service_binary.as_deref(), &this_version))
+                            .flatten(),
                         version: Some(conn.engine_version.clone()),
                         address: Some(conn.engine.address().to_string()),
                         device: chosen.map(|chosen| chosen.device),
                         log,
                         downloads,
+                        this_version,
+                        service_binary,
                     }
                 }
                 None => DaemonReport {
@@ -46,6 +55,9 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     device: None,
                     log,
                     downloads: None,
+                    notice: connect::mismatch(None, service_binary.as_deref(), &this_version),
+                    this_version,
+                    service_binary,
                 },
             };
             Ok(emit(mode, &daemon_status(&report), &Typed { kind: DocKind::Daemon, body: &report }))
@@ -133,6 +145,12 @@ pub struct DaemonReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
     pub downloads: Option<usize>,
+    /// The version of this torrential, which the engine should run.
+    pub this_version: String,
+    /// The binary the login service starts, when it is not this torrential.
+    pub service_binary: Option<String>,
+    /// Why the engine may not run this torrential, and how to make it, in plain words.
+    pub notice: Option<String>,
 }
 
 pub fn daemon_status(report: &DaemonReport) -> Doc {
@@ -150,13 +168,17 @@ pub fn daemon_status(report: &DaemonReport) -> Doc {
     if let Some(address) = &report.address {
         fields.push(("address", Cell::new(address.clone())));
     }
-    let mut summary = Vec::new();
+    let mut summary: Vec<String> = report.notice.iter().cloned().collect();
     if let Some(device) = &report.device {
         fields.push(("device", Cell::new(device.clone())));
         summary.push("an engine on another machine; torrential connect --local drives this machine's".to_string());
     }
+    if let Some(service) = &report.service_binary {
+        fields.push(("service", Cell::new(service.clone())));
+    }
     if let Some(log) = &report.log {
         fields.push(("log", Cell::new(log.clone())));
     }
-    Doc { body: Body::Fields { title: Vec::new(), fields }, summary, next: Some("torrential status".to_string()) }
+    let next = if report.service_binary.is_some() { "torrential engine install" } else { "torrential status" };
+    Doc { body: Body::Fields { title: Vec::new(), fields }, summary, next: Some(next.to_string()) }
 }

@@ -151,7 +151,7 @@ impl Ports {
         let web_seeds = search.web_seeds();
         let search: Arc<dyn SearchPort> = Arc::new(search);
         Ok(Self {
-            engine: Box::new(Libtorrent::start(&paths.state, network)?),
+            engine: Box::new(Libtorrent::start(&paths.state, network, settings.torrent_interface.clone())?),
             web_seeds,
             search,
             parse: libtorrent::parse,
