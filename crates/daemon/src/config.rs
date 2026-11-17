@@ -27,6 +27,9 @@ pub struct Config {
     pub catalog: CatalogConfig,
     pub ffmpeg: FfmpegConfig,
     pub plays_max: PlaysMax,
+    /// The engine runs as a server: it listens on the network with nothing paired, and lets a
+    /// paired device in by whatever address it uses.
+    pub server: bool,
     /// The network interface, such as a VPN's `wg0`, that every torrent socket is bound to. The web
     /// app, pairing and casting stay on every network.
     pub torrent_interface: Option<InterfaceName>,
@@ -66,6 +69,7 @@ struct File {
     catalog: Catalog,
     ffmpeg: Ffmpeg,
     plays: Plays,
+    server: Option<bool>,
     torrent_interface: Option<Spanned<String>>,
 }
 
@@ -86,6 +90,12 @@ struct PreferencesOnly {
 #[serde(default)]
 struct UpdatesOnly {
     updates: Option<Policy>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ServerOnly {
+    server: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -187,7 +197,7 @@ pub fn preferences(paths: &Paths) -> Result<Preferences, Error> {
 pub fn save_preferences(paths: &Paths, preferences: &Preferences, writes: &Writes) -> Result<(PathBuf, bool), Error> {
     save(paths, writes, "preferences block", |text| {
         let edited = if preferences.is_empty() {
-            without_block(text)
+            without_block(text, "preferences")
         } else {
             with_block(text, "preferences", &block(preferences))
         };
@@ -230,6 +240,14 @@ pub fn save_updates(paths: &Paths, policy: Policy, writes: &Writes) -> Result<(P
     })
 }
 
+/// Writes `server: true` into config.yaml, or takes the line out.
+pub fn save_server(paths: &Paths, on: bool, writes: &Writes) -> Result<(PathBuf, bool), Error> {
+    save(paths, writes, "server line", |text| {
+        let edited = if on { with_block(text, "server", "server: true\n") } else { without_block(text, "server") };
+        (read_server(&edited).ok() == Some(on)).then_some(edited)
+    })
+}
+
 fn save(
     paths: &Paths,
     writes: &Writes,
@@ -259,6 +277,11 @@ fn read_preferences(text: &str) -> Result<Preferences, Problem> {
 fn read_updates(text: &str) -> Result<Policy, Problem> {
     let file: UpdatesOnly = serde_saphyr::from_str(text).map_err(|e| problem(&e))?;
     Ok(file.updates.unwrap_or_default())
+}
+
+fn read_server(text: &str) -> Result<bool, Problem> {
+    let file: ServerOnly = serde_saphyr::from_str(text).map_err(|e| problem(&e))?;
+    Ok(file.server.unwrap_or_default())
 }
 
 impl Overrides {
@@ -301,9 +324,9 @@ fn block_lines(lines: &[&str], key: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-fn without_block(text: &str) -> String {
+fn without_block(text: &str, key: &str) -> String {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let Some((start, mut end)) = block_lines(&lines, "preferences") else { return text.to_string() };
+    let Some((start, mut end)) = block_lines(&lines, key) else { return text.to_string() };
     while end < lines.len() && lines[end].trim().is_empty() {
         end += 1;
     }
@@ -423,6 +446,7 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
             (Some(referenced.line()), format!("plays.max {value:?} is not a size; use a form like 20GiB, or none"))
         })?),
     };
+    let server = file.server.unwrap_or_default();
     let torrent_interface =
         file.torrent_interface.map(|Spanned { value, referenced, .. }| torrent_interface(&value, referenced.line()));
     Ok(Config {
@@ -436,6 +460,7 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
         catalog,
         ffmpeg,
         plays_max,
+        server,
         torrent_interface: torrent_interface.transpose()?,
     })
 }
@@ -860,6 +885,24 @@ sources:
         assert_eq!(folder.text(), "# indexers\nsources:\n  disabled: [nyaa]\n\nupdates: off\n");
         assert!(!save(Policy::Off), "saving the same policy again changes nothing");
         assert_eq!(updates(&folder.paths).unwrap(), Policy::Off);
+    }
+
+    #[test]
+    fn server_install_writes_the_server_line_and_uninstall_takes_it_out() {
+        let folder = Folder::new();
+        folder.write("# indexers\nsources:\n  disabled: [nyaa]\n");
+        let writes = Writes { sandboxed: false, rerun: "torrential server install".into() };
+        let save = |on| save_server(&folder.paths, on, &writes).unwrap().1;
+        let server = || Config::load(&folder.paths, &env()).unwrap().server;
+
+        assert!(!server());
+        assert!(save(true));
+        assert_eq!(folder.text(), "# indexers\nsources:\n  disabled: [nyaa]\n\nserver: true\n");
+        assert!(server());
+        assert!(!save(true), "saving it again changes nothing");
+        assert!(save(false));
+        assert_eq!(folder.text(), "# indexers\nsources:\n  disabled: [nyaa]\n");
+        assert!(!server());
     }
 
     #[test]

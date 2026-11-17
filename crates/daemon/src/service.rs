@@ -247,23 +247,68 @@ fn home(env: &Env) -> Result<&Path, Error> {
     env.home().ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))
 }
 
-/// A test names a folder of stand-ins for launchctl and systemctl in `SERVICE_BIN`, so it never
-/// changes the real login services.
-fn run(env: &Env, program: &str, args: &[&str]) -> Result<(), Error> {
+/// A test names a folder of stand-ins for launchctl, systemctl, loginctl and sudo in
+/// `SERVICE_BIN`, so it never changes the real login services.
+fn program(env: &Env, program: &str) -> PathBuf {
     let bin = env.test().and_then(|test| test.path(hooks::SERVICE_BIN));
-    let path = bin.map_or_else(|| PathBuf::from(program), |bin| bin.join(program));
-    let output = Command::new(path)
-        .args(args)
-        .output()
-        .map_err(|e| Error::new(ErrorCode::Internal, format!("cannot run {program}: {e}")))?;
+    bin.map_or_else(|| PathBuf::from(program), |bin| bin.join(program))
+}
+
+fn run(env: &Env, name: &str, args: &[&str]) -> Result<(), Error> {
+    output(env, name, args).map(drop)
+}
+
+/// What `name` printed, or why it failed.
+fn output(env: &Env, name: &str, args: &[&str]) -> Result<String, Error> {
+    let mut command = Command::new(program(env, name));
+    // systemctl --user finds this person's systemd through XDG_RUNTIME_DIR, which a shell from su,
+    // sudo or a remote runner leaves unset.
+    #[cfg(target_os = "linux")]
+    if name == "systemctl" && env.var("XDG_RUNTIME_DIR").is_none() {
+        command.env("XDG_RUNTIME_DIR", format!("/run/user/{}", crate::paths::uid()));
+    }
+    let output =
+        command.args(args).output().map_err(|e| Error::new(ErrorCode::Internal, format!("cannot run {name}: {e}")))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     Err(Error::internal(format!(
-        "{program} {} failed: {}",
+        "{name} {} failed: {}",
         args.join(" "),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+/// Whether systemd starts the services of user `uid` at boot and keeps them after the user logs
+/// out, which a server's engine needs.
+#[cfg(target_os = "linux")]
+pub fn lingering(env: &Env, uid: u32) -> bool {
+    let shown = output(env, "loginctl", &["show-user", &uid.to_string(), "--property=Linger", "--value"]);
+    shown.is_ok_and(|shown| shown.trim() == "yes")
+}
+
+/// Turns lingering on or off for user `uid`. logind lets a person do that for themselves on most
+/// systems, and else `sudo` does it, asking for a password on the terminal when `terminal` says
+/// someone is there to type it.
+#[cfg(target_os = "linux")]
+pub fn linger(env: &Env, uid: u32, on: bool, terminal: bool) -> Result<(), Error> {
+    let (verb, uid) = (if on { "enable-linger" } else { "disable-linger" }, uid.to_string());
+    if run(env, "loginctl", &[verb, &uid]).is_ok() {
+        return Ok(());
+    }
+    let mut sudo = Command::new(program(env, "sudo"));
+    if !terminal {
+        sudo.arg("-n");
+    }
+    if sudo.args(["loginctl", verb, &uid]).status().is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+    let (message, then) = if on {
+        ("systemd cannot keep the engine running without a login until lingering is on", "torrential server install")
+    } else {
+        ("systemd keeps starting the engine at boot until lingering is off", "torrential server uninstall")
+    };
+    Err(Error::new(ErrorCode::Usage, message).with_hint(format!("run sudo loginctl {verb} {uid}, then {then} again")))
 }
 
 /// The unit as its file holds it. Task Scheduler reads a task's XML as UTF-16.

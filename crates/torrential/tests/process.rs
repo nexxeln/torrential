@@ -527,6 +527,80 @@ fn a_login_service_left_half_written_is_finished_at_the_next_start() {
     assert_eq!(left, [service.unit.file_name().unwrap()], "no partial file is left behind");
 }
 
+/// `server install` on Linux, with stand-ins: a logind that will not let the person linger, a
+/// sudo that will, and a systemd that starts the engine when asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn server_install_lingers_starts_the_service_and_shows_a_code_and_uninstall_undoes_it() {
+    let service = Service::new();
+    let home = &service.home;
+    let calls = service.calls.display().to_string();
+    let exe = env!("CARGO_BIN_EXE_torrential");
+    let log = home.dir.path().join("state/torrential/engine.log");
+    home.stub(
+        "systemctl",
+        &format!(
+            "echo \"systemctl $*\" >> '{calls}'\ncase \"$*\" in *--now*) '{exe}' daemon run --service </dev/null >>'{}' 2>&1 & ;; esac",
+            log.display()
+        ),
+    );
+    home.stub(
+        "loginctl",
+        &format!(
+            "echo \"loginctl $*\" >> '{calls}'\ncase \"$1\" in show-user) echo no ;; enable-linger) exit 1 ;; esac"
+        ),
+    );
+    home.stub("sudo", &format!("echo \"sudo $*\" >> '{calls}'"));
+    let config = home.dir.path().join("config/torrential/config.yaml");
+
+    let install = home.json(&["server", "install", "--json"]);
+
+    let uid = unsafe { libc::geteuid() };
+    assert_eq!((install["result"].as_str(), install["lingering"].as_bool()), (Some("installed"), Some(true)));
+    assert_eq!(install["unit"].as_str(), Some(service.unit.display().to_string().as_str()));
+    assert_eq!(install["offer"]["code"].as_str().map(str::len), Some(6), "{install}");
+    assert_eq!(
+        service.calls(),
+        format!(
+            "loginctl show-user {uid} --property=Linger --value\nloginctl enable-linger {uid}\n\
+             sudo -n loginctl enable-linger {uid}\n\
+             systemctl --user daemon-reload\nsystemctl --user enable --now torrential.service\n"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "server: true\n");
+    let (pid, _) = home.engine().unwrap();
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains(" runs as a server, on the network on port "), "{log}");
+
+    std::fs::remove_file(&service.calls).unwrap();
+    let uninstall = home.json(&["server", "uninstall", "--json"]);
+
+    assert_eq!((uninstall["result"].as_str(), uninstall["lingering"].as_bool()), (Some("uninstalled"), Some(false)));
+    assert_eq!(
+        service.calls(),
+        format!("loginctl disable-linger {uid}\nloginctl show-user {uid} --property=Linger --value\n")
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "");
+    assert!(!alive(pid), "the server's engine stopped");
+    let again = home.json(&["server", "uninstall", "--json"]);
+    assert_eq!(again["result"], "not_installed");
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn server_install_says_it_runs_only_on_linux() {
+    let home = Home::new();
+    let run = home.run(&["server", "install", "--json"]);
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert_eq!(
+        (run.json()["error"]["message"].as_str(), run.json()["error"]["hint"].as_str()),
+        (
+            Some("torrential server runs only on Linux"),
+            Some("on this computer, torrential devices add lets a phone or TV in")
+        )
+    );
+}
+
 // Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
 #[cfg(unix)]
 #[test]

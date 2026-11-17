@@ -62,7 +62,8 @@ pub struct Granted {
 pub enum Reach {
     /// 127.0.0.1 only, while nothing is paired.
     Loopback,
-    /// Every address, while a device is paired, a code is open, or a TV plays a cast.
+    /// Every address, while a device is paired, a code is open, or a TV plays a cast, and always
+    /// on a server.
     Network,
 }
 
@@ -184,12 +185,15 @@ struct State {
     /// Why the engine's last try to listen on the home network failed, or `None` after one that
     /// worked.
     refused: Option<io::ErrorKind>,
+    /// `server: true` in config.yaml.
+    server: bool,
 }
 
 impl State {
     fn reach(&self) -> Reach {
         let open = self.offer.as_ref().is_some_and(Offer::open);
-        if open || !self.paired.is_empty() || !self.grants.is_empty() { Reach::Network } else { Reach::Loopback }
+        let wanted = open || !self.paired.is_empty() || !self.grants.is_empty();
+        if wanted || self.server { Reach::Network } else { Reach::Loopback }
     }
 
     fn device(&self, id: &str) -> Option<&Device> {
@@ -198,8 +202,13 @@ impl State {
 
     fn offer(&self, port: u16) -> Option<PairingOffer> {
         let offer = self.offer.as_ref().filter(|offer| offer.open())?;
-        let lan_address = self.names.lan.first().map(|ip| format!("{ip}:{port}"));
-        let address = self.names.local.as_ref().map(|name| format!("{name}:{port}")).or(lan_address.clone())?;
+        let lan = self.names.lan.first();
+        let lan_address = lan.map(|ip| format!("{ip}:{port}"));
+        // A .local name answers only on a home network, so a server whose best address is a public
+        // one offers that address.
+        let home = lan.is_none_or(|ip| ip.is_private() || ip.is_link_local());
+        let local = self.names.local.as_ref().filter(|_| home).map(|name| format!("{name}:{port}"));
+        let address = local.or(lan_address.clone())?;
         Some(PairingOffer {
             code: offer.code.clone(),
             url: format!("http://{address}/pair#{}", offer.code),
@@ -249,7 +258,8 @@ pub struct Devices {
 }
 
 impl Devices {
-    pub fn open(db: &Db) -> Result<Self, Error> {
+    /// The devices paired before, on a server when `server` says.
+    pub fn open(db: &Db, server: bool) -> Result<Self, Error> {
         let (conn, path) = (db.open()?, db.path());
         let paired = {
             let mut stmt = conn
@@ -278,6 +288,7 @@ impl Devices {
             tries: HashMap::new(),
             names: Names::read(),
             refused: None,
+            server,
         };
         let reach = watch::Sender::new(state.reach());
         Ok(Self {
@@ -342,6 +353,11 @@ impl Devices {
     /// This Mac's .local name, as phones and TVs on the home network open it.
     pub fn local_name(&self) -> Option<String> {
         self.state().names.local.clone()
+    }
+
+    /// Whether the engine runs as a server, which lets a paired device in by any address.
+    pub fn server(&self) -> bool {
+        self.state().server
     }
 
     /// The paired devices and the open offer.

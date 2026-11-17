@@ -667,6 +667,26 @@ expression: value
         ]
       },
       {
+        "name": "server",
+        "about": "Run the engine as a server on Linux: it starts at boot without a login, and paired devices reach it from anywhere",
+        "arguments": [],
+        "flags": [],
+        "subcommands": [
+          {
+            "name": "install",
+            "about": "Start the engine at boot, keep it on the network, and show a code that pairs the first device",
+            "arguments": [],
+            "flags": []
+          },
+          {
+            "name": "uninstall",
+            "about": "Go back to an engine that starts at login and listens on the network only while a device is paired",
+            "arguments": [],
+            "flags": []
+          }
+        ]
+      },
+      {
         "name": "schema",
         "about": "Print every command, flag, exit code, and error code as JSON",
         "arguments": [],

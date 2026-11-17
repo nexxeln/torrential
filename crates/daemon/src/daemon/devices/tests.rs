@@ -18,12 +18,12 @@ struct Home {
 impl Home {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let devices = Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap()).unwrap());
+        let devices = Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap(), false).unwrap());
         Self { dir, devices }
     }
 
     fn reopened(&self) -> Devices {
-        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap()).unwrap()
+        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap(), false).unwrap()
     }
 
     fn code(&self) -> String {
@@ -245,4 +245,30 @@ async fn a_second_iphone_is_named_iphone_2() {
     assert_eq!(device.name, "iPhone 2");
     let names: Vec<String> = home.devices.list(PORT).devices.into_iter().map(|d| d.name).collect();
     assert_eq!(names.len(), 2);
+}
+
+#[test]
+fn a_server_with_a_public_address_offers_it_in_place_of_its_local_name() {
+    let offered = |lan: &str| {
+        let offer = Offer { code: "482913".into(), expires_at: NOW + 300, deadline: Instant::now() + OFFER, wrong: 0 };
+        let state = State {
+            paired: HashMap::new(),
+            offer: Some(offer),
+            grants: HashMap::new(),
+            tries: HashMap::new(),
+            names: Names { local: Some("box.local".into()), lan: vec![lan.parse().unwrap()] },
+            refused: None,
+            server: true,
+        };
+        let offer = state.offer(PORT).unwrap();
+        (offer.address, offer.url)
+    };
+    assert_eq!(
+        offered("203.0.113.7"),
+        ("203.0.113.7:47919".to_string(), "http://203.0.113.7:47919/pair#482913".to_string())
+    );
+    assert_eq!(
+        offered("192.168.1.23"),
+        ("box.local:47919".to_string(), "http://box.local:47919/pair#482913".to_string())
+    );
 }

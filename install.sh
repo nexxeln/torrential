@@ -5,6 +5,21 @@ repo=nexxeln/torrential
 dir=${TORRENTIAL_INSTALL_DIR:-$HOME/.local/bin}
 version=${TORRENTIAL_VERSION:-latest}
 
+server=
+for arg in "$@"; do
+  case $arg in
+    --server) server=1 ;;
+    *)
+      echo "Unknown option $arg. The one option is --server." >&2
+      exit 2
+      ;;
+  esac
+done
+if [ -n "$server" ] && [ "$(uname -s)" != Linux ]; then
+  echo "--server runs only on Linux, where systemd starts the engine at boot." >&2
+  exit 2
+fi
+
 case "$(uname -s) $(uname -m)" in
   "Darwin arm64") target=aarch64-apple-darwin ;;
   "Linux x86_64") target=x86_64-unknown-linux-musl ;;
@@ -56,3 +71,12 @@ case ":$PATH:" in
   *":$dir:"*) ;;
   *) echo "Add $dir to your PATH to run it: export PATH=\"$dir:\$PATH\"" ;;
 esac
+
+if [ -n "$server" ]; then
+  # Piped from curl, this script is the shell's input, so sudo reads a password from the terminal.
+  if (: </dev/tty) 2>/dev/null; then
+    "$dir/torrential" server install </dev/tty
+  else
+    "$dir/torrential" server install
+  fi
+fi

@@ -898,10 +898,10 @@ mod tests {
         let key = store.remove(&tomb, Some((&name, folder, 300))).unwrap().unwrap();
         assert_eq!(store.deletions().unwrap(), [Recorded { key, job: play.id, play: name, folder, bytes: 300 }]);
 
-        let devices = Arc::new(Devices::open(&db).unwrap());
+        let devices = Arc::new(Devices::open(&db, false).unwrap());
         let code = devices.add(47919, 1_800_000_000).unwrap().offer.unwrap().code;
         let phone = std::net::IpAddr::from([192, 168, 1, 40]);
         let (device, _) = devices.pair(&code, Some("iPhone"), phone, 1_800_000_000).unwrap();
-        assert_eq!(Devices::open(&db).unwrap().list(47919).devices, [device]);
+        assert_eq!(Devices::open(&db, false).unwrap().list(47919).devices, [device]);
     }
 }

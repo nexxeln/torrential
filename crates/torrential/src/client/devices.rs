@@ -61,7 +61,7 @@ fn list_doc(list: &DeviceList, now: i64) -> Doc {
     Doc { body: Body::Table { header: vec!["ID", "NAME", "ADDED", "SEEN"], rows }, summary, next }
 }
 
-fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
+pub(super) fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
     let mut fields = vec![
         ("address", Cell::styled(format!("http://{}", offer.address), Token::Accent)),
         ("code", Cell::styled(&offer.code, Token::Accent)),
@@ -80,7 +80,7 @@ fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
 
 /// A QR code in half blocks, two rows to a line, dark on light whatever the terminal's colors,
 /// inside the four modules of light a camera needs to find it.
-fn blocks(rows: &[String]) -> String {
+pub(super) fn blocks(rows: &[String]) -> String {
     const MARGIN: isize = 4;
     let size = rows.len() as isize;
     let dark = |x: isize, y: isize| {

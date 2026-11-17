@@ -194,6 +194,8 @@ pub struct Running {
 pub struct Listen<'a> {
     pub ports: &'a [u16],
     pub access: &'a Path,
+    /// On the network from the start, with nothing paired, as `server: true` in config.yaml asks.
+    pub server: bool,
 }
 
 pub fn start(
@@ -207,7 +209,7 @@ pub fn start(
 ) -> Result<Running, Error> {
     let store = Store::open(db)?;
     ports.search.restore(store.results(torrential_core::time::now())?);
-    let devices = Arc::new(devices::Devices::open(db)?);
+    let devices = Arc::new(devices::Devices::open(db, listen.server)?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
     let players = http::bind(listen.ports, *reach.borrow_and_update())
@@ -357,7 +359,7 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let access = paths.engine_token();
-        let listen = Listen { ports: &http_ports, access: &access };
+        let listen = Listen { ports: &http_ports, access: &access, server: settings.server };
         let running = start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), listen)?;
         running.ctx.news.post(switch::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
@@ -366,6 +368,9 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
             persist(&format!("write {}", paths.http_port().display()), written);
         }
         log(&format!("engine {version} started, pid {pid}, web app and players http://127.0.0.1:{players}"));
+        if settings.server {
+            log(&format!("engine {version} runs as a server, on the network on port {players}"));
+        }
         persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(switch::follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));

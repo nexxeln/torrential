@@ -38,6 +38,16 @@ nix develop -c cargo install --path crates/torrential
 
 </details>
 
+## Run it on a server
+
+On a Linux server, NAS, or seedbox, install with `--server`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh | sh -s -- --server
+```
+
+The engine then starts when the machine boots, with no one logged in, and listens on the network. The command ends with a QR code and a link that pair your first phone or computer. Paired devices reach the server from any network, and anyone else gets only the pairing page. `torrential server uninstall` turns this off.
+
 ## Watch on your computer
 
 ```sh

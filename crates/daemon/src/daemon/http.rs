@@ -885,7 +885,7 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
         }
         Peer::Loopback if !request.from.loopback_allowed(port) => return Err(Refusal::Forbidden),
         Peer::Network { local, .. } => {
-            if !request.from.home_allowed(port, local, name.as_deref()) {
+            if !request.from.home_allowed(port, local, name.as_deref(), devices.server()) {
                 let host = name.unwrap_or_else(|| local.to_string());
                 return Err(Refusal::Elsewhere(format!("{host}:{port}")));
             }
@@ -938,13 +938,15 @@ impl Sender {
 
     /// For a request from the home network, true when it names this Mac by its .local name or by
     /// the address it connected to, on `port`, and no other website made it. A web page that
-    /// rebinds its own hostname to this Mac's address still names that hostname.
-    fn home_allowed(&self, port: u16, local: IpAddr, name: Option<&str>) -> bool {
+    /// rebinds its own hostname to this Mac's address still names that hostname. A `server` takes
+    /// any name and port, since devices reach it by names it cannot know, such as a forwarded
+    /// port, and a page that rebinds its name to it holds no device's cookie.
+    fn home_allowed(&self, port: u16, local: IpAddr, name: Option<&str>, server: bool) -> bool {
         let Some(host) = self.host.as_deref() else { return false };
         let (host_name, host_port) = split_host(host);
         let ours = host_name.parse::<IpAddr>().is_ok_and(|ip| ip.to_canonical() == local) || name == Some(host_name);
         let same_origin = self.origin.as_deref().is_none_or(|origin| origin.strip_prefix("http://") == Some(host));
-        ours && host_port == Some(port) && !self.cross_site() && same_origin
+        (server || ours && host_port == Some(port)) && !self.cross_site() && same_origin
     }
 
     fn cross_site(&self) -> bool {
@@ -1047,7 +1049,7 @@ mod tests {
         let allowed = |host: Option<&str>, site: Option<&str>, origin: Option<&str>| {
             let from =
                 Sender { host: host.map(String::from), site: site.map(String::from), origin: origin.map(String::from) };
-            from.home_allowed(47919, mac, Some("studio-mac.local"))
+            from.home_allowed(47919, mac, Some("studio-mac.local"), false)
         };
         // A phone that opened either address, and a TV that plays a cast.
         assert!(allowed(Some("studio-mac.local:47919"), Some("none"), None));
@@ -1068,7 +1070,26 @@ mod tests {
         assert!(!allowed(Some("192.168.1.23:47919"), None, Some("http://192.168.1.23:3000")));
         assert!(!allowed(Some("192.168.1.23:47919"), None, Some("null")));
         let v6 = Sender { host: Some("[fd00::23]:47919".into()), site: None, origin: None };
-        assert!(v6.home_allowed(47919, "fd00::23".parse().unwrap(), None));
+        assert!(v6.home_allowed(47919, "fd00::23".parse().unwrap(), None, false));
+    }
+
+    #[test]
+    fn a_server_takes_any_name_but_still_refuses_other_websites() {
+        let server: IpAddr = "10.0.0.5".parse().unwrap();
+        let allowed = |host: Option<&str>, site: Option<&str>, origin: Option<&str>| {
+            let from =
+                Sender { host: host.map(String::from), site: site.map(String::from), origin: origin.map(String::from) };
+            from.home_allowed(47919, server, Some("box.local"), true)
+        };
+        // Its public address behind a router's forwarded port, and a name only DNS knows.
+        assert!(allowed(Some("203.0.113.7:8080"), Some("none"), None));
+        assert!(allowed(Some("box.example.net:47919"), Some("same-origin"), Some("http://box.example.net:47919")));
+        // Another website, another origin, or no name at all.
+        assert!(!allowed(Some("box.example.net:47919"), Some("cross-site"), None));
+        assert!(!allowed(Some("box.example.net:47919"), Some("same-site"), None));
+        assert!(!allowed(Some("box.example.net:47919"), None, Some("https://example.org")));
+        assert!(!allowed(Some("box.example.net:47919"), None, Some("null")));
+        assert!(!allowed(None, None, None));
     }
 
     #[test]
