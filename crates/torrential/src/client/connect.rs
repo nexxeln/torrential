@@ -170,7 +170,7 @@ pub fn existing(paths: &Paths, env: &Env) -> Result<Option<Conn>, Error> {
 }
 
 pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
-    let Some(conn) = existing(paths, env)? else { return start(paths, env) };
+    let Some(conn) = existing(paths, env)? else { return launch::start(paths, env) };
     if conn.engine_version == env.version() && conn.wire == WIRE_VERSION {
         return Ok(conn);
     }
@@ -181,18 +181,6 @@ pub fn ensure(paths: &Paths, env: &Env) -> Result<Conn, Error> {
         Err(staying) if speaks => existing(paths, env)?.ok_or(staying),
         Err(staying) => Err(staying),
     }
-}
-
-/// Starts this torrential's engine, once a torrential 0.5 engine that the update to this release
-/// left running has made way.
-// Remove in 0.7, with `bridge05`.
-fn start(paths: &Paths, env: &Env) -> Result<Conn, Error> {
-    #[cfg(unix)]
-    if let Some(pid) = torrential_daemon::daemon::bridge05::make_way(paths, &env.version())? {
-        exits(pid, Request::Shutdown { asked: false }.within())?;
-        return replace(paths, env);
-    }
-    launch::start(paths, env)
 }
 
 /// This torrential's engine, in place of an older one that just exited. When the login service
