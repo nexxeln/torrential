@@ -202,6 +202,8 @@ pub struct Listen<'a> {
     pub access: &'a Path,
     /// How devices outside the home reach the engine, from config.yaml.
     pub exposure: crate::config::Exposure,
+    /// What the web app hears from the first request, such as the update that started this engine.
+    pub news: Option<switch::News>,
 }
 
 pub fn start(
@@ -215,6 +217,8 @@ pub fn start(
 ) -> Result<Running, Error> {
     let store = Store::open(db)?;
     ports.search.restore(store.results(torrential_core::time::now())?);
+    let news = switch::Board::default();
+    news.post(listen.news);
     let devices = Arc::new(devices::Devices::open(db, listen.exposure)?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
@@ -259,7 +263,7 @@ pub fn start(
         media: media::State::new(ports.ffmpeg),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         playing,
-        news: switch::Board::default(),
+        news,
         devices,
         casts: cast::Casts::new(ctx.clone(), ports.tvs),
         indexers: ports.indexers,
@@ -368,9 +372,9 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>, server
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let access = paths.engine_token();
-        let listen = Listen { ports: &http_ports, access: &access, exposure: settings.exposure.clone() };
+        let news = switch::opening(env, paths);
+        let listen = Listen { ports: &http_ports, access: &access, exposure: settings.exposure.clone(), news };
         let running = start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), listen)?;
-        running.ctx.news.post(switch::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
             let written = fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
