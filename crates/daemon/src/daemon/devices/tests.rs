@@ -267,8 +267,8 @@ async fn a_second_iphone_is_named_iphone_2() {
 }
 
 #[test]
-fn an_offer_leads_with_the_public_address_then_the_local_name_or_a_public_ip_and_shows_the_tailnet() {
-    let offered = |lan: &str, public: Option<&str>| {
+fn an_offer_leads_with_the_public_address_then_a_servers_tailnet_then_the_local_name_or_a_public_ip() {
+    let offered = |server: bool, lan: &str, public: Option<&str>| {
         let offer = Offer { code: "482913".into(), expires_at: NOW + 600, deadline: Instant::now() + OFFER, wrong: 0 };
         let state = State {
             paired: HashMap::new(),
@@ -283,7 +283,7 @@ fn an_offer_leads_with_the_public_address_then_the_local_name_or_a_public_ip_and
             tailnet: Some(Tailnet { name: Some("box.tail1234.ts.net".into()), ip: "100.101.102.103".parse().unwrap() }),
             refused: None,
             exposure: Exposure {
-                server: true,
+                server,
                 public_address: public.map(|public| crate::config::PublicAddress::parse(public).unwrap()),
             },
         };
@@ -291,7 +291,7 @@ fn an_offer_leads_with_the_public_address_then_the_local_name_or_a_public_ip_and
         [offer.url, offer.address, offer.lan_address.unwrap(), offer.tailnet_address.unwrap()]
     };
     assert_eq!(
-        offered("192.168.1.23", None),
+        offered(false, "192.168.1.23", None),
         [
             "http://box.local:47919/pair#482913",
             "http://box.local:47919",
@@ -300,7 +300,16 @@ fn an_offer_leads_with_the_public_address_then_the_local_name_or_a_public_ip_and
         ]
     );
     assert_eq!(
-        offered("203.0.113.7", None),
+        offered(true, "192.168.1.23", None),
+        [
+            "http://box.tail1234.ts.net:47919/pair#482913",
+            "http://box.tail1234.ts.net:47919",
+            "http://192.168.1.23:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
+    );
+    assert_eq!(
+        offered(false, "203.0.113.7", None),
         [
             "http://203.0.113.7:47919/pair#482913",
             "http://203.0.113.7:47919",
@@ -309,7 +318,7 @@ fn an_offer_leads_with_the_public_address_then_the_local_name_or_a_public_ip_and
         ]
     );
     assert_eq!(
-        offered("203.0.113.7", Some("https://tv.example.com")),
+        offered(true, "203.0.113.7", Some("https://tv.example.com")),
         [
             "https://tv.example.com/pair#482913",
             "https://tv.example.com",
