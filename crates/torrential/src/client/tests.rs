@@ -672,11 +672,21 @@ fn daemon_status_running_and_stopped() {
         address: Some("http://127.0.0.1:47919".into()),
         log: "/Users/ada/.local/state/torrential/engine.log".into(),
         downloads: Some(2),
+        this_version: "0.1.0".into(),
+        service_binary: None,
+        notice: None,
     };
     let stopped =
         DaemonReport { engine: "stopped", pid: None, version: None, address: None, downloads: None, ..running.clone() };
+    let service_binary = Some("/opt/old/torrential".to_string());
+    let other = DaemonReport {
+        version: Some("0.0.9".into()),
+        notice: crate::client::connect::mismatch(Some("0.0.9"), service_binary.as_deref(), "0.1.0"),
+        service_binary,
+        ..running.clone()
+    };
     let mut out = String::new();
-    for report in [running, stopped] {
+    for report in [running, stopped, other] {
         out.push_str(&both(&daemon_status(&report), &crate::output::Typed { kind: DocKind::Daemon, body: &report }));
     }
     insta::assert_snapshot!(out);
@@ -966,6 +976,9 @@ fn a_tab_in_a_path_stays_inside_its_column() {
         address: None,
         log: "/state/my\ntorrential/engine.log".into(),
         downloads: None,
+        this_version: "0.1.0".into(),
+        service_binary: None,
+        notice: None,
     };
     let named = job("9b5212", Some("arch\tlinux.iso"), JobStatus::Paused, Progress::default());
 
