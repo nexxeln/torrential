@@ -98,7 +98,9 @@ fn ended(report: &mut impl FnMut(AttemptEvent), outcome: Outcome) -> Outcome {
 }
 
 /// Plays `ask`, reports each step, the last being `playing` or `failed`, and answers how it ended.
-/// A download here that holds the video plays first, before any search. Otherwise sources are
+/// A download here that holds the video plays first, before any search. While the network
+/// interface torrents are bound to is down, only a finished one plays, and the play fails at once
+/// rather than try sources no peer can send. Otherwise sources are
 /// tried once the search so far holds one that could lead, while slower indexes go on answering,
 /// and each next source is the best of what has been found by then. Dropping the future stops the
 /// play and gives up the source under test.
@@ -120,9 +122,22 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         Ok(jobs) => jobs,
         Err(error) => return ended(&mut report, Outcome::Failed { error, tried: Vec::new() }),
     };
+    let waiting_for = match ctx.owner.ask(|reply| Command::WaitingFor { reply }).await {
+        Ok(waiting_for) => waiting_for,
+        Err(error) => return ended(&mut report, Outcome::Failed { error, tried: Vec::new() }),
+    };
     let here: BTreeSet<TorrentId> = jobs.iter().map(|j| j.id).collect();
     let mut walk = Walk { ctx, ask: &ask, title: &title, here: &here, end, tried: Vec::new(), asked: HashMap::new() };
-    let healthy: Vec<Job> = jobs.iter().filter(|j| !matches!(j.status, JobStatus::Error { .. })).cloned().collect();
+    // While no peer can be reached, only a finished download plays.
+    let healthy: Vec<Job> = jobs
+        .iter()
+        .filter(|j| match j.status {
+            JobStatus::Error { .. } => false,
+            JobStatus::Done { .. } => true,
+            _ => waiting_for.is_none(),
+        })
+        .cloned()
+        .collect();
     let ffmpeg = ask.plays.remux && ctx.media.ffmpeg.converts();
     let held = ctx.titles.line(&healthy, &title.video, Vec::new(), ask.player, ffmpeg);
     let reused = |r: &Release| ask.player.reuses(Quality::parse(&r.name), ffmpeg);
@@ -130,6 +145,9 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
         && let Some(outcome) = walk.try_source(release, 1, &mut report).await
     {
         return outcome;
+    }
+    if let Some(interface) = waiting_for {
+        return ended(&mut report, Outcome::Failed { error: unreachable(&interface), tried: walk.tried });
     }
 
     let query = match ctx.titles.query(&title, (ctx.preferences)(), ask.player).await {
@@ -189,6 +207,17 @@ pub async fn run(ctx: &Ctx, ask: PlayTitle, mut report: impl FnMut(AttemptEvent)
     }
     let error = failure(&title.name(), &walk.tried, ask.pin.is_some(), ask.replace.is_some());
     ended(&mut report, Outcome::Failed { error, tried: walk.tried })
+}
+
+/// Why a title play tries no source: torrents reach peers only through `interface`, which is down.
+fn unreachable(interface: &str) -> Error {
+    Error::new(
+        ErrorCode::NetworkUnavailable,
+        format!("torrential is waiting for {interface}, the torrent_interface in config.yaml, to come up"),
+    )
+    .with_hint(format!(
+        "bring {interface} up, or remove torrent_interface from config.yaml and run torrential engine stop"
+    ))
 }
 
 /// Whether a title play may stop waiting for its search and try `first`, the best of its sources
@@ -554,7 +583,7 @@ fn failure(name: &str, tried: &[Tried], pinned: bool, replacing: bool) -> Error 
     }
     if every(|s| matches!(s, Skip::NotOnTv { .. })) {
         return Error::new(ErrorCode::NoSource, format!("no source of {name} comes in a container the TV plays"))
-            .with_hint("play it on this Mac, or choose a source in MKV or MP4");
+            .with_hint("play it here, or choose a source in MKV or MP4");
     }
     if every(|s| matches!(s, Skip::TooLarge { .. }))
         && let Some(Skip::TooLarge { error }) = tried.first().map(|t| &t.reason)

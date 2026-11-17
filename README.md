@@ -38,6 +38,35 @@ nix develop -c cargo install --path crates/torrential
 
 </details>
 
+## Run it on a server
+
+On a Linux server, NAS, or seedbox, install with `--server`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh | sh -s -- --server
+```
+
+The engine then starts when the machine boots, with no one logged in, and listens on the network. The command ends with a QR code and a link that pair your first phone or computer. Paired devices reach the server from any network, and anyone else gets only the pairing page. `torrential server uninstall` turns this off.
+
+Or run it in Docker, for amd64 and arm64. It needs the host's network to name its address in the pairing link and to find TVs, and it keeps settings, state and downloads in `/data`:
+
+```sh
+mkdir -p ~/torrential
+docker run -d --name torrential --network host --restart unless-stopped \
+  --user "$(id -u):$(id -g)" -v ~/torrential:/data ghcr.io/nexxeln/torrential
+docker exec torrential torrential devices add
+```
+
+Templates for [Unraid](docker/unraid/torrential.xml) and [TrueNAS](docker/truenas/torrential.yaml) set the same up. A newer image updates it. Its config file is `/data/config/config.yaml`.
+
+To watch away from home, install [Tailscale](https://tailscale.com) on the server and on your devices. The pairing link and QR code then use the server's tailnet name, which works from any network with no port opened. With a domain of your own, put [Caddy](https://caddyserver.com) in front, which gets the HTTPS certificate, and set `public_address` in the config file so pairing links use it:
+
+```
+tv.example.com {
+	reverse_proxy 127.0.0.1:47919
+}
+```
+
 ## Watch on your computer
 
 ```sh
@@ -91,6 +120,17 @@ torrential status                            # list your downloads
 
 `torrential --help` lists the rest. Every command takes `--json`.
 
+## Private and local trackers
+
+To search a tracker torrential lacks, such as a private one or one in your language, run [Prowlarr](https://prowlarr.com) or [Jackett](https://github.com/Jackett/Jackett), add the tracker there, then give torrential its address and API key:
+
+```sh
+torrential indexers add http://localhost:9696 --key <api key>   # adds every tracker you set up in Prowlarr
+torrential indexers                                             # whether each answers, and what it carries
+```
+
+Search, titles and Play then use those trackers too, also when the engine runs on a server. Jackett's address works the same way, and so does any Torznab feed. The key is kept in `config.yaml`, which only you can read.
+
 ## With your agent
 
 ```sh
@@ -116,6 +156,9 @@ catalog:
 ffmpeg:
   fetch: false                # do not fetch ffmpeg when it is not installed
 updates: notify               # say when a new version is out instead of installing it, or off
+torrent_interface: wg0        # Linux and macOS: peers, trackers and the DHT use only this network
+                              # interface, such as a VPN's, and wait while it is down
+public_address: https://tv.example.com  # the address pairing links use, such as a domain in front of a server
 ```
 
 ## It never seeds

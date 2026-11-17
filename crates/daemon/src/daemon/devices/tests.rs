@@ -18,12 +18,13 @@ struct Home {
 impl Home {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let devices = Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap()).unwrap());
+        let devices =
+            Arc::new(Devices::open(&db::connect(&dir.path().join("state.db")).unwrap(), Exposure::default()).unwrap());
         Self { dir, devices }
     }
 
     fn reopened(&self) -> Devices {
-        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap()).unwrap()
+        Devices::open(&db::connect(&self.dir.path().join("state.db")).unwrap(), Exposure::default()).unwrap()
     }
 
     fn code(&self) -> String {
@@ -45,22 +46,26 @@ async fn a_phone_pairs_with_the_code_and_its_cookie_lets_it_in_from_then_on() {
     let offer = home.devices.add(PORT, NOW).unwrap().offer.unwrap();
     assert_eq!(offer.code.len(), 6);
     assert!(offer.code.bytes().all(|b| b.is_ascii_digit()));
-    assert_eq!(offer.url, format!("http://{}/pair#{}", offer.address, offer.code));
-    assert_eq!(offer.expires_at, NOW + 300);
+    assert_eq!(offer.url, format!("{}/pair#{}", offer.address, offer.code));
+    assert_eq!(offer.expires_at, NOW + 600);
 
     let typed = format!("{} {}", &offer.code[..3], &offer.code[3..]);
     let (device, token) = home.pair(&typed, IPHONE, NOW + 10).unwrap();
     assert_eq!((device.name.as_str(), device.added_at, device.seen_at), ("iPhone", NOW + 10, NOW + 10));
     assert_eq!(device.id.len(), 8);
     assert_eq!(token.len(), 64);
-    assert_eq!(home.devices.holder(&token, NOW + 20), Some(Device { seen_at: NOW + 20, ..device.clone() }));
+    assert_eq!(device.seen_from.as_deref(), Some("192.168.1.40"));
+    let away: IpAddr = "100.101.3.4".parse().unwrap();
+    let seen = Device { seen_at: NOW + 20, seen_from: Some("100.101.3.4".into()), ..device.clone() };
+    assert_eq!(home.devices.holder(&token, away, NOW + 20), Some(seen.clone()));
     assert_eq!(home.devices.list(PORT).offer, None, "a code lets one device in");
     assert_eq!(refusal(home.pair(&offer.code, IPHONE, NOW + 30)), "NoOffer");
 
     let restarted = home.reopened();
-    assert_eq!(restarted.holder(&token, NOW + 90).map(|d| d.id), Some(device.id), "pairing outlives the engine");
-    assert_eq!(home.devices.holder(&"0".repeat(64), NOW), None);
-    assert_eq!(home.devices.holder("not a token", NOW), None);
+    assert_eq!(restarted.device(&device.id), Some(seen), "pairing and the last address outlive the engine");
+    assert_eq!(restarted.holder(&token, PHONE, NOW + 90).map(|d| d.id), Some(device.id));
+    assert_eq!(home.devices.holder(&"0".repeat(64), PHONE, NOW), None);
+    assert_eq!(home.devices.holder("not a token", PHONE, NOW), None);
 }
 
 #[test]
@@ -80,24 +85,24 @@ fn the_database_keeps_only_a_hash_of_the_token() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_code_stops_working_after_five_minutes() {
+async fn a_code_stops_working_after_ten_minutes() {
     let home = Home::new();
     let code = home.code();
-    tokio::time::sleep(Duration::from_secs(299)).await;
+    tokio::time::sleep(Duration::from_secs(599)).await;
     assert!(home.devices.list(PORT).offer.is_some(), "not expired yet");
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(refusal(home.pair(&code, IPHONE, NOW + 300)), "NoOffer");
+    assert_eq!(refusal(home.pair(&code, IPHONE, NOW + 600)), "NoOffer");
     assert_eq!(home.devices.list(PORT).offer, None);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_code_closes_five_minutes_after_it_opens_even_when_the_clock_is_set_back() {
+async fn a_code_closes_ten_minutes_after_it_opens_even_when_the_clock_is_set_back() {
     let home = Home::new();
     let reach = home.devices.reach();
     // The Mac's clock ran an hour fast when the code opened, and was put right after.
     let fast = torrential_core::time::now() + 3600;
     home.devices.add(PORT, fast).unwrap();
-    tokio::time::sleep(Duration::from_secs(299)).await;
+    tokio::time::sleep(Duration::from_secs(599)).await;
     assert_eq!(*reach.borrow(), Reach::Network, "the code is still open");
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(*reach.borrow(), Reach::Loopback, "the engine stops listening on the network");
@@ -132,6 +137,20 @@ async fn one_address_gets_ten_pairing_tries_a_minute() {
     );
 }
 
+#[test]
+fn an_address_that_offers_thirty_tokens_that_open_nothing_gets_none_checked_until_the_minute_ends() {
+    let home = Home::new();
+    let other: IpAddr = "192.168.1.41".parse().unwrap();
+    for _ in 0..30 {
+        home.devices.missed(PHONE, NOW);
+    }
+    assert!(!home.devices.spent(PHONE, NOW), "thirty are allowed");
+    home.devices.missed(PHONE, NOW);
+    assert!(home.devices.spent(PHONE, NOW));
+    assert!(!home.devices.spent(other, NOW), "another address");
+    assert!(!home.devices.spent(PHONE, NOW - NOW.rem_euclid(60) + 60), "the next minute");
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_engine_listens_on_the_network_while_a_device_is_paired_a_code_is_open_or_a_cast_plays() {
     let home = Home::new();
@@ -139,7 +158,7 @@ async fn the_engine_listens_on_the_network_while_a_device_is_paired_a_code_is_op
     assert_eq!(*reach.borrow(), Reach::Loopback);
     home.code();
     assert_eq!(*reach.borrow(), Reach::Network, "an open code");
-    tokio::time::sleep(Duration::from_secs(301)).await;
+    tokio::time::sleep(Duration::from_secs(601)).await;
     assert_eq!(*reach.borrow(), Reach::Loopback, "the code expired");
 
     let code_again = home.code();
@@ -169,8 +188,8 @@ async fn a_removed_device_is_locked_out_and_its_open_requests_end() {
     let left = home.devices.remove(&device.id, PORT).unwrap();
     assert_eq!(left.devices, []);
     tokio::time::timeout(Duration::from_secs(1), waiting).await.expect("removing ends its requests").unwrap();
-    assert_eq!(home.devices.holder(&token, NOW), None);
-    assert_eq!(home.reopened().holder(&token, NOW), None);
+    assert_eq!(home.devices.holder(&token, PHONE, NOW), None);
+    assert_eq!(home.reopened().holder(&token, PHONE, NOW), None);
     let error = home.devices.remove(&device.id, PORT).unwrap_err();
     assert_eq!(
         (error.code, error.message, error.hint),
@@ -245,4 +264,66 @@ async fn a_second_iphone_is_named_iphone_2() {
     assert_eq!(device.name, "iPhone 2");
     let names: Vec<String> = home.devices.list(PORT).devices.into_iter().map(|d| d.name).collect();
     assert_eq!(names.len(), 2);
+}
+
+#[test]
+fn an_offer_leads_with_the_public_address_then_a_servers_tailnet_then_the_local_name_or_a_public_ip() {
+    let offered = |server: bool, lan: &str, public: Option<&str>| {
+        let offer = Offer { code: "482913".into(), expires_at: NOW + 600, deadline: Instant::now() + OFFER, wrong: 0 };
+        let state = State {
+            paired: HashMap::new(),
+            offer: Some(offer),
+            grants: HashMap::new(),
+            tries: Tries::default(),
+            misses: Tries::default(),
+            names: Names {
+                local: Some("box.local".into()),
+                lan: vec!["100.101.102.103".parse().unwrap(), lan.parse().unwrap()],
+            },
+            tailnet: Some(Tailnet { name: Some("box.tail1234.ts.net".into()), ip: "100.101.102.103".parse().unwrap() }),
+            refused: None,
+            exposure: Exposure {
+                server,
+                public_address: public.map(|public| crate::config::PublicAddress::parse(public).unwrap()),
+            },
+        };
+        let offer = state.offer(PORT).unwrap();
+        [offer.url, offer.address, offer.lan_address.unwrap(), offer.tailnet_address.unwrap()]
+    };
+    assert_eq!(
+        offered(false, "192.168.1.23", None),
+        [
+            "http://box.local:47919/pair#482913",
+            "http://box.local:47919",
+            "http://192.168.1.23:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
+    );
+    assert_eq!(
+        offered(true, "192.168.1.23", None),
+        [
+            "http://box.tail1234.ts.net:47919/pair#482913",
+            "http://box.tail1234.ts.net:47919",
+            "http://192.168.1.23:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
+    );
+    assert_eq!(
+        offered(false, "203.0.113.7", None),
+        [
+            "http://203.0.113.7:47919/pair#482913",
+            "http://203.0.113.7:47919",
+            "http://203.0.113.7:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
+    );
+    assert_eq!(
+        offered(true, "203.0.113.7", Some("https://tv.example.com")),
+        [
+            "https://tv.example.com/pair#482913",
+            "https://tv.example.com",
+            "http://203.0.113.7:47919",
+            "http://box.tail1234.ts.net:47919"
+        ]
+    );
 }

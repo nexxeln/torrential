@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame, read_frame};
+use torrential_core::protocol::{Request, WIRE_VERSION};
 use torrential_daemon::wire::{Access, Client};
 
 mod common;
@@ -112,7 +112,8 @@ fn a_command_waits_for_the_login_service_to_start_the_engine_it_replaces() {
 
     assert_eq!((run.code, run.stderr.as_str()), (0, ""));
     assert_eq!(home.engine(), Some((restarted, env!("CARGO_PKG_VERSION").into())), "the service's engine runs");
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     assert_eq!(systemd.join().unwrap(), Some(75), "the old engine exited for the service to start the next");
 }
 
@@ -132,6 +133,27 @@ fn a_client_that_finds_a_newer_engine_says_to_restart_this_torrential_and_leaves
         );
     }
     assert_eq!(home.engine(), Some((pid, "9.0.0".into())));
+}
+
+#[test]
+fn a_client_uses_an_engine_newer_by_its_patch_and_says_so() {
+    let this = env!("CARGO_PKG_VERSION");
+    let (release, patch) = this.rsplit_once('.').unwrap();
+    let newer = format!("{release}.{}", patch.parse::<u64>().unwrap() + 1);
+    let mut home = Home::new().with(hooks::VERSION, &newer);
+    assert_eq!(home.run(&["status"]).code, 0);
+    let (pid, _) = home.engine().unwrap();
+    home.unset(hooks::VERSION);
+    home.set("CLAUDECODE", "1");
+
+    let run = home.run(&["status"]);
+
+    let said = format!(
+        "# the engine runs the newer torrential {newer}, not this torrential {this}; run torrential update to bring \
+         this one up to date\n"
+    );
+    assert_eq!((run.code, run.stderr), (0, said));
+    assert_eq!(home.engine(), Some((pid, newer)), "the newer engine kept running");
 }
 
 #[test]
@@ -386,7 +408,8 @@ fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
     let second = home.run(&["status"]);
     let added = std::fs::read_to_string(&unit).unwrap();
     let uninstall = home.json(&["engine", "uninstall", "--json"]);
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     let after_uninstall = home.run(&["status"]);
     let left_out = !unit.exists();
     let install = home.json(&["engine", "install", "--json"]);
@@ -419,6 +442,38 @@ fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
             .to_string()
     };
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), expected, "adding the service at start ran neither");
+}
+
+/// An install from another path leaves the login service starting another torrential. Each
+/// command says so with the fix, and engine status shows it, until engine install points the
+/// service at this torrential.
+// Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
+#[cfg(unix)]
+#[test]
+fn a_command_says_when_the_login_service_starts_another_torrential() {
+    let service = Service::new();
+    assert_eq!(service.home.run(&["status"]).code, 0);
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_torrential")).unwrap().display().to_string();
+    let unit = std::fs::read_to_string(&service.unit).unwrap();
+    std::fs::write(&service.unit, unit.replace(&exe, "/opt/old/torrential")).unwrap();
+
+    let run = service.home.run(&["status"]);
+    let status = service.home.json(&["engine", "status", "--json"]);
+    let install = service.home.json(&["engine", "install", "--json"]);
+    let after = service.home.run(&["status"]);
+
+    let this = env!("CARGO_PKG_VERSION");
+    let said = format!(
+        "the login service starts /opt/old/torrential, not this torrential {this}; run torrential engine install \
+         to have it start this one"
+    );
+    assert_eq!((run.code, run.stderr), (0, format!("# {said}\n")));
+    assert_eq!(
+        (&status["service_binary"], &status["this_version"], &status["notice"], &status["next"]),
+        (&json!("/opt/old/torrential"), &json!(this), &json!(said), &json!("torrential engine install"))
+    );
+    assert_eq!(install["result"], "installed");
+    assert_eq!((after.code, after.stderr.as_str()), (0, ""));
 }
 
 // Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
@@ -474,6 +529,97 @@ fn a_login_service_left_half_written_is_finished_at_the_next_start() {
     assert_eq!(left, [service.unit.file_name().unwrap()], "no partial file is left behind");
 }
 
+/// `server install` on Linux, with stand-ins: a logind that will not let the person linger, a
+/// sudo that will, and a systemd that starts the engine when asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn server_install_lingers_starts_the_service_and_shows_a_code_and_uninstall_undoes_it() {
+    let service = Service::new();
+    let home = &service.home;
+    let calls = service.calls.display().to_string();
+    let exe = env!("CARGO_BIN_EXE_torrential");
+    let log = home.dir.path().join("state/torrential/engine.log");
+    home.stub(
+        "systemctl",
+        &format!(
+            "echo \"systemctl $*\" >> '{calls}'\ncase \"$*\" in *--now*) '{exe}' daemon run --service </dev/null >>'{}' 2>&1 & ;; esac",
+            log.display()
+        ),
+    );
+    home.stub(
+        "loginctl",
+        &format!(
+            "echo \"loginctl $*\" >> '{calls}'\ncase \"$1\" in show-user) echo no ;; enable-linger) exit 1 ;; esac"
+        ),
+    );
+    home.stub("sudo", &format!("echo \"sudo $*\" >> '{calls}'"));
+    let config = home.dir.path().join("config/torrential/config.yaml");
+
+    let install = home.json(&["server", "install", "--json"]);
+
+    let uid = unsafe { libc::geteuid() };
+    assert_eq!((install["result"].as_str(), install["lingering"].as_bool()), (Some("installed"), Some(true)));
+    assert_eq!(install["unit"].as_str(), Some(service.unit.display().to_string().as_str()));
+    assert_eq!(install["offer"]["code"].as_str().map(str::len), Some(6), "{install}");
+    assert_eq!(
+        service.calls(),
+        format!(
+            "loginctl show-user {uid} --property=Linger --value\nloginctl enable-linger {uid}\n\
+             sudo -n loginctl enable-linger {uid}\n\
+             systemctl --user daemon-reload\nsystemctl --user enable --now torrential.service\n"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "server: true\n");
+    let (pid, _) = home.engine().unwrap();
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains(" runs as a server, on the network on port "), "{log}");
+
+    std::fs::remove_file(&service.calls).unwrap();
+    let uninstall = home.json(&["server", "uninstall", "--json"]);
+
+    assert_eq!((uninstall["result"].as_str(), uninstall["lingering"].as_bool()), (Some("uninstalled"), Some(false)));
+    assert_eq!(
+        service.calls(),
+        format!("loginctl disable-linger {uid}\nloginctl show-user {uid} --property=Linger --value\n")
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "");
+    assert!(!alive(pid), "the server's engine stopped");
+    let again = home.json(&["server", "uninstall", "--json"]);
+    assert_eq!(again["result"], "not_installed");
+}
+
+#[test]
+fn engine_run_with_server_runs_a_server_and_leaves_config_yaml_alone() {
+    let home = Home::new();
+    let log = home.dir.path().join("engine.log");
+    let mut engine =
+        home.process(&["engine", "run", "--server"]).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();
+    // Reaped as it exits, so the stop sees it gone.
+    let engine = std::thread::spawn(move || engine.wait().unwrap().code());
+    eventually("the engine says it runs as a server", Duration::from_secs(30), || {
+        std::fs::read_to_string(&log).unwrap_or_default().contains(" runs as a server, on the network on port ")
+    });
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
+    assert_eq!(engine.join().unwrap(), Some(0));
+    assert!(!home.path("th/config/config.yaml").exists(), "the image's engine writes no server line");
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn server_install_says_it_runs_only_on_linux() {
+    let home = Home::new();
+    let run = home.run(&["server", "install", "--json"]);
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert_eq!(
+        (run.json()["error"]["message"].as_str(), run.json()["error"]["hint"].as_str()),
+        (
+            Some("torrential server runs only on Linux"),
+            Some("on this computer, torrential devices add lets a phone or TV in")
+        )
+    );
+}
+
 // Its stand-ins are for launchd and systemd; W4 tests the Windows logon task in CI.
 #[cfg(unix)]
 #[test]
@@ -519,7 +665,8 @@ fn wait_ends_soon_after_the_engine_is_stopped() {
     let wait = home.start(&["wait", "9b5212", "--timeout", "60s"]);
 
     let started = Instant::now();
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     let wait = wait.finish();
 
     assert!(started.elapsed() < Duration::from_secs(10), "wait took {:?}", started.elapsed());
@@ -552,13 +699,13 @@ fn wait_that_finds_a_newer_engine_after_a_restart_says_to_restart_this_torrentia
 
     kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
-    home.set(hooks::VERSION, "0.1.1");
+    home.set(hooks::VERSION, "0.2.0");
     assert_eq!(home.run(&["status"]).code, 0);
     let wait = wait.finish();
 
     assert_eq!(
         (wait.code, wait.stderr.as_str()),
-        (6, "error[daemon_version]: the engine runs the newer torrential 0.1.1, so restart this torrential\n")
+        (6, "error[daemon_version]: the engine runs the newer torrential 0.2.0, so restart this torrential\n")
     );
 }
 
@@ -703,7 +850,9 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
 #[test]
 fn a_killed_engine_comes_back_with_the_download_running() {
     let home = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "1MiB");
-    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let began = Instant::now();
+    let get = home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]);
+    assert_eq!(get.code, 0, "after {:?}: {}\nengine log:\n{}", began.elapsed(), get.stderr, home.log());
     let (pid, _) = home.engine().unwrap();
     kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
@@ -786,7 +935,8 @@ fn the_engine_writes_its_port_and_a_new_token_where_only_this_user_can_read_them
     #[cfg(unix)]
     let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(home.token_file()).unwrap().permissions());
     let web = home.json(&["engine", "status", "--json"])["address"].as_str().unwrap().to_string();
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     let after_stop = home.token_file().exists();
     assert_eq!(home.run(&["status"]).code, 0);
     let second = Access::read(&home.token_file()).unwrap().unwrap();
@@ -849,85 +999,6 @@ fn a_command_that_finds_an_engine_it_cannot_reach_says_to_stop_it() {
         )
     );
     assert!(alive(pid), "the engine runs until the person stops it");
-}
-
-/// What torrential 0.5.2 asks a release's engine at 0.5's socket before it installs the release.
-/// It takes jobs or a `daemon_version` error as the answer to the status, then waits for a clean exit.
-// Remove in 0.7
-// It plays an engine from before 0.6, which listened on a Unix socket.
-#[cfg(unix)]
-#[test]
-fn an_engine_passes_the_trial_torrential_0_5_runs_before_it_installs_a_release() {
-    use std::io::Write;
-    use std::process::Stdio;
-    let home = Home::new();
-    let mut engine = home
-        .process(&["daemon", "run", "--http-port", "0"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let socket = home.path("th/run/engine.sock");
-    let mut found = None;
-    eventually("the engine listens at 0.5's socket", Duration::from_secs(20), || {
-        found = std::os::unix::net::UnixStream::connect(&socket).ok();
-        found.is_some()
-    });
-    let mut stream = found.unwrap();
-    let mut ask = |json: &str| {
-        stream.write_all(&[&(json.len() as u32).to_be_bytes()[..], json.as_bytes()].concat()).unwrap();
-        read_frame::<Value>(&mut stream)
-    };
-
-    let hello = ask(r#"{"op":"hello","client_version":"0.5.2","wire":10}"#).unwrap();
-    let status = ask(r#"{"op":"status","refs":[]}"#).unwrap();
-    let _ = ask(r#"{"op":"shutdown","asked":true}"#);
-
-    let message =
-        format!("the engine runs the newer torrential {}, so restart this torrential", env!("CARGO_PKG_VERSION"));
-    let refusal = json!({"type": "error", "error": {"code": "daemon_version", "message": message}});
-    assert_eq!([hello, status], [Some(refusal.clone()), Some(refusal)]);
-    let mut exited = None;
-    eventually("the engine stops", Duration::from_secs(20), || {
-        exited = engine.try_wait().unwrap();
-        exited.is_some()
-    });
-    assert!(exited.unwrap().success(), "{:?}", exited);
-    assert!(!socket.exists(), "the engine removed 0.5's socket");
-}
-
-/// A torrential 0.5 engine still runs after `torrential update` installs this release, and answers
-/// only at 0.5's socket. It stops when a newer client asks it to make way.
-// Remove in 0.7
-// It plays an engine from before 0.6, which listened on a Unix socket.
-#[cfg(unix)]
-#[test]
-fn a_command_asks_an_engine_from_torrential_0_5_to_make_way_and_starts_its_own() {
-    use std::io::Write;
-    let home = Home::new();
-    std::fs::create_dir_all(home.path("th/run")).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(home.path("th/run/engine.sock")).unwrap();
-    let mut old = std::process::Command::new("sleep").arg("60").spawn().unwrap();
-    let stand_in = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let hello: Value = read_frame(&mut stream).unwrap().unwrap();
-        let reply = json!({"type": "hello", "engine_version": "0.5.2", "wire": 10, "pid": old.id(), "http_port": 0});
-        stream.write_all(&encode_frame(&reply).unwrap()).unwrap();
-        let stop: Value = read_frame(&mut stream).unwrap().unwrap();
-        old.kill().unwrap();
-        old.wait().unwrap();
-        stream.write_all(&encode_frame(&json!({"type": "ok"})).unwrap()).unwrap();
-        [hello, stop]
-    });
-
-    let run = home.run(&["status"]);
-
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(stand_in.is_finished(), "the command never asked the 0.5 engine to make way");
-    let [hello, stop] = stand_in.join().unwrap();
-    assert_eq!(hello, json!({"op": "hello", "client_version": env!("CARGO_PKG_VERSION"), "wire": 10}));
-    assert_eq!(stop, json!({"op": "shutdown", "asked": false}));
-    assert_eq!(home.engine().map(|(_, version)| version).as_deref(), Some(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

@@ -1,5 +1,4 @@
 use std::io::{BufReader, Write};
-use std::net::TcpStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -9,13 +8,14 @@ use torrential_core::text::sanitize;
 use torrential_core::{Error, ErrorCode, Job, JobStatus, TorrentId};
 
 use super::connect::{self, Conn};
-use super::rows::{job_row, next_for_stopped, short_ids};
+use super::rows::{job_row, next_for_stopped, short_ids, state_name};
 use crate::cli::Until;
 use crate::output::format;
 use crate::output::theme::Token;
 use crate::output::{Body, Cell, Doc, DocKind, Mode, json_document, json_line};
 use torrential_daemon::env::Env;
 use torrential_daemon::paths::Paths;
+use torrential_daemon::wire::Stream;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(100);
 const HUMAN_HEARTBEAT: Duration = Duration::from_secs(240);
@@ -118,7 +118,7 @@ impl State {
 type Events = mpsc::Receiver<Result<Event, Error>>;
 
 /// The frames of a watch's reply, as the engine sends them.
-type Frames = BufReader<TcpStream>;
+type Frames = BufReader<Stream>;
 
 /// Where to find the engine again when the connection to it ends.
 pub struct Engine {
@@ -157,10 +157,10 @@ fn events(conn: Conn, refs: Vec<String>, engine: Engine) -> Result<(Vec<Job>, Ev
 
 /// Asks the engine to follow `refs` and reads the snapshot it answers with.
 fn watch(conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, Frames), Error> {
-    let (mut stream, log) = conn.follow(&Request::Watch { refs })?;
-    let first = read_frame(&mut stream).map_err(|e| connect::lost(e, &log))?;
+    let (mut stream, engine) = conn.follow(&Request::Watch { refs })?;
+    let first = read_frame(&mut stream).map_err(|e| engine.lost(e))?;
     let unexpected = || Error::internal("the engine sent an unexpected first watch event");
-    match first.ok_or_else(|| connect::lost(std::io::ErrorKind::UnexpectedEof.into(), &log))? {
+    match first.ok_or_else(|| engine.lost(std::io::ErrorKind::UnexpectedEof.into()))? {
         Frame::Update(Event::Snapshot { jobs }) => Ok((jobs, stream)),
         Frame::Reply(reply) => match *reply {
             Response::Error { error } => Err(error),
@@ -172,11 +172,12 @@ fn watch(conn: Conn, refs: Vec<String>) -> Result<(Vec<Job>, Frames), Error> {
 
 /// Follows the downloads `ids` again once the engine answers. An engine that is restarting leaves
 /// its token file and refuses connections for a few seconds, so `back` tries again for a short
-/// while. One that was stopped removes its token file, and a newer one is not for this torrential to
-/// use; either ends the wait at once.
+/// while, as it does for an engine on another machine. One on this machine that was stopped
+/// removes its token file, and a newer one is not for this torrential to use; either ends the wait
+/// at once.
 fn back(engine: &Engine, ids: &[String]) -> Result<(Vec<Job>, Frames), Error> {
     let stopped = || Error::new(ErrorCode::DaemonUnavailable, "the engine stopped while waiting");
-    let followed = connect::poll(connect::BACK_WITHIN, || match connect::existing(&engine.paths, &engine.env) {
+    let followed = connect::poll(connect::BACK_WITHIN, || match connect::found(&engine.paths, &engine.env) {
         Ok(Some(conn)) => match watch(conn, ids.to_vec()) {
             Err(error) if error.code == ErrorCode::DaemonUnavailable => Ok(None),
             followed => followed.map(Some),
@@ -313,13 +314,13 @@ impl Show for Lines<'_> {
         for w in watched {
             self.print(self.printer.row(Duration::ZERO, &w.id, &w.job));
         }
-        self.printed = watched.iter().map(|w| w.job.status.name()).collect();
+        self.printed = watched.iter().map(|w| state_name(&w.job)).collect();
     }
 
     fn changed(&mut self, watched: &[Watched], i: usize, at: Duration) {
         let w = &watched[i];
-        if w.job.status.name() != self.printed[i] {
-            self.printed[i] = w.job.status.name();
+        if state_name(&w.job) != self.printed[i] {
+            self.printed[i] = state_name(&w.job);
             self.print(self.printer.row(at, &w.id, &w.job));
         }
     }
@@ -395,6 +396,10 @@ impl Show for Bars {
 fn live_message(job: &Job) -> String {
     use crate::output::format;
     let name = job.name.as_deref().map(torrential_core::text::sanitize).unwrap_or_default();
+    if let Some(interface) = &job.waiting_for {
+        let interface = sanitize(interface);
+        return format!("waiting for {interface}  {}  {name}", format::percent(&job.progress));
+    }
     match job.status {
         JobStatus::Downloading => format!(
             "{}  {}  {}  eta {}  {name}",
@@ -520,6 +525,7 @@ mod tests {
             added_at: 0,
             title: None,
             place: torrential_core::Place::Folder,
+            waiting_for: None,
         }
     }
 

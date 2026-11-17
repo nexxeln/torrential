@@ -92,6 +92,22 @@ pub fn state_cell(status: &JobStatus) -> Cell {
     Cell::styled(status.name(), token)
 }
 
+/// The state a person reads for a download: `waiting` while the network interface it needs is
+/// down, else its status.
+pub fn state_name(job: &Job) -> &'static str {
+    if job.waiting_for.is_some() { "waiting" } else { job.status.name() }
+}
+
+pub fn job_state_cell(job: &Job) -> Cell {
+    if job.waiting_for.is_some() { Cell::styled(state_name(job), Token::Accent) } else { state_cell(&job.status) }
+}
+
+/// The line that says why downloads wait, once for all of them.
+pub fn waiting_line<'a>(jobs: impl IntoIterator<Item = &'a Job>) -> Option<String> {
+    let name = jobs.into_iter().find_map(|job| job.waiting_for.as_deref())?;
+    Some(format!("waiting for {}, the torrent_interface in config.yaml, to come up", sanitize(name)))
+}
+
 pub fn next_for_stopped(status: &JobStatus, id: &str) -> Option<String> {
     match status {
         JobStatus::Error { error } if error.next.is_some() => error.next.as_deref().cloned(),
@@ -103,10 +119,10 @@ pub fn next_for_stopped(status: &JobStatus, id: &str) -> Option<String> {
 
 pub fn job_row(id: &str, job: &Job) -> Vec<Cell> {
     let active = matches!(job.status, JobStatus::Metadata | JobStatus::Checking | JobStatus::Downloading);
-    let downloading = job.status == JobStatus::Downloading;
+    let downloading = job.status == JobStatus::Downloading && job.waiting_for.is_none();
     vec![
         Cell::styled(id, Token::Accent),
-        state_cell(&job.status),
+        job_state_cell(job),
         Cell::new(format::percent(&job.progress)),
         Cell::new(format::size(job.progress.size)),
         Cell::new(if downloading { format::rate(job.progress.down_rate) } else { NONE.to_string() }),

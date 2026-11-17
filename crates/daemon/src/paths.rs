@@ -142,6 +142,11 @@ impl Paths {
         self.state.join("no-login-service")
     }
 
+    /// Left by `torrential server install` when it turned lingering on, so uninstall turns it off.
+    pub fn server_lingers(&self) -> PathBuf {
+        self.state.join("server-lingers")
+    }
+
     /// Holds the port the engine last served the web app on.
     pub fn http_port(&self) -> PathBuf {
         self.state.join("http-port")
@@ -151,6 +156,12 @@ impl Paths {
     /// which only this user can read. It stays while the engine restarts for an update.
     pub fn engine_token(&self) -> PathBuf {
         self.state.join("engine-token")
+    }
+
+    /// The engines on other machines that `torrential connect` paired with, their device tokens,
+    /// and the one this torrential drives, which only this user can read.
+    pub fn remotes(&self) -> PathBuf {
+        self.state.join("remotes.json")
     }
 
     /// Left by an engine that exits for the login service to start the next one.

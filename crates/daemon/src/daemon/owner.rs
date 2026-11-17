@@ -12,7 +12,7 @@ use torrential_core::{
     TorrentId,
 };
 
-use super::admission::{self, Cap};
+use super::admission::{self, Cap, Plan};
 use super::book::{self, Home, Intent, JobEntry, JobRecord, Linked, Observed, Phase, Verify};
 use super::engine_port::{Activity, AddSource, AddTorrent, EngineEvent, EngineHandle};
 use super::files;
@@ -23,7 +23,7 @@ use super::resolve::{self, Found, Scope, no_download};
 use super::search_port::SavedLink;
 use super::shelf::Shelf;
 use super::store::{Store, Tombstone};
-use crate::disk::Disk;
+use crate::disk::{Disk, Space};
 use crate::log::{log, persist};
 use deleter::Deleter;
 use holds::{Before, Holds, OnDisk, PutBack};
@@ -205,6 +205,7 @@ pub enum Command {
     Cache { metainfo: Metainfo },
     Cached { id: TorrentId, reply: Reply<Option<Arc<Metainfo>>> },
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
+    WaitingFor { reply: Reply<Option<String>> },
     Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
     Remove { refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>> },
@@ -285,13 +286,17 @@ pub struct Owner {
     /// Looks up the web seeds that serve every file of a torrent the engine downloads.
     web_seeds: WebSeeds,
     parse: ParseTorrent,
-    disk: Arc<dyn Disk>,
-    /// The folders that have answered, and those being looked in.
+    /// The disk, and which folders on it answer now. The owner looks in a folder only through it.
     reach: Reach,
     parked: Vec<Parked>,
+    /// Downloads whose file list came while their folder did not answer. The engine downloads
+    /// none of their files until the folder answers and they are admitted.
+    unadmitted: BTreeSet<TorrentId>,
     updates: broadcast::Sender<Update>,
     config: OwnerConfig,
     resume_saved_at: Instant,
+    /// The network interface torrents are bound to, while it is missing or down.
+    waiting_for: Option<String>,
 }
 
 impl Owner {
@@ -342,12 +347,13 @@ impl Owner {
             engine,
             web_seeds,
             parse,
-            reach: Reach::new(disk.clone(), vec![config.plays.root.clone()]),
+            reach: Reach::new(disk, vec![config.plays.root.clone()]),
             parked: Vec::new(),
-            disk,
+            unadmitted: BTreeSet::new(),
             updates,
             config,
             resume_saved_at: Instant::now(),
+            waiting_for: None,
         };
         // A download in a folder that has not answered yet starts once it does.
         let folders: Vec<PathBuf> = owner.jobs.values().map(|job| job.record.dir.clone()).collect();
@@ -451,6 +457,9 @@ impl Owner {
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
             }
+            Command::WaitingFor { reply } => {
+                let _ = reply.send(Ok(self.waiting_for.clone()));
+            }
             Command::Pause { refs, reply } => match self.resolve_jobs(&refs, "pause") {
                 Ok(ids) => {
                     if !refs.is_empty() {
@@ -539,8 +548,8 @@ impl Owner {
         }
     }
 
-    /// Notes the folders that answered and runs the commands that waited for them. A command that
-    /// has waited `SAY_AFTER` for a folder answers that it is waiting.
+    /// Notes the folders that answered and runs the commands and the downloads that waited for
+    /// them. A command that has waited `SAY_AFTER` for a folder answers that it is waiting.
     fn reached_folders(&mut self, now: Instant) {
         let answered = self.reach.catch_up(now);
         for parked in std::mem::take(&mut self.parked) {
@@ -553,12 +562,18 @@ impl Owner {
             }
         }
         if answered {
+            for id in std::mem::take(&mut self.unadmitted) {
+                if self.jobs.contains_key(&id) {
+                    self.admit(id);
+                }
+            }
+            self.put_back_all();
             self.schedule();
         }
     }
 
     fn views(&self, ids: &[TorrentId]) -> Vec<Job> {
-        ids.iter().filter_map(|id| self.jobs.get(id)).map(JobEntry::view).collect()
+        ids.iter().filter_map(|id| self.jobs.get(id)).map(|job| job.view(self.waiting_for.as_deref())).collect()
     }
 
     fn stream_file(&self, id: TorrentId, index: u32) -> Result<StreamFile, Error> {
@@ -578,7 +593,7 @@ impl Owner {
 
     fn publish(&self, id: TorrentId) {
         if let Some(job) = self.jobs.get(&id) {
-            let _ = self.updates.send(Update::Job(Box::new(job.view())));
+            let _ = self.updates.send(Update::Job(Box::new(job.view(self.waiting_for.as_deref()))));
         }
     }
 
@@ -679,29 +694,29 @@ impl Owner {
         persist("save the search results", self.store.record_results(&saved, now()));
     }
 
-    fn others_remaining(&self, dir: &Path, except: TorrentId) -> Result<u64, Error> {
-        let space = self.disk.space(dir).map_err(|e| {
-            Error::new(ErrorCode::StorageError, format!("cannot read free space at {}: {e}", dir.display()))
-        })?;
-        Ok(self
-            .jobs
+    /// What the running downloads other than `except` still need on the disk `device`. One in a
+    /// folder that does not answer counts once it does.
+    fn others_remaining(&self, device: u64, except: TorrentId) -> u64 {
+        self.jobs
             .values()
             .filter(|j| j.id() != except && j.record.intent == Intent::Running && !self.leaving(j.id()))
-            // A download in a folder that has not answered yet counts once it starts.
-            .filter(|j| self.reach.reached(&j.record.dir))
-            .filter(|j| self.disk.space(&j.record.dir).is_ok_and(|s| s.device == space.device))
-            .map(|job| self.space_needed(job))
-            .sum())
+            .filter_map(|job| {
+                let (space, allocated) = self.reach.ask(&job.record.dir, measure(job)).ok()?;
+                (space.ok()?.device == device).then(|| space_needed(job, allocated))
+            })
+            .sum()
     }
 
-    fn space_needed(&self, job: &JobEntry) -> u64 {
-        match (&job.metainfo, job.wanted()) {
-            (Some(metainfo), Some(wanted)) => {
-                let allocated = admission::allocated_bytes(metainfo, &job.record.dir, &wanted, self.disk.as_ref());
-                job.selected_size().unwrap_or(0).saturating_sub(allocated.max(job.verified()))
-            }
-            _ => job.remaining(),
-        }
+    /// What `metainfo`'s `selection` takes in `dir`, looked up there.
+    fn plan(&self, metainfo: &Arc<Metainfo>, selection: &Selection, dir: &Path) -> Result<Plan, Error> {
+        let (metainfo, selection, at) = (metainfo.clone(), selection.clone(), dir.to_path_buf());
+        self.reach.ask(dir, move |disk| admission::plan(&metainfo, &selection, &at, disk))?
+    }
+
+    /// The disk `dir` is on, unless it does not answer.
+    fn space(&self, dir: &Path) -> Option<Space> {
+        let at = dir.to_path_buf();
+        self.reach.ask(dir, move |disk| disk.space(&at)).ok()?.ok()
     }
 
     /// `get` as a person runs it, which makes a download under test theirs.
@@ -750,10 +765,11 @@ impl Owner {
         let name = metainfo.as_ref().map(|m| m.name.clone()).or_else(|| magnet.as_ref().and_then(|m| m.name.clone()));
         let dir = dir.unwrap_or_else(|| self.config.default_dir.clone());
         if home == Home::Folder {
-            self.tending.outside_plays(&dir, self.disk.lineage(&dir))?;
+            let looked = dir.clone();
+            self.tending.outside_plays(&dir, self.reach.ask(&dir, move |disk| disk.lineage(&looked))?)?;
         }
         let cap = Cap::new(max_size, setup_max_size);
-        let plan = metainfo.as_deref().map(|m| admission::plan(m, &selection, &dir, self.disk.as_ref())).transpose()?;
+        let plan = metainfo.as_ref().map(|m| self.plan(m, &selection, &dir)).transpose()?;
         if let (Some(plan), Some(metainfo)) = (&plan, metainfo.as_deref()) {
             admission::check_size(plan.selected_size, cap, None)?;
             if !dry_run {
@@ -765,11 +781,11 @@ impl Owner {
             let space = match home {
                 Home::Plays(_) if !dry_run => {
                     self.make_room_for(id, plan.selected_size);
-                    self.disk.space(&dir).unwrap_or(plan.space)
+                    self.space(&dir).unwrap_or(plan.space)
                 }
                 _ => plan.space,
             };
-            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(&dir, id)?)?;
+            admission::check_disk(self.reclaimable(space), plan.needed(0), self.others_remaining(space.device, id))?;
         }
         let record = JobRecord {
             id,
@@ -788,7 +804,7 @@ impl Owner {
             home,
         };
         if dry_run {
-            let job = JobEntry::new(record, metainfo, Observed::Absent).view();
+            let job = JobEntry::new(record, metainfo, Observed::Absent).view(None);
             return Ok(GetReply {
                 outcome: GetOutcome::Planned,
                 job,
@@ -807,7 +823,12 @@ impl Owner {
         self.publish(id);
         let job = &self.jobs[&id];
         let outcome = if job.observed.in_engine() { GetOutcome::Started } else { GetOutcome::Queued };
-        Ok(GetReply { outcome, job: job.view(), plan: plan.map(|p| p.public(cap)), previous_selection: None })
+        Ok(GetReply {
+            outcome,
+            job: job.view(self.waiting_for.as_deref()),
+            plan: plan.map(|p| p.public(cap)),
+            previous_selection: None,
+        })
     }
 
     fn get_existing(
@@ -830,11 +851,17 @@ impl Owner {
         }
         let job = &self.jobs[&id];
         let too_large = matches!(&job.record.intent, Intent::Failed { error } if error.code == ErrorCode::TooLarge);
-        let recheck = matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none() && self.lost_files(job);
+        let recheck =
+            matches!(job.record.intent, Intent::Done { .. }) && job.verify.is_none() && self.lost_files(job)?;
         let unchanged = selection == Selection::All || selection == job.record.selection;
         if unchanged && cap == job.record.cap && !too_large && !recheck {
             let plan = self.current_plan(job);
-            return Ok(GetReply { outcome: GetOutcome::Existing, job: job.view(), plan, previous_selection: None });
+            return Ok(GetReply {
+                outcome: GetOutcome::Existing,
+                job: job.view(self.waiting_for.as_deref()),
+                plan,
+                previous_selection: None,
+            });
         }
         let previous = (!unchanged).then(|| job.record.selection.clone());
         let selection = if unchanged { job.record.selection.clone() } else { selection };
@@ -842,7 +869,7 @@ impl Owner {
             if dry_run {
                 return Ok(GetReply {
                     outcome: GetOutcome::Planned,
-                    job: job.view(),
+                    job: job.view(self.waiting_for.as_deref()),
                     plan: None,
                     previous_selection: previous,
                 });
@@ -850,10 +877,10 @@ impl Owner {
             self.store.set_selection(id, &selection)?;
             self.jobs.get_mut(&id).expect("found above").record.selection = selection;
             self.publish(id);
-            let job = self.jobs[&id].view();
+            let job = self.jobs[&id].view(self.waiting_for.as_deref());
             return Ok(GetReply { outcome: GetOutcome::Updated, job, plan: None, previous_selection: previous });
         };
-        let plan = admission::plan(&metainfo, &selection, &job.record.dir, self.disk.as_ref())?;
+        let plan = self.plan(&metainfo, &selection, &job.record.dir)?;
         admission::check_size(plan.selected_size, cap, None)?;
         if !dry_run {
             admission::check_conflicts(&plan)?;
@@ -861,11 +888,11 @@ impl Owner {
         }
         let needed = plan.needed(if recheck { 0 } else { job.verified() });
         // A running download gets the files at once, so only room the disk has now counts.
-        admission::check_disk(plan.space, needed, self.others_remaining(&job.record.dir, id)?)?;
+        admission::check_disk(plan.space, needed, self.others_remaining(plan.space.device, id))?;
         if dry_run {
             let mut preview = job.clone();
             preview.record.selection = selection;
-            let job = preview.view();
+            let job = preview.view(None);
             return Ok(GetReply {
                 outcome: GetOutcome::Planned,
                 job,
@@ -915,16 +942,26 @@ impl Owner {
             (None, true) => GetOutcome::Queued,
             (None, false) => GetOutcome::Existing,
         };
-        Ok(GetReply { outcome, job: job.view(), plan: Some(plan.public(cap)), previous_selection: previous })
+        Ok(GetReply {
+            outcome,
+            job: job.view(self.waiting_for.as_deref()),
+            plan: Some(plan.public(cap)),
+            previous_selection: previous,
+        })
     }
 
     /// Whether a selected file of the download is gone from disk or shorter than the torrent says.
-    fn lost_files(&self, job: &JobEntry) -> bool {
-        let Some(metainfo) = job.metainfo.as_deref() else { return false };
-        let Ok(wanted) = super::files::wanted(metainfo, &job.record.selection) else { return false };
-        metainfo.files.iter().zip(wanted).filter(|(_, wanted)| *wanted).any(|(file, _)| {
-            let path = super::files::path(metainfo, file, &job.record.dir);
-            self.disk.allocated_file_bytes(&path) != Some(file.size)
+    fn lost_files(&self, job: &JobEntry) -> Result<bool, Error> {
+        let Some(metainfo) = job.metainfo.clone() else { return Ok(false) };
+        let Ok(wanted) = files::wanted(&metainfo, &job.record.selection) else { return Ok(false) };
+        let dir = job.record.dir.clone();
+        self.reach.ask(&job.record.dir, move |disk| {
+            metainfo
+                .files
+                .iter()
+                .zip(wanted)
+                .filter(|(_, wanted)| *wanted)
+                .any(|(file, _)| disk.allocated_file_bytes(&files::path(&metainfo, file, &dir)) != Some(file.size))
         })
     }
 
@@ -984,7 +1021,8 @@ impl Owner {
         let free = match &title {
             Some(_) if absent => {
                 let into = dir.as_deref().unwrap_or(&self.config.default_dir);
-                admission::check_free(&files::footprint(&metainfo, into), id)
+                let footprint = files::footprint(&metainfo, into);
+                self.reach.ask(into, move |disk| admission::check_free(disk, &footprint, id)).and_then(|free| free)
             }
             _ => Ok(()),
         };
@@ -1024,7 +1062,7 @@ impl Owner {
         }
         self.schedule();
         self.publish(id);
-        Ok((self.jobs[&id].view(), metainfo))
+        Ok((self.jobs[&id].view(self.waiting_for.as_deref()), metainfo))
     }
 
     /// Marks a download as having played. Every test of it is over, and it stays as it is. The
@@ -1090,15 +1128,17 @@ impl Owner {
             return OnDisk::Unsettled;
         }
         let Some(metainfo) = job.metainfo.as_deref() else { return OnDisk::Nothing };
-        match admission::taken(&files::footprint(metainfo, &job.record.dir)) {
-            None => OnDisk::Nothing,
-            Some(_) => OnDisk::Something,
+        let footprint = files::footprint(metainfo, &job.record.dir);
+        match self.reach.ask(&job.record.dir, move |disk| admission::taken(disk, &footprint).is_some()) {
+            Ok(false) => OnDisk::Nothing,
+            Ok(true) => OnDisk::Something,
+            // What is in a folder that does not answer is not known yet.
+            Err(_) => OnDisk::Unsettled,
         }
     }
 
     fn current_plan(&self, job: &JobEntry) -> Option<torrential_core::protocol::DownloadPlan> {
-        let metainfo = job.metainfo.as_deref()?;
-        let plan = admission::plan(metainfo, &job.record.selection, &job.record.dir, self.disk.as_ref()).ok()?;
+        let plan = self.plan(job.metainfo.as_ref()?, &job.record.selection, &job.record.dir).ok()?;
         Some(plan.public(job.record.cap))
     }
 
@@ -1291,11 +1331,11 @@ impl Owner {
                 Removing::Download(id) if !self.jobs.contains_key(&id) => {}
                 Removing::Download(id) => {
                     let job = &self.jobs[&id];
-                    let view = job.view();
+                    let view = job.view(self.waiting_for.as_deref());
                     let tomb =
                         Tombstone { id, name: job.record.name.clone(), path: view.path.clone(), removed_at: now };
                     let doom = self.doom(job, delete);
-                    self.tending.remove(&mut self.store, &tomb, doom)?;
+                    self.tending.remove(&mut self.store, &tomb, doom, &self.reach)?;
                     let job = self.jobs.remove(&id).expect("resolved above");
                     self.streamed.remove(&id);
                     self.holds.end(id);
@@ -1361,7 +1401,8 @@ impl Owner {
             return Err(Error::new(ErrorCode::JobConflict, format!("{short} is busy saving its state"))
                 .with_hint(format!("try torrential verify {short} again in a few seconds")));
         }
-        self.check_writes(id, "verify")?;
+        let links = self.reach.ask(&job.record.dir, links(job))?;
+        self.check_writes(id, &links, "verify")?;
         let job = &self.jobs[&id];
         let wanted = job.wanted().unwrap_or_else(|| vec![true; metainfo.files.len()]);
         let in_engine = job.observed.in_engine();
@@ -1456,6 +1497,11 @@ impl Owner {
                     self.fail(id, error);
                 }
             }
+            EngineEvent::Interface { name, up } => {
+                self.waiting_for = (!up).then_some(name);
+                let ids: Vec<TorrentId> = self.jobs.keys().copied().collect();
+                ids.into_iter().for_each(|id| self.publish(id));
+            }
             EngineEvent::Removed { id } => {
                 self.draining.remove(&id);
                 self.tending.let_go(id);
@@ -1486,14 +1532,25 @@ impl Owner {
         let job = self.jobs.get_mut(&id).expect("caller checked");
         job.record.name = Some(metainfo.name.clone());
         job.record.info_hash = metainfo.info_hash;
-        job.metainfo = Some(metainfo.clone());
+        job.metainfo = Some(metainfo);
+        self.admit(id);
+        let info = self.job_files(id).expect("metadata just stored");
+        self.reply_metadata_waiters(id, Ok(info));
+    }
+
+    /// Checks a download whose file list arrived against its folder, its size cap and the other
+    /// downloads, then gives the engine its files or stops it with why. One whose folder does not
+    /// answer waits in `unadmitted`, with no file selected, until it does.
+    fn admit(&mut self, id: TorrentId) {
+        let job = &self.jobs[&id];
+        let metainfo = job.metainfo.clone().expect("admitted once its file list is here");
         let (dir, cap, selection) = (job.record.dir.clone(), job.record.cap, job.record.selection.clone());
-        let admitted = admission::plan(&metainfo, &selection, &dir, self.disk.as_ref()).and_then(|plan| {
+        let admitted = self.plan(&metainfo, &selection, &dir).and_then(|plan| {
             admission::check_size(plan.selected_size, cap, Some(id))?;
             admission::check_conflicts(&plan)?;
             self.check_claims(id, &metainfo, &dir, &plan.wanted, None)?;
             // The engine gets the files at once, so only room the disk has now counts.
-            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(&dir, id)?)?;
+            admission::check_disk(plan.space, plan.needed(0), self.others_remaining(plan.space.device, id))?;
             Ok(plan)
         });
         match admitted {
@@ -1502,14 +1559,12 @@ impl Owner {
                     self.engine.send(id, move |e| e.select(id, &plan.wanted));
                 }
                 self.publish(id);
-                let info = self.job_files(id).expect("metadata just stored");
-                self.reply_metadata_waiters(id, Ok(info));
             }
-            Err(error) => {
-                let info = self.job_files(id).expect("metadata just stored");
-                self.reply_metadata_waiters(id, Ok(info));
-                self.fail(id, error);
+            Err(_) if !self.reach.reached(&dir) => {
+                self.unadmitted.insert(id);
+                self.publish(id);
             }
+            Err(error) => self.fail(id, error),
         }
     }
 
@@ -1785,11 +1840,16 @@ impl Owner {
     }
 
     fn start(&mut self, id: TorrentId) {
-        if !self.reach.reach(&self.jobs[&id].record.dir) {
+        let job = &self.jobs[&id];
+        let (measured, linked) = (measure(job), links(job));
+        // A download in a folder that does not answer starts once it does.
+        let Ok(((space, allocated), links)) =
+            self.reach.ask(&job.record.dir, move |disk| (measured(disk), linked(disk)))
+        else {
             return;
-        }
+        };
         self.jobs.get_mut(&id).expect("scheduled").forget_sources();
-        if let Err(error) = self.check_writes(id, "resume") {
+        if let Err(error) = self.check_writes(id, &links, "resume") {
             self.fail(id, error);
             return;
         }
@@ -1801,10 +1861,9 @@ impl Owner {
             return;
         }
         if job.metainfo.is_some()
-            && let Ok(space) = self.disk.space(&job.record.dir)
-            && let Err(error) = self
-                .others_remaining(&job.record.dir, id)
-                .and_then(|others| admission::check_disk(space, self.space_needed(job), others))
+            && let Ok(space) = space
+            && let Err(error) =
+                admission::check_disk(space, space_needed(job, allocated), self.others_remaining(space.device, id))
         {
             // Plays leaving the plays folder make room: it is checked again once they are gone.
             if !self.reclaiming(space) {
@@ -1839,11 +1898,13 @@ impl Owner {
         self.publish(id);
     }
 
-    fn check_writes(&self, id: TorrentId, command: &str) -> Result<(), Error> {
+    /// Refuses to write `id` through any of the `links` on the way to its files, or into files
+    /// another download writes.
+    fn check_writes(&self, id: TorrentId, links: &[PathBuf], command: &str) -> Result<(), Error> {
         let job = &self.jobs[&id];
         let (Some(metainfo), Some(wanted)) = (job.metainfo.as_deref(), job.wanted()) else { return Ok(()) };
         let (dir, retry) = (&job.record.dir, format!("torrential {command} {}", &id.to_hex()[..6]));
-        admission::check_links(&admission::links(metainfo, dir, &wanted, self.disk.as_ref()), dir, Some(&retry))?;
+        admission::check_links(links, dir, Some(&retry))?;
         self.check_claims(id, metainfo, dir, &wanted, Some(&retry))
     }
 
@@ -2002,6 +2063,32 @@ enum Stopper {
     /// An update, which restarts the engine only once every download's progress is saved.
     /// Otherwise the engine carries on and the update tries again later.
     Update(Reply<()>),
+}
+
+/// Looks up what `job`'s selected files take up on disk already.
+fn allocated(job: &JobEntry) -> impl FnOnce(&dyn Disk) -> u64 + Send + 'static {
+    let (dir, files) = (job.record.dir.clone(), job.metainfo.clone().zip(job.wanted()));
+    move |disk| files.map_or(0, |(metainfo, wanted)| admission::allocated_bytes(&metainfo, &dir, &wanted, disk))
+}
+
+/// Looks up the disk `job` downloads to, and what its selected files take up on it already.
+fn measure(job: &JobEntry) -> impl FnOnce(&dyn Disk) -> (std::io::Result<Space>, u64) + Send + 'static {
+    let (dir, allocated) = (job.record.dir.clone(), allocated(job));
+    move |disk| (disk.space(&dir), allocated(disk))
+}
+
+/// Looks up the links on the way to `job`'s selected files, which libtorrent would write through.
+fn links(job: &JobEntry) -> impl FnOnce(&dyn Disk) -> Vec<PathBuf> + Send + 'static {
+    let (dir, files) = (job.record.dir.clone(), job.metainfo.clone().zip(job.wanted()));
+    move |disk| files.map_or_else(Vec::new, |(metainfo, wanted)| admission::links(&metainfo, &dir, &wanted, disk))
+}
+
+/// What `job` still needs on its disk, with `allocated` bytes of its selected files there already.
+fn space_needed(job: &JobEntry, allocated: u64) -> u64 {
+    match (&job.metainfo, job.wanted()) {
+        (Some(_), Some(_)) => job.selected_size().unwrap_or(0).saturating_sub(allocated.max(job.verified())),
+        _ => job.remaining(),
+    }
 }
 
 /// Answers a command that did not run with `error`.

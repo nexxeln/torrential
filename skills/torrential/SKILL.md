@@ -36,6 +36,8 @@ Anything else, or a particular release:
 4. `torrential wait <id>`. Exit 0 means done. Exit 8 means not done yet: wait again, or run the `next:` line if it says paused. Exit 7 means a problem, and `torrential status <id>` explains it.
 5. Report the `path:` from `torrential status <id>`.
 
+`torrential indexers` lists the Torznab indexers (Prowlarr, Jackett) searched beside the built-in sources. Add one with `torrential indexers add <address> --key <key>` only with an address and key the user gives you.
+
 Downloads run in a background engine and keep going after your turn. `wait` returns within 100 seconds. Never give it a `--timeout` longer than your tool allows, and never poll with `sleep`. In Claude Code, run `torrential wait <id> --timeout 110m` with `run_in_background` and a `timeout` of 7200000: background commands may run up to 2 hours, foreground ones 10 minutes.
 
 Manage downloads with `status`, `pause`, `resume` (`--all` after a reboot), `verify` (then `wait`), and `rm`. `rm` deletes the files of a play (`"place": "plays"` in `--json`) and keeps the files of any other download unless you add `--delete`, which moves them to the Trash. Its `--json` lists what it deleted under `deleted` and what went to the Trash under `trashed`.
@@ -47,3 +49,7 @@ A `# update:` line means a newer torrential is out. Tell the user once and offer
 `torrential play <title id, torrent id, or search words>` opens the user's player on the video while it downloads, and for a title ID first finds a torrent that starts, as `get` does. Run it only when the user asks to watch something. With `--json` it opens nothing and returns `streams[0].url`, a local URL any player can open while the download continues. A title it plays downloads into torrential's plays folder, which drops the plays watched longest ago once they pass 20 GiB. To keep a file, use `get`.
 
 `torrential tv` lists the TVs on the home network (any smart TV with DLNA). When the user asks to watch on the TV, run `torrential tv play <title id or torrent id>`, with `--tv <part of its name>` if more than one answers. It returns once the TV plays, and the cast goes on without you. `torrential tv pause`, `resume`, `seek 1:02:30`, `volume 20`, and `stop` work the remote.
+
+## Another machine's engine
+
+`torrential connect <address>` makes every command drive the engine on a server or NAS, after the user runs `torrential devices add` there and passes its code with `--code` or its link. Run it only when the user asks. Downloads then run and land on that machine, and `torrential engine status` shows its `address`. `play` and `setup` work only with this machine's engine, so use `torrential web` or `torrential tv play` instead. `torrential pull <id>` copies a finished download from that machine into this one's download folder, and run again it goes on from where a cut copy stopped. `torrential connect --local` switches back.

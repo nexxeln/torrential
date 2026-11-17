@@ -369,7 +369,7 @@ impl Casts {
         match (tvs.as_slice(), wanted) {
             ([one], _) => Ok((*one).clone()),
             ([], None) => Err(Error::new(ErrorCode::NotFound, "no TV answered on the home network").with_hint(
-                "check that the TV is on and on the same network as this Mac, and that its DLNA or media sharing setting is on",
+                "check that the TV is on and on the same network as the computer running torrential, and that its DLNA or media sharing setting is on",
             )),
             ([], Some(wanted)) => Err(Error::new(ErrorCode::NotFound, format!("no TV named {wanted} answered"))
                 .with_hint("run torrential tv to list the TVs on the network")
@@ -858,9 +858,7 @@ impl Contact {
         if !self.played && now.saturating_duration_since(self.started) >= START_WITHIN {
             let error = Error::new(ErrorCode::FetchFailed, format!("{tv} took the video but did not start playing it"));
             return Some(
-                error.with_hint(
-                    "check what the TV shows, and play it on this Mac if the TV says it cannot play the file",
-                ),
+                error.with_hint("check what the TV shows, and play it here if the TV says it cannot play the file"),
             );
         }
         None
@@ -954,7 +952,7 @@ async fn find(
                             ErrorCode::Usage,
                             format!("{} cannot decode the video of this source", tv.tv.name),
                         )
-                        .with_hint("let torrential choose a source, or play it on this Mac"));
+                        .with_hint("let torrential choose a source, or play it here"));
                     }
                     Some(release.id)
                 }
@@ -1061,7 +1059,7 @@ fn refused(tv: &Tv, path: &str) -> Error {
     let container = extension(path).to_ascii_uppercase();
     let plays: Vec<String> = tv.plays.iter().map(|c| c.name().to_ascii_uppercase()).collect();
     Error::new(ErrorCode::Usage, format!("{} does not play {container} files, only {}", tv.name, plays.join(" and ")))
-        .with_hint("play it on this Mac, or choose a source in a format the TV plays")
+        .with_hint("play it here, or choose a source in a format the TV plays")
 }
 
 fn file_name(path: &str) -> String {
@@ -1071,7 +1069,7 @@ fn file_name(path: &str) -> String {
 /// This Mac's address on the network the TV at `address` is on.
 fn facing(address: &str) -> Result<IpAddr, Error> {
     let unreachable = |e: std::io::Error| {
-        Error::new(ErrorCode::NetworkUnavailable, format!("this Mac has no way to the TV at {address} ({e})"))
+        Error::new(ErrorCode::NetworkUnavailable, format!("torrential has no way to the TV at {address} ({e})"))
     };
     let tv: IpAddr = address.parse().map_err(|_| Error::internal(format!("{address} is not an IP address")))?;
     let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(unreachable)?;
@@ -1090,7 +1088,7 @@ async fn reachable(ctx: &Ctx, host: IpAddr) -> Result<(), Error> {
             let why = ctx.devices.list(ctx.http_port).unreachable;
             return Err(Error::new(
                 ErrorCode::NetworkUnavailable,
-                why.unwrap_or_else(|| format!("the TV cannot reach this Mac at {host}:{}", ctx.http_port)),
+                why.unwrap_or_else(|| format!("the TV cannot reach torrential at {host}:{}", ctx.http_port)),
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

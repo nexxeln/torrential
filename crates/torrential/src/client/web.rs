@@ -1,7 +1,7 @@
 //! `torrential web`: opens the web app the engine serves.
 
 use serde::Serialize;
-use torrential_core::{Error, ErrorCode};
+use torrential_core::Error;
 
 use super::connect::Conn;
 use super::emit;
@@ -17,13 +17,10 @@ struct Web {
     opened: bool,
 }
 
+/// Opens the web app of the engine this torrential drives. A browser that is not paired with an
+/// engine on another machine gets its pairing page first.
 pub fn run(conn: &Conn, args: WebArgs, mode: Mode, env: &Env) -> Result<u8, Error> {
-    if conn.http_port == 0 {
-        return Err(Error::new(ErrorCode::DaemonVersion, "the running engine is older than the web app")
-            .with_hint("run torrential engine stop, then run the command again")
-            .with_next("torrential engine stop"));
-    }
-    let url = format!("http://127.0.0.1:{}", conn.http_port);
+    let url = conn.engine.address().to_string();
     let opened = !args.no_open && mode != Mode::Json;
     if opened {
         torrential_daemon::player::open_url(&url, env)?;

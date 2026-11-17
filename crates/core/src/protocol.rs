@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::cast::{Cast, CastAction, CastRequest, TvList};
 use crate::catalog::{EpisodeInfo, TitleCard, TitleDetails, TitleId, VideoRef};
 use crate::device::DeviceList;
-use crate::error::Error;
 use crate::error::Tried;
+use crate::error::{Error, ErrorCode};
 use crate::id::ReleaseId;
+use crate::indexer::{ApiKey, IndexerList};
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::target::Target;
@@ -31,7 +32,7 @@ pub const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
 pub const STEP_WITHIN: Duration = Duration::from_secs(240);
 const REPLY_WITHIN: Duration = Duration::from_secs(30);
 
-pub const WIRE_VERSION: u32 = 11;
+pub const WIRE_VERSION: u32 = 12;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -140,9 +141,80 @@ pub enum Request {
         release: Option<ReleaseId>,
         socket: PathBuf,
     },
+    /// The Torznab indexers in config.yaml, each asked now whether it answers.
+    Indexers,
+    /// Asks `url` whether it answers as a Torznab indexer, then writes it to config.yaml, where
+    /// the engine searches it from now on. A Prowlarr or Jackett server's own address adds each
+    /// indexer it has. An entry already there with the same URL takes the new key.
+    AddIndexer {
+        url: String,
+        name: Option<String>,
+        key: Option<ApiKey>,
+    },
+    /// Takes an indexer out of config.yaml.
+    RemoveIndexer {
+        name: String,
+    },
 }
 
 impl Request {
+    /// Why a paired device may not send this request, or `None` when it may. A device reaches the
+    /// engine from another machine, so it may not stop the engine, list, add or remove devices, or
+    /// name a path on the engine's machine: a folder, a `.torrent` file, or a player's socket. It
+    /// may manage the indexers, since the server's engine is the one that searches them.
+    pub fn refused_to_device(&self) -> Option<Error> {
+        let local = |message: &str, hint: &str| Some(Error::new(ErrorCode::LocalOnly, message).with_hint(hint));
+        let torrent_file = |target: &Target| match target {
+            Target::TorrentFile(_) => local(
+                "the engine reads a .torrent file on its own machine, so another machine cannot name one",
+                "pass the torrent's magnet link or URL instead",
+            ),
+            _ => None,
+        };
+        match self {
+            Request::Hello
+            | Request::Search { .. }
+            | Request::Status { .. }
+            | Request::Pause { .. }
+            | Request::Resume { .. }
+            | Request::Remove { .. }
+            | Request::Verify { .. }
+            | Request::Watch { .. }
+            | Request::Titles { .. }
+            | Request::Title { .. }
+            | Request::Sources { .. }
+            | Request::PlayTitle(_)
+            | Request::GetTitle(_)
+            | Request::Tvs { .. }
+            | Request::CastControl { .. }
+            | Request::Home
+            | Request::Indexers
+            | Request::AddIndexer { .. }
+            | Request::RemoveIndexer { .. } => None,
+            Request::Files { target, .. } | Request::Cast(CastRequest { target, .. }) => torrent_file(target),
+            Request::Get(GetRequest { target, dir, .. }) | Request::Play(PlayRequest { target, dir, .. }) => {
+                match dir {
+                    Some(_) => local(
+                        "only the machine that runs the engine can choose the folder a download goes to",
+                        "leave out --dir, and the download goes to the engine's download folder",
+                    ),
+                    None => torrent_file(target),
+                }
+            }
+            Request::Shutdown { .. } => {
+                local("only the machine that runs the engine can stop it", "run torrential engine stop on that machine")
+            }
+            Request::Devices | Request::AddDevice | Request::RemoveDevice { .. } => local(
+                "only the machine that runs the engine can list, add, or remove devices",
+                "run torrential devices on that machine",
+            ),
+            Request::Follow { .. } => local(
+                "only a player on the machine that runs the engine can be followed",
+                "play on that machine, or in the web app",
+            ),
+        }
+    }
+
     /// How long a client waits for the engine to answer this request. For a streamed reply, the
     /// limit holds for each frame. A watch's events come with no limit.
     pub fn within(&self) -> Duration {
@@ -153,6 +225,7 @@ impl Request {
             Request::Get(get) if get.dry_run => METADATA_WAIT + Duration::from_secs(15),
             Request::Pause { .. } | Request::Shutdown { .. } => 2 * WRITES_STOP_WITHIN,
             Request::PlayTitle(_) | Request::GetTitle(_) | Request::Cast(_) => STEP_WITHIN,
+            Request::AddIndexer { .. } => 2 * REPLY_WITHIN,
             _ => REPLY_WITHIN,
         }
     }
@@ -246,6 +319,10 @@ pub enum Response {
     },
     Home {
         home: Box<Home>,
+    },
+    Indexers {
+        #[serde(flatten)]
+        list: IndexerList,
     },
     Ok,
     Error {
@@ -370,6 +447,7 @@ replies! {
     TvList => Tvs { list },
     Box<Cast> => Cast { cast },
     Box<Home> => Home { home },
+    IndexerList => Indexers { list },
 }
 
 impl Reply for () {
@@ -594,6 +672,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_paired_device_may_not_stop_the_engine_manage_devices_or_name_a_path_on_its_machine() {
+        let file = || Target::TorrentFile(PathBuf::from("/srv/films/sintel.torrent"));
+        let prefix = || Target::Prefix("9b5212".into());
+        let get = |target, dir: Option<&str>| {
+            Request::Get(GetRequest {
+                target,
+                dir: dir.map(PathBuf::from),
+                files: vec![],
+                max_size: None,
+                dry_run: false,
+            })
+        };
+        let cast = |target| {
+            Request::Cast(CastRequest {
+                tv: None,
+                target,
+                source: None,
+                file: None,
+                video: None,
+                subtitle: None,
+                start_at: None,
+            })
+        };
+        let folder = Some("only the machine that runs the engine can choose the folder a download goes to");
+        let torrent = Some("the engine reads a .torrent file on its own machine, so another machine cannot name one");
+        let stop = Some("only the machine that runs the engine can stop it");
+        let devices = Some("only the machine that runs the engine can list, add, or remove devices");
+        let cases = [
+            ("hello", Request::Hello, None),
+            ("status", Request::Status { refs: vec![] }, None),
+            ("remove with its files", Request::Remove { refs: vec!["9b5212".into()], delete: true }, None),
+            ("get into the engine's folder", get(prefix(), None), None),
+            (
+                "files of a magnet",
+                Request::Files { target: Target::Magnet("magnet:?xt=urn:btih:9b52".into()), timeout_ms: 1 },
+                None,
+            ),
+            ("cast a download", cast(prefix()), None),
+            ("get into a folder", get(prefix(), Some("/home/ada/.ssh")), folder),
+            (
+                "play into a folder",
+                Request::Play(PlayRequest { target: prefix(), dir: Some("/tmp".into()), files: vec![0] }),
+                folder,
+            ),
+            ("get a .torrent file", get(file(), None), torrent),
+            ("files of a .torrent file", Request::Files { target: file(), timeout_ms: 1 }, torrent),
+            ("cast a .torrent file", cast(file()), torrent),
+            ("stop", Request::Shutdown { asked: true }, stop),
+            ("make way for another version", Request::Shutdown { asked: false }, stop),
+            ("list devices", Request::Devices, devices),
+            ("add a device", Request::AddDevice, devices),
+            ("remove a device", Request::RemoveDevice { id: "3f9a0c2e".into() }, devices),
+            ("list indexers", Request::Indexers, None),
+            (
+                "add an indexer",
+                Request::AddIndexer { url: "http://127.0.0.1:9696".into(), name: None, key: crate::ApiKey::new("k3y") },
+                None,
+            ),
+            ("remove an indexer", Request::RemoveIndexer { name: "filelist".into() }, None),
+            (
+                "follow a player",
+                Request::Follow { video: "tt0063350".parse().unwrap(), release: None, socket: "/tmp/mpv".into() },
+                Some("only a player on the machine that runs the engine can be followed"),
+            ),
+        ];
+        for (what, request, refused) in cases {
+            let error = request.refused_to_device();
+            assert_eq!(error.as_ref().map(|error| error.message.as_str()), refused, "{what}");
+            assert!(error.is_none_or(|error| error.code == ErrorCode::LocalOnly), "{what}");
+        }
+    }
+
+    #[test]
     fn a_search_without_stream_is_the_non_streaming_search() {
         let json = r#"{"op":"search","query":{"text":"arch","limit":10,"timeout_ms":6000}}"#;
         let Request::Search { query, stream } = serde_json::from_str(json).unwrap() else { panic!("not a search") };
@@ -646,6 +797,8 @@ mod tests {
         (10, &["follow"]),
         // Each request is a POST to the engine's HTTP port, which says the client's version.
         (11, &[]),
+        // Torznab indexers are added, listed and removed through the engine, which may be on a server.
+        (12, &["indexers", "add_indexer", "remove_indexer"]),
     ];
 
     #[test]

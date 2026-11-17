@@ -103,7 +103,12 @@ added_at: number,
 /**
  * The title the download was made for, when playing a title made it.
  */
-title?: TitleLink | null, place: Place, } & ({ "state": "queued" } | { "state": "metadata" } | { "state": "checking" } | { "state": "downloading" } | { "state": "paused" } | { "state": "done", finished_at: number, } | { "state": "error", error: Error, });
+title?: TitleLink | null, place: Place,
+/**
+ * The network interface this download reaches peers through, named while it is missing or
+ * down. Nothing arrives until it is back.
+ */
+waiting_for?: string | null, } & ({ "state": "queued" } | { "state": "metadata" } | { "state": "checking" } | { "state": "downloading" } | { "state": "paused" } | { "state": "done", finished_at: number, } | { "state": "error", error: Error, });
 
 export type Event = { "event": "snapshot", jobs: Array<Job>, } | { "event": "job", job: Job, } | { "event": "removed", id: string, } | { "event": "heartbeat", at: number, } | { "event": "search_update", result: SearchResult, pending: Array<string>, };
 
@@ -270,7 +275,12 @@ added_at: number,
 /**
  * Unix seconds of its last request, to within a minute.
  */
-seen_at: number, };
+seen_at: number,
+/**
+ * The address its last request came from, such as `192.168.1.40` or `100.101.3.4`. `None`
+ * for a device paired before torrential 0.7 that has not asked since.
+ */
+seen_from: string | null, };
 
 export type Container = "mkv" | "mp4" | "webm" | "avi" | "ts" | "mov" | "mpeg" | "wmv";
 
@@ -500,14 +510,22 @@ code: string,
  */
 url: string,
 /**
- * What to type into a TV's browser: this machine's .local name and the port.
+ * What to type into a TV's browser, such as `http://studio-mac.local:47919`: the
+ * `public_address` in config.yaml, else this machine's .local name and the port.
  */
 address: string,
 /**
- * This machine's address on the home network and the port, for a browser that cannot open
- * .local names. `None` when the machine has no such address.
+ * This machine's address on the home network and the port, such as
+ * `http://192.168.1.23:47919`, for a browser that cannot open .local names. `None` when the
+ * machine has no such address.
  */
 lan_address: string | null,
+/**
+ * This machine's name on its Tailscale network and the port, such as
+ * `http://box.tail1234.ts.net:47919`, which a device on the tailnet opens from anywhere.
+ * `None` while Tailscale does not run.
+ */
+tailnet_address: string | null,
 /**
  * Unix seconds.
  */
@@ -548,7 +566,7 @@ export const PIECE_RUNS = 200;
 export const SEARCH_LIMIT = 50;
 
 /** How long a pairing code works. */
-export const PAIRING_MINUTES = 5;
+export const PAIRING_MINUTES = 10;
 
 /** Seconds of video one thumbnail stands for. */
 export const THUMBNAIL_EVERY = 10;

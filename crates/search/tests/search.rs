@@ -248,6 +248,28 @@ async fn torznab_is_asked_only_once() {
 }
 
 #[tokio::test]
+async fn a_reconfigured_search_asks_the_new_indexers_and_drops_the_old() {
+    let server = Server::start(vec![("/torznab/api", vec![ok(fixture("torznab/jackett-ubuntu.xml"))])]).await;
+    let search = Search::new(&SearchConfig::default(), ResultCache::new()).unwrap();
+    let unknown = search.search(&query("ubuntu", &["romania"])).await.unwrap_err();
+    assert_eq!(unknown.message, "unknown source \"romania\"");
+
+    let indexer = TorznabConfig { name: "romania".into(), url: format!("{}/torznab/api", server.base), api_key: None };
+    let config = SearchConfig { torznab: vec![indexer], ..SearchConfig::default() };
+    search.reconfigure(&config).unwrap();
+    let found = search.search(&query("ubuntu", &["romania"])).await.unwrap();
+    assert_eq!(outcomes(&found), [("romania".into(), SourceOutcome::Ok { results: 3 })]);
+
+    let clash = TorznabConfig { name: "nyaa".into(), url: format!("{}/torznab/api", server.base), api_key: None };
+    let refused = search.reconfigure(&SearchConfig { torznab: vec![clash], ..SearchConfig::default() }).unwrap_err();
+    assert_eq!(refused.message, "source name \"nyaa\" is used twice");
+    assert!(search.sources().iter().any(|s| s.name == "romania"), "a refused change keeps the sources it had");
+
+    search.reconfigure(&SearchConfig::default()).unwrap();
+    assert!(search.search(&query("ubuntu", &["romania"])).await.is_err());
+}
+
+#[tokio::test]
 async fn an_oversized_answer_is_an_error_not_a_truncated_list() {
     let mut huge = fixture("apibay/q.php-ubuntu.json");
     huge.resize(5 << 20, b' ');

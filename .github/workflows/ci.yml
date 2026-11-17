@@ -114,7 +114,11 @@ jobs:
       - name: Install with install.ps1, download Sintel, and stop the engine
         run: |
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'dist' -PassThru
-          Start-Sleep 2
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not (Test-Connection 127.0.0.1 -TcpPort 8765 -Quiet)) {
+            if ((Get-Date) -gt $deadline) { throw 'the release server did not answer within 30 s' }
+            Start-Sleep -Milliseconds 200
+          }
           $env:TORRENTIAL_DOWNLOAD_URL = 'http://127.0.0.1:8765'
           ./install.ps1
           Stop-Process $server
@@ -129,6 +133,12 @@ jobs:
             Write-Host "$($job.name): $($job.progress.verified) of $($job.progress.size) bytes, $($job.progress.peers) peers"
             if ((Get-Date) -gt $deadline) { throw 'no verified bytes of Sintel within 5 minutes' }
           } until ($job.progress.verified -gt 0)
+          $stopping = [Diagnostics.Stopwatch]::StartNew()
           & $torrential engine stop
-          if ($LASTEXITCODE) { throw 'engine stop failed' }
+          $stopped = $LASTEXITCODE
+          Write-Host "engine stop took $([math]::Round($stopping.Elapsed.TotalSeconds, 1)) s"
+          if ($stopped) {
+            Get-Content "$env:LOCALAPPDATA\torrential\state\engine.log" -Tail 50 -ErrorAction SilentlyContinue
+            throw 'engine stop failed'
+          }
           if ((& $torrential engine status --json | ConvertFrom-Json).engine -ne 'stopped') { throw 'the engine still runs' }

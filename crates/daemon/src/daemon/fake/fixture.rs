@@ -443,7 +443,7 @@ mod tests {
         let mut mapped = Vec::new();
         for stored in store.jobs().unwrap() {
             let metainfo = parse(&stored.metainfo.unwrap()).unwrap();
-            let job = JobEntry::new(stored.record, Some(Arc::new(metainfo)), Observed::Absent).view();
+            let job = JobEntry::new(stored.record, Some(Arc::new(metainfo)), Observed::Absent).view(None);
             let name = job.name.unwrap();
             let Some(map) = job.progress.piece_map else {
                 assert_eq!(job.status.name(), "done", "{name} has no map");

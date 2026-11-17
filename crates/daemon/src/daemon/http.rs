@@ -1,12 +1,12 @@
 //! The engine's HTTP server. It serves downloads to video players, the web app with its API, and
-//! the requests of this user's torrential at `wire::PATH`. It listens on 127.0.0.1, and on the home
-//! network too while a phone or TV is paired. A request for bytes that have not arrived asks the
-//! engine for their pieces first and waits for them, so a player can start and seek while the rest
-//! of the file downloads.
+//! the requests of torrential at `wire::PATH`, this user's and paired machines'. It listens on
+//! 127.0.0.1, and on the home network too while a phone or TV is paired. A request for bytes that
+//! have not arrived asks the engine for their pieces first and waits for them, so a player can
+//! start and seek while the rest of the file downloads.
 
 use std::collections::VecDeque;
 use std::io::{self, SeekFrom};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ use torrential_core::{ErrorCode, TorrentId};
 
 use super::cast::{Dlna, HELLO};
 use super::ctx::Ctx;
-use super::devices::{Asker, CAST, COOKIE, Devices, Reach};
+use super::devices::{Addressing, Asker, CAST, COOKIE, Devices, Reach};
 use super::owner::{Command, Lease, StreamFile};
 use super::web;
 use crate::log::log;
@@ -56,46 +56,75 @@ const MAX_FRAME: usize = torrential_core::protocol::MAX_FRAME;
 const ONE_WRITE: usize = 8 * 1024;
 
 const JSON: &str = "application/json";
+/// On every answer, so a browser never reads a file as another type than the one it is sent as,
+/// such as a file name or a subtitle that holds markup.
+const NOSNIFF: &str = "X-Content-Type-Options: nosniff\r\n";
+/// The web app's page runs only the app's own scripts and styles and talks only to this engine.
+const APP_POLICY: &str = "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; \
+    img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; worker-src 'self' blob:; \
+    object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'\r\n";
 
 /// Binds the first of `ports` that is free where `reach` says, or any free port when other programs
 /// hold them all.
 pub fn bind(ports: &[u16], reach: Reach) -> io::Result<TcpListener> {
-    let ip = address(reach);
-    match ports.iter().find_map(|&port| listener(ip, port).ok()) {
+    match ports.iter().filter(|&&port| !answers(port)).find_map(|&port| listener(reach, port).ok()) {
         Some(listener) => Ok(listener),
-        None => listener(ip, 0),
+        None => listener(reach, 0),
     }
 }
 
-/// A listening socket on `ip` and `port`.
-#[cfg(unix)]
-fn listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
-    TcpListener::bind((ip, port))
+/// Whether a program already takes connections on 127.0.0.1 at `port`. macOS lets a socket on
+/// 127.0.0.1 share a port with another program's socket on every address, or the other way round,
+/// so the bind alone would leave the browser and the CLI talking to the other engine.
+fn answers(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(500))
+        .is_ok()
 }
 
-/// A listening socket on `ip` and `port` that no other program may share. Windows otherwise lets a
-/// socket on every address take a port another program holds on one, and that program keeps
-/// what comes to its address.
+/// A listening socket on `port` where `reach` says.
+fn listener(reach: Reach, port: u16) -> io::Result<TcpListener> {
+    match reach {
+        Reach::Loopback => socket(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+        Reach::Network => socket(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))),
+    }
+}
+
+/// A socket for IPv6 alone on `port`, beside the one on every IPv4 address, so a device on a
+/// tailnet reaches the engine at its IPv6 address there too. None where the machine has no IPv6.
+/// One socket for both would let macOS hand it the port while another program holds IPv4.
+fn ipv6(port: u16) -> Option<tokio::net::TcpListener> {
+    let listener = socket(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))).ok()?;
+    listener.set_nonblocking(true).ok()?;
+    tokio::net::TcpListener::from_std(listener).ok()
+}
+
+fn socket(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = socket2::Socket::new(socket2::Domain::for_address(address), socket2::Type::STREAM, None)?;
+    if address.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    // As std's TcpListener::bind does, so a port the last engine left in TIME_WAIT is free at once.
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    #[cfg(windows)]
+    exclusive(&socket)?;
+    socket.bind(&address.into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
+/// Lets no other program share the socket's port. Windows otherwise lets a socket on every address
+/// take a port another program holds on one, and that program keeps what comes to its address.
 #[cfg(windows)]
-fn listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
+fn exclusive(socket: &socket2::Socket) -> io::Result<()> {
     use std::os::windows::io::AsRawSocket;
     use windows::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOCKET, SOL_SOCKET, setsockopt};
-    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
     let on = 1i32.to_ne_bytes();
     // The socket is open, and `on` outlives the call.
     if unsafe { setsockopt(SOCKET(socket.as_raw_socket() as usize), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, Some(&on)) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    socket.bind(&std::net::SocketAddr::from((ip, port)).into())?;
-    socket.listen(1024)?;
-    Ok(socket.into())
-}
-
-fn address(reach: Reach) -> Ipv4Addr {
-    match reach {
-        Reach::Loopback => Ipv4Addr::LOCALHOST,
-        Reach::Network => Ipv4Addr::UNSPECIFIED,
-    }
+    Ok(())
 }
 
 /// `http://127.0.0.1:{port}/{torrent ID}/{file index}/{file name}`. The server routes on the ID
@@ -134,9 +163,32 @@ pub enum Peer {
 }
 
 impl Peer {
+    /// The address the request came from.
+    pub fn ip(self) -> IpAddr {
+        match self {
+            Self::Loopback => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Self::Network { remote, .. } => remote,
+        }
+    }
+
     fn of(local: SocketAddr, remote: SocketAddr) -> Self {
         let remote = remote.ip().to_canonical();
         if remote.is_loopback() { Self::Loopback } else { Self::Network { local: local.ip().to_canonical(), remote } }
+    }
+
+    /// Where `request` comes from. A reverse proxy on this machine, such as Caddy in front of the
+    /// public address, connects over loopback, so a request that names the public address or
+    /// says whom it was forwarded for comes from the network, from that address.
+    fn of_request(self, request: &Request, addressing: &Addressing) -> Self {
+        let public = addressing.exposure.public_address.as_ref();
+        let names_public = public.is_some_and(|public| request.from.host.as_deref() == Some(public.host.as_str()));
+        match self {
+            Self::Loopback if request.forwarded.is_some() || names_public => Self::Network {
+                local: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                remote: request.forwarded.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            },
+            peer => peer,
+        }
     }
 }
 
@@ -147,10 +199,13 @@ impl Peer {
 pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut reach: watch::Receiver<Reach>) {
     let strangers = Arc::new(Strangers::default());
     let mut retry = tokio::time::Instant::now();
+    let on_network = |listener: &tokio::net::TcpListener| reach_of(listener) == Reach::Network;
+    let mut v6 = if on_network(&listener) { ipv6(ctx.http_port) } else { None };
     loop {
         let want = *reach.borrow_and_update();
         if reach_of(&listener) != want && tokio::time::Instant::now() >= retry {
             listener = listen(listener, want, ctx.http_port, &ctx.devices).await;
+            v6 = if on_network(&listener) { ipv6(ctx.http_port) } else { None };
             retry = tokio::time::Instant::now() + RETRY;
         }
         let astray = reach_of(&listener) != want;
@@ -165,6 +220,7 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
                     tokio::time::sleep(BACKOFF).await;
                 }
             },
+            Ok((stream, remote)) = accept_on(&v6) => spawn(&ctx, &strangers, stream, remote),
             changed = reach.changed() => {
                 if changed.is_err() {
                     return;
@@ -173,6 +229,14 @@ pub async fn accept(ctx: Arc<Ctx>, mut listener: tokio::net::TcpListener, mut re
             }
             () = tokio::time::sleep_until(retry), if astray => {}
         }
+    }
+}
+
+/// The next connection to `listener`, or never when there is none.
+async fn accept_on(listener: &Option<tokio::net::TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -188,8 +252,16 @@ fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: 
     tokio::spawn(async move {
         let _ = stream.set_nodelay(true);
         let (rd, wr) = stream.into_split();
-        let connection =
-            |stranger| Connection { ctx: &ctx, peer, rd, wr, pending: Vec::new(), chunked: false, stranger };
+        let connection = |stranger| Connection {
+            ctx: &ctx,
+            peer,
+            accepted: peer,
+            rd,
+            wr,
+            pending: Vec::new(),
+            chunked: false,
+            stranger,
+        };
         match stranger {
             None => drop(connection(None).serve().await),
             Some((stranger, closed)) => tokio::select! {
@@ -288,13 +360,13 @@ fn reach_of(listener: &tokio::net::TcpListener) -> Reach {
 /// 127.0.0.1 can, and `devices` records why.
 async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: &Devices) -> tokio::net::TcpListener {
     drop(old);
-    let open = |ip: Ipv4Addr| {
-        let listener = listener(ip, port)?;
+    let open = |reach: Reach| {
+        let listener = listener(reach, port)?;
         listener.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(listener)
     };
     loop {
-        match open(address(reach)) {
+        match open(reach) {
             Ok(listener) => {
                 devices.refused(None);
                 log(&match reach {
@@ -308,12 +380,13 @@ async fn listen(old: tokio::net::TcpListener, reach: Reach, port: u16, devices: 
                 // is logged once.
                 let new = reach == Reach::Loopback || devices.refused(Some(e.kind()));
                 if new {
-                    log(&format!("cannot listen on {}:{port}: {e}", address(reach)));
+                    let at = if reach == Reach::Network { "every address" } else { "127.0.0.1" };
+                    log(&format!("cannot listen on {at} on port {port}: {e}"));
                 }
             }
         }
         if reach == Reach::Network
-            && let Ok(listener) = open(Ipv4Addr::LOCALHOST)
+            && let Ok(listener) = open(Reach::Loopback)
         {
             return listener;
         }
@@ -343,6 +416,9 @@ pub struct Request {
     bearer: Option<String>,
     /// The User-Agent, lowercased.
     pub agent: Option<String>,
+    /// The last address in `X-Forwarded-For`, which a reverse proxy adds: the one that connected
+    /// to it. Unspecified when the header holds no address.
+    forwarded: Option<IpAddr>,
     keep_alive: bool,
     /// HTTP/1.1, which can take a chunked answer.
     chunks: bool,
@@ -359,6 +435,11 @@ impl Request {
     fn head_only(&self) -> bool {
         self.method == Method::Head
     }
+
+    /// The `Host` header, lowercased.
+    pub fn host(&self) -> Option<&str> {
+        self.from.host.as_deref()
+    }
 }
 
 enum Head {
@@ -368,7 +449,10 @@ enum Head {
 
 pub struct Connection<'a> {
     pub ctx: &'a Ctx,
+    /// Where the request being answered comes from.
     pub peer: Peer,
+    /// The other end of the connection.
+    accepted: Peer,
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     /// Bytes read past the end of the request being answered.
@@ -391,7 +475,16 @@ impl Connection<'_> {
                     false
                 }
                 Some(Head::Request(mut request)) => {
-                    let (ctx, peer) = (self.ctx, self.peer);
+                    let ctx = self.ctx;
+                    self.peer = self.accepted.of_request(&request, &ctx.devices.addressing());
+                    let peer = self.peer;
+                    let now = torrential_core::time::now();
+                    // No token from an address that offered too many that opened nothing is checked.
+                    if (request.cookie.is_some() || request.bearer.is_some()) && ctx.devices.spent(peer.ip(), now) {
+                        self.empty("429 Too Many Requests", "Retry-After: 60\r\n", false).await?;
+                        self.linger(request.length).await;
+                        return Ok(());
+                    }
                     let ask_now = |request: &Request| {
                         ask(peer, request, ctx.http_port, &ctx.devices, torrential_core::time::now())
                     };
@@ -416,7 +509,13 @@ impl Connection<'_> {
                     request.body = self.read_body(request.length, by).await?;
                     // Asked again, since a device may have been removed, or a cast dropped, while
                     // the body arrived.
-                    let asker = match ask_now(&request) {
+                    let asker = ask_now(&request);
+                    if matches!(asker, Ok(Asker::Stranger { removed: true }))
+                        || matches!(asker, Err(Refusal::Unauthorized)) && request.bearer.is_some()
+                    {
+                        ctx.devices.missed(peer.ip(), now);
+                    }
+                    let asker = match asker {
                         Ok(asker) => asker,
                         Err(refusal) => {
                             self.refuse(refusal).await?;
@@ -486,11 +585,11 @@ impl Connection<'_> {
                 let dlna = self.ctx.casts.served(&request.path);
                 return self.file(request, granted.id, granted.index, dlna.as_ref()).await;
             }
-            Asker::Local if request.path == wire::PATH => {
+            Asker::Local | Asker::Device(_) if request.path == wire::PATH => {
                 if request.method != Method::Post {
                     return self.empty("405 Method Not Allowed", "", false).await;
                 }
-                return super::server::answer(self, &request).await;
+                return super::server::answer(self, &request, asker).await;
             }
             Asker::Local | Asker::Device(_) => {}
         }
@@ -508,11 +607,15 @@ impl Connection<'_> {
             None => match web::assets::find(&request.path) {
                 Some(asset) => {
                     let mut headers = format!("Cache-Control: {}\r\n", asset.cache);
+                    if asset.content_type.starts_with("text/html") {
+                        headers.push_str(APP_POLICY);
+                    }
                     // Browsers cap a cookie at 400 days, so each visit starts the 400 days again.
                     if let (Asker::Device(_), Some(token)) = (asker, &request.cookie)
                         && asset.content_type.starts_with("text/html")
                     {
-                        headers.push_str(&web::devices::set_cookie(token));
+                        let secure = self.ctx.devices.addressing().exposure.secure(request.host());
+                        headers.push_str(&web::devices::set_cookie(token, secure));
                     }
                     self.send("200 OK", asset.content_type, &headers, asset.bytes, &request).await
                 }
@@ -542,7 +645,7 @@ impl Connection<'_> {
             }
         };
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n{NOSNIFF}Connection: close\r\n\r\n",
             text.len()
         );
         self.wr.write_all(head.as_bytes()).await?;
@@ -560,7 +663,7 @@ impl Connection<'_> {
     ) -> io::Result<bool> {
         let close = if request.keep_alive { "" } else { "Connection: close\r\n" };
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{headers}{close}\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{NOSNIFF}{headers}{close}\r\n",
             body.len()
         );
         self.wr.write_all(head.as_bytes()).await?;
@@ -581,7 +684,7 @@ impl Connection<'_> {
         self.chunked = request.chunks;
         let encoding = if self.chunked { "Transfer-Encoding: chunked\r\n" } else { "" };
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\n{encoding}Connection: close\r\n\r\n"
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\n{NOSNIFF}{encoding}Connection: close\r\n\r\n"
         );
         self.wr.write_all(head.as_bytes()).await
     }
@@ -650,8 +753,11 @@ impl Connection<'_> {
         };
         let content_type = dlna.map_or(content_type(&file.path), |dlna| dlna.mime.as_str());
         let dlna = dlna.map(Dlna::headers).unwrap_or_default();
+        // A torrent's infohash fixes every byte of its files, so this tag never names other bytes,
+        // and a browser that keeps it can resume a cut download.
+        let tag = format!("ETag: \"{}-{index}\"\r\n", id.to_hex());
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}{dlna}{}\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{tag}{NOSNIFF}{extra}{dlna}{}\r\n",
             end - start,
             if keep { "" } else { "Connection: close\r\n" },
         );
@@ -687,7 +793,8 @@ impl Connection<'_> {
 
     pub async fn empty(&mut self, status: &str, extra: &str, keep: bool) -> io::Result<bool> {
         let close = if keep { "" } else { "Connection: close\r\n" };
-        let head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\n{extra}{close}\r\n");
+        let head =
+            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\n{NOSNIFF}{extra}{close}\r\n");
         self.wr.write_all(head.as_bytes()).await?;
         Ok(keep)
     }
@@ -812,6 +919,10 @@ fn head(parsed: &httparse::Request) -> Head {
         token.map(String::from)
     });
     let bearer = header("authorization").and_then(|value| Some(value.strip_prefix("bearer ")?.trim().to_string()));
+    let forwarded = header("x-forwarded-for").map(|list| {
+        let last = list.rsplit(',').next().unwrap_or_default().trim();
+        last.parse::<IpAddr>().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |ip| ip.to_canonical())
+    });
     let method = match parsed.method {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
@@ -846,6 +957,7 @@ fn head(parsed: &httparse::Request) -> Head {
         cookie,
         bearer,
         agent: header("user-agent"),
+        forwarded,
         keep_alive,
         chunks,
         length,
@@ -856,7 +968,7 @@ fn head(parsed: &httparse::Request) -> Head {
 enum Refusal {
     /// Over loopback, a request another website made, or one that names another host.
     Forbidden,
-    /// A request for `wire::PATH` without this user's token, or from another machine.
+    /// A request for `wire::PATH` without this user's token over loopback or a paired device's.
     Unauthorized,
     /// From the home network, a request another website made, or one that names another host. It
     /// holds the address to open instead.
@@ -869,11 +981,13 @@ enum Refusal {
 }
 
 /// Who sent `request`. Over loopback, a request that names this Mac's .local name moves to
-/// 127.0.0.1 first. Only this user's token over loopback lets a request in at `wire::PATH`. A cast
-/// URL is let in by its grant alone, anything else over loopback is this Mac, and from the network a
-/// paired device's cookie lets it in.
+/// 127.0.0.1 first. At `wire::PATH`, this user's token over loopback lets a request in, and so does
+/// a paired device's token, such as torrential's on another machine. A cast URL is let in by its
+/// grant alone, anything else over loopback is this Mac, and from the network a paired device's
+/// cookie lets it in.
 fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) -> Result<Asker, Refusal> {
-    let name = devices.local_name();
+    let addressing = devices.addressing();
+    let name = addressing.local.clone();
     let named = |host: &str| name.as_deref() == Some(split_host(host).0);
     match peer {
         Peer::Loopback if request.from.host.as_deref().is_some_and(named) => {
@@ -885,7 +999,7 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
         }
         Peer::Loopback if !request.from.loopback_allowed(port) => return Err(Refusal::Forbidden),
         Peer::Network { local, .. } => {
-            if !request.from.home_allowed(port, local, name.as_deref()) {
+            if !request.from.home_allowed(port, local, &addressing) {
                 let host = name.unwrap_or_else(|| local.to_string());
                 return Err(Refusal::Elsewhere(format!("{host}:{port}")));
             }
@@ -894,8 +1008,11 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
     }
     if request.path == wire::PATH {
         let token = request.bearer.as_deref();
-        let local = peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token));
-        return if local { Ok(Asker::Local) } else { Err(Refusal::Unauthorized) };
+        if peer == Peer::Loopback && token.is_some_and(|token| devices.is_local(token)) {
+            return Ok(Asker::Local);
+        }
+        let device = token.and_then(|token| devices.holder(token, peer.ip(), now));
+        return device.map(|device| Asker::Device(device.id)).ok_or(Refusal::Unauthorized);
     }
     if request.path.starts_with(CAST) {
         return devices.granted(&request.path).map(Asker::Cast).ok_or(Refusal::CastEnded);
@@ -904,7 +1021,9 @@ fn ask(peer: Peer, request: &Request, port: u16, devices: &Devices, now: i64) ->
         return Ok(Asker::Local);
     }
     Ok(match request.cookie.as_deref() {
-        Some(token) => devices.holder(token, now).map_or(Asker::Stranger { removed: true }, |d| Asker::Device(d.id)),
+        Some(token) => {
+            devices.holder(token, peer.ip(), now).map_or(Asker::Stranger { removed: true }, |d| Asker::Device(d.id))
+        }
         None => Asker::Stranger { removed: false },
     })
 }
@@ -936,15 +1055,24 @@ impl Sender {
         self.origin.as_deref().is_none_or(own)
     }
 
-    /// For a request from the home network, true when it names this Mac by its .local name or by
-    /// the address it connected to, on `port`, and no other website made it. A web page that
-    /// rebinds its own hostname to this Mac's address still names that hostname.
-    fn home_allowed(&self, port: u16, local: IpAddr, name: Option<&str>) -> bool {
+    /// For a request from the network, true when it names this Mac by the address it connected
+    /// to, its .local name or its tailnet name, on `port`, or by the public address, and no other
+    /// website made it. A web page that rebinds its own hostname to this Mac's address still names
+    /// that hostname. A server takes any name and port, since devices reach it by names it cannot
+    /// know, such as a forwarded port, and a page that rebinds its name to it holds no device's
+    /// cookie.
+    fn home_allowed(&self, port: u16, local: IpAddr, addressing: &Addressing) -> bool {
         let Some(host) = self.host.as_deref() else { return false };
         let (host_name, host_port) = split_host(host);
-        let ours = host_name.parse::<IpAddr>().is_ok_and(|ip| ip.to_canonical() == local) || name == Some(host_name);
-        let same_origin = self.origin.as_deref().is_none_or(|origin| origin.strip_prefix("http://") == Some(host));
-        ours && host_port == Some(port) && !self.cross_site() && same_origin
+        let names = [&addressing.local, &addressing.tailnet];
+        let ours = host_name.parse::<IpAddr>().is_ok_and(|ip| ip.to_canonical() == local)
+            || names.iter().any(|name| name.as_deref() == Some(host_name));
+        let public = addressing.exposure.public_address.as_ref().filter(|public| public.host == host);
+        let named = addressing.exposure.server || public.is_some() || ours && host_port == Some(port);
+        let same_origin = self.origin.as_deref().is_none_or(|origin| {
+            origin.strip_prefix("http://") == Some(host) || public.is_some_and(|public| public.origin == origin)
+        });
+        named && !self.cross_site() && same_origin
     }
 
     fn cross_site(&self) -> bool {
@@ -1007,6 +1135,28 @@ fn content_type(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Exposure, PublicAddress};
+
+    fn addressing(local: Option<&str>, server: bool, public: Option<&str>) -> Addressing {
+        let public_address = public.map(|public| PublicAddress::parse(public).unwrap());
+        Addressing {
+            local: local.map(String::from),
+            tailnet: Some("studio-mac.tail1234.ts.net".into()),
+            exposure: Exposure { server, public_address },
+        }
+    }
+
+    #[test]
+    fn a_port_another_engine_holds_is_passed_over() {
+        for held in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST] {
+            let other = TcpListener::bind((held, 0)).unwrap();
+            let port = other.local_addr().unwrap().port();
+            for reach in [Reach::Loopback, Reach::Network] {
+                let ours = bind(&[port], reach).unwrap();
+                assert_ne!(ours.local_addr().unwrap().port(), port, "{held} held, {reach:?} took its port");
+            }
+        }
+    }
 
     #[test]
     fn requests_other_websites_make_through_the_browser_are_refused() {
@@ -1047,12 +1197,15 @@ mod tests {
         let allowed = |host: Option<&str>, site: Option<&str>, origin: Option<&str>| {
             let from =
                 Sender { host: host.map(String::from), site: site.map(String::from), origin: origin.map(String::from) };
-            from.home_allowed(47919, mac, Some("studio-mac.local"))
+            from.home_allowed(47919, mac, &addressing(Some("studio-mac.local"), false, None))
         };
         // A phone that opened either address, and a TV that plays a cast.
         assert!(allowed(Some("studio-mac.local:47919"), Some("none"), None));
         assert!(allowed(Some("studio-mac.local:47919"), Some("same-origin"), Some("http://studio-mac.local:47919")));
         assert!(allowed(Some("192.168.1.23:47919"), None, None));
+        // A phone away from home on the tailnet.
+        assert!(allowed(Some("studio-mac.tail1234.ts.net:47919"), Some("none"), None));
+        assert!(!allowed(Some("studio-mac.tail1234.ts.net:8080"), None, None));
         // A page that rebinds its hostname to this Mac's address.
         assert!(!allowed(Some("rebound.example:47919"), None, None));
         assert!(!allowed(Some("127.0.0.1:47919"), None, None));
@@ -1068,7 +1221,76 @@ mod tests {
         assert!(!allowed(Some("192.168.1.23:47919"), None, Some("http://192.168.1.23:3000")));
         assert!(!allowed(Some("192.168.1.23:47919"), None, Some("null")));
         let v6 = Sender { host: Some("[fd00::23]:47919".into()), site: None, origin: None };
-        assert!(v6.home_allowed(47919, "fd00::23".parse().unwrap(), None));
+        assert!(v6.home_allowed(47919, "fd00::23".parse().unwrap(), &addressing(None, false, None)));
+    }
+
+    #[test]
+    fn a_server_takes_any_name_but_still_refuses_other_websites() {
+        let server: IpAddr = "10.0.0.5".parse().unwrap();
+        let allowed = |host: Option<&str>, site: Option<&str>, origin: Option<&str>| {
+            let from =
+                Sender { host: host.map(String::from), site: site.map(String::from), origin: origin.map(String::from) };
+            from.home_allowed(47919, server, &addressing(Some("box.local"), true, None))
+        };
+        // Its public address behind a router's forwarded port, and a name only DNS knows.
+        assert!(allowed(Some("203.0.113.7:8080"), Some("none"), None));
+        assert!(allowed(Some("box.example.net:47919"), Some("same-origin"), Some("http://box.example.net:47919")));
+        // Another website, another origin, or no name at all.
+        assert!(!allowed(Some("box.example.net:47919"), Some("cross-site"), None));
+        assert!(!allowed(Some("box.example.net:47919"), Some("same-site"), None));
+        assert!(!allowed(Some("box.example.net:47919"), None, Some("https://example.org")));
+        assert!(!allowed(Some("box.example.net:47919"), None, Some("null")));
+        assert!(!allowed(None, None, None));
+    }
+
+    #[test]
+    fn the_public_address_lets_its_own_https_page_in_and_no_other() {
+        let proxy: IpAddr = Ipv4Addr::LOCALHOST.into();
+        let allowed = |host: Option<&str>, site: Option<&str>, origin: Option<&str>| {
+            let from =
+                Sender { host: host.map(String::from), site: site.map(String::from), origin: origin.map(String::from) };
+            from.home_allowed(47919, proxy, &addressing(None, false, Some("https://tv.example.com")))
+        };
+        assert!(allowed(Some("tv.example.com"), Some("same-origin"), Some("https://tv.example.com")));
+        assert!(allowed(Some("tv.example.com"), Some("none"), None));
+        assert!(!allowed(Some("tv.example.com"), Some("cross-site"), None));
+        assert!(!allowed(Some("tv.example.com"), None, Some("https://example.org")));
+        assert!(!allowed(Some("other.example.com"), None, None));
+    }
+
+    #[test]
+    fn a_request_a_local_proxy_forwards_comes_from_the_network_and_never_from_this_mac() {
+        let request = |host: &str, forwarded: Option<&str>| {
+            let mut head = format!("GET /api/jobs HTTP/1.1\r\nHost: {host}\r\n");
+            if let Some(forwarded) = forwarded {
+                head.push_str(&format!("X-Forwarded-For: {forwarded}\r\n"));
+            }
+            head.push_str("\r\n");
+            let mut headers = [httparse::EMPTY_HEADER; 16];
+            let mut parsed = httparse::Request::new(&mut headers);
+            parsed.parse(head.as_bytes()).unwrap();
+            match super::head(&parsed) {
+                Head::Request(request) => request,
+                Head::Refused(status) => panic!("{status}"),
+            }
+        };
+        let public = addressing(None, false, Some("https://tv.example.com"));
+        let from = |host: &str, forwarded: Option<&str>| Peer::Loopback.of_request(&request(host, forwarded), &public);
+        let network =
+            |remote: &str| Peer::Network { local: Ipv4Addr::LOCALHOST.into(), remote: remote.parse().unwrap() };
+
+        assert_eq!(from("tv.example.com", Some("198.51.100.4")), network("198.51.100.4"));
+        assert_eq!(from("tv.example.com", Some("10.0.0.2, 203.0.113.9")), network("203.0.113.9"));
+        assert_eq!(from("127.0.0.1:47919", Some("2001:db8::7")), network("2001:db8::7"), "a proxy that rewrites Host");
+        assert_eq!(from("tv.example.com", None), network("0.0.0.0"));
+        assert_eq!(from("127.0.0.1:47919", Some("unknown")), network("0.0.0.0"));
+        assert_eq!(from("127.0.0.1:47919", None), Peer::Loopback, "the web app on this Mac");
+        let phone = Peer::Network { local: "192.168.1.23".parse().unwrap(), remote: "192.168.1.40".parse().unwrap() };
+        assert_eq!(
+            phone.of_request(&request("tv.example.com", Some("6.6.6.6")), &public),
+            phone,
+            "only a local proxy is believed"
+        );
     }
 
     #[test]

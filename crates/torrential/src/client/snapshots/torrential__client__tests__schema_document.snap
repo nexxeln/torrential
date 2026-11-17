@@ -263,7 +263,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
     },
     {
       "name": "devices",
-      "about": "List, add, or remove the phones and TVs that watch from this Mac",
+      "about": "List, add, or remove the phones and TVs that watch from this computer",
       "arguments": [],
       "flags": [],
       "subcommands": [
@@ -275,7 +275,7 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         },
         {
           "name": "add",
-          "about": "Show a code and a QR code that let one more phone or TV in for 5 minutes",
+          "about": "Show a code and a QR code that let one more phone or TV in for 10 minutes",
           "arguments": [],
           "flags": []
         },
@@ -286,6 +286,61 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
             {
               "name": "ID",
               "help": "A device ID from torrential devices",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": []
+        }
+      ]
+    },
+    {
+      "name": "indexers",
+      "about": "List, add, or remove the Torznab indexers the engine searches, such as Jackett's or Prowlarr's",
+      "arguments": [],
+      "flags": [],
+      "subcommands": [
+        {
+          "name": "list",
+          "about": "List the indexers, whether each answers now, and their categories, the default",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "add",
+          "about": "Check a Torznab feed, or Prowlarr's or Jackett's own address, and add each indexer it has",
+          "arguments": [
+            {
+              "name": "URL",
+              "help": "A Torznab feed URL, or the address of Prowlarr or Jackett",
+              "required": true,
+              "repeatable": false
+            }
+          ],
+          "flags": [
+            {
+              "name": "--name",
+              "help": "The name to search it by with --source, for one feed",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "NAME"
+            },
+            {
+              "name": "--key",
+              "help": "The API key, from the settings page of Jackett or Prowlarr",
+              "takes_value": true,
+              "repeatable": false,
+              "value_name": "KEY"
+            }
+          ]
+        },
+        {
+          "name": "remove",
+          "about": "Stop searching an indexer, and take it out of config.yaml",
+          "arguments": [
+            {
+              "name": "NAME",
+              "help": "A name from torrential indexers",
               "required": true,
               "repeatable": false
             }
@@ -438,6 +493,61 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
               "value_name": "NAME"
             }
           ]
+        }
+      ]
+    },
+    {
+      "name": "connect",
+      "about": "Drive the engine on another machine, such as a server or a NAS, or this machine's again",
+      "arguments": [
+        {
+          "name": "ADDRESS",
+          "help": "The engine's address: the link torrential devices add shows there, a URL, a host:port, or a machine's name, such as its Tailscale name",
+          "required": false,
+          "repeatable": false
+        }
+      ],
+      "flags": [
+        {
+          "name": "--code",
+          "help": "The code torrential devices add shows on the engine's machine",
+          "takes_value": true,
+          "repeatable": false,
+          "value_name": "CODE"
+        },
+        {
+          "name": "--local",
+          "help": "Drive this machine's engine again",
+          "takes_value": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "pull",
+      "about": "Copy a finished download from the engine on another machine to this one",
+      "arguments": [
+        {
+          "name": "ID",
+          "help": "A download ID from torrential status",
+          "required": true,
+          "repeatable": false
+        }
+      ],
+      "flags": [
+        {
+          "name": "--files",
+          "help": "Copy only files matching this glob or exact path. Repeat to add more",
+          "takes_value": true,
+          "repeatable": true,
+          "value_name": "GLOB"
+        },
+        {
+          "name": "--dir",
+          "help": "The folder to copy into. Defaults to the download folder on this machine",
+          "takes_value": true,
+          "repeatable": false,
+          "value_name": "DIR"
         }
       ]
     },
@@ -659,6 +769,26 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
         {
           "name": "uninstall",
           "about": "Remove the login service",
+          "arguments": [],
+          "flags": []
+        }
+      ]
+    },
+    {
+      "name": "server",
+      "about": "Run the engine as a server on Linux: it starts at boot without a login, and paired devices reach it from anywhere",
+      "arguments": [],
+      "flags": [],
+      "subcommands": [
+        {
+          "name": "install",
+          "about": "Start the engine at boot, keep it on the network, and show a code that pairs the first device",
+          "arguments": [],
+          "flags": []
+        },
+        {
+          "name": "uninstall",
+          "about": "Go back to an engine that starts at login and listens on the network only while a device is paired",
           "arguments": [],
           "flags": []
         }

@@ -39,7 +39,7 @@ import { defaultAudio, plan } from "./plan";
 import { SeekBar } from "./SeekBar";
 import { audioLabel, offsetText, Settings, type SettingsPage } from "./Settings";
 import { Shortcuts } from "./Shortcuts";
-import { DirectSource, RemuxSource, type Source, type SourceState } from "./source";
+import { DirectSource, RemuxSource, type SourceState } from "./source";
 import { Unsaved } from "./saving";
 import { Stats } from "./Stats";
 import { SubtitleLayer } from "./SubtitleLayer";
@@ -211,7 +211,9 @@ function Stage({ element, frame, play, media, onReload, onBack, shown }: Playbac
   const how = useMemo(() => plan(media, audio, directWorks), [media, audio, directWorks]);
   const heard = audio ?? defaultAudio(media.audio)?.stream ?? null;
   const [sourceState, setSourceState] = useState<SourceState>({ kind: "streaming" });
-  const source = useRef<Source | null>(null);
+  /** Counts Try agains. Each builds the source anew, since a phone that locked can leave the old one dead. */
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
   /** The browser refused to start without a click. */
   const [needsClick, setNeedsClick] = useState(false);
   const howKind = how.kind;
@@ -228,7 +230,6 @@ function Stage({ element, frame, play, media, onReload, onBack, shown }: Playbac
             { id, file: file.index, duration: media.duration, type: type!, video: videoMode!, audio: heard ?? undefined, start },
             setSourceState,
           );
-    source.current = made;
     const remembered = preferences();
     element.volume = remembered.volume;
     element.muted = remembered.muted;
@@ -238,14 +239,20 @@ function Stage({ element, frame, play, media, onReload, onBack, shown }: Playbac
       (refused: DOMException) => setNeedsClick(refused.name === "NotAllowedError"),
     );
     return () => {
-      source.current = null;
       made.destroy();
     };
-  }, [element, howKind, type, videoMode, heard, id, file.index, file.url, media.duration]);
+  }, [element, howKind, type, videoMode, heard, id, file.index, file.url, media.duration, attempt]);
 
   // A file the browser said it could read, but could not: let the engine repackage it.
   const failure = sourceState.kind === "failed" ? sourceState.error : null;
   const converts = media.ffmpeg === "ready";
+  // A phone that locked mid-play comes back with a dead stream. Coming back to the page tries again by itself.
+  useEffect(() => {
+    if (!failure) return;
+    const back = () => !document.hidden && retry();
+    document.addEventListener("visibilitychange", back);
+    return () => document.removeEventListener("visibilitychange", back);
+  }, [failure, retry]);
   useEffect(() => {
     if (failure && howKind === "direct" && converts && [mediaErrorCode(3), mediaErrorCode(4)].some((code) => code === failure.code)) setDirectWorks(false);
   }, [failure, howKind, converts]);
@@ -526,7 +533,8 @@ function Stage({ element, frame, play, media, onReload, onBack, shown }: Playbac
         {!stuck && <Buffering play={play} quiet={shown.replacing} />}
         <FeedbackLayer />
 
-        {!stuck && !waiting && paused && needsClick && (
+        {/* Shown while it waits too: iOS buffers nothing until a tap starts the video. */}
+        {!stuck && paused && needsClick && (
           <button
             type="button"
             aria-label="Play"
@@ -561,7 +569,7 @@ function Stage({ element, frame, play, media, onReload, onBack, shown }: Playbac
         {stats && <Stats media={media} how={how} play={play} subtitle={chosen} offset={offset} audio={heard} />}
 
         {shown.overlay}
-        {failure && <Problem title="The video stopped" error={failure} onRetry={() => source.current?.retry()} onBack={onBack} back={back} />}
+        {failure && <Problem title="The video stopped" error={failure} onRetry={retry} onBack={onBack} back={back} />}
         {blocked === "ffmpeg" && (
           <Problem
             title="This file needs ffmpeg"

@@ -3256,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "torrential"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -3286,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-daemon"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "clap",
  "dirs",
@@ -3312,6 +3312,8 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rustix",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3332,20 +3334,22 @@ dependencies = [
 
 [[package]]
 name = "torrential-engine"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "cmake",
  "cxx",
  "cxx-build",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "socket2",
  "tempfile",
  "torrential-core",
+ "windows",
 ]
 
 [[package]]
 name = "torrential-search"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "futures-util",
  "percent-encoding",
@@ -3363,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "torrential-tui"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "crossterm",
  "insta",

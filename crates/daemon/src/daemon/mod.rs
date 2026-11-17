@@ -1,7 +1,5 @@
 pub mod admission;
 pub(crate) mod book;
-#[cfg(unix)]
-pub mod bridge05;
 pub(crate) mod cast;
 pub(crate) mod ctx;
 pub(crate) mod db;
@@ -12,6 +10,7 @@ pub(crate) mod engine_port;
 pub mod fake;
 pub mod files;
 pub(crate) mod http;
+pub(crate) mod indexers;
 pub(crate) mod libtorrent;
 pub(crate) mod magnet;
 pub(crate) mod media;
@@ -84,6 +83,8 @@ pub struct Ports {
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
     /// Where searches for TVs go.
     pub tvs: cast::Find,
+    /// config.yaml's indexers, which the engine checks and changes.
+    pub indexers: indexers::Indexers,
 }
 
 impl Ports {
@@ -113,6 +114,7 @@ impl Ports {
             };
             Arc::new(titles::catalog_port::Live::new(&config)?)
         };
+        let indexers = indexers::Indexers::new(paths.clone(), env.clone())?;
         let tvs = match test.map(|test| test.ssdp()).transpose()?.flatten() {
             Some(address) => cast::Find::At(address),
             None => cast::Find::Multicast,
@@ -136,6 +138,7 @@ impl Ports {
                 subtitles,
                 catalog,
                 tvs,
+                indexers,
             });
         }
         let network = match test.map(|test| test.loopback_peers()).transpose()?.flatten() {
@@ -153,7 +156,7 @@ impl Ports {
         let web_seeds = search.web_seeds();
         let search: Arc<dyn SearchPort> = Arc::new(search);
         Ok(Self {
-            engine: Box::new(Libtorrent::start(&paths.state, network)?),
+            engine: Box::new(Libtorrent::start(&paths.state, network, settings.torrent_interface.clone())?),
             web_seeds,
             search,
             parse: libtorrent::parse,
@@ -164,6 +167,7 @@ impl Ports {
             subtitles,
             catalog,
             tvs,
+            indexers,
         })
     }
 }
@@ -196,6 +200,10 @@ pub struct Running {
 pub struct Listen<'a> {
     pub ports: &'a [u16],
     pub access: &'a Path,
+    /// How devices outside the home reach the engine, from config.yaml.
+    pub exposure: crate::config::Exposure,
+    /// What the web app hears from the first request, such as the update that started this engine.
+    pub news: Option<switch::News>,
 }
 
 pub fn start(
@@ -209,7 +217,9 @@ pub fn start(
 ) -> Result<Running, Error> {
     let store = Store::open(db)?;
     ports.search.restore(store.results(torrential_core::time::now())?);
-    let devices = Arc::new(devices::Devices::open(db)?);
+    let news = switch::Board::default();
+    news.post(listen.news);
+    let devices = Arc::new(devices::Devices::open(db, listen.exposure)?);
     // Taken before the bind, so a change while the engine starts reaches the accept loop.
     let mut reach = devices.reach();
     let players = http::bind(listen.ports, *reach.borrow_and_update())
@@ -253,22 +263,24 @@ pub fn start(
         media: media::State::new(ports.ffmpeg),
         titles: titles::Titles::new(ports.catalog, shelf, timing),
         playing,
-        news: switch::Board::default(),
+        news,
         devices,
         casts: cast::Casts::new(ctx.clone(), ports.tvs),
+        indexers: ports.indexers,
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })
 }
 
 /// Runs the engine until `torrential engine stop`, a signal, or, when `service` says launchd,
-/// systemd or Task Scheduler started it, a switch to an installed update.
-pub fn run(env: &Env, service: bool, http_port: Option<u16>) -> u8 {
+/// systemd or Task Scheduler started it, a switch to an installed update. `server` runs it as a
+/// server whatever config.yaml says.
+pub fn run(env: &Env, service: bool, http_port: Option<u16>, server: bool) -> u8 {
     let paths = match Paths::from_process(env) {
         Ok(paths) => paths,
         Err(e) => return fail_start(None, &e),
     };
-    match serve(env, &paths, service, http_port) {
+    match serve(env, &paths, service, http_port, server) {
         Ok(Ended::Restart) if service => {
             service::start_next(env, &paths);
             service::RESTART
@@ -302,8 +314,9 @@ fn fail_start(paths: Option<&Paths>, error: &Error) -> u8 {
     crate::exit::code(error.code)
 }
 
-fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Result<Ended, Startup> {
-    let settings = Config::load(paths, env)?;
+fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>, server: bool) -> Result<Ended, Startup> {
+    let mut settings = Config::load(paths, env)?;
+    settings.exposure.server |= server;
     let io = |what: &str, e: std::io::Error| Error::new(ErrorCode::StateCorrupt, format!("cannot {what}: {e}"));
     paths.make_state().map_err(|e| io(&format!("create {}", paths.state.display()), e))?;
     paths::check_state_filesystem(&paths.state)?;
@@ -359,21 +372,21 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         let last = std::fs::read_to_string(paths.http_port()).ok().and_then(|text| text.trim().parse().ok());
         let http_ports: Vec<u16> = last.into_iter().chain([wanted]).collect();
         let access = paths.engine_token();
-        let listen = Listen { ports: &http_ports, access: &access };
+        let news = switch::opening(env, paths);
+        let listen = Listen { ports: &http_ports, access: &access, exposure: settings.exposure.clone(), news };
         let running = start(&tokio::runtime::Handle::current(), &db, ports, config, timing, version.clone(), listen)?;
-        running.ctx.news.post(switch::opening(env, paths));
         let (pid, players) = (std::process::id(), running.ctx.http_port);
         if last != Some(players) {
             let written = fsutil::write_atomic(&paths.http_port(), players.to_string().as_bytes());
             persist(&format!("write {}", paths.http_port().display()), written);
         }
         log(&format!("engine {version} started, pid {pid}, web app and players http://127.0.0.1:{players}"));
+        if settings.exposure.server {
+            log(&format!("engine {version} runs as a server, on the network on port {players}"));
+        }
         persist(&format!("remove {}", paths.switching().display()), fsutil::remove(&paths.switching()));
         let signals = tokio::spawn(stop_on_signal(running.ctx.owner.clone()));
         let updates = tokio::spawn(switch::follow_updates(env.clone(), paths.clone(), running.ctx.clone(), service));
-        // Remove in 0.7
-        #[cfg(unix)]
-        let bridge = tokio::spawn(bridge05::answer(paths.clone(), running.ctx.owner.clone(), version.clone()));
         let ended = running.owner.await.unwrap_or(Ended::Stopped);
         // Before the port stops answering, so a stop that finds it refusing waits for the next engine.
         if ended == Ended::Restart && service {
@@ -382,8 +395,6 @@ fn serve(env: &Env, paths: &Paths, service: bool, http_port: Option<u16>) -> Res
         running.http.abort();
         signals.abort();
         updates.abort();
-        #[cfg(unix)]
-        bridge.abort();
         // An engine that stops for a newer version leaves its token file, so a client following it
         // finds a port that refuses for a moment instead of none, and waits for the next engine.
         if ended == Ended::Stopped {

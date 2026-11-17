@@ -1,7 +1,10 @@
 //! The names a phone or TV on the home network reaches this machine by: its .local name, which
-//! Bonjour or Avahi answers for, and its addresses.
+//! Bonjour or Avahi answers for, and its addresses. Away from home, a device on the same Tailscale
+//! network reaches it by its tailnet name or address.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
+
+use serde::Deserialize;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Names {
@@ -15,6 +18,67 @@ impl Names {
     pub fn read() -> Self {
         Self { local: local_name(), lan: lan_addresses() }
     }
+}
+
+/// This machine on a Tailscale network.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Tailnet {
+    /// Its MagicDNS name, such as `box.tail1234.ts.net`, when the tailnet has MagicDNS.
+    pub name: Option<String>,
+    /// Its address there, in 100.64.0.0/10 or fd7a:115c:a1e0::/48.
+    pub ip: IpAddr,
+}
+
+/// What `tailscale status --json` says that this reads.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Status {
+    backend_state: String,
+    #[serde(rename = "Self")]
+    me: Option<Peer>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Peer {
+    #[serde(rename = "DNSName", default)]
+    dns_name: String,
+    #[serde(rename = "TailscaleIPs", default)]
+    tailscale_ips: Vec<IpAddr>,
+}
+
+impl Tailnet {
+    /// This machine on its tailnet while Tailscale runs: what `tailscale status` says, or, with no
+    /// `tailscale` command to ask, an address of this machine in the tailnet range.
+    pub fn read() -> Option<Self> {
+        let output = std::process::Command::new("tailscale").args(["status", "--json"]).output().ok();
+        match output.filter(|output| output.status.success()) {
+            Some(output) => Self::from_status(&output.stdout),
+            None => up_ipv4().into_iter().find(|ip| tailnet_range(*ip)).map(|ip| Self { name: None, ip: ip.into() }),
+        }
+    }
+
+    fn from_status(json: &[u8]) -> Option<Self> {
+        let status: Status = serde_json::from_slice(json).ok()?;
+        let me = status.me.filter(|_| status.backend_state == "Running")?;
+        let ip = me.tailscale_ips.iter().find(|ip| ip.is_ipv4()).or(me.tailscale_ips.first()).copied()?;
+        let name = me.dns_name.trim_end_matches('.').to_ascii_lowercase();
+        Some(Self { name: (!name.is_empty()).then_some(name), ip })
+    }
+
+    /// The name, or else the address, a browser on the tailnet opens.
+    pub fn host(&self) -> String {
+        self.name.clone().unwrap_or_else(|| match self.ip {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        })
+    }
+}
+
+/// 100.64.0.0/10, the shared address space Tailscale gives its machines IPv4 addresses from.
+fn tailnet_range(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    a == 100 && (64..128).contains(&b)
 }
 
 /// The name Bonjour answers for: the Local Hostname in System Settings, Sharing.
@@ -76,7 +140,12 @@ fn lan_addresses() -> Vec<Ipv4Addr> {
     found
 }
 
-/// The IPv4 addresses of the network interfaces that are up.
+/// The prefixes of the bridges Docker, LXD and libvirt add for their containers and machines,
+/// which no phone or TV reaches this machine by.
+#[cfg(unix)]
+const BRIDGES: [&str; 6] = ["docker", "br-", "veth", "virbr", "lxdbr", "cni"];
+
+/// The IPv4 addresses of the network interfaces that are up, but for container bridges.
 #[cfg(unix)]
 fn up_ipv4() -> Vec<Ipv4Addr> {
     let mut found = Vec::new();
@@ -89,7 +158,8 @@ fn up_ipv4() -> Vec<Ipv4Addr> {
         next = entry.ifa_next;
         let up = entry.ifa_flags & libc::IFF_UP as u32 != 0;
         let Some(address) = (unsafe { entry.ifa_addr.as_ref() }) else { continue };
-        if !up || i32::from(address.sa_family) != libc::AF_INET {
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_string_lossy();
+        if !up || i32::from(address.sa_family) != libc::AF_INET || BRIDGES.iter().any(|b| name.starts_with(b)) {
             continue;
         }
         let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in>() };
@@ -142,12 +212,15 @@ fn up_ipv4() -> Vec<Ipv4Addr> {
     found
 }
 
-/// Private addresses are the home network. A link-local address is all a machine has without a
-/// router, and others are a VPN or a public address.
+/// Private addresses are the home network. Then come public addresses, then the tailnet's shared
+/// address space, which a device off the tailnet cannot reach. A link-local address is all a
+/// machine has without a router.
 fn rank(ip: Ipv4Addr) -> u8 {
     if ip.is_private() {
         0
     } else if ip.is_link_local() {
+        3
+    } else if tailnet_range(ip) {
         2
     } else {
         1
@@ -169,17 +242,30 @@ mod tests {
     }
 
     #[test]
-    fn the_home_network_comes_before_a_vpn_and_a_bare_link() {
+    fn the_home_network_comes_before_a_public_address_a_tailnet_and_a_bare_link() {
         let mut ips: Vec<Ipv4Addr> =
-            ["169.254.3.4", "100.64.0.7", "192.168.1.23"].iter().map(|ip| ip.parse().unwrap()).collect();
+            ["169.254.3.4", "100.64.0.7", "203.0.113.7", "192.168.1.23"].iter().map(|ip| ip.parse().unwrap()).collect();
         ips.sort_by_key(|ip| rank(*ip));
-        assert_eq!(
-            ips,
-            [
-                "192.168.1.23".parse::<Ipv4Addr>().unwrap(),
-                "100.64.0.7".parse().unwrap(),
-                "169.254.3.4".parse().unwrap()
-            ]
-        );
+        let ips: Vec<String> = ips.iter().map(Ipv4Addr::to_string).collect();
+        assert_eq!(ips, ["192.168.1.23", "203.0.113.7", "100.64.0.7", "169.254.3.4"]);
+    }
+
+    #[test]
+    fn tailscale_status_gives_the_magicdns_name_and_the_ipv4_address() {
+        let status = |state: &str, name: &str| {
+            format!(
+                r#"{{"Version":"1.90.4","BackendState":"{state}","Self":{{"ID":"n1","HostName":"box","DNSName":"{name}","TailscaleIPs":["100.101.102.103","fd7a:115c:a1e0::4d01:6667"]}},"MagicDNSSuffix":"tail1234.ts.net"}}"#
+            )
+        };
+        let ip: IpAddr = "100.101.102.103".parse().unwrap();
+        let running = Tailnet::from_status(status("Running", "Box.tail1234.ts.net.").as_bytes()).unwrap();
+        assert_eq!(running, Tailnet { name: Some("box.tail1234.ts.net".into()), ip });
+        assert_eq!(running.host(), "box.tail1234.ts.net");
+        let unnamed = Tailnet::from_status(status("Running", "").as_bytes()).unwrap();
+        assert_eq!((unnamed.host(), unnamed.name), ("100.101.102.103".to_string(), None));
+        assert_eq!(Tailnet::from_status(status("Stopped", "box.tail1234.ts.net.").as_bytes()), None);
+        assert_eq!(Tailnet::from_status(br#"{"BackendState":"NeedsLogin","Self":null}"#), None);
+        assert!(tailnet_range("100.64.0.1".parse().unwrap()) && tailnet_range("100.127.255.254".parse().unwrap()));
+        assert!(!tailnet_range("100.128.0.1".parse().unwrap()) && !tailnet_range("100.63.0.1".parse().unwrap()));
     }
 }

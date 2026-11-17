@@ -1,5 +1,5 @@
-//! The requests of this user's torrential: each a POST to the engine's HTTP port, answered in
-//! frames, with the updates of a request that streams before its reply.
+//! The requests of torrential, this user's and paired machines': each a POST to the engine's HTTP
+//! port, answered in frames, with the updates of a request that streams before its reply.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -15,10 +15,12 @@ use torrential_core::protocol::{
 use torrential_core::{AttemptEvent, CastRequest, Error, ErrorCode, Player, Plays, SearchQuery, TorrentId};
 
 use super::ctx::Ctx;
+use super::devices::Asker;
 use super::downloads::{
     Answer, JobEvents, Searching, files, get, listed, metadata, pause, play, remove, resume, search, streams,
 };
 use super::http::{Connection, Request as Http};
+use super::indexers;
 use super::owner::plays::Destination;
 use super::owner::{Command, MetaTarget};
 use super::search_port::Progress;
@@ -79,14 +81,20 @@ pub async fn handle(ctx: &Ctx, request: Request) -> Response {
             follow::follow(ctx.titles.watching.clone(), video, release, socket);
             Ok(Response::Ok)
         }
+        Request::Indexers => indexers::list(ctx).await.map(|list| Response::Indexers { list }),
+        Request::AddIndexer { url, name, key } => {
+            indexers::add(ctx, &url, name, key).await.map(|list| Response::Indexers { list })
+        }
+        Request::RemoveIndexer { name } => indexers::remove(ctx, &name).await.map(|list| Response::Indexers { list }),
     };
     result.unwrap_or_else(|error| Response::Error { error })
 }
 
 /// Answers a request at `wire::PATH`, whose token the guard has checked, with its frames. The
 /// query says the client's version and protocol. Every engine answers hello and shutdown, and
-/// refuses the rest when the protocols differ. The connection closes after the reply.
-pub async fn answer(conn: &mut Connection<'_>, http: &Http) -> io::Result<bool> {
+/// refuses the rest when the protocols differ. A paired device gets only the requests a device may
+/// send. The connection closes after the reply.
+pub async fn answer(conn: &mut Connection<'_>, http: &Http, asker: &Asker) -> io::Result<bool> {
     let ctx = conn.ctx;
     let speaks = http.param("wire").and_then(|wire| wire.parse::<u32>().ok());
     let (Some(version), Some(speaks)) = (http.param("version"), speaks) else {
@@ -94,6 +102,13 @@ pub async fn answer(conn: &mut Connection<'_>, http: &Http) -> io::Result<bool> 
     };
     let request = serde_json::from_slice::<Request>(&http.body);
     conn.begin(wire::FRAMES, http).await?;
+    if let (Asker::Device(device), Ok(request)) = (asker, &request)
+        && let Some(error) = request.refused_to_device()
+    {
+        log(&format!("refused device {device} a request only this machine may send: {}", error.message));
+        send(conn, &Response::Error { error }).await?;
+        return conn.end().await;
+    }
     let reply = match request {
         Ok(Request::Hello) => hello(ctx),
         Ok(Request::Shutdown { asked: false }) => switch(ctx, &version).await,

@@ -219,7 +219,7 @@ function Picker({
       {tvs.length === 0 && looking && <p className="px-2.5 py-2 text-sm text-soft">Looking for TVs on this network…</p>}
       {tvs.length === 0 && search.kind === "done" && (
         <p className="px-2.5 py-2 text-sm text-pretty text-soft">
-          No TV answered. Check that the TV is on, on the same network as this Mac, and that its DLNA or media sharing setting is on.
+          No TV answered. Check that the TV is on, on the same network as the computer running torrential, and that its DLNA or media sharing setting is on.
         </p>
       )}
       {search.kind === "failed" && <p className="px-2.5 py-2 text-sm text-pretty text-error">{sentence(search.error.message)}</p>}

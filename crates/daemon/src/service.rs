@@ -152,6 +152,64 @@ pub fn unit(manager: Manager, exe: &Path, log: &Path, torrential_home: Option<&s
     }
 }
 
+/// What a login service unit starts: the torrential binary, and the `TORRENTIAL_HOME` it sets.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Starts {
+    pub exe: String,
+    pub home: Option<String>,
+}
+
+/// Reads back what `unit` wrote, or `None` for a unit torrential did not write.
+fn starts(manager: Manager, unit: &str) -> Option<Starts> {
+    let between = |text: &str, from: &str, to: &str| -> Option<String> {
+        let rest = &text[text.find(from)? + from.len()..];
+        Some(rest[..rest.find(to)?].to_string())
+    };
+    let after = |key: &str| unit.find(key).map(|at| &unit[at..]);
+    match manager {
+        Manager::Launchd => Some(Starts {
+            exe: unxml(&between(after("<key>ProgramArguments</key>")?, "<string>", "</string>")?),
+            home: after("<key>TORRENTIAL_HOME</key>")
+                .and_then(|rest| between(rest, "<string>", "</string>"))
+                .map(|h| unxml(&h)),
+        }),
+        Manager::Systemd => Some(Starts {
+            exe: between(unit, "ExecStart=\"", "\"")?,
+            home: between(unit, "Environment=\"TORRENTIAL_HOME=", "\""),
+        }),
+        Manager::TaskScheduler => {
+            let command = &unit[..unit.find("\" daemon run --service")?];
+            Some(Starts {
+                exe: unxml(&command[command.rfind('"')? + 1..]),
+                home: between(unit, "set \"TORRENTIAL_HOME=", "\"").map(|h| unxml(&h)),
+            })
+        }
+    }
+}
+
+fn unxml(text: &str) -> String {
+    text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+}
+
+/// The binary the login service starts, when torrential wrote the service for this engine's
+/// state folder and it starts another binary than this one, as an install from another path
+/// leaves it.
+pub fn starts_another(env: &Env, paths: &Paths) -> Option<String> {
+    let manager = Manager::current();
+    let bytes = std::fs::read(manager.unit_path(home(env).ok()?, paths)).ok()?;
+    let text = match manager {
+        Manager::TaskScheduler => {
+            let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+            String::from_utf16(units.strip_prefix(&[0xFEFF]).unwrap_or(&units)).ok()?
+        }
+        Manager::Launchd | Manager::Systemd => String::from_utf8(bytes).ok()?,
+    };
+    let service = starts(manager, &text)?;
+    let this = env.installed().ok()?.display().to_string();
+    (service.home.as_deref() == env.var("TORRENTIAL_HOME") && service.exe != without_verbatim(&this))
+        .then_some(service.exe)
+}
+
 /// `path` without the `\\?\` a canonical Windows path starts with, which cmd cannot run.
 fn without_verbatim(path: &str) -> &str {
     match path.strip_prefix(r"\\?\") {
@@ -189,23 +247,68 @@ fn home(env: &Env) -> Result<&Path, Error> {
     env.home().ok_or_else(|| Error::new(ErrorCode::Usage, "HOME is not set"))
 }
 
-/// A test names a folder of stand-ins for launchctl and systemctl in `SERVICE_BIN`, so it never
-/// changes the real login services.
-fn run(env: &Env, program: &str, args: &[&str]) -> Result<(), Error> {
+/// A test names a folder of stand-ins for launchctl, systemctl, loginctl and sudo in
+/// `SERVICE_BIN`, so it never changes the real login services.
+fn program(env: &Env, program: &str) -> PathBuf {
     let bin = env.test().and_then(|test| test.path(hooks::SERVICE_BIN));
-    let path = bin.map_or_else(|| PathBuf::from(program), |bin| bin.join(program));
-    let output = Command::new(path)
-        .args(args)
-        .output()
-        .map_err(|e| Error::new(ErrorCode::Internal, format!("cannot run {program}: {e}")))?;
+    bin.map_or_else(|| PathBuf::from(program), |bin| bin.join(program))
+}
+
+fn run(env: &Env, name: &str, args: &[&str]) -> Result<(), Error> {
+    output(env, name, args).map(drop)
+}
+
+/// What `name` printed, or why it failed.
+fn output(env: &Env, name: &str, args: &[&str]) -> Result<String, Error> {
+    let mut command = Command::new(program(env, name));
+    // systemctl --user finds this person's systemd through XDG_RUNTIME_DIR, which a shell from su,
+    // sudo or a remote runner leaves unset.
+    #[cfg(target_os = "linux")]
+    if name == "systemctl" && env.var("XDG_RUNTIME_DIR").is_none() {
+        command.env("XDG_RUNTIME_DIR", format!("/run/user/{}", crate::paths::uid()));
+    }
+    let output =
+        command.args(args).output().map_err(|e| Error::new(ErrorCode::Internal, format!("cannot run {name}: {e}")))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     Err(Error::internal(format!(
-        "{program} {} failed: {}",
+        "{name} {} failed: {}",
         args.join(" "),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+/// Whether systemd starts the services of user `uid` at boot and keeps them after the user logs
+/// out, which a server's engine needs.
+#[cfg(target_os = "linux")]
+pub fn lingering(env: &Env, uid: u32) -> bool {
+    let shown = output(env, "loginctl", &["show-user", &uid.to_string(), "--property=Linger", "--value"]);
+    shown.is_ok_and(|shown| shown.trim() == "yes")
+}
+
+/// Turns lingering on or off for user `uid`. logind lets a person do that for themselves on most
+/// systems, and else `sudo` does it, asking for a password on the terminal when `terminal` says
+/// someone is there to type it.
+#[cfg(target_os = "linux")]
+pub fn linger(env: &Env, uid: u32, on: bool, terminal: bool) -> Result<(), Error> {
+    let (verb, uid) = (if on { "enable-linger" } else { "disable-linger" }, uid.to_string());
+    if run(env, "loginctl", &[verb, &uid]).is_ok() {
+        return Ok(());
+    }
+    let mut sudo = Command::new(program(env, "sudo"));
+    if !terminal {
+        sudo.arg("-n");
+    }
+    if sudo.args(["loginctl", verb, &uid]).status().is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+    let (message, then) = if on {
+        ("systemd cannot keep the engine running without a login until lingering is on", "torrential server install")
+    } else {
+        ("systemd keeps starting the engine at boot until lingering is off", "torrential server uninstall")
+    };
+    Err(Error::new(ErrorCode::Usage, message).with_hint(format!("run sudo loginctl {verb} {uid}, then {then} again")))
 }
 
 /// The unit as its file holds it. Task Scheduler reads a task's XML as UTF-16.
@@ -461,5 +564,18 @@ mod tests {
         let home = unit(Manager::TaskScheduler, exe, log, Some(r"D:\th"), r"STUDIO\ada");
         assert!(home.contains(r#"/c "set "TORRENTIAL_HOME=D:\th"&amp;&amp; "C:\"#), "{home}");
         assert_eq!(encoded(Manager::TaskScheduler, "<a/>")[..4], [0xFF, 0xFE, b'<', 0]);
+    }
+
+    #[test]
+    fn every_unit_reads_back_the_binary_and_the_home_it_starts() {
+        let (exe, log) = (r"C:\Ada & Bo\<bin>\torrential", Path::new("/state/engine.log"));
+        for manager in [Manager::Launchd, Manager::Systemd, Manager::TaskScheduler] {
+            for home in [None, Some(r"D:\th & co")] {
+                let written = unit(manager, Path::new(exe), log, home, "ada");
+                let expected = Starts { exe: exe.to_string(), home: home.map(str::to_string) };
+                assert_eq!(starts(manager, &written), Some(expected), "{manager:?} {home:?}");
+            }
+        }
+        assert_eq!(starts(Manager::Systemd, "[Service]\nExecStart=/usr/bin/other\n"), None);
     }
 }

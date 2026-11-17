@@ -7,12 +7,14 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use torrential_core::protocol::{Request, Response, WIRE_VERSION};
+use torrential_core::protocol::{Request, Response, WIRE_VERSION, read_frame};
 use torrential_core::{DeviceList, ErrorCode};
 
+use super::super::devices::Reach;
 use super::super::http;
 use super::super::names::Names;
-use super::{GIB, Harness, MIB, torrent, written};
+use super::{GIB, Harness, MIB, Outside, fake, torrent, written};
+use crate::config::{Exposure, PublicAddress};
 
 const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
 
@@ -151,7 +153,8 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let not_paired = (
         401,
         "not_paired".to_string(),
-        "this device is not paired with the Mac, so open /pair and enter the code that Add a device shows".to_string(),
+        "this device is not paired with torrential, so open /pair and enter the code that Add a device shows"
+            .to_string(),
     );
     for path in ["/api/jobs", "/api/home", "/api/devices", "/api/me", "/api/search?q=sintel", "/api/stream?id=x&file=0"]
     {
@@ -166,7 +169,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let mut idle = TcpStream::connect((ip, h.running.ctx.http_port)).await.unwrap();
     let page = phone.get("/pair").await;
     assert_eq!(page.status, 200);
-    assert!(page.text().contains("Enter the code that Add a device shows in torrential on the Mac."));
+    assert!(page.text().contains("Enter the code that Add a device shows on the computer running torrential."));
 
     let wrong = format!("{:06}", (offer.code.parse::<u32>().unwrap() + 1) % 1_000_000);
     assert_eq!(phone.pair(&wrong).await.status, 400);
@@ -184,7 +187,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let bytes = phone.send("GET", &file, &["Range: bytes=0-99"], "").await;
     assert_eq!((bytes.status, bytes.body.len()), (206, 100));
     let mac_only =
-        (403, "local_only".to_string(), "only the Mac running torrential can add or remove devices".to_string());
+        (403, "local_only".to_string(), "only the computer running torrential can add or remove devices".to_string());
     assert_eq!(phone.get("/api/devices").await.error(), mac_only);
     assert_eq!(phone.send("POST", "/api/devices/add", &[], "{}").await.error(), mac_only);
     assert_eq!(phone.get("/pair").await.header("location"), Some("/"));
@@ -220,7 +223,7 @@ async fn a_phone_reaches_nothing_until_it_pairs_and_nothing_once_it_is_removed()
     let removed = (
         401,
         "not_paired".to_string(),
-        "this device was removed on the Mac, so open /pair and enter a new code from Add a device".to_string(),
+        "this device was removed from torrential, so open /pair and enter a new code from Add a device".to_string(),
     );
     assert_eq!(phone.get("/api/jobs").await.error(), removed);
     assert_eq!(phone.get(&file).await.header("location"), Some("/pair"));
@@ -268,6 +271,159 @@ async fn a_request_from_the_network_must_name_this_mac_and_come_from_its_own_pag
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name() {
+    let ip = lan();
+    let h = Harness::with_outside(
+        fake::Search::new(fake::isos()),
+        Outside { exposure: Exposure { server: true, public_address: None }, ..Outside::default() },
+    );
+    listening(&h, ip, true).await;
+    let mut phone = Browser { host: "box.example.net:8080".into(), ..Browser::on(ip, &h) };
+    let not_paired = (
+        401,
+        "not_paired".to_string(),
+        "this device is not paired with torrential, so open /pair and enter the code that Add a device shows"
+            .to_string(),
+    );
+    assert_eq!(phone.get("/api/jobs").await.error(), not_paired);
+    assert_eq!(phone.get("/").await.header("location"), Some("/pair"));
+    assert_eq!(phone.get("/pair").await.status, 200);
+
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    assert_eq!(phone.pair(&offer.code).await.status, 200);
+    assert_eq!(phone.get("/api/jobs").await.status, 200, "a name the server cannot know");
+    let cross_site = phone.send("POST", "/api/pause", &["Sec-Fetch-Site: cross-site"], r#"{"refs":["x"]}"#).await;
+    assert_eq!(cross_site.status, 403);
+
+    let id = phone.get("/api/me").await.json()["device"]["id"].as_str().unwrap().to_string();
+    devices(&h, Request::RemoveDevice { id }).await;
+    assert_eq!(*h.running.ctx.devices.reach().borrow(), Reach::Network, "a server keeps listening");
+    assert_eq!(phone.get("/pair").await.status, 200);
+}
+
+/// Caddy in front of the engine on the same machine, at the public address.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_pairs_through_a_proxy_at_the_public_address_with_a_secure_cookie_and_is_never_this_mac() {
+    let public_address = PublicAddress::parse("https://tv.example.com");
+    let exposure = Exposure { server: false, public_address };
+    let h = Harness::with_outside(fake::Search::new(fake::isos()), Outside { exposure, ..Outside::default() });
+    let port = h.running.ctx.http_port;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    assert_eq!(
+        (offer.address.as_str(), offer.url.as_str()),
+        ("https://tv.example.com", format!("https://tv.example.com/pair#{}", offer.code).as_str())
+    );
+    listening(&h, lan(), true).await;
+    let mut phone = Browser { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), port, host: "tv.example.com".into(), cookie: None };
+    let forwarded = "X-Forwarded-For: 198.51.100.4";
+    let not_paired = |answer: Answer| answer.error().1;
+    assert_eq!(not_paired(phone.send("GET", "/api/devices", &[forwarded], "").await), "not_paired");
+    assert_eq!(not_paired(phone.get("/api/jobs").await), "not_paired", "the public address alone");
+    let rewritten = Browser { host: format!("127.0.0.1:{port}"), ..Browser::on(Ipv4Addr::LOCALHOST, &h) };
+    assert_eq!(
+        not_paired(rewritten.send("GET", "/api/jobs", &[forwarded], "").await),
+        "not_paired",
+        "a proxy that rewrites Host"
+    );
+
+    let body = format!(r#"{{"code":"{}"}}"#, offer.code);
+    let agent = format!("User-Agent: {IPHONE}");
+    let paired = phone.send("POST", "/api/pair", &[forwarded, "Origin: https://tv.example.com", &agent], &body).await;
+    assert_eq!(paired.status, 200);
+    let cookie = paired.header("set-cookie").unwrap();
+    assert!(cookie.ends_with("; HttpOnly; SameSite=Strict; Secure"), "{cookie}");
+    phone.cookie = Some(cookie.split(';').next().unwrap().to_string());
+    assert_eq!(phone.send("GET", "/api/jobs", &[forwarded], "").await.status, 200);
+    assert_eq!(phone.send("GET", "/api/devices", &[forwarded], "").await.error().1, "local_only");
+    let other_site =
+        phone.send("POST", "/api/pause", &[forwarded, "Origin: https://example.org"], r#"{"refs":["x"]}"#).await;
+    assert_eq!(other_site.status, 403);
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let token = format!("Authorization: Bearer {}", h.token());
+    let through = phone.send("POST", &path, &[forwarded, &token], r#"{"op":"hello"}"#).await;
+    assert_eq!(through.status, 401, "this user's token counts only from this Mac");
+
+    assert_eq!(mac_again(port).get("/api/devices").await.status, 200, "the web app on this Mac");
+}
+
+/// Waits out the last seconds of a minute, so tries counted by the minute all fall in one.
+async fn early_in_a_minute() {
+    let second = torrential_core::time::now().rem_euclid(60);
+    if second > 50 {
+        tokio::time::sleep(Duration::from_secs((61 - second) as u64)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_address_that_offers_tokens_that_open_nothing_gets_no_more_checked_this_minute() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut phone = Browser::on(ip, &h);
+    phone.pair(&offer.code).await;
+    let seen_from = || async { devices(&h, Request::Devices).await.devices[0].seen_from.clone() };
+    assert_eq!(seen_from().await, Some(ip.to_string()));
+    early_in_a_minute().await;
+
+    for n in 0..31 {
+        let guess = Browser { cookie: Some(format!("torrential_device={:064x}", n + 1)), ..Browser::on(ip, &h) };
+        assert_eq!(guess.get("/api/jobs").await.error().1, "not_paired", "guess {n}");
+    }
+    let refused = Browser { cookie: Some(format!("torrential_device={:064x}", 99)), ..Browser::on(ip, &h) };
+    let refused = refused.get("/api/jobs").await;
+    assert_eq!((refused.status, refused.header("retry-after")), (429, Some("60")));
+    assert_eq!(phone.get("/api/jobs").await.status, 429, "a device at that address waits the minute out too");
+    assert_eq!(Browser::on(ip, &h).get("/pair").await.status, 200, "the pairing page needs no token");
+    let elsewhere = Browser { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), host: format!("127.0.0.1:{port}"), ..phone };
+    let forwarded = elsewhere.send("GET", "/api/jobs", &["X-Forwarded-For: 198.51.100.9"], "").await;
+    assert_eq!(forwarded.status, 200, "the same device from another address");
+    assert_eq!(seen_from().await, Some("198.51.100.9".to_string()));
+
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let hello = r#"{"op":"hello"}"#;
+    for n in 0..31 {
+        let wrong = format!("Authorization: Bearer {:064x}", n + 1);
+        assert_eq!(mac_again(port).send("POST", &path, &[&wrong], hello).await.status, 401, "guess {n}");
+    }
+    let token = format!("Authorization: Bearer {}", h.token());
+    assert_eq!(mac_again(port).send("POST", &path, &[&token], hello).await.status, 429, "even the right token");
+    assert_eq!(mac_again(port).get("/api/me").await.status, 200, "the web app on this Mac sends no token");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_answer_says_nosniff_and_the_app_page_runs_only_its_own_scripts() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let page = mac_again(port).get("/").await;
+    assert_eq!(page.status, 200);
+    assert_eq!(
+        page.header("content-security-policy"),
+        Some(
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; \
+             connect-src 'self'; font-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; \
+             form-action 'self'; frame-ancestors 'none'"
+        )
+    );
+    devices(&h, Request::AddDevice).await;
+    listening(&h, ip, true).await;
+    let answers = [
+        ("the app", mac_again(port).get("/").await),
+        ("JSON", mac_again(port).get("/api/me").await),
+        ("a missing asset", mac_again(port).get("/assets/missing.js").await),
+        ("a missing file", mac_again(port).get(&format!("/{}/0/x.mp4", "ab".repeat(20))).await),
+        ("another website", mac_again(port).send("GET", "/api/me", &["Sec-Fetch-Site: cross-site"], "").await),
+        ("the pairing page", Browser::on(ip, &h).get("/pair").await),
+        ("a stranger's API call", Browser::on(ip, &h).get("/api/jobs").await),
+    ];
+    for (what, answer) in answers {
+        assert_eq!(answer.header("x-content-type-options"), Some("nosniff"), "{what}: {}", answer.headers);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn only_the_token_over_loopback_reaches_the_command_lines_requests_whatever_the_address() {
     let ip = lan();
     let h = Harness::new();
@@ -297,6 +453,112 @@ async fn only_the_token_over_loopback_reaches_the_command_lines_requests_whateve
     let mine = mac_again(port).send("POST", &path, &[&bearer(&token)], hello).await;
     assert_eq!(mine.status, 200);
     assert!(mine.text().contains(r#""type":"hello","engine_version":"0.1.0""#), "{}", mine.text());
+}
+
+/// What the engine at `ip` answers torrential on another machine that sends `token`: the reply, or
+/// the status of an answer without one.
+async fn from_another_machine(ip: Ipv4Addr, port: u16, token: &str, request: Request) -> Result<Response, u16> {
+    let (address, token) = (crate::wire::Address { tls: false, host: ip.to_string(), port }, token.to_string());
+    tokio::task::spawn_blocking(move || {
+        let client = crate::wire::Client { version: "0.1.0", wire: WIRE_VERSION };
+        match crate::wire::post(&address, &token, client, &request, Duration::from_secs(10)).unwrap() {
+            crate::wire::Answer::Frames(mut frames) => Ok(read_frame(&mut frames).unwrap().unwrap()),
+            crate::wire::Answer::Status(status) => Err(status),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_machine_reaches_what_a_device_may_ask_and_a_stranger_reaches_nothing() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut laptop = Browser::on(ip, &h);
+    laptop.pair(&offer.code).await;
+    let token = laptop.cookie.unwrap().strip_prefix("torrential_device=").unwrap().to_string();
+    let ask = |request| from_another_machine(ip, port, &token, request);
+
+    assert!(matches!(ask(Request::Hello).await, Ok(Response::Hello { wire: WIRE_VERSION, .. })));
+    assert!(matches!(ask(Request::Status { refs: vec![] }).await, Ok(Response::Jobs { .. })));
+    let refused = [
+        Request::AddDevice,
+        Request::Devices,
+        Request::Shutdown { asked: true },
+        Request::Get(torrential_core::protocol::GetRequest {
+            target: torrential_core::Target::Prefix("9b5212".into()),
+            dir: Some("/tmp".into()),
+            files: vec![],
+            max_size: None,
+            dry_run: false,
+        }),
+        Request::Files { target: torrential_core::Target::TorrentFile("/etc/passwd".into()), timeout_ms: 1000 },
+    ];
+    for request in refused {
+        let answer = ask(request.clone()).await;
+        let Ok(Response::Error { error }) = answer else { panic!("{request:?} answered {answer:?}") };
+        assert_eq!(error.code, ErrorCode::LocalOnly, "{request:?}");
+    }
+    assert!(matches!(ask(Request::Hello).await, Ok(Response::Hello { .. })), "the engine still runs");
+    assert_eq!(devices(&h, Request::Devices).await.devices.len(), 1, "no device was added");
+
+    let local = h.token();
+    for (who, token) in [("a wrong token", "0".repeat(64)), ("this Mac's token from another machine", local)] {
+        assert_eq!(from_another_machine(ip, port, &token, Request::Hello).await.err(), Some(401), "{who}");
+    }
+    let id = devices(&h, Request::Devices).await.devices[0].id.clone();
+    // An open code keeps the engine on the network once the laptop is gone.
+    devices(&h, Request::AddDevice).await;
+    devices(&h, Request::RemoveDevice { id }).await;
+    assert_eq!(ask(Request::Hello).await.err(), Some(401), "a removed machine");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_this_machine_and_its_paired_machines_reach_the_indexers() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let config = Harness::paths(&h.dir).config.join("config.yaml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let text =
+        "# mine\nsources:\n  torznab:\n    - name: filelist\n      url: http://127.0.0.1:9/api\n      api_key: k3y\n";
+    std::fs::write(&config, text).unwrap();
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut laptop = Browser::on(ip, &h);
+    laptop.pair(&offer.code).await;
+    let token = laptop.cookie.unwrap().strip_prefix("torrential_device=").unwrap().to_string();
+    let ask = |request| from_another_machine(ip, port, &token, request);
+
+    let Ok(Response::Indexers { list }) = ask(Request::Indexers).await else { panic!("a paired machine lists them") };
+    let reply = serde_json::to_string(&list).unwrap();
+    assert!(reply.contains(r#""name":"filelist""#) && !reply.contains("k3y"), "{reply}");
+
+    let remove = Request::RemoveIndexer { name: "filelist".into() };
+    let body = serde_json::to_string(&remove).unwrap();
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let stranger = Browser::on(ip, &h).send("POST", &path, &[], &body).await;
+    assert_eq!(stranger.status, 401, "a machine with no token");
+    for (who, token) in
+        [("a token no device holds", "0".repeat(64)), ("this machine's token from another machine", h.token())]
+    {
+        assert_eq!(from_another_machine(ip, port, &token, remove.clone()).await.err(), Some(401), "{who}");
+    }
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text, "no refused request changed config.yaml");
+
+    let Ok(Response::Indexers { list }) = ask(remove.clone()).await else { panic!("a paired machine removes one") };
+    assert_eq!(list.indexers, vec![]);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
+
+    let id = devices(&h, Request::Devices).await.devices[0].id.clone();
+    // An open code keeps the engine on the network once the laptop is gone.
+    devices(&h, Request::AddDevice).await;
+    devices(&h, Request::RemoveDevice { id }).await;
+    let add = Request::AddIndexer { url: "http://127.0.0.1:9/api".into(), name: None, key: None };
+    assert_eq!(ask(add).await.err(), Some(401), "a removed machine");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -494,7 +756,8 @@ async fn a_request_whose_body_arrives_after_its_device_is_removed_is_refused_and
     let _ = tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut answer)).await;
     let answer = String::from_utf8_lossy(&answer);
     assert!(
-        answer.starts_with("HTTP/1.1 401 Unauthorized\r\n") && answer.contains("this device was removed on the Mac"),
+        answer.starts_with("HTTP/1.1 401 Unauthorized\r\n")
+            && answer.contains("this device was removed from torrential"),
         "the phone's request is answered as a removed device's: {answer:?}"
     );
     let left: Vec<_> = h.status().await.into_iter().map(|job| job.id).collect();
@@ -516,7 +779,7 @@ async fn the_engine_keeps_trying_the_home_network_while_another_program_holds_it
     let squatter = squatter(ip, port);
     devices(&h, Request::AddDevice).await;
     let why = format!(
-        "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
+        "no phone or TV can reach this computer yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
     );
     unreachable(&h, Some(&why)).await;
     let me = mac_again(port).get("/api/me").await;
@@ -555,11 +818,7 @@ async fn this_mac_alone_adds_and_removes_devices_and_loopback_keeps_its_checks()
     assert!(rows.len() >= 21 && rows.iter().all(|row| row.as_str().unwrap().len() == rows.len()));
     assert_eq!(
         opened["offer"]["url"],
-        format!(
-            "http://{}/pair#{}",
-            opened["offer"]["address"].as_str().unwrap(),
-            opened["offer"]["code"].as_str().unwrap()
-        )
+        format!("{}/pair#{}", opened["offer"]["address"].as_str().unwrap(), opened["offer"]["code"].as_str().unwrap())
     );
     let missing = mac.send("POST", "/api/devices/remove", &[], r#"{"id":"0badf00d"}"#).await;
     assert_eq!(missing.error(), (404, "not_found".into(), "no device has the ID 0badf00d".into()));

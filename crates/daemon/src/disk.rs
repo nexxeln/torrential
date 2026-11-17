@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use crate::folder::Identity;
+use crate::folder::{Folder, Identity};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIN_RESERVE: u64 = 2 * GIB;
@@ -25,10 +25,16 @@ pub trait Disk: Send + Sync {
     /// The identities of the folder `path` names, or of the nearest one above it that exists, and
     /// of every folder above that.
     fn lineage(&self, path: &Path) -> std::io::Result<Vec<Identity>>;
+    /// Which file or folder `path` names, following a link.
+    fn identity(&self, path: &Path) -> std::io::Result<Identity>;
     fn exists(&self, path: &Path) -> bool;
+    /// Whether anything is at `path`, without following a link, or why the disk cannot say.
+    fn found(&self, path: &Path) -> std::io::Result<bool>;
     fn is_link(&self, path: &Path) -> bool;
     /// Space already allocated to a regular file, without following a symbolic link.
     fn allocated_file_bytes(&self, path: &Path) -> Option<u64>;
+    /// Holds the folder `path` names open, following a link to it.
+    fn open_folder(&self, path: &Path) -> std::io::Result<Folder>;
 }
 
 /// What torrential leaves free on a disk of `total` bytes.
@@ -50,8 +56,20 @@ impl Disk for RealDisk {
         crate::folder::lineage(path)
     }
 
+    fn identity(&self, path: &Path) -> std::io::Result<Identity> {
+        crate::folder::identity(path)
+    }
+
     fn exists(&self, path: &Path) -> bool {
         path.symlink_metadata().is_ok()
+    }
+
+    fn found(&self, path: &Path) -> std::io::Result<bool> {
+        match path.symlink_metadata() {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     fn is_link(&self, path: &Path) -> bool {
@@ -61,6 +79,10 @@ impl Disk for RealDisk {
     fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
         let meta = path.symlink_metadata().ok()?;
         meta.is_file().then(|| allocated(path, &meta).min(meta.len()))
+    }
+
+    fn open_folder(&self, path: &Path) -> std::io::Result<Folder> {
+        Folder::open(path)
     }
 }
 
@@ -116,8 +138,16 @@ impl Disk for RoomyDisk {
         RealDisk.lineage(path)
     }
 
+    fn identity(&self, path: &Path) -> std::io::Result<Identity> {
+        RealDisk.identity(path)
+    }
+
     fn exists(&self, path: &Path) -> bool {
         RealDisk.exists(path)
+    }
+
+    fn found(&self, path: &Path) -> std::io::Result<bool> {
+        RealDisk.found(path)
     }
 
     fn is_link(&self, path: &Path) -> bool {
@@ -126,6 +156,10 @@ impl Disk for RoomyDisk {
 
     fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
         RealDisk.allocated_file_bytes(path)
+    }
+
+    fn open_folder(&self, path: &Path) -> std::io::Result<Folder> {
+        RealDisk.open_folder(path)
     }
 }
 
@@ -141,8 +175,9 @@ struct FakeFiles {
     paths: BTreeSet<PathBuf>,
     links: BTreeSet<PathBuf>,
     allocated: std::collections::BTreeMap<PathBuf, u64>,
-    /// Folders whose lineage waits on a FIFO until a test lets it go, as macOS has a new program
-    /// wait to open ~/Downloads until the person answers its prompt.
+    /// Folders where every look waits on a FIFO until a test lets it go, as macOS has a new program
+    /// wait to open ~/Downloads until the person answers its prompt, and as a network share that
+    /// dropped leaves every call waiting.
     stalled: std::collections::BTreeMap<PathBuf, PathBuf>,
 }
 
@@ -159,8 +194,8 @@ impl FakeDisk {
         })))
     }
 
-    /// Makes the lineage of `folder` wait to open the FIFO it makes at `fifo` until the stall is
-    /// let go.
+    /// Makes every look at `folder`, or at anything in it, wait to open the FIFO it makes at `fifo`
+    /// until the stall is let go.
     #[cfg(unix)]
     pub fn stall(&self, folder: impl Into<PathBuf>, fifo: PathBuf) -> Stall {
         use std::os::unix::ffi::OsStrExt;
@@ -200,39 +235,61 @@ impl FakeDisk {
     pub fn frees(&self, path: impl Into<PathBuf>, bytes: u64) {
         self.0.lock().unwrap().freeing.push((path.into(), bytes));
     }
+
+    /// Waits while `path` is in a stalled folder.
+    fn answer(&self, path: &Path) -> std::io::Result<()> {
+        let files = self.0.lock().unwrap();
+        let stalled = files.stalled.iter().find(|(folder, _)| path.starts_with(folder)).map(|(_, fifo)| fifo.clone());
+        drop(files);
+        // Opening a FIFO to read waits until something opens it to write.
+        stalled.map_or(Ok(()), |fifo| std::fs::File::open(fifo).map(drop))
+    }
 }
 
 #[cfg(test)]
 impl Disk for FakeDisk {
-    fn space(&self, _: &Path) -> std::io::Result<Space> {
+    fn space(&self, path: &Path) -> std::io::Result<Space> {
+        self.answer(path)?;
         let files = self.0.lock().unwrap();
         let freed: u64 = files.freeing.iter().filter(|(path, _)| !path.exists()).map(|(_, bytes)| bytes).sum();
         Ok(Space { free: files.space.free + freed, ..files.space })
     }
 
     fn lineage(&self, path: &Path) -> std::io::Result<Vec<Identity>> {
-        let stalled = self.0.lock().unwrap().stalled.get(path).cloned();
-        if let Some(fifo) = stalled {
-            // Opening a FIFO to read waits until something opens it to write.
-            drop(std::fs::File::open(fifo)?);
-        }
+        self.answer(path)?;
         RealDisk.lineage(path)
     }
 
+    fn identity(&self, path: &Path) -> std::io::Result<Identity> {
+        self.answer(path)?;
+        RealDisk.identity(path)
+    }
+
     fn exists(&self, path: &Path) -> bool {
-        self.0.lock().unwrap().paths.contains(path)
+        self.answer(path).is_ok() && self.0.lock().unwrap().paths.contains(path)
+    }
+
+    fn found(&self, path: &Path) -> std::io::Result<bool> {
+        self.answer(path)?;
+        RealDisk.found(path)
     }
 
     fn is_link(&self, path: &Path) -> bool {
-        self.0.lock().unwrap().links.contains(path)
+        self.answer(path).is_ok() && self.0.lock().unwrap().links.contains(path)
     }
 
     fn allocated_file_bytes(&self, path: &Path) -> Option<u64> {
+        self.answer(path).ok()?;
         self.0.lock().unwrap().allocated.get(path).copied()
+    }
+
+    fn open_folder(&self, path: &Path) -> std::io::Result<Folder> {
+        self.answer(path)?;
+        RealDisk.open_folder(path)
     }
 }
 
-/// A folder whose lineage waits, until this is let go or dropped.
+/// A folder where every look waits, until this is let go or dropped.
 #[cfg(all(test, unix))]
 pub struct Stall {
     disk: FakeDisk,

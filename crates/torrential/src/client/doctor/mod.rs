@@ -61,12 +61,20 @@ pub fn run(env: &Env, mode: Mode, network: bool) -> u8 {
         Ok(()) => checks.push(check(Checked::State, CheckStatus::Ok, paths.state.display().to_string())),
         Err(error) => checks.push(check(Checked::State, CheckStatus::Fail, error.message)),
     }
-    match connect::running(&paths, env) {
-        Ok(Some(conn)) => checks.push(check(
-            Checked::Engine,
-            CheckStatus::Ok,
-            format!("running {} (pid {})", conn.engine_version, conn.pid),
-        )),
+    let chosen = super::remote::Remotes::using(&paths);
+    let found = match &chosen {
+        Ok(Some(chosen)) => connect::remote(chosen, env).map(Some),
+        Ok(None) => connect::running(&paths, env),
+        Err(error) => Err(error.clone()),
+    };
+    match found {
+        Ok(Some(conn)) => {
+            let detail = match conn.engine {
+                connect::Engine::Local { .. } => format!("running {} (pid {})", conn.engine_version, conn.pid),
+                connect::Engine::Remote(address) => format!("running {} at {address}", conn.engine_version),
+            };
+            checks.push(check(Checked::Engine, CheckStatus::Ok, detail));
+        }
         Ok(None) => {
             checks.push(check(Checked::Engine, CheckStatus::Ok, "not running; the next command starts it".into()))
         }

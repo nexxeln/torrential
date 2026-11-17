@@ -8,11 +8,12 @@ mod bridge;
 mod config;
 mod create;
 mod error;
+mod port;
 mod session;
 mod torrent;
 
 pub use alert::Alert;
-pub use config::{ClientIdentity, Config, ConnectionLimits, Dht, DhtState, UploadPolicy};
+pub use config::{ClientIdentity, Config, ConnectionLimits, Dht, DhtState, InterfaceName, Listen, UploadPolicy};
 pub use create::{PieceSize, TorrentFormat, create_torrent};
 pub use error::{EngineError, ErrorKind, NativeError};
 pub use session::Session;

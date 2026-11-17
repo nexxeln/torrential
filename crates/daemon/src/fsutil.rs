@@ -73,6 +73,29 @@ pub fn temporary(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.partial", std::process::id()))
 }
 
+/// Writes `bytes` to `path` whole, so that only this user can read it: mode 0600 on Unix, and an
+/// owner-only access list on Windows.
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let partial = temporary(path);
+    let written = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&partial)?;
+        #[cfg(unix)]
+        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        #[cfg(windows)]
+        owner_only(&partial)?;
+        file.write_all(bytes)?;
+        std::fs::rename(&partial, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
+}
+
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }

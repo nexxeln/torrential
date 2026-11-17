@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { type ApiError, asApiError, change, type Job } from "../api";
+import { type ApiError, asApiError, change, files, type Job, type TorrentFile } from "../api";
 import { bytes, count, percent, rate, sentence, span } from "../lib/format";
-import { STATE_WORDS, useJobs } from "../lib/jobs";
-import { readable } from "../lib/release";
+import { STATE_WORDS, useJobs, waiting } from "../lib/jobs";
+import { fileName, fileUrl, readable, savedVideo } from "../lib/release";
 import { Link, watchPath } from "../router";
 import { Button, buttonClass } from "../ui/Button";
 import { Header } from "../ui/Header";
@@ -14,9 +14,9 @@ function facts(job: Job): string {
   const { progress } = job;
   const size = progress.size;
   const have = size === null ? null : job.state === "done" ? bytes(size) : `${bytes(progress.verified)} of ${bytes(size)}`;
-  const moving = job.state === "downloading";
+  const moving = job.state === "downloading" && !job.waiting_for;
   return [
-    STATE_WORDS[job.state],
+    waiting(job) ?? STATE_WORDS[job.state],
     have,
     moving ? rate(progress.down_rate) : null,
     moving ? count(progress.peers, "peer") : null,
@@ -27,6 +27,26 @@ function facts(job: Job): string {
 }
 
 type Action = "pause" | "resume" | "remove";
+
+/** A plain download of a finished film under its own name, which the browser can resume when the connection drops. */
+function Save({ id }: { id: string }) {
+  const [file, setFile] = useState<TorrentFile | null>(null);
+  useEffect(() => {
+    const abort = new AbortController();
+    files(id, abort.signal).then(
+      (reply) => setFile(savedVideo(reply.files)),
+      () => {},
+    );
+    return () => abort.abort();
+  }, [id]);
+  if (!file) return null;
+  const name = fileName(file.path);
+  return (
+    <a href={fileUrl(id, file)} download={name} title={`Downloads ${name} to this device.`} className={buttonClass({ variant: "quiet" })}>
+      Save to this device
+    </a>
+  );
+}
 
 function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiError) => void; onTrashed: (said: string) => void }) {
   const [busy, setBusy] = useState<Action | null>(null);
@@ -46,7 +66,7 @@ function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiErro
   };
 
   return (
-    <li className="grid grid-cols-1 items-center gap-x-6 gap-y-2 py-4 sm:grid-cols-[minmax(0,1fr)_--spacing(60)]">
+    <li className="grid grid-cols-1 items-center gap-x-6 gap-y-2 py-4 sm:grid-cols-[minmax(0,1fr)_--spacing(78)]">
       <div className="flex min-w-0 flex-col gap-2">
         <div className="truncate text-base font-medium text-ink sm:text-sm" title={job.name ?? undefined}>
           {name.title} <span className="font-normal text-pencil">{name.tags}</span>
@@ -84,6 +104,7 @@ function Row({ job, onFailed, onTrashed }: { job: Job; onFailed: (error: ApiErro
             <Link href={watchPath(job.id)} className={buttonClass({})}>
               Watch
             </Link>
+            {job.state === "done" && <Save id={job.id} />}
             {job.state !== "done" &&
               (stopped ? (
                 <Button variant="quiet" disabled={busy !== null} onClick={() => act("resume")}>

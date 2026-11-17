@@ -1,4 +1,4 @@
-import type { Release } from "../api";
+import type { Release, TorrentFile } from "../api";
 
 const VIDEO_FILE = /\.(mkv|mp4|m4v|mov|webm|avi|ts|m2ts|wmv|mpg|mpeg|ogv)$/i;
 /** Where a release name stops being the title: a year, an episode, or a resolution. */
@@ -40,4 +40,15 @@ export function isVideoFile(path: string): boolean {
 
 export function fileName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/** The film a finished download holds, which Save to this device copies: the largest video file it kept. */
+export function savedVideo(files: TorrentFile[]): TorrentFile | null {
+  const videos = files.filter((file) => file.selected && isVideoFile(file.path));
+  return videos.reduce<TorrentFile | null>((largest, file) => (largest && largest.size >= file.size ? largest : file), null);
+}
+
+/** Where the engine serves a download's file, whole or in ranges, under the file's own name. */
+export function fileUrl(id: string, file: TorrentFile): string {
+  return `/${id}/${file.index}/${encodeURIComponent(fileName(file.path))}`;
 }

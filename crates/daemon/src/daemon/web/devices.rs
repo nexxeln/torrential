@@ -2,7 +2,6 @@
 //! devices with.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,18 +10,19 @@ use torrential_core::{Device, DeviceList, Error, ErrorCode, PairingOffer};
 
 use super::super::ctx::Ctx;
 use super::super::devices::{Asker, COOKIE};
-use super::super::http::{Connection, Method, Peer, Request};
+use super::super::http::{Connection, Method, Request};
 use super::{ErrorBody, body, value};
 use crate::qr::qr;
 
 /// The page that pairs a phone or TV.
 pub const PAIR: &str = "/pair";
 const PAGE: &str = include_str!("pair.html");
-const LEAD: &str = "Enter the code that Add a device shows in torrential on the Mac.";
-const REMOVED_LEAD: &str = "This device was removed, so enter a new code from Add a device in torrential on the Mac.";
+const LEAD: &str = "Enter the code that Add a device shows on the computer running torrential.";
+const REMOVED_LEAD: &str =
+    "This device was removed, so enter a new code from Add a device on the computer running torrential.";
 const NOT_PAIRED: &str =
-    "this device is not paired with the Mac, so open /pair and enter the code that Add a device shows";
-const REMOVED: &str = "this device was removed on the Mac, so open /pair and enter a new code from Add a device";
+    "this device is not paired with torrential, so open /pair and enter the code that Add a device shows";
+const REMOVED: &str = "this device was removed from torrential, so open /pair and enter a new code from Add a device";
 /// Browsers keep a cookie at most 400 days.
 const COOKIE_SECS: u32 = 400 * 86_400;
 const PAGE_HEADERS: &str = "Cache-Control: no-store\r\n\
@@ -30,9 +30,11 @@ const PAGE_HEADERS: &str = "Cache-Control: no-store\r\n\
     connect-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'\r\n\
     Referrer-Policy: no-referrer\r\n";
 
-/// The header that gives a device its token, which only requests to this Mac carry.
-pub fn set_cookie(token: &str) -> String {
-    format!("Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={COOKIE_SECS}; HttpOnly; SameSite=Strict\r\n")
+/// The header that gives a device its token, which only requests to this Mac carry, and only over
+/// HTTPS when `secure` says the device reached it at the HTTPS public address.
+pub fn set_cookie(token: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={COOKIE_SECS}; HttpOnly; SameSite=Strict{secure}\r\n")
 }
 
 /// What a browser that is not paired may reach: the pairing page, and the request that pairs it.
@@ -65,14 +67,11 @@ async fn pair(conn: &mut Connection<'_>, request: &Request) -> io::Result<bool> 
         Ok(Pair { code }) => code,
         Err(error) => return conn.json("400 Bad Request", &ErrorBody { error: &error }, request).await,
     };
-    let from = match conn.peer {
-        Peer::Network { remote, .. } => remote,
-        Peer::Loopback => IpAddr::V4(Ipv4Addr::LOCALHOST),
-    };
-    match conn.ctx.devices.pair(&code, request.agent.as_deref(), from, now()) {
+    match conn.ctx.devices.pair(&code, request.agent.as_deref(), conn.peer.ip(), now()) {
         Ok((device, token)) => {
             let body = serde_json::to_vec(&Paired { device }).map_err(io::Error::other)?;
-            let headers = format!("Cache-Control: no-store\r\n{}", set_cookie(&token));
+            let secure = conn.ctx.devices.addressing().exposure.secure(request.host());
+            let headers = format!("Cache-Control: no-store\r\n{}", set_cookie(&token, secure));
             conn.send("200 OK", "application/json", &headers, &body, request).await
         }
         Err(refused) => {
@@ -130,8 +129,8 @@ pub fn remove(ctx: &Ctx, asker: &Asker, Remove { id }: Remove) -> Result<Value, 
 fn local_only(asker: &Asker) -> Result<(), Error> {
     match asker {
         Asker::Local => Ok(()),
-        _ => Err(Error::new(ErrorCode::LocalOnly, "only the Mac running torrential can add or remove devices")
-            .with_hint("open torrential on the Mac to do it")),
+        _ => Err(Error::new(ErrorCode::LocalOnly, "only the computer running torrential can add or remove devices")
+            .with_hint("open torrential on that computer to do it")),
     }
 }
 

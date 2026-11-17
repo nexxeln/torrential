@@ -62,13 +62,21 @@ pub enum Command {
     /// Open the web app, to search and watch in your browser
     #[command(after_help = "Examples:\n  torrential web\n  torrential web --no-open")]
     Web(WebArgs),
-    /// List, add, or remove the phones and TVs that watch from this Mac
+    /// List, add, or remove the phones and TVs that watch from this computer
     #[command(
         after_help = "Examples:\n  torrential devices\n  torrential devices add\n  torrential devices remove 3f9a0c2e --json"
     )]
     Devices {
         #[command(subcommand)]
         command: Option<DevicesCommand>,
+    },
+    /// List, add, or remove the Torznab indexers the engine searches, such as Jackett's or Prowlarr's
+    #[command(
+        after_help = "Examples:\n  torrential indexers\n  torrential indexers add http://127.0.0.1:9696 --key <prowlarr api key>\n  torrential indexers add http://127.0.0.1:9117 --key <jackett api key>\n  torrential indexers add http://127.0.0.1:3333/torznab --name bitmagnet\n  torrential indexers remove thepiratebay --json"
+    )]
+    Indexers {
+        #[command(subcommand)]
+        command: Option<IndexersCommand>,
     },
     /// List the TVs on the home network, play on one, and control what plays
     #[command(
@@ -78,6 +86,16 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<TvCommand>,
     },
+    /// Drive the engine on another machine, such as a server or a NAS, or this machine's again
+    #[command(
+        after_help = "Examples:\n  torrential connect http://nas.local:47919/pair#123456\n  torrential connect my-server --code 123456\n  torrential connect --local"
+    )]
+    Connect(ConnectArgs),
+    /// Copy a finished download from the engine on another machine to this one
+    #[command(
+        after_help = "Examples:\n  torrential pull 9b5212\n  torrential pull 4c1e9a --files '*.mp4' --dir ~/Movies"
+    )]
+    Pull(PullArgs),
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -109,6 +127,12 @@ pub enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Run the engine as a server on Linux: it starts at boot without a login, and paired devices reach it from anywhere
+    #[command(after_help = "Examples:\n  torrential server install\n  torrential server uninstall --json")]
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
     /// Print every command, flag, exit code, and error code as JSON
     Schema,
     /// Print shell completion setup
@@ -131,6 +155,32 @@ pub struct WebArgs {
     /// Print the address without opening a browser
     #[arg(long)]
     pub no_open: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ConnectArgs {
+    /// The engine's address: the link torrential devices add shows there, a URL, a host:port, or a machine's name, such as its Tailscale name
+    #[arg(value_name = "ADDRESS", required_unless_present = "local", conflicts_with = "local")]
+    pub address: Option<String>,
+    /// The code torrential devices add shows on the engine's machine
+    #[arg(long, value_name = "CODE", conflicts_with = "local")]
+    pub code: Option<String>,
+    /// Drive this machine's engine again
+    #[arg(long)]
+    pub local: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PullArgs {
+    /// A download ID from torrential status
+    #[arg(value_name = "ID", add = ArgValueCandidates::new(complete_download_ids))]
+    pub reference: String,
+    /// Copy only files matching this glob or exact path. Repeat to add more
+    #[arg(long, value_name = "GLOB")]
+    pub files: Vec<String>,
+    /// The folder to copy into. Defaults to the download folder on this machine
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -336,13 +386,37 @@ pub struct VerifyArgs {
 pub enum DevicesCommand {
     /// List the paired devices and the open code, the default
     List,
-    /// Show a code and a QR code that let one more phone or TV in for 5 minutes
+    /// Show a code and a QR code that let one more phone or TV in for 10 minutes
     Add,
     /// Lock a device out at once
     Remove {
         /// A device ID from torrential devices
         #[arg(value_name = "ID")]
         id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IndexersCommand {
+    /// List the indexers, whether each answers now, and their categories, the default
+    List,
+    /// Check a Torznab feed, or Prowlarr's or Jackett's own address, and add each indexer it has
+    Add {
+        /// A Torznab feed URL, or the address of Prowlarr or Jackett
+        #[arg(value_name = "URL")]
+        url: String,
+        /// The name to search it by with --source, for one feed
+        #[arg(long)]
+        name: Option<String>,
+        /// The API key, from the settings page of Jackett or Prowlarr
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
+    },
+    /// Stop searching an indexer, and take it out of config.yaml
+    Remove {
+        /// A name from torrential indexers
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 }
 
@@ -406,6 +480,14 @@ pub struct TvPlayArgs {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ServerCommand {
+    /// Start the engine at boot, keep it on the network, and show a code that pairs the first device
+    Install,
+    /// Go back to an engine that starts at login and listens on the network only while a device is paired
+    Uninstall,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum DaemonCommand {
     /// Show whether the engine is running
     Status,
@@ -425,6 +507,10 @@ pub enum DaemonCommand {
         /// The port for the web app and players when the one used last is not free, 0 for any
         #[arg(long, value_name = "PORT")]
         http_port: Option<u16>,
+        /// Run as a server, as `server: true` in config.yaml does: on the network from the start,
+        /// with nothing paired. The container image runs the engine this way
+        #[arg(long)]
+        server: bool,
     },
     /// The short-lived middle process of the detached start
     #[command(hide = true)]

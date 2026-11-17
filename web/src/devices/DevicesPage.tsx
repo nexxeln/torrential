@@ -50,6 +50,11 @@ function Offer({ offer, now }: { offer: PairingOffer; now: number }) {
             If the TV cannot open that address, use <span className="text-soft">{offer.lan_address}</span>.
           </p>
         )}
+        {offer.tailnet_address && offer.tailnet_address !== offer.address && (
+          <p className="text-pencil">
+            Away from home, a device on your tailnet opens <span className="text-soft">{offer.tailnet_address}</span>.
+          </p>
+        )}
         <p className="text-pencil tabular-nums">The code works for {remaining(offer.expires_at - now)} more and lets one device in.</p>
       </div>
     </section>
@@ -63,6 +68,7 @@ function Row({ device, now, busy, onRemove }: { device: Device; now: number; bus
         <p className="truncate text-base font-medium text-ink sm:text-sm">{device.name}</p>
         <p className="text-sm text-pencil tabular-nums">
           Added {ago(device.added_at, now)} · last seen {ago(device.seen_at, now)}
+          {device.seen_from && ` from ${device.seen_from}`}
         </p>
       </div>
       <Button variant="quiet" disabled={busy} title="Locks it out at once. Add it again with a new code." onClick={onRemove}>
@@ -124,7 +130,7 @@ export function DevicesPage() {
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-medium text-ink">Devices</h1>
           <p className="max-w-[60ch] text-base text-pretty text-pencil sm:text-sm">
-            Phones and TVs on this network watch from this Mac once you add them. They need no account and store nothing.
+            Phones and TVs on this network watch from this computer once you add them. They need no account and store nothing.
           </p>
         </div>
         {state.kind === "failed" && (
@@ -171,7 +177,7 @@ export function DevicesPage() {
                 ))}
               </ul>
             ) : (
-              <p className="pt-2 text-base text-pencil sm:text-sm">No phone or TV yet. Only this Mac can reach torrential.</p>
+              <p className="pt-2 text-base text-pencil sm:text-sm">No phone or TV yet. Only this computer can reach torrential.</p>
             )}
           </section>
         )}

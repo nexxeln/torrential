@@ -87,6 +87,8 @@ struct Outside {
     display: Option<Display>,
     /// A search in place of the harness's fake, which keeps its catalog's order.
     search: Option<Arc<dyn SearchPort>>,
+    /// `server` and `public_address` in config.yaml.
+    exposure: crate::config::Exposure,
 }
 
 impl Default for Outside {
@@ -105,6 +107,7 @@ impl Default for Outside {
             preferences: Preferences::default(),
             display: None,
             search: None,
+            exposure: crate::config::Exposure::default(),
         }
     }
 }
@@ -216,11 +219,27 @@ impl Harness {
             subtitles: Arc::new(outside.subtitles.clone()),
             catalog: outside.catalog.clone(),
             tvs: outside.tvs,
+            indexers: super::indexers::Indexers::new(Harness::paths(dir), Harness::env(dir)).unwrap(),
         };
         let db = super::db::connect(&dir.path().join("state.db")).unwrap();
         let handle = tokio::runtime::Handle::current();
-        let listen = Listen { ports: &[0], access: &dir.path().join(TOKEN_FILE) };
+        let listen = Listen {
+            ports: &[0],
+            access: &dir.path().join(TOKEN_FILE),
+            exposure: outside.exposure.clone(),
+            news: None,
+        };
         start(&handle, &db, ports, config(dir.path(), outside), outside.timing, "0.1.0".into(), listen).unwrap()
+    }
+
+    /// The environment of an engine whose home is in `dir`.
+    fn env(dir: &tempfile::TempDir) -> crate::env::Env {
+        let home = dir.path().join("home").display().to_string();
+        crate::env::Env::from_pairs([("HOME", home.as_str()), ("TORRENTIAL_HOME", home.as_str())])
+    }
+
+    fn paths(dir: &tempfile::TempDir) -> crate::paths::Paths {
+        crate::paths::Paths::resolve(&Self::env(dir), 501, None).unwrap()
     }
 
     async fn crash_and_restart(self) -> Self {
@@ -526,6 +545,95 @@ async fn the_engine_answers_while_a_download_folder_keeps_a_get_waiting() {
     }
     prompt.release();
     assert_eq!(h.get(magnet(&film), &[]).await.unwrap().outcome, GetOutcome::Started);
+}
+
+/// A network share that dropped, or a disk gone to sleep, leaves every call in its folder waiting.
+/// Each command that looks in a folder that answered before and then stopped says it is waiting
+/// for it, a download there starts once it answers, and the engine answers everyone else.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_that_stops_answering_holds_up_only_what_needs_it() {
+    let h = Harness::new();
+    h.swarm.set_rate(100 * GIB);
+    let share = h.dir.path().join("share");
+    let into = |target| GetRequest { dir: Some(share.clone()), ..request(&h, target) };
+    let (iso, film) = (torrent(30, "arch.iso", &[("arch.iso", GIB)]), torrent(31, "film", &[("film.mkv", GIB)]));
+    h.get_with(into(h.torrent_file(&iso))).await.unwrap();
+    h.until("done", |jobs| jobs[0].status.name() == "done").await;
+    h.disk.file(share.join("arch.iso"), GIB);
+    h.get_with(into(h.torrent_file(&film))).await.unwrap();
+    h.changes(Request::Pause { refs: vec![prefix(&film)] }).await.unwrap();
+    let waiting = Err((ErrorCode::StorageError, format!("torrential is waiting for access to {}", share.display())));
+    fn answer<T>(answer: Result<T, Error>) -> Result<(), (ErrorCode, String)> {
+        answer.map(drop).map_err(|e| (e.code, e.message))
+    }
+    let stalls = std::cell::Cell::new(0);
+    let stall = || {
+        stalls.set(stalls.get() + 1);
+        h.disk.stall(&share, h.dir.path().join(format!("stall-{}", stalls.get())))
+    };
+    let answers_at_once = || async {
+        let asked = Instant::now();
+        h.status().await;
+        assert!(asked.elapsed() < Duration::from_millis(500), "status took {:?}", asked.elapsed());
+    };
+
+    let stalled = stall();
+    assert_eq!(answer(h.get(Target::Prefix(prefix(&iso)), &[]).await), waiting, "get of a download there");
+    answers_at_once().await;
+    drop(stalled);
+    let stalled = stall();
+    let verify = Request::Verify { reference: prefix(&iso), repair: false };
+    assert_eq!(answer(h.changes(verify).await), waiting, "verify");
+    drop(stalled);
+    let stalled = stall();
+    let rm = Request::Remove { refs: vec![prefix(&iso)], delete: true };
+    assert_eq!(answer(h.changes(rm).await), waiting, "rm --delete");
+    drop(stalled);
+    let stalled = stall();
+    let other = torrent(32, "other", &[("other.mkv", GIB)]);
+    assert_eq!(answer(h.get_with(into(h.torrent_file(&other))).await), waiting, "get of a new download there");
+    answers_at_once().await;
+    drop(stalled);
+
+    let stalled = stall();
+    let resumed = h.changes(Request::Resume { refs: vec![prefix(&film)], all: false }).await.unwrap();
+    assert_eq!(resumed, [(prefix(&film), "resumed".into())]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.states().await, ["done", "queued"], "the download there waits to start");
+    drop(stalled);
+    h.until("it starts once the folder answers", |jobs| jobs[1].status.name() != "queued").await;
+
+    let _stalled = stall();
+    let started = h.get(h.torrent_file(&other), &[]).await.unwrap();
+    assert_eq!(started.outcome, GetOutcome::Started, "a download elsewhere counts the one there once it answers");
+    answers_at_once().await;
+}
+
+/// A file list that comes while its download's folder does not answer waits with nothing
+/// selected, and the download goes on by itself once the folder answers.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_list_that_comes_while_the_folder_does_not_answer_downloads_once_it_does() {
+    let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
+    let outside = Outside { gate: Some(gate.clone()), ..Outside::default() };
+    let h = Harness::with_outside(fake::Search::new(vec![]), outside);
+    let film = torrent(33, "film", &[("film.mkv", GIB)]);
+    h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
+    gate.close();
+    h.get(magnet(&film), &[]).await.unwrap();
+    gate.until_held(1).await;
+    let stalled = h.disk.stall(h.downloads(), h.dir.path().join("stall"));
+    gate.open();
+    let jobs = h.until("its file list is here", |jobs| jobs[0].name.is_some()).await;
+    assert_eq!(
+        (jobs[0].status.name(), jobs[0].progress.verified),
+        ("metadata", 0),
+        "nothing downloads into a folder that does not answer"
+    );
+    drop(stalled);
+    h.until("it downloads once the folder answers", |jobs| jobs[0].status.name() == "done").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1547,9 +1655,13 @@ async fn a_player_gets_a_range_once_the_engine_has_its_pieces() {
     h.swarm.set_rate(100 * GIB);
     let (status, headers, body) = fetch.await.unwrap();
     assert_eq!(status, 206);
+    let tag = format!("etag: \"{}-0\"\n", film.info_hash.id().to_hex());
     assert_eq!(
         headers,
         "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 1000000-1000099/4194304\ncontent-type: video/x-matroska\n"
+            .to_string()
+            + &tag
+            + "x-content-type-options: nosniff\n"
     );
     assert_eq!(body, bytes[1_000_000..1_000_100]);
 }
@@ -1576,7 +1688,8 @@ async fn a_player_that_asks_while_an_update_installs_hears_to_try_again() {
         refused,
         (
             503,
-            "content-length: 50\ncontent-type: text/plain; charset=utf-8\nretry-after: 5\n".into(),
+            "content-length: 50\ncontent-type: text/plain; charset=utf-8\nretry-after: 5\nx-content-type-options: nosniff\n"
+                .into(),
             b"torrential is updating, try again in a few seconds".to_vec()
         )
     );
@@ -1595,11 +1708,20 @@ async fn one_player_connection_gets_whole_files_ranges_and_refusals() {
 
     let mut player = Player::connect(&h).await;
     player.send("HEAD", &srt, &["Host: 127.0.0.1:47919"]).await;
-    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\n";
-    assert_eq!(player.answer(true).await, (200, whole.to_string(), Vec::new()));
-    let last = "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 9900-9999/10000\ncontent-type: application/x-subrip\n";
-    assert_eq!(player.get(&srt, "bytes=-100").await, (206, last.to_string(), bytes[9_900..].to_vec()));
-    let past = "accept-ranges: bytes\ncontent-length: 0\ncontent-range: bytes */10000\n";
+    // The infohash and the index name the file's bytes for good, so a browser can resume with it.
+    let tag = format!("etag: \"{}-0\"\n", notes.info_hash.id().to_hex());
+    let nosniff = "x-content-type-options: nosniff\n";
+    let whole = "accept-ranges: bytes\ncontent-length: 10000\ncontent-type: application/x-subrip\n".to_string()
+        + &tag
+        + nosniff;
+    assert_eq!(player.answer(true).await, (200, whole, Vec::new()));
+    let last = "accept-ranges: bytes\ncontent-length: 100\ncontent-range: bytes 9900-9999/10000\ncontent-type: application/x-subrip\n"
+        .to_string()
+        + &tag
+        + nosniff;
+    assert_eq!(player.get(&srt, "bytes=-100").await, (206, last, bytes[9_900..].to_vec()));
+    let past =
+        "accept-ranges: bytes\ncontent-length: 0\ncontent-range: bytes */10000\nx-content-type-options: nosniff\n";
     assert_eq!(player.get(&srt, "bytes=10000-").await, (416, past.to_string(), Vec::new()));
     let unselected = format!("/{}/1/notes.txt", notes.info_hash.id().to_hex());
     assert_eq!(player.get(&unselected, "bytes=0-").await.0, 404, "notes.txt is not selected");

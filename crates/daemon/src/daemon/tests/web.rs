@@ -551,7 +551,8 @@ async fn the_player_gets_a_files_tracks_once_and_a_stream_of_what_ffmpeg_writes(
     assert_eq!((status, body.as_slice()), (200, &b"ftypmoof"[..]));
     assert_eq!(
         headers,
-        "cache-control: no-store\nconnection: close\ncontent-type: video/mp4\ntransfer-encoding: chunked\n"
+        "cache-control: no-store\nconnection: close\ncontent-type: video/mp4\ntransfer-encoding: chunked\n\
+         x-content-type-options: nosniff\n"
     );
     assert_eq!(tools.calls()[1], "ffmpeg -version", "whether this ffmpeg paces its reading is asked once");
     assert_eq!(

@@ -271,6 +271,7 @@ lt::session_params make_params(SessionSettings const& s) {
 
   lt::settings_pack& p = params.settings;
   p.set_str(lt::settings_pack::listen_interfaces, std::string(s.listen_interfaces));
+  p.set_str(lt::settings_pack::outgoing_interfaces, std::string(s.outgoing_interfaces));
   p.set_bool(lt::settings_pack::enable_dht, s.dht);
   p.set_str(lt::settings_pack::dht_bootstrap_nodes, std::string(s.dht_bootstrap_nodes));
   p.set_bool(lt::settings_pack::enable_lsd, s.local_network);
@@ -300,6 +301,12 @@ lt::session_params make_params(SessionSettings const& s) {
   // peer. A web seed then never qualifies, and a slow peer that took blocks
   // of the piece holds them for seconds before another peer is asked.
   p.set_int(lt::settings_pack::request_queue_time, 1);
+  // On Windows libtorrent flushes the file to the disk after every write by
+  // default, so a download goes only as fast as the disk takes those flushes,
+  // and a pause or a stop waits while up to 100 MiB of queued writes go out
+  // that way. Writing through the system's cache, as on macOS and Linux,
+  // keeps both as fast as memory.
+  p.set_int(lt::settings_pack::disk_io_write_mode, lt::settings_pack::enable_os_cache);
   p.set_int(lt::settings_pack::alert_queue_size, 10000);
   p.set_int(lt::settings_pack::alert_mask, lt::alert_category::status | lt::alert_category::error |
                                                lt::alert_category::storage | lt::alert_category::dht);
@@ -448,6 +455,12 @@ void Session::set_file_priorities(rust::Slice<const std::uint8_t> id,
 void Session::force_recheck(rust::Slice<const std::uint8_t> id) { find_with_metadata(id).force_recheck(); }
 
 void Session::announce_to_dht(rust::Slice<const std::uint8_t> id) { find(id).force_dht_announce(); }
+
+void Session::reannounce(rust::Slice<const std::uint8_t> id) {
+  lt::torrent_handle const h = find(id);
+  h.force_reannounce(0, -1, lt::torrent_handle::ignore_min_interval);
+  h.force_dht_announce();
+}
 
 void Session::save_resume_data(rust::Slice<const std::uint8_t> id) {
   find(id).save_resume_data(lt::torrent_handle::flush_disk_cache | lt::torrent_handle::save_info_dict);
