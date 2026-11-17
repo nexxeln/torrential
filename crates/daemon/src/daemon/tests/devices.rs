@@ -344,6 +344,83 @@ async fn a_phone_pairs_through_a_proxy_at_the_public_address_with_a_secure_cooki
     assert_eq!(mac_again(port).get("/api/devices").await.status, 200, "the web app on this Mac");
 }
 
+/// Waits out the last seconds of a minute, so tries counted by the minute all fall in one.
+async fn early_in_a_minute() {
+    let second = torrential_core::time::now().rem_euclid(60);
+    if second > 50 {
+        tokio::time::sleep(Duration::from_secs((61 - second) as u64)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_address_that_offers_tokens_that_open_nothing_gets_no_more_checked_this_minute() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut phone = Browser::on(ip, &h);
+    phone.pair(&offer.code).await;
+    let seen_from = || async { devices(&h, Request::Devices).await.devices[0].seen_from.clone() };
+    assert_eq!(seen_from().await, Some(ip.to_string()));
+    early_in_a_minute().await;
+
+    for n in 0..31 {
+        let guess = Browser { cookie: Some(format!("torrential_device={:064x}", n + 1)), ..Browser::on(ip, &h) };
+        assert_eq!(guess.get("/api/jobs").await.error().1, "not_paired", "guess {n}");
+    }
+    let refused = Browser { cookie: Some(format!("torrential_device={:064x}", 99)), ..Browser::on(ip, &h) };
+    let refused = refused.get("/api/jobs").await;
+    assert_eq!((refused.status, refused.header("retry-after")), (429, Some("60")));
+    assert_eq!(phone.get("/api/jobs").await.status, 429, "a device at that address waits the minute out too");
+    assert_eq!(Browser::on(ip, &h).get("/pair").await.status, 200, "the pairing page needs no token");
+    let elsewhere = Browser { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), host: format!("127.0.0.1:{port}"), ..phone };
+    let forwarded = elsewhere.send("GET", "/api/jobs", &["X-Forwarded-For: 198.51.100.9"], "").await;
+    assert_eq!(forwarded.status, 200, "the same device from another address");
+    assert_eq!(seen_from().await, Some("198.51.100.9".to_string()));
+
+    let path = format!("{}?version=0.1.0&wire={WIRE_VERSION}", crate::wire::PATH);
+    let hello = r#"{"op":"hello"}"#;
+    for n in 0..31 {
+        let wrong = format!("Authorization: Bearer {:064x}", n + 1);
+        assert_eq!(mac_again(port).send("POST", &path, &[&wrong], hello).await.status, 401, "guess {n}");
+    }
+    let token = format!("Authorization: Bearer {}", h.token());
+    assert_eq!(mac_again(port).send("POST", &path, &[&token], hello).await.status, 429, "even the right token");
+    assert_eq!(mac_again(port).get("/api/me").await.status, 200, "the web app on this Mac sends no token");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_answer_says_nosniff_and_the_app_page_runs_only_its_own_scripts() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let page = mac_again(port).get("/").await;
+    assert_eq!(page.status, 200);
+    assert_eq!(
+        page.header("content-security-policy"),
+        Some(
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; \
+             connect-src 'self'; font-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; \
+             form-action 'self'; frame-ancestors 'none'"
+        )
+    );
+    devices(&h, Request::AddDevice).await;
+    listening(&h, ip, true).await;
+    let answers = [
+        ("the app", mac_again(port).get("/").await),
+        ("JSON", mac_again(port).get("/api/me").await),
+        ("a missing asset", mac_again(port).get("/assets/missing.js").await),
+        ("a missing file", mac_again(port).get(&format!("/{}/0/x.mp4", "ab".repeat(20))).await),
+        ("another website", mac_again(port).send("GET", "/api/me", &["Sec-Fetch-Site: cross-site"], "").await),
+        ("the pairing page", Browser::on(ip, &h).get("/pair").await),
+        ("a stranger's API call", Browser::on(ip, &h).get("/api/jobs").await),
+    ];
+    for (what, answer) in answers {
+        assert_eq!(answer.header("x-content-type-options"), Some("nosniff"), "{what}: {}", answer.headers);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_token_over_loopback_reaches_the_command_lines_requests_whatever_the_address() {
     let ip = lan();

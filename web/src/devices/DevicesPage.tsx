@@ -68,6 +68,7 @@ function Row({ device, now, busy, onRemove }: { device: Device; now: number; bus
         <p className="truncate text-base font-medium text-ink sm:text-sm">{device.name}</p>
         <p className="text-sm text-pencil tabular-nums">
           Added {ago(device.added_at, now)} · last seen {ago(device.seen_at, now)}
+          {device.seen_from && ` from ${device.seen_from}`}
         </p>
       </div>
       <Button variant="quiet" disabled={busy} title="Locks it out at once. Add it again with a new code." onClick={onRemove}>

@@ -46,6 +46,7 @@ fn list_doc(list: &DeviceList, now: i64) -> Doc {
                 Cell::new(&device.name),
                 Cell::new(format::age(Some(device.added_at), now)),
                 Cell::new(format::age(Some(device.seen_at), now)),
+                Cell::new(device.seen_from.as_deref().unwrap_or("-")),
             ]
         })
         .collect();
@@ -58,7 +59,7 @@ fn list_doc(list: &DeviceList, now: i64) -> Doc {
     }
     summary.extend(list.unreachable.clone());
     let next = list.devices.is_empty().then(|| "torrential devices add".to_string());
-    Doc { body: Body::Table { header: vec!["ID", "NAME", "ADDED", "SEEN"], rows }, summary, next }
+    Doc { body: Body::Table { header: vec!["ID", "NAME", "ADDED", "SEEN", "FROM"], rows }, summary, next }
 }
 
 pub(super) fn offer_doc(offer: &PairingOffer, unreachable: Option<&str>, now: i64) -> Doc {
@@ -127,23 +128,35 @@ mod tests {
     fn the_list_shows_each_device_and_the_open_code() {
         let list = DeviceList {
             devices: vec![
-                Device { id: "3f9a0c2e".into(), name: "iPhone".into(), added_at: NOW - 3 * 86_400, seen_at: NOW - 120 },
-                Device { id: "b71d04aa".into(), name: "LG TV".into(), added_at: NOW - 3_600, seen_at: NOW - 3_600 },
+                Device {
+                    id: "3f9a0c2e".into(),
+                    name: "iPhone".into(),
+                    added_at: NOW - 3 * 86_400,
+                    seen_at: NOW - 120,
+                    seen_from: Some("100.101.3.4".into()),
+                },
+                Device {
+                    id: "b71d04aa".into(),
+                    name: "LG TV".into(),
+                    added_at: NOW - 3_600,
+                    seen_at: NOW - 3_600,
+                    seen_from: None,
+                },
             ],
             offer: Some(offer()),
             unreachable: None,
         };
         assert_eq!(
             list_doc(&list, NOW).plain(),
-            "ID\tNAME\tADDED\tSEEN\n\
-             3f9a0c2e\tiPhone\t3d\t2m\n\
-             b71d04aa\tLG TV\t1h\t1h\n\
+            "ID\tNAME\tADDED\tSEEN\tFROM\n\
+             3f9a0c2e\tiPhone\t3d\t2m\t100.101.3.4\n\
+             b71d04aa\tLG TV\t1h\t1h\t-\n\
              # 2 devices\n\
              # code 482913 is open: open http://studio-mac.local:47919 on the phone or TV and enter it\n\
              # away from home, a device on your tailnet opens http://studio-mac.tail1234.ts.net:47919\n"
         );
         let empty = list_doc(&DeviceList::default(), NOW).plain();
-        assert_eq!(empty, "ID\tNAME\tADDED\tSEEN\n# 0 devices\nnext: torrential devices add\n");
+        assert_eq!(empty, "ID\tNAME\tADDED\tSEEN\tFROM\n# 0 devices\nnext: torrential devices add\n");
     }
 
     #[test]
@@ -152,7 +165,7 @@ mod tests {
         let list = DeviceList { unreachable: Some(why.into()), ..DeviceList::default() };
         assert_eq!(
             list_doc(&list, NOW).plain(),
-            format!("ID\tNAME\tADDED\tSEEN\n# 0 devices\n# {why}\nnext: torrential devices add\n")
+            format!("ID\tNAME\tADDED\tSEEN\tFROM\n# 0 devices\n# {why}\nnext: torrential devices add\n")
         );
     }
 

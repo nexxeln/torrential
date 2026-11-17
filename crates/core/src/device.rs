@@ -15,6 +15,9 @@ pub struct Device {
     pub added_at: i64,
     /// Unix seconds of its last request, to within a minute.
     pub seen_at: i64,
+    /// The address its last request came from, such as `192.168.1.40` or `100.101.3.4`. `None`
+    /// for a device paired before torrential 0.7 that has not asked since.
+    pub seen_from: Option<String>,
 }
 
 /// A short code that lets one device in, open for a few minutes.

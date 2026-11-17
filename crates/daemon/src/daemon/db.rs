@@ -112,6 +112,7 @@ CREATE TABLE deletions (
     bytes INTEGER NOT NULL
 ) STRICT;
 "#,
+    "ALTER TABLE devices ADD COLUMN seen_from TEXT;",
 ];
 
 /// The engine's database file, checked and migrated to this version's schema. The store, the
