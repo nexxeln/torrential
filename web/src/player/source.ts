@@ -5,8 +5,6 @@ export type SourceState = { kind: "streaming" } | { kind: "failed"; error: ApiEr
 
 /** Feeds one file to a video element. The element's own events say when it plays, waits, or ends. */
 export interface Source {
-  /** Starts again at the current time after a failure. */
-  retry(): void;
   destroy(): void;
 }
 
@@ -63,10 +61,6 @@ export class DirectSource implements Source {
     this.element.src = this.url;
     beginAt(this.element, at, this.stop.signal);
     this.onState({ kind: "streaming" });
-  }
-
-  retry(): void {
-    this.open(this.element.currentTime);
   }
 
   destroy(): void {
@@ -169,10 +163,6 @@ export class RemuxSource implements Source {
     element.addEventListener("waiting", () => this.reportShortfall(), { signal });
     element.addEventListener("error", () => this.fail(mediaError(element)), { signal });
     onState({ kind: "streaming" });
-  }
-
-  retry(): void {
-    this.restart(this.element.currentTime);
   }
 
   destroy(): void {
