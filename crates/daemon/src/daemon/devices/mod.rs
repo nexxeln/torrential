@@ -227,7 +227,10 @@ impl State {
         let home = lan.is_none_or(|ip| ip.is_private() || ip.is_link_local());
         let local = self.names.local.as_ref().filter(|_| home).map(|name| format!("http://{name}:{port}"));
         let public = self.exposure.public_address.as_ref().map(|public| public.origin.clone());
-        let address = public.or(local).or_else(|| lan_address.clone()).or_else(|| tailnet_address.clone())?;
+        // A server is reached through its tailnet, at home and away; a computer at home by its .local name.
+        let tailnet = self.exposure.server.then(|| tailnet_address.clone()).flatten();
+        let address =
+            public.or(tailnet).or(local).or_else(|| lan_address.clone()).or_else(|| tailnet_address.clone())?;
         Some(PairingOffer {
             code: offer.code.clone(),
             url: format!("{address}/pair#{}", offer.code),
