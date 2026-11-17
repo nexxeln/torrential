@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use torrential_core::protocol::{Request, Response, WIRE_VERSION};
+use torrential_core::protocol::{Request, Response, WIRE_VERSION, read_frame};
 use torrential_core::{DeviceList, ErrorCode};
 
 use super::super::devices::Reach;
@@ -325,6 +325,67 @@ async fn only_the_token_over_loopback_reaches_the_command_lines_requests_whateve
     let mine = mac_again(port).send("POST", &path, &[&bearer(&token)], hello).await;
     assert_eq!(mine.status, 200);
     assert!(mine.text().contains(r#""type":"hello","engine_version":"0.1.0""#), "{}", mine.text());
+}
+
+/// What the engine at `ip` answers torrential on another machine that sends `token`: the reply, or
+/// the status of an answer without one.
+async fn from_another_machine(ip: Ipv4Addr, port: u16, token: &str, request: Request) -> Result<Response, u16> {
+    let (address, token) = (crate::wire::Address { tls: false, host: ip.to_string(), port }, token.to_string());
+    tokio::task::spawn_blocking(move || {
+        let client = crate::wire::Client { version: "0.1.0", wire: WIRE_VERSION };
+        match crate::wire::post(&address, &token, client, &request, Duration::from_secs(10)).unwrap() {
+            crate::wire::Answer::Frames(mut frames) => Ok(read_frame(&mut frames).unwrap().unwrap()),
+            crate::wire::Answer::Status(status) => Err(status),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_machine_reaches_what_a_device_may_ask_and_a_stranger_reaches_nothing() {
+    let ip = lan();
+    let h = Harness::new();
+    let port = h.running.ctx.http_port;
+    let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
+    listening(&h, ip, true).await;
+    let mut laptop = Browser::on(ip, &h);
+    laptop.pair(&offer.code).await;
+    let token = laptop.cookie.unwrap().strip_prefix("torrential_device=").unwrap().to_string();
+    let ask = |request| from_another_machine(ip, port, &token, request);
+
+    assert!(matches!(ask(Request::Hello).await, Ok(Response::Hello { wire: WIRE_VERSION, .. })));
+    assert!(matches!(ask(Request::Status { refs: vec![] }).await, Ok(Response::Jobs { .. })));
+    let refused = [
+        Request::AddDevice,
+        Request::Devices,
+        Request::Shutdown { asked: true },
+        Request::Get(torrential_core::protocol::GetRequest {
+            target: torrential_core::Target::Prefix("9b5212".into()),
+            dir: Some("/tmp".into()),
+            files: vec![],
+            max_size: None,
+            dry_run: false,
+        }),
+        Request::Files { target: torrential_core::Target::TorrentFile("/etc/passwd".into()), timeout_ms: 1000 },
+    ];
+    for request in refused {
+        let answer = ask(request.clone()).await;
+        let Ok(Response::Error { error }) = answer else { panic!("{request:?} answered {answer:?}") };
+        assert_eq!(error.code, ErrorCode::LocalOnly, "{request:?}");
+    }
+    assert!(matches!(ask(Request::Hello).await, Ok(Response::Hello { .. })), "the engine still runs");
+    assert_eq!(devices(&h, Request::Devices).await.devices.len(), 1, "no device was added");
+
+    let local = h.token();
+    for (who, token) in [("a wrong token", "0".repeat(64)), ("this Mac's token from another machine", local)] {
+        assert_eq!(from_another_machine(ip, port, &token, Request::Hello).await.err(), Some(401), "{who}");
+    }
+    let id = devices(&h, Request::Devices).await.devices[0].id.clone();
+    // An open code keeps the engine on the network once the laptop is gone.
+    devices(&h, Request::AddDevice).await;
+    devices(&h, Request::RemoveDevice { id }).await;
+    assert_eq!(ask(Request::Hello).await.err(), Some(401), "a removed machine");
 }
 
 #[tokio::test(flavor = "multi_thread")]

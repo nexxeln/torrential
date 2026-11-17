@@ -7,6 +7,7 @@ mod files;
 mod get;
 pub mod launch;
 pub mod play;
+mod remote;
 pub mod rows;
 mod search;
 mod server;
@@ -27,7 +28,7 @@ use serde::Serialize;
 use torrential_core::protocol::{FilesReply, JobAction, Request, Response};
 use torrential_core::{Error, ErrorCode, Job, Target};
 
-use crate::cli::Command;
+use crate::cli::{Command, DaemonCommand};
 use crate::output::{self, DocKind, Mode, Typed, render};
 use connect::Conn;
 use torrential_core::protocol::METADATA_WAIT;
@@ -57,10 +58,77 @@ fn emit(mode: Mode, doc: &output::Doc, payload: &impl Serialize) -> u8 {
     0
 }
 
+/// Where a command runs while this torrential drives an engine on another machine.
+enum Runs {
+    /// Against the engine this torrential drives, wherever it is.
+    Engine,
+    /// On this machine alone, whatever engine this torrential drives.
+    Here,
+    /// Against this machine's engine alone, so it is refused while another drives: why, and what
+    /// to do instead.
+    LocalEngine((&'static str, &'static str)),
+}
+
+/// Why a player on this machine cannot play from an engine on another, and what to do instead.
+pub(crate) const PLAYS_HERE: (&str, &str) = (
+    "torrential play opens a player on this machine, which plays from this machine's engine alone",
+    "watch in the web app with torrential web, or on a TV with torrential tv play",
+);
+/// Why config.yaml on this machine does not change an engine on another.
+pub(crate) const SETTINGS_HERE: (&str, &str) = (
+    "torrential setup changes config.yaml on this machine, which the engine on another machine does not read",
+    "run torrential setup on that machine",
+);
+
+fn runs(command: &Command) -> Runs {
+    match command {
+        Command::Search(_)
+        | Command::Titles(_)
+        | Command::Title(_)
+        | Command::Sources(_)
+        | Command::Files(_)
+        | Command::Get(_)
+        | Command::Web(_)
+        | Command::Devices { .. }
+        | Command::Tv { .. }
+        | Command::Status(_)
+        | Command::Wait(_)
+        | Command::Pause(_)
+        | Command::Resume(_)
+        | Command::Rm(_)
+        | Command::Verify(_)
+        | Command::Tui
+        | Command::Daemon { command: DaemonCommand::Status } => Runs::Engine,
+        Command::Connect(_)
+        | Command::Doctor(_)
+        | Command::Schema
+        | Command::Completions { .. }
+        | Command::Skill { .. }
+        | Command::Update(_)
+        | Command::Daemon {
+            command:
+                DaemonCommand::Install
+                | DaemonCommand::Uninstall
+                | DaemonCommand::Run { .. }
+                | DaemonCommand::Launch
+                | DaemonCommand::Interrupt { .. },
+        } => Runs::Here,
+        Command::Play(_) => Runs::LocalEngine(PLAYS_HERE),
+        Command::Setup(_) => Runs::LocalEngine(SETTINGS_HERE),
+        Command::Daemon { command: DaemonCommand::Stop } => Runs::LocalEngine((
+            "torrential engine stop stops the engine on this machine",
+            "run it on that machine, or run torrential connect --local first",
+        )),
+    }
+}
+
 fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let paths = || Paths::from_process(env);
     let engine = || connect::ensure(&paths()?, env);
+    if let Runs::LocalEngine(refusal) = runs(&command) {
+        remote::local_only(&paths()?, refusal)?;
+    }
     match command {
         Command::Search(args) => search::run(engine()?, args, mode),
         Command::Titles(args) => titles::titles(engine()?, &args.words, mode),
@@ -122,6 +190,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             let reference = job_refs(std::slice::from_ref(&args.reference), &cwd)?.remove(0);
             changes::run(engine()?, Request::Verify { reference, repair: args.repair }, JobAction::Verify, mode)
         }
+        Command::Connect(args) => remote::run(args, mode, env),
         Command::Setup(args) => setup::run(args, mode, env),
         Command::Doctor(args) => Ok(doctor::run(env, mode, args.network)),
         Command::Tui => tui::run(env),

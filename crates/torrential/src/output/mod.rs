@@ -191,6 +191,7 @@ torrential_core::words! {
     pub enum DocKind {
         Cast = "cast",
         Completions = "completions",
+        Connect = "connect",
         Daemon = "daemon",
         DaemonService = "daemon_service",
         DaemonStop = "daemon_stop",

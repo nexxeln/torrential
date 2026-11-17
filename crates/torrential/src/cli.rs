@@ -78,6 +78,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<TvCommand>,
     },
+    /// Drive the engine on another machine, such as a server or a NAS, or this machine's again
+    #[command(
+        after_help = "Examples:\n  torrential connect http://nas.local:47919/pair#123456\n  torrential connect my-server --code 123456\n  torrential connect --local"
+    )]
+    Connect(ConnectArgs),
     /// List downloads, or show one in detail
     Status(StatusArgs),
     /// Follow downloads until they finish or the timeout is reached
@@ -137,6 +142,19 @@ pub struct WebArgs {
     /// Print the address without opening a browser
     #[arg(long)]
     pub no_open: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ConnectArgs {
+    /// The engine's address: the link torrential devices add shows there, a URL, a host:port, or a machine's name, such as its Tailscale name
+    #[arg(value_name = "ADDRESS", required_unless_present = "local", conflicts_with = "local")]
+    pub address: Option<String>,
+    /// The code torrential devices add shows on the engine's machine
+    #[arg(long, value_name = "CODE", conflicts_with = "local")]
+    pub code: Option<String>,
+    /// Drive this machine's engine again
+    #[arg(long)]
+    pub local: bool,
 }
 
 #[derive(Args, Debug)]
