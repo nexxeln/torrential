@@ -70,6 +70,8 @@ jobs:
           target: x86_64-pc-windows-msvc
           kind: test
       - run: cargo test --workspace --locked --no-fail-fast
+      - name: The pinned ffmpeg build fetches, runs, and has what conversions use
+        run: cargo test --locked -p torrential-daemon the_pinned_build_runs_here -- --ignored
       - name: The logon task starts the engine, and uninstalling it stops the engine
         shell: pwsh
         run: |
