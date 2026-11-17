@@ -26,16 +26,27 @@ fn refused(home: &Home, args: &[&str]) -> (i32, String, String) {
     (run.code, error["code"].as_str().unwrap().into(), error["message"].as_str().unwrap().into())
 }
 
+/// A server's engine and a laptop's torrential, which pairs with it by the link `devices add`
+/// prints. Returns the server's address on the home network and what `connect` printed.
+fn paired() -> (Home, Home, String, Value) {
+    // A port of its own, since macOS lets a second engine take 127.0.0.1 on a port another holds
+    // on every address, and these tests run at once.
+    let server = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "100GiB").with(hooks::HTTP_PORT, "0");
+    // Windows names the system's Downloads folder whatever HOME says.
+    server.write_config(&format!("downloads:\n  dir: '{}'\n", server.path("dl").display()));
+    let laptop = Home::new().with(hooks::ENGINE, "fake").with(hooks::HTTP_PORT, "0");
+    let offer = server.json(&["devices", "add", "--json"]);
+    let lan = offer["offer"]["lan_address"].as_str().expect("this test needs an address on a home network").to_string();
+    let link = format!("http://{lan}/pair#{}", offer["offer"]["code"].as_str().unwrap());
+    let connected = laptop.json(&["connect", &link, "--json"]);
+    (server, laptop, lan, connected)
+}
+
 #[test]
 fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
-    let server = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "100GiB");
-    let laptop = Home::new().with(hooks::ENGINE, "fake");
-    let offer = server.json(&["devices", "add", "--json"]);
-    let lan = offer["offer"]["lan_address"].as_str().expect("this test needs an address on a home network");
-    let link = format!("http://{lan}/pair#{}", offer["offer"]["code"].as_str().unwrap());
+    let (server, laptop, lan, connected) = paired();
     let address = format!("http://{lan}");
 
-    let connected = laptop.json(&["connect", &link, "--json"]);
     assert_eq!((&connected["engine"], &connected["address"]), (&Value::from("remote"), &Value::from(address.clone())));
     let device = connected["device"].as_str().unwrap().to_string();
     assert_eq!(server.json(&["devices", "--json"])["devices"][0]["id"], device);
@@ -96,4 +107,33 @@ fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
     assert_eq!(laptop.json(&["connect", "--local", "--json"])["engine"], "local");
     assert!(!ids(&laptop).contains(&ARCH.to_string()), "the laptop's own engine never had it");
     assert!(laptop.path("th/state/engine-token").exists());
+}
+
+#[test]
+fn pull_copies_a_finished_download_from_the_engine_on_another_machine_and_again_changes_nothing() {
+    let alone = Home::new().with(hooks::ENGINE, "fake").with(hooks::HTTP_PORT, "0");
+    let (code, kind, said) = refused(&alone, &["pull", "4c1e9a"]);
+    assert_eq!((code, kind.as_str()), (6, "not_paired"));
+    assert!(said.starts_with("torrential pull copies a download from an engine on another machine"), "{said}");
+
+    let (server, laptop, _, _) = paired();
+    // The fake engine downloads nothing to disk, so the subtitle the server holds is written first.
+    let held = server.path("dl/night_of_the_living_dead/night_of_the_living_dead.srt");
+    let bytes: Vec<u8> = (0..49 * 1024u32).map(|n| (n % 251) as u8).collect();
+    std::fs::create_dir_all(held.parent().unwrap()).unwrap();
+    std::fs::write(&held, &bytes).unwrap();
+    assert_eq!(laptop.run(&["search", "night", "of", "the", "living", "dead"]).code, 0);
+    assert_eq!(laptop.run(&["get", "4c1e9a", "--files", "*.srt"]).code, 0);
+    assert_eq!(laptop.run(&["wait", "4c1e9a"]).code, 0);
+
+    let into = laptop.path("pulled").display().to_string();
+    let pulled = laptop.json(&["pull", "4c1e9a", "--dir", &into, "--json"]);
+    let path = laptop.path("pulled/night_of_the_living_dead/night_of_the_living_dead.srt");
+    assert_eq!(
+        pulled["files"],
+        serde_json::json!([{ "path": path.display().to_string(), "size": 50176, "resumed_at": 0 }])
+    );
+    assert!(std::fs::read(&path).unwrap() == bytes, "the copy has the server's bytes");
+    let again = laptop.json(&["pull", "4c1e9a", "--dir", &into, "--json"]);
+    assert_eq!(again["files"][0]["resumed_at"], 50176, "a file already here stays");
 }
