@@ -236,7 +236,7 @@ fn gone(tv: &str, error: &reqwest::Error) -> Failed {
     let why = if error.is_timeout() { "it did not answer in time".to_string() } else { error.to_string() };
     Failed::Gone(
         Error::new(ErrorCode::NetworkUnavailable, format!("{tv} cannot be reached ({why})"))
-            .with_hint("check that the TV is on and on the same network as this Mac"),
+            .with_hint("check that the TV is on and on the same network as the computer running torrential"),
     )
 }
 

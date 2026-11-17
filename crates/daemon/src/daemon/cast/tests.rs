@@ -91,7 +91,7 @@ fn a_tv_that_does_not_take_the_container_is_refused_in_a_sentence() {
     };
     let error = refused(&tv, "Night/Night.avi");
     assert_eq!(error.message, "LG TV does not play AVI files, only MKV and MP4");
-    assert_eq!(error.hint.as_deref(), Some("play it on this Mac, or choose a source in a format the TV plays"));
+    assert_eq!(error.hint.as_deref(), Some("play it here, or choose a source in a format the TV plays"));
 }
 
 #[test]

@@ -75,7 +75,7 @@ fn list_doc(list: &TvList) -> Doc {
     let mut summary = vec![count(list.tvs.len(), "TV")];
     if list.tvs.is_empty() {
         summary.push(
-            "no TV answered: check that it is on, on the same network as this Mac, and that its DLNA or media sharing setting is on"
+            "no TV answered: check that it is on, on the same network as the computer running torrential, and that its DLNA or media sharing setting is on"
                 .to_string(),
         );
     }
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(
             list_doc(&TvList::default()).plain(),
             "TV\tADDRESS\tPLAYS\tNOW\n# 0 TVs\n\
-             # no TV answered: check that it is on, on the same network as this Mac, and that its DLNA or media sharing setting is on\n"
+             # no TV answered: check that it is on, on the same network as the computer running torrential, and that its DLNA or media sharing setting is on\n"
         );
     }
 

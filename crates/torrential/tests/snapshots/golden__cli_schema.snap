@@ -265,7 +265,7 @@ expression: value
       },
       {
         "name": "devices",
-        "about": "List, add, or remove the phones and TVs that watch from this Mac",
+        "about": "List, add, or remove the phones and TVs that watch from this computer",
         "arguments": [],
         "flags": [],
         "subcommands": [

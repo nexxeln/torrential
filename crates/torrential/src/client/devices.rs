@@ -1,4 +1,4 @@
-//! `torrential devices`: the phones and TVs that watch from this Mac over the home network.
+//! `torrential devices`: the phones and TVs that watch from this computer over the home network.
 
 use std::io::Write;
 
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn the_list_says_why_no_phone_or_tv_can_reach_the_mac() {
-        let why = "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port 47919 (address in use) and keeps trying";
+        let why = "no phone or TV can reach this computer yet, because torrential cannot listen on the home network on port 47919 (address in use) and keeps trying";
         let list = DeviceList { unreachable: Some(why.into()), ..DeviceList::default() };
         assert_eq!(
             list_doc(&list, NOW).plain(),

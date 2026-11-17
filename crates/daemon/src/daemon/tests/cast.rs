@@ -718,7 +718,7 @@ async fn a_video_in_a_container_the_tv_does_not_take_is_refused_before_it_downlo
         (
             ErrorCode::Usage,
             "Fake TV does not play AVI files, only MP4",
-            Some("play it on this Mac, or choose a source in a format the TV plays")
+            Some("play it here, or choose a source in a format the TV plays")
         )
     );
     assert_eq!(tv.actions(), ["GetProtocolInfo"]);
@@ -1093,7 +1093,7 @@ async fn a_title_cast_never_hands_the_tv_a_source_it_cannot_decode_once_the_rest
         (
             ErrorCode::Usage,
             "Fake TV cannot decode the video of this source",
-            Some("let torrential choose a source, or play it on this Mac")
+            Some("let torrential choose a source, or play it here")
         )
     );
     assert_eq!(tv.actions(), ["GetProtocolInfo"]);
@@ -1132,7 +1132,7 @@ async fn a_cast_never_gives_the_tv_an_address_where_another_program_answers() {
         (
             ErrorCode::NetworkUnavailable,
             format!(
-                "no phone or TV can reach this Mac yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
+                "no phone or TV can reach this computer yet, because torrential cannot listen on the home network on port {port} (address in use) and keeps trying"
             )
         )
     );

@@ -17,11 +17,12 @@ use crate::qr::qr;
 /// The page that pairs a phone or TV.
 pub const PAIR: &str = "/pair";
 const PAGE: &str = include_str!("pair.html");
-const LEAD: &str = "Enter the code that Add a device shows in torrential on the Mac.";
-const REMOVED_LEAD: &str = "This device was removed, so enter a new code from Add a device in torrential on the Mac.";
+const LEAD: &str = "Enter the code that Add a device shows on the computer running torrential.";
+const REMOVED_LEAD: &str =
+    "This device was removed, so enter a new code from Add a device on the computer running torrential.";
 const NOT_PAIRED: &str =
-    "this device is not paired with the Mac, so open /pair and enter the code that Add a device shows";
-const REMOVED: &str = "this device was removed on the Mac, so open /pair and enter a new code from Add a device";
+    "this device is not paired with torrential, so open /pair and enter the code that Add a device shows";
+const REMOVED: &str = "this device was removed from torrential, so open /pair and enter a new code from Add a device";
 /// Browsers keep a cookie at most 400 days.
 const COOKIE_SECS: u32 = 400 * 86_400;
 const PAGE_HEADERS: &str = "Cache-Control: no-store\r\n\
@@ -128,8 +129,8 @@ pub fn remove(ctx: &Ctx, asker: &Asker, Remove { id }: Remove) -> Result<Value, 
 fn local_only(asker: &Asker) -> Result<(), Error> {
     match asker {
         Asker::Local => Ok(()),
-        _ => Err(Error::new(ErrorCode::LocalOnly, "only the Mac running torrential can add or remove devices")
-            .with_hint("open torrential on the Mac to do it")),
+        _ => Err(Error::new(ErrorCode::LocalOnly, "only the computer running torrential can add or remove devices")
+            .with_hint("open torrential on that computer to do it")),
     }
 }
 

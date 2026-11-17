@@ -27,7 +27,7 @@ export function Header({ current }: { current: "search" | "downloads" | "devices
                 The engine is not running. Start it with <code className="font-mono">torrential web</code>.
               </>
             ) : (
-              "The Mac’s torrential cannot be reached. Check that the Mac is awake and on this network."
+              "torrential cannot be reached. Check that the computer running it is awake and on this network."
             )}
           </p>
         ) : (

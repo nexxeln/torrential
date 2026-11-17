@@ -71,7 +71,7 @@
         location.replace("/");
         return;
       }
-      var message = "the Mac refused the code, so try again";
+      var message = "torrential refused the code, so try again";
       try {
         message = JSON.parse(request.responseText).error.message;
       } catch (e) {}
@@ -81,7 +81,7 @@
     };
     request.onerror = function () {
       go.disabled = false;
-      show("Cannot reach the Mac, so check that it is awake and on this network.", true);
+      show("Cannot reach torrential, so check that the computer running it is awake and on this network.", true);
     };
     request.send(JSON.stringify({ code: code }));
   }
