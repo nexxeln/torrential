@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- Unraid: save this as /boot/config/plugins/dockerMan/templates-user/my-torrential.xml, then Docker, Add Container, Template: torrential. -->
+<Container version="2">
+  <Name>torrential</Name>
+  <Repository>ghcr.io/nexxeln/torrential:latest</Repository>
+  <Registry>https://github.com/nexxeln/torrential/pkgs/container/torrential</Registry>
+  <Network>host</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nexxeln/torrential/issues</Support>
+  <Project>https://github.com/nexxeln/torrential</Project>
+  <Overview>Search for a film or show, press Play, and watch it in a browser, on a paired phone, or on a TV while it downloads. To pair a phone or a TV, open the container's console and run: torrential devices add</Overview>
+  <Category>Downloaders: MediaServer:Video</Category>
+  <WebUI>http://[IP]:[PORT:47919]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/nexxeln/torrential/main/docker/unraid/torrential.xml</TemplateURL>
+  <ExtraParams>--user 99:100</ExtraParams>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/torrential" Mode="rw" Description="Settings, state, and what plays while it downloads" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/torrential</Config>
+  <Config Name="Downloads" Target="/data/Downloads" Default="/mnt/user/downloads" Mode="rw" Description="Downloads go to a torrential folder in this share" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/downloads</Config>
+</Container>

@@ -475,6 +475,10 @@ pub enum DaemonCommand {
         /// The port for the web app and players when the one used last is not free, 0 for any
         #[arg(long, value_name = "PORT")]
         http_port: Option<u16>,
+        /// Run as a server, as `server: true` in config.yaml does: on the network from the start,
+        /// with nothing paired. The container image runs the engine this way
+        #[arg(long)]
+        server: bool,
     },
     /// The short-lived middle process of the detached start
     #[command(hide = true)]

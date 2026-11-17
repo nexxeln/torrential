@@ -48,6 +48,17 @@ curl -fsSL https://raw.githubusercontent.com/nexxeln/torrential/main/install.sh 
 
 The engine then starts when the machine boots, with no one logged in, and listens on the network. The command ends with a QR code and a link that pair your first phone or computer. Paired devices reach the server from any network, and anyone else gets only the pairing page. `torrential server uninstall` turns this off.
 
+Or run it in Docker, for amd64 and arm64. It needs the host's network to name its address in the pairing link and to find TVs, and it keeps settings, state and downloads in `/data`:
+
+```sh
+mkdir -p ~/torrential
+docker run -d --name torrential --network host --restart unless-stopped \
+  --user "$(id -u):$(id -g)" -v ~/torrential:/data ghcr.io/nexxeln/torrential
+docker exec torrential torrential devices add
+```
+
+Templates for [Unraid](docker/unraid/torrential.xml) and [TrueNAS](docker/truenas/torrential.yaml) set the same up. A newer image updates it. Its config file is `/data/config/config.yaml`.
+
 To watch away from home, install [Tailscale](https://tailscale.com) on the server and on your devices. The pairing link then shows the server's tailnet name too, which works from any network with no port opened. With a domain of your own, put [Caddy](https://caddyserver.com) in front, which gets the HTTPS certificate, and set `public_address` in the config file so pairing links use it:
 
 ```

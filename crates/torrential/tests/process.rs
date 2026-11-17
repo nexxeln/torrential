@@ -112,7 +112,8 @@ fn a_command_waits_for_the_login_service_to_start_the_engine_it_replaces() {
 
     assert_eq!((run.code, run.stderr.as_str()), (0, ""));
     assert_eq!(home.engine(), Some((restarted, env!("CARGO_PKG_VERSION").into())), "the service's engine runs");
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     assert_eq!(systemd.join().unwrap(), Some(75), "the old engine exited for the service to start the next");
 }
 
@@ -407,7 +408,8 @@ fn the_first_engine_adds_a_login_service_and_uninstall_keeps_it_out() {
     let second = home.run(&["status"]);
     let added = std::fs::read_to_string(&unit).unwrap();
     let uninstall = home.json(&["engine", "uninstall", "--json"]);
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     let after_uninstall = home.run(&["status"]);
     let left_out = !unit.exists();
     let install = home.json(&["engine", "install", "--json"]);
@@ -586,6 +588,23 @@ fn server_install_lingers_starts_the_service_and_shows_a_code_and_uninstall_undo
     assert_eq!(again["result"], "not_installed");
 }
 
+#[test]
+fn engine_run_with_server_runs_a_server_and_leaves_config_yaml_alone() {
+    let home = Home::new();
+    let log = home.dir.path().join("engine.log");
+    let mut engine =
+        home.process(&["engine", "run", "--server"]).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();
+    // Reaped as it exits, so the stop sees it gone.
+    let engine = std::thread::spawn(move || engine.wait().unwrap().code());
+    eventually("the engine says it runs as a server", Duration::from_secs(30), || {
+        std::fs::read_to_string(&log).unwrap_or_default().contains(" runs as a server, on the network on port ")
+    });
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
+    assert_eq!(engine.join().unwrap(), Some(0));
+    assert!(!home.path("th/config/config.yaml").exists(), "the image's engine writes no server line");
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn server_install_says_it_runs_only_on_linux() {
@@ -646,7 +665,8 @@ fn wait_ends_soon_after_the_engine_is_stopped() {
     let wait = home.start(&["wait", "9b5212", "--timeout", "60s"]);
 
     let started = Instant::now();
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     let wait = wait.finish();
 
     assert!(started.elapsed() < Duration::from_secs(10), "wait took {:?}", started.elapsed());
@@ -913,7 +933,8 @@ fn the_engine_writes_its_port_and_a_new_token_where_only_this_user_can_read_them
     #[cfg(unix)]
     let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(home.token_file()).unwrap().permissions());
     let web = home.json(&["engine", "status", "--json"])["address"].as_str().unwrap().to_string();
-    assert_eq!(home.run(&["engine", "stop"]).code, 0);
+    let stop = home.run(&["engine", "stop"]);
+    assert_eq!(stop.code, 0, "{}{}", stop.stdout, stop.stderr);
     let after_stop = home.token_file().exists();
     assert_eq!(home.run(&["status"]).code, 0);
     let second = Access::read(&home.token_file()).unwrap().unwrap();
