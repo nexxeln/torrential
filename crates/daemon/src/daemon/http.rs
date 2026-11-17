@@ -67,10 +67,18 @@ const APP_POLICY: &str = "Content-Security-Policy: default-src 'self'; script-sr
 /// Binds the first of `ports` that is free where `reach` says, or any free port when other programs
 /// hold them all.
 pub fn bind(ports: &[u16], reach: Reach) -> io::Result<TcpListener> {
-    match ports.iter().find_map(|&port| listener(reach, port).ok()) {
+    match ports.iter().filter(|&&port| !answers(port)).find_map(|&port| listener(reach, port).ok()) {
         Some(listener) => Ok(listener),
         None => listener(reach, 0),
     }
+}
+
+/// Whether a program already takes connections on 127.0.0.1 at `port`. macOS lets a socket on
+/// 127.0.0.1 share a port with another program's socket on every address, or the other way round,
+/// so the bind alone would leave the browser and the CLI talking to the other engine.
+fn answers(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(500))
+        .is_ok()
 }
 
 /// A listening socket on `port` where `reach` says.
@@ -1135,6 +1143,18 @@ mod tests {
             local: local.map(String::from),
             tailnet: Some("studio-mac.tail1234.ts.net".into()),
             exposure: Exposure { server, public_address },
+        }
+    }
+
+    #[test]
+    fn a_port_another_engine_holds_is_passed_over() {
+        for held in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST] {
+            let other = TcpListener::bind((held, 0)).unwrap();
+            let port = other.local_addr().unwrap().port();
+            for reach in [Reach::Loopback, Reach::Network] {
+                let ours = bind(&[port], reach).unwrap();
+                assert_ne!(ours.local_addr().unwrap().port(), port, "{held} held, {reach:?} took its port");
+            }
         }
     }
 
