@@ -15,8 +15,10 @@ use torrential_core::{Error, ErrorCode, TorrentId};
 
 use super::super::book::{Identity, PlayName};
 use super::super::store::{Store, Tombstone};
+use super::reach::Reach;
 use super::trash::{Stays, Trash, Trashed};
-use crate::folder::{self, Folder, Kind, lineage};
+use crate::disk::Disk;
+use crate::folder::{self, Folder, Kind};
 use crate::log::log;
 
 /// What happens to a file between the check that it is the file to move to the Trash and the
@@ -122,15 +124,21 @@ pub struct InUse {
 }
 
 impl InUse {
-    /// Adds a download that writes `targets` in `dir`.
-    pub fn add(&mut self, dir: &Path, targets: &[PathBuf]) -> io::Result<()> {
-        self.folders.extend(lineage(dir)?);
+    /// Adds a download that writes `targets` in `dir`, as `disk` finds them.
+    pub fn add(&mut self, disk: &dyn Disk, dir: &Path, targets: &[PathBuf]) -> io::Result<()> {
+        self.folders.extend(disk.lineage(dir)?);
         for target in targets {
-            if let Ok(identity) = folder::identity(target) {
+            if let Ok(identity) = disk.identity(target) {
                 self.files.insert(identity);
             }
         }
         Ok(())
+    }
+
+    /// Adds what `other` found.
+    pub fn merge(&mut self, other: InUse) {
+        self.folders.extend(other.folders);
+        self.files.extend(other.files);
     }
 }
 
@@ -288,8 +296,15 @@ impl Deleter {
     }
 
     /// Takes a download off record, and puts on record what of it to delete, both or neither.
-    /// It is deleted once the engine lets go of the download.
-    pub fn remove(&mut self, store: &mut Store, tombstone: &Tombstone, doom: Option<Doom>) -> Result<(), Error> {
+    /// It is deleted once the engine lets go of the download. The files of a download in a
+    /// folder the person chose are looked at in that folder through `reach`.
+    pub fn remove(
+        &mut self,
+        store: &mut Store,
+        tombstone: &Tombstone,
+        doom: Option<Doom>,
+        reach: &Reach,
+    ) -> Result<(), Error> {
         let job = tombstone.id;
         let what = match doom {
             None => {
@@ -302,8 +317,10 @@ impl Deleter {
                 What::Play { key, name, dir, folder, bytes }
             }
             Some(Doom::Files { dir, files }) => {
+                let at = dir.clone();
+                let files = reach.ask(&dir, move |disk| pin(disk, &at, files))?;
                 store.remove(tombstone, None)?;
-                What::Files { files: pin(&dir, files), dir }
+                What::Files { files, dir }
             }
         };
         self.pending.push(Pending { job, what, ran: false, failed: None });
@@ -328,13 +345,15 @@ impl Deleter {
     }
 
     /// Runs each deletion whose download is not in `draining`. `in_use` is what other downloads
-    /// write, or why that is not known. What fails is tried again at the next run. Answers what
-    /// each deletion run for the first time did, for the `rm` that asked for it.
+    /// write, or why that is not known. Files in a folder the person chose go through `reach`.
+    /// What fails is tried again at the next run. Answers what each deletion run for the first
+    /// time did, for the `rm` that asked for it.
     pub fn run(
         &mut self,
         draining: &BTreeSet<TorrentId>,
-        in_use: Result<&InUse, &str>,
+        in_use: Result<Arc<InUse>, String>,
         store: &mut Store,
+        reach: &Reach,
     ) -> Vec<(TorrentId, Report)> {
         let mut reports = Vec::new();
         for mut pending in std::mem::take(&mut self.pending) {
@@ -343,7 +362,7 @@ impl Deleter {
                 continue;
             }
             let before = pending.what.bytes();
-            let (report, again) = match self.step(&mut pending.what, in_use) {
+            let (report, again) = match self.step(&mut pending.what, &in_use, reach) {
                 Outcome::Done(report) | Outcome::Refused(report) => (report, false),
                 Outcome::Again(report) => (report, true),
             };
@@ -391,7 +410,7 @@ impl Deleter {
         reports
     }
 
-    fn step(&self, what: &mut What, in_use: Result<&InUse, &str>) -> Outcome {
+    fn step(&self, what: &mut What, in_use: &Result<Arc<InUse>, String>, reach: &Reach) -> Outcome {
         match what {
             What::Play { name: None, dir, .. } => {
                 let why = "it is not a folder directly in the plays folder".to_string();
@@ -405,7 +424,7 @@ impl Deleter {
                 };
                 let in_use = match in_use {
                     Ok(in_use) => in_use,
-                    Err(why) => return Outcome::Again(kept(why.to_string())),
+                    Err(why) => return Outcome::Again(kept(why.clone())),
                 };
                 let folder = match root.folder.open_in(name.as_str().as_ref()) {
                     Ok(folder) => folder,
@@ -440,86 +459,116 @@ impl Deleter {
                 Outcome::Again(kept(format!("{why}, so torrential tries again")))
             }
             What::Files { dir, files } => {
-                let mut report = Report::default();
-                let in_use = match in_use {
-                    Ok(in_use) => in_use,
-                    Err(why) => {
-                        report.kept = files.iter().map(|(file, _)| (dir.join(file), why.to_string())).collect();
-                        return Outcome::Again(report);
+                let (trash, pause, in_use) = (self.trash.clone(), self.trash_pause.clone(), in_use.clone());
+                let (at, mut asked) = (dir.clone(), files.clone());
+                let looked = reach.ask(dir, move |disk| {
+                    let in_use = in_use.as_deref().map_err(String::as_str);
+                    let outcome = trash_files(disk, &trash, &pause, &at, &mut asked, in_use);
+                    (asked, outcome)
+                });
+                match looked {
+                    Ok((left, outcome)) => {
+                        *files = left;
+                        outcome
                     }
-                };
-                // The download's folder itself may be a link, as ~/Downloads often is.
-                let folder = match Folder::open(dir) {
-                    Ok(folder) => folder,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Outcome::Done(report),
-                    Err(e) => {
-                        let why = format!("the download's folder cannot be opened: {e}");
-                        report.kept = files.iter().map(|(file, _)| (dir.join(file), why.clone())).collect();
-                        return Outcome::Refused(report);
-                    }
-                };
-                // Files another program has open, tried again at the next run.
-                let mut busy = Vec::new();
-                for (file, pinned) in files.iter() {
-                    let path = dir.join(file);
-                    let pin = match pinned {
-                        Ok(pin) => pin,
-                        Err(why) => {
-                            report.kept.push((path, why.clone()));
-                            continue;
-                        }
-                    };
-                    let (parent, last) = match open_parent(&folder, file) {
-                        Ok(Some(found)) => found,
-                        Ok(None) => continue,
-                        Err(why) => {
-                            report.kept.push((path, why.into()));
-                            continue;
-                        }
-                    };
-                    if !parent.identity().is_ok_and(|identity| identity == pin.folder) {
-                        let why = "the folder it is in was moved or replaced after you asked to delete it";
-                        report.kept.push((path, why.into()));
-                        continue;
-                    }
-                    match parent.entry(last) {
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(e) => report.kept.push((path, format!("it cannot be read: {e}"))),
-                        Ok(entry) if entry.identity != pin.file => {
-                            report.kept.push((path, "it was replaced after you asked to delete it".into()))
-                        }
-                        Ok(entry) if in_use.files.contains(&entry.identity) => {
-                            report.kept.push((path, "another download uses it".into()))
-                        }
-                        Ok(_) => {
-                            (self.trash_pause.0)(&path);
-                            match self.trash.put(&parent, last, &path, pin.file) {
-                                Ok(trashed) => report.trashed.push((path, trashed)),
-                                Err(Stays::Busy(why)) => {
-                                    report.kept.push((path, why));
-                                    busy.push((file.clone(), pinned.clone()));
-                                }
-                                Err(Stays::For(why)) => report.kept.push((path, why)),
-                            }
-                        }
-                    }
+                    Err(error) => Outcome::Again(Report {
+                        kept: files.iter().map(|(file, _)| (dir.join(file), error.message.clone())).collect(),
+                        ..Report::default()
+                    }),
                 }
-                for (file, _) in files.iter() {
-                    prune(&folder, file);
-                }
-                if busy.is_empty() {
-                    return Outcome::Done(report);
-                }
-                *files = busy;
-                Outcome::Again(report)
             }
         }
     }
 }
 
+/// Moves to the Trash each of `files` in `dir` that is still the file it was when the person asked
+/// to delete it, and that no other download uses. Those another program has open stay in `files`,
+/// to be tried again.
+fn trash_files(
+    disk: &dyn Disk,
+    trash: &Trash,
+    pause: &TrashPause,
+    dir: &Path,
+    files: &mut Vec<(PathBuf, Result<Pin, String>)>,
+    in_use: Result<&InUse, &str>,
+) -> Outcome {
+    let mut report = Report::default();
+    let in_use = match in_use {
+        Ok(in_use) => in_use,
+        Err(why) => {
+            report.kept = files.iter().map(|(file, _)| (dir.join(file), why.to_string())).collect();
+            return Outcome::Again(report);
+        }
+    };
+    // The download's folder itself may be a link, as ~/Downloads often is.
+    let folder = match disk.open_folder(dir) {
+        Ok(folder) => folder,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Outcome::Done(report),
+        Err(e) => {
+            let why = format!("the download's folder cannot be opened: {e}");
+            report.kept = files.iter().map(|(file, _)| (dir.join(file), why.clone())).collect();
+            return Outcome::Refused(report);
+        }
+    };
+    // Files another program has open, tried again at the next run.
+    let mut busy = Vec::new();
+    for (file, pinned) in files.iter() {
+        let path = dir.join(file);
+        let pin = match pinned {
+            Ok(pin) => pin,
+            Err(why) => {
+                report.kept.push((path, why.clone()));
+                continue;
+            }
+        };
+        let (parent, last) = match open_parent(&folder, file) {
+            Ok(Some(found)) => found,
+            Ok(None) => continue,
+            Err(why) => {
+                report.kept.push((path, why.into()));
+                continue;
+            }
+        };
+        if !parent.identity().is_ok_and(|identity| identity == pin.folder) {
+            let why = "the folder it is in was moved or replaced after you asked to delete it";
+            report.kept.push((path, why.into()));
+            continue;
+        }
+        match parent.entry(last) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => report.kept.push((path, format!("it cannot be read: {e}"))),
+            Ok(entry) if entry.identity != pin.file => {
+                report.kept.push((path, "it was replaced after you asked to delete it".into()))
+            }
+            Ok(entry) if in_use.files.contains(&entry.identity) => {
+                report.kept.push((path, "another download uses it".into()))
+            }
+            Ok(_) => {
+                (pause.0)(&path);
+                match trash.put(&parent, last, &path, pin.file) {
+                    Ok(trashed) => report.trashed.push((path, trashed)),
+                    Err(Stays::Busy(why)) => {
+                        report.kept.push((path, why));
+                        busy.push((file.clone(), pinned.clone()));
+                    }
+                    Err(Stays::For(why)) => report.kept.push((path, why)),
+                }
+            }
+        }
+    }
+    for (file, _) in files.iter() {
+        prune(&folder, file);
+    }
+    if busy.is_empty() {
+        return Outcome::Done(report);
+    }
+    *files = busy;
+    Outcome::Again(report)
+}
+
 /// Each of `files` in `dir` as it is now, or why it stays. Files not there are left out.
-fn pin(dir: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Result<Pin, String>)> {
-    let folder = match Folder::open(dir) {
+fn pin(disk: &dyn Disk, dir: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Result<Pin, String>)> {
+    let folder = match disk.open_folder(dir) {
         Ok(folder) => folder,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return vec![],
         Err(e) => {
@@ -693,8 +742,14 @@ mod tests {
         Tombstone { id: id(n), name: None, path: None, removed_at: 1 }
     }
 
-    fn run(deleter: &mut Deleter, store: &mut Store, in_use: &InUse) -> Vec<Report> {
-        deleter.run(&BTreeSet::new(), Ok(in_use), store).into_iter().map(|(_, report)| report).collect()
+    /// Where every folder under `root` answers.
+    fn reach(root: &Path) -> Reach {
+        Reach::new(Arc::new(crate::disk::RealDisk), vec![root.to_path_buf()])
+    }
+
+    fn run(deleter: &mut Deleter, store: &mut Store, root: &Path, in_use: InUse) -> Vec<Report> {
+        let ran = deleter.run(&BTreeSet::new(), Ok(Arc::new(in_use)), store, &reach(root));
+        ran.into_iter().map(|(_, report)| report).collect()
     }
 
     fn files(paths: &[&str]) -> Vec<PathBuf> {
@@ -732,10 +787,12 @@ mod tests {
         symlink(outside.join("keep.mp4"), folder.join("Film/film.srt")).unwrap();
         symlink(outside.join("films"), folder.join("Film/extras")).unwrap();
 
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 })).unwrap();
+        deleter
+            .remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 }), &reach(root))
+            .unwrap();
         assert_eq!(deleter.play_bytes(), 4);
         assert_eq!(
-            run(&mut deleter, store, &InUse::default()),
+            run(&mut deleter, store, root, InUse::default()),
             [Report { deleted: vec![folder.clone()], ..Report::default() }]
         );
         assert!(!folder.exists());
@@ -757,7 +814,7 @@ mod tests {
         write(&folder.join("notes.txt"), "the person's own notes");
 
         let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
-        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), Vec::<Report>::new());
         assert_eq!(std::fs::read_to_string(folder.join("notes.txt")).unwrap(), "the person's own notes");
         assert_eq!(std::fs::read_to_string(root.join("plays/moved/film.mp4")).unwrap(), "film");
         assert_eq!(store.deletions().unwrap(), [], "it is not tried again");
@@ -803,10 +860,12 @@ mod tests {
         };
         write(&folder.join("extras/keep.txt"), "on another disk");
 
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 })).unwrap();
+        deleter
+            .remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 }), &reach(root))
+            .unwrap();
         let why = "a folder in it is on another disk, so torrential tries again";
         assert_eq!(
-            run(&mut deleter, store, &InUse::default()),
+            run(&mut deleter, store, root, InUse::default()),
             [Report { kept: vec![(folder.clone(), why.into())], ..Report::default() }]
         );
         assert_eq!(std::fs::read_to_string(folder.join("extras/keep.txt")).unwrap(), "on another disk");
@@ -824,10 +883,12 @@ mod tests {
         let dir = root.join("disk/Downloads");
         write(&dir.join("Set/a.mkv"), "a");
         let mut deleter = Deleter::open(&root.join("plays"), Trash::Finder, TrashPause::default(), store).unwrap();
-        deleter.remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv"]) })).unwrap();
+        deleter
+            .remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv"]) }), &reach(root))
+            .unwrap();
 
         let trashed = vec![(dir.join("Set/a.mkv"), Trashed::Moved)];
-        assert_eq!(run(&mut deleter, store, &InUse::default()), [Report { trashed, ..Report::default() }]);
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), [Report { trashed, ..Report::default() }]);
         let trash = root.join(format!("disk/.Trashes/{}", crate::paths::uid()));
         assert_eq!(std::fs::read_to_string(trash.join("a.mkv")).unwrap(), "a");
         assert!(!dir.join("Set").exists());
@@ -889,8 +950,10 @@ mod tests {
         let shut = |mode| std::fs::set_permissions(folder.join("Film"), std::fs::Permissions::from_mode(mode)).unwrap();
         shut(0o000);
         let took = 3 << 30;
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: took })).unwrap();
-        run(&mut deleter, store, &InUse::default());
+        deleter
+            .remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: took }), &reach(root))
+            .unwrap();
+        run(&mut deleter, store, root, InUse::default());
         let restarted =
             Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap().play_bytes();
         shut(0o755);
@@ -914,10 +977,10 @@ mod tests {
 
         let dir = root.join("data/plays/0101010101010101-0");
         let folder = Identity { device: 1, inode: 1 };
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: dir.clone(), folder, bytes: 4 })).unwrap();
+        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: dir.clone(), folder, bytes: 4 }), &reach(root)).unwrap();
         let why = "it is not a folder directly in the plays folder";
         let kept = Report { kept: vec![(dir, why.into())], ..Report::default() };
-        assert_eq!(run(&mut deleter, store, &InUse::default()), [kept]);
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), [kept]);
         assert_eq!(std::fs::read_to_string(root.join("disk/plays/0101010101010101-0/film.mp4")).unwrap(), "film");
     }
 
@@ -937,7 +1000,7 @@ mod tests {
         symlink(outside.join("c.srt"), dir.join("Set/c.srt")).unwrap();
         symlink(outside.join("extras"), dir.join("Set/extras")).unwrap();
         let mut in_use = InUse::default();
-        in_use.add(&root.join("Other"), &[dir.join("Set/shared.nfo")]).unwrap();
+        in_use.add(&crate::disk::RealDisk, &root.join("Other"), &[dir.join("Set/shared.nfo")]).unwrap();
         let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let all = [
             "Set/a.mkv",
@@ -948,9 +1011,11 @@ mod tests {
             "Set/gone.mkv",
             "../mine.txt",
         ];
-        deleter.remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&all) })).unwrap();
+        deleter
+            .remove(store, &tomb(1), Some(Doom::Files { dir: dir.clone(), files: files(&all) }), &reach(root))
+            .unwrap();
 
-        let reports = run(&mut deleter, store, &in_use);
+        let reports = run(&mut deleter, store, root, in_use);
         let kept = [
             ("Set/c.srt", "it is not a regular file"),
             ("Set/extras/d.txt", "a folder on its path is a link"),
@@ -970,13 +1035,45 @@ mod tests {
     }
 
     // Windows makes links only for an administrator or in Developer Mode.
+    /// Files the person asked to delete in a folder that then stops answering stay, and say why,
+    /// until the folder answers again.
+    #[cfg(unix)]
+    #[test]
+    fn files_in_a_folder_that_stops_answering_stay_until_it_answers() {
+        let Place { root, store, .. } = &mut place();
+        let dir = root.join("downloads");
+        write(&dir.join("Set/a.mkv"), "a");
+        let disk = crate::disk::FakeDisk::new(crate::disk::Space { device: 1, total: 1 << 40, free: 1 << 39 });
+        let reach = Reach::new(Arc::new(disk.clone()), vec![root.clone()]);
+        let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
+        let doom = Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv"]) };
+        deleter.remove(store, &tomb(1), Some(doom), &reach).unwrap();
+        let run = |deleter: &mut Deleter, store: &mut Store| -> Vec<Report> {
+            let ran = deleter.run(&BTreeSet::new(), Ok(Arc::default()), store, &reach);
+            ran.into_iter().map(|(_, report)| report).collect()
+        };
+
+        let stall = disk.stall(&dir, root.join("stall"));
+        let kept = (dir.join("Set/a.mkv"), format!("torrential is waiting for access to {}", dir.display()));
+        assert_eq!(run(&mut deleter, store), [Report { kept: vec![kept], ..Report::default() }]);
+        assert!(dir.join("Set/a.mkv").exists());
+        drop(stall);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !reach.catch_up(std::time::Instant::now()) {
+            assert!(std::time::Instant::now() < deadline, "the folder answers once it is let go");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(run(&mut deleter, store), Vec::<Report>::new(), "the rm heard already");
+        assert!(!dir.join("Set/a.mkv").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_lineage_of_a_folder_not_made_yet_starts_where_its_path_really_goes() {
         let Place { root, .. } = &place();
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         symlink(root.join("a/b"), root.join("link")).unwrap();
-        let of = |path: &Path| lineage(path).unwrap();
+        let of = |path: &Path| folder::lineage(path).unwrap();
         assert_eq!(of(&root.join("link/new/deeper")), of(&root.join("a/b")));
         assert_eq!(of(&root.join("a/new/../../a/b/new")), of(&root.join("a/b")));
         assert_eq!(of(&root.join("a/b/new/..")), of(&root.join("a/b")));
@@ -1001,7 +1098,7 @@ mod tests {
         let mut deleter = Deleter::open(&root.join("plays"), trash(root), TrashPause::default(), store).unwrap();
         let held = hold(&dir.join("Set/a.mkv"));
         let doom = Doom::Files { dir: dir.clone(), files: files(&["Set/a.mkv", "Set/b.srt"]) };
-        deleter.remove(store, &tomb(1), Some(doom)).unwrap();
+        deleter.remove(store, &tomb(1), Some(doom), &reach(root)).unwrap();
 
         let why = "another program has it open, so torrential tries again once it lets go";
         let first = Report {
@@ -1009,10 +1106,10 @@ mod tests {
             kept: vec![(dir.join("Set/a.mkv"), why.into())],
             ..Report::default()
         };
-        assert_eq!(run(&mut deleter, store, &InUse::default()), [first]);
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), [first]);
         assert!(deleter.ready(&BTreeSet::new()), "it waits to go");
         drop(held);
-        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new(), "the rm heard already");
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), Vec::<Report>::new(), "the rm heard already");
         assert!(!deleter.ready(&BTreeSet::new()));
         assert_eq!(std::fs::read_to_string(root.join("trash/files/a.mkv")).unwrap(), "a");
         assert!(!dir.join("Set").exists(), "the folder it left empty goes too");
@@ -1026,14 +1123,16 @@ mod tests {
         let (folder, made) = deleter.make_play(id(1)).unwrap();
         write(&folder.join("Film/film.mp4"), "film");
         let held = hold(&folder.join("Film/film.mp4"));
-        deleter.remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 })).unwrap();
+        deleter
+            .remove(store, &tomb(1), Some(Doom::Play { dir: folder.clone(), folder: made, bytes: 4 }), &reach(root))
+            .unwrap();
 
         let why = "another program has a file in it open, so torrential tries again";
         let kept = Report { kept: vec![(folder.clone(), why.into())], ..Report::default() };
-        assert_eq!(run(&mut deleter, store, &InUse::default()), [kept]);
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), [kept]);
         assert_eq!(store.deletions().unwrap().len(), 1, "it stays on record for after a restart");
         drop(held);
-        assert_eq!(run(&mut deleter, store, &InUse::default()), Vec::<Report>::new());
+        assert_eq!(run(&mut deleter, store, root, InUse::default()), Vec::<Report>::new());
         assert!(!folder.exists());
         assert_eq!((deleter.play_bytes(), store.deletions().unwrap()), (0, vec![]));
     }
