@@ -7,6 +7,7 @@ mod files;
 mod get;
 pub mod launch;
 pub mod play;
+mod pull;
 mod remote;
 pub mod rows;
 mod search;
@@ -67,6 +68,8 @@ enum Runs {
     /// Against this machine's engine alone, so it is refused while another drives: why, and what
     /// to do instead.
     LocalEngine((&'static str, &'static str)),
+    /// Against an engine on another machine alone, so it is refused while this machine's drives.
+    RemoteEngine((&'static str, &'static str)),
 }
 
 /// Why a player on this machine cannot play from an engine on another, and what to do instead.
@@ -113,6 +116,10 @@ fn runs(command: &Command) -> Runs {
                 | DaemonCommand::Launch
                 | DaemonCommand::Interrupt { .. },
         } => Runs::Here,
+        Command::Pull(_) => Runs::RemoteEngine((
+            "torrential pull copies a download from an engine on another machine, and this torrential drives this machine's",
+            "its files are on this machine already, and torrential status shows where",
+        )),
         Command::Play(_) => Runs::LocalEngine(PLAYS_HERE),
         Command::Setup(_) => Runs::LocalEngine(SETTINGS_HERE),
         Command::Daemon { command: DaemonCommand::Stop } => Runs::LocalEngine((
@@ -130,8 +137,12 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let paths = || Paths::from_process(env);
     let engine = || connect::ensure(&paths()?, env);
-    if let Runs::LocalEngine(refusal) = runs(&command) {
-        remote::local_only(&paths()?, refusal)?;
+    match runs(&command) {
+        Runs::LocalEngine(refusal) => remote::local_only(&paths()?, refusal)?,
+        Runs::RemoteEngine((why, instead)) if remote::Remotes::using(&paths()?)?.is_none() => {
+            return Err(Error::new(ErrorCode::NotPaired, why).with_hint(instead));
+        }
+        Runs::Engine | Runs::Here | Runs::RemoteEngine(_) => {}
     }
     match command {
         Command::Search(args) => search::run(engine()?, args, mode),
@@ -195,6 +206,7 @@ fn dispatch(command: Command, mode: Mode, env: &Env) -> Result<u8, Error> {
             changes::run(engine()?, Request::Verify { reference, repair: args.repair }, JobAction::Verify, mode)
         }
         Command::Connect(args) => remote::run(args, mode, env),
+        Command::Pull(args) => pull::run(args, mode, env, &cwd),
         Command::Setup(args) => setup::run(args, mode, env),
         Command::Doctor(args) => Ok(doctor::run(env, mode, args.network)),
         Command::Tui => tui::run(env),

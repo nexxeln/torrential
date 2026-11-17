@@ -471,6 +471,34 @@ expression: value
         ]
       },
       {
+        "name": "pull",
+        "about": "Copy a finished download from the engine on another machine to this one",
+        "arguments": [
+          {
+            "name": "ID",
+            "help": "A download ID from torrential status",
+            "required": true,
+            "repeatable": false
+          }
+        ],
+        "flags": [
+          {
+            "name": "--files",
+            "help": "Copy only files matching this glob or exact path. Repeat to add more",
+            "takes_value": true,
+            "repeatable": true,
+            "value_name": "GLOB"
+          },
+          {
+            "name": "--dir",
+            "help": "The folder to copy into. Defaults to the download folder on this machine",
+            "takes_value": true,
+            "repeatable": false,
+            "value_name": "DIR"
+          }
+        ]
+      },
+      {
         "name": "status",
         "about": "List downloads, or show one in detail",
         "arguments": [
