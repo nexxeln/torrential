@@ -54,6 +54,10 @@ pub(super) fn night() -> (Harness, [fake::TorrentFile; 4]) {
     night_with(Outside::default())
 }
 
+/// Title-play timing for a test whose source sends its file list and its first bytes: each wait
+/// may take the play's whole budget, so a slow machine waits for them instead of skipping the source.
+pub(super) const PATIENT: Timing = Timing { file_list: TIMING.budget, first_bytes: TIMING.budget, ..TIMING };
+
 /// `night`, with what `outside` sets.
 pub(super) fn night_with(outside: Outside) -> (Harness, [fake::TorrentFile; 4]) {
     let night = [
@@ -738,8 +742,7 @@ async fn testing(h: &Harness, source: &fake::TorrentFile) -> tokio::task::JoinHa
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_that_goes_away_leaves_the_source_another_play_tests_and_the_last_to_go_stops_it() {
-    let patient = Timing { first_bytes: std::time::Duration::from_secs(10), ..TIMING };
-    let (h, night) = night_with(Outside { timing: patient, ..Outside::default() });
+    let (h, night) = night_with(Outside { timing: PATIENT, ..Outside::default() });
     h.swarm.set_rate(0);
     let first = testing(&h, &night[3]).await;
     let second = testing(&h, &night[3]).await;

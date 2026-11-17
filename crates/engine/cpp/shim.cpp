@@ -301,6 +301,12 @@ lt::session_params make_params(SessionSettings const& s) {
   // peer. A web seed then never qualifies, and a slow peer that took blocks
   // of the piece holds them for seconds before another peer is asked.
   p.set_int(lt::settings_pack::request_queue_time, 1);
+  // On Windows libtorrent flushes the file to the disk after every write by
+  // default, so a download goes only as fast as the disk takes those flushes,
+  // and a pause or a stop waits while up to 100 MiB of queued writes go out
+  // that way. Writing through the system's cache, as on macOS and Linux,
+  // keeps both as fast as memory.
+  p.set_int(lt::settings_pack::disk_io_write_mode, lt::settings_pack::enable_os_cache);
   p.set_int(lt::settings_pack::alert_queue_size, 10000);
   p.set_int(lt::settings_pack::alert_mask, lt::alert_category::status | lt::alert_category::error |
                                                lt::alert_category::storage | lt::alert_category::dht);

@@ -117,6 +117,25 @@ fn listen_failures_and_taken_ports() {
     assert_ne!(next.addr().port(), taken.addr().port(), "libtorrent moved to a free port");
 }
 
+/// Windows refuses a UDP port it reserves, as Hyper-V and WSL have it do, or one another account
+/// holds on every address, even where TCP binds. libtorrent moves only off a port that is in use,
+/// so it listened nowhere on that address: no peer could connect, and uTP and the DHT were off.
+#[cfg(windows)]
+#[test]
+fn a_port_windows_refuses_for_udp_moves_to_one_that_binds() {
+    let loopback = |port| SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let refused = |e: std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
+    let Some(port) = (49152..=u16::MAX).find(|&port| {
+        std::net::UdpSocket::bind(loopback(port)).is_err_and(refused)
+            && std::net::TcpListener::bind(loopback(port)).is_ok()
+    }) else {
+        eprintln!("this machine refuses no UDP port that TCP binds, so there is nothing to check");
+        return;
+    };
+    let node = Node::new(Config { listen: Listen::Addresses(vec![loopback(port)]), ..Config::loopback() });
+    assert_ne!(node.addr().port(), port);
+}
+
 #[test]
 fn every_interface_reports_its_address_and_scope() {
     let mut session = Session::new(Config {

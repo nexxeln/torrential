@@ -3341,8 +3341,10 @@ dependencies = [
  "cxx-build",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "socket2",
  "tempfile",
  "torrential-core",
+ "windows",
 ]
 
 [[package]]

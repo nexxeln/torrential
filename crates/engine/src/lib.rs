@@ -8,6 +8,7 @@ mod bridge;
 mod config;
 mod create;
 mod error;
+mod port;
 mod session;
 mod torrent;
 

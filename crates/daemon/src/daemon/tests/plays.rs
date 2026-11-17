@@ -17,7 +17,7 @@ use super::super::fake;
 use super::super::owner::Command;
 use super::super::owner::deleter::TrashPause;
 use super::super::store::{Store, Tombstone};
-use super::titles::{night, night_with};
+use super::titles::{PATIENT, night, night_with};
 use super::web::{magnet_link, post};
 use super::{Gate, Harness, MIB, Outside, Player, ROOMY, prefix, torrent, written};
 use crate::disk::reserve;
@@ -64,7 +64,7 @@ async fn names(h: &Harness) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_play_downloads_into_a_folder_of_its_own_and_leaves_a_folder_of_the_same_name_alone() {
-    let (h, night) = night();
+    let (h, night) = night_with(Outside { timing: PATIENT, ..Outside::default() });
     let theirs = h.downloads().join("night_of_the_living_dead");
     std::fs::create_dir_all(&theirs).unwrap();
     std::fs::write(theirs.join("night_of_the_living_dead.mp4"), "the person's own film").unwrap();
@@ -141,7 +141,7 @@ async fn a_deletion_a_crash_cut_short_finishes_when_the_engine_starts_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_play_watched_longest_ago_leaves_once_the_plays_folder_is_over_its_limit() {
-    let (h, night) = night_with(Outside { plays_max: 3 * GIB, ..Outside::default() });
+    let (h, night) = night_with(Outside { plays_max: 3 * GIB, timing: PATIENT, ..Outside::default() });
     h.swarm.set_rate(100 * GIB);
     assert_eq!(post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await.0, 200);
     h.play_title("tt0063350", Some(&night[3]), None).await;
@@ -167,7 +167,7 @@ async fn the_play_watched_longest_ago_leaves_once_the_plays_folder_is_over_its_l
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_play_no_one_streams_pauses_and_streaming_it_again_resumes_it_but_a_saved_titles_play_goes_on() {
-    let (h, night) = night_with(Outside { idle_after: Duration::from_secs(1), ..Outside::default() });
+    let (h, night) = night_with(Outside { idle_after: Duration::from_secs(1), timing: PATIENT, ..Outside::default() });
     h.swarm.set_rate(20 * MIB);
     post(&h, "/api/library", json!({ "title": "tt0063350", "saved": true })).await;
     h.play_title("tt0063350", Some(&night[3]), None).await;
@@ -322,7 +322,8 @@ async fn a_crash_before_rm_delete_gets_to_the_files_keeps_what_is_at_their_names
 async fn saving_a_title_while_its_play_leaves_the_plays_folder_keeps_the_play_and_its_files() {
     let gate =
         Gate::holding(|event| matches!(event, EngineEvent::Removed { id } if *id == TorrentId::from_bytes([0xa4; 20])));
-    let (h, night) = night_with(Outside { plays_max: 200 * MIB, gate: Some(gate.clone()), ..Outside::default() });
+    let (h, night) =
+        night_with(Outside { plays_max: 200 * MIB, gate: Some(gate.clone()), timing: PATIENT, ..Outside::default() });
     h.swarm.set_rate(100 * MIB);
     h.play_title("tt0063350", Some(&night[3]), None).await;
     let folder = h.play_folder(&night[3]);

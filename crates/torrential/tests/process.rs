@@ -850,7 +850,9 @@ fn play_opens_the_configured_player_with_the_subtitles_and_the_system_language()
 #[test]
 fn a_killed_engine_comes_back_with_the_download_running() {
     let home = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "1MiB");
-    assert_eq!(home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]).code, 0);
+    let began = Instant::now();
+    let get = home.run(&["get", &magnet(10 << 30), "--dir", &home.downloads()]);
+    assert_eq!(get.code, 0, "after {:?}: {}\nengine log:\n{}", began.elapsed(), get.stderr, home.log());
     let (pid, _) = home.engine().unwrap();
     kill(pid);
     eventually("the killed engine is gone", Duration::from_secs(5), || !alive(pid));
