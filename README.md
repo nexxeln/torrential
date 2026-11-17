@@ -59,7 +59,7 @@ docker exec torrential torrential devices add
 
 Templates for [Unraid](docker/unraid/torrential.xml) and [TrueNAS](docker/truenas/torrential.yaml) set the same up. A newer image updates it. Its config file is `/data/config/config.yaml`.
 
-To watch away from home, install [Tailscale](https://tailscale.com) on the server and on your devices. The pairing link then shows the server's tailnet name too, which works from any network with no port opened. With a domain of your own, put [Caddy](https://caddyserver.com) in front, which gets the HTTPS certificate, and set `public_address` in the config file so pairing links use it:
+To watch away from home, install [Tailscale](https://tailscale.com) on the server and on your devices. The pairing link and QR code then use the server's tailnet name, which works from any network with no port opened. With a domain of your own, put [Caddy](https://caddyserver.com) in front, which gets the HTTPS certificate, and set `public_address` in the config file so pairing links use it:
 
 ```
 tv.example.com {
