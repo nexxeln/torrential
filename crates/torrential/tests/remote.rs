@@ -29,10 +29,12 @@ fn refused(home: &Home, args: &[&str]) -> (i32, String, String) {
 /// A server's engine and a laptop's torrential, which pairs with it by the link `devices add`
 /// prints. Returns the server's address on the home network and what `connect` printed.
 fn paired() -> (Home, Home, String, Value) {
-    let server = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "100GiB");
+    // A port of its own, since macOS lets a second engine take 127.0.0.1 on a port another holds
+    // on every address, and these tests run at once.
+    let server = Home::new().with(hooks::ENGINE, "fake").with(hooks::FAKE_RATE, "100GiB").with(hooks::HTTP_PORT, "0");
     // Windows names the system's Downloads folder whatever HOME says.
     server.write_config(&format!("downloads:\n  dir: '{}'\n", server.path("dl").display()));
-    let laptop = Home::new().with(hooks::ENGINE, "fake");
+    let laptop = Home::new().with(hooks::ENGINE, "fake").with(hooks::HTTP_PORT, "0");
     let offer = server.json(&["devices", "add", "--json"]);
     let lan = offer["offer"]["lan_address"].as_str().expect("this test needs an address on a home network").to_string();
     let link = format!("http://{lan}/pair#{}", offer["offer"]["code"].as_str().unwrap());
@@ -109,7 +111,7 @@ fn connect_drives_the_engine_on_another_machine_and_never_starts_one_here() {
 
 #[test]
 fn pull_copies_a_finished_download_from_the_engine_on_another_machine_and_again_changes_nothing() {
-    let alone = Home::new().with(hooks::ENGINE, "fake");
+    let alone = Home::new().with(hooks::ENGINE, "fake").with(hooks::HTTP_PORT, "0");
     let (code, kind, said) = refused(&alone, &["pull", "4c1e9a"]);
     assert_eq!((code, kind.as_str()), (6, "not_paired"));
     assert!(said.starts_with("torrential pull copies a download from an engine on another machine"), "{said}");

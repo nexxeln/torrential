@@ -103,7 +103,6 @@ fn runs(command: &Command) -> Runs {
         | Command::Tui
         | Command::Daemon { command: DaemonCommand::Status } => Runs::Engine,
         Command::Connect(_)
-        | Command::Server { .. }
         | Command::Doctor(_)
         | Command::Schema
         | Command::Completions { .. }
