@@ -202,6 +202,7 @@ torrential_core::words! {
         Get = "get",
         Play = "play",
         Progress = "progress",
+        Pull = "pull",
         Result = "result",
         Schema = "schema",
         Server = "server",

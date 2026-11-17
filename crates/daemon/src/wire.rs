@@ -296,6 +296,11 @@ pub fn post(address: &Address, token: &str, client: Client, request: &Request, w
     Ok(if head.status == 200 { Answer::Frames(reader) } else { Answer::Status(head.status) })
 }
 
+/// Where an engine serves file `index` of download `id`, whole or in ranges, under its own name.
+pub fn file_route(id: torrential_core::TorrentId, index: u32, path: &str) -> String {
+    crate::daemon::http::route_of(id, index, path)
+}
+
 /// Sends `request` to this machine's engine and reads its reply, which comes in one frame.
 pub fn ask(access: &Access, client: Client, request: &Request) -> io::Result<Response> {
     match post(&access.address(), &access.token, client, request, request.within())? {
