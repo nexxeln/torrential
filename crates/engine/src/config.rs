@@ -34,8 +34,8 @@ impl Config {
 }
 
 /// Where the session accepts peers, and which way its own connections leave. Port 0 lets the OS
-/// choose. A taken port is not an error: libtorrent tries the next 10 ports, then lets the OS
-/// choose. `Session::listen_port` reports the port it got.
+/// choose. A port of `Addresses` that another program holds, or that the system refuses, is not an
+/// error: the session takes one the OS chooses. `Session::listen_port` reports the port it got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listen {
     /// Accept peers on these addresses. Connections to peers, trackers and the DHT leave by the

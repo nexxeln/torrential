@@ -6,8 +6,9 @@ use torrential_core::TorrentId;
 
 use crate::alert::Alert;
 use crate::bridge::{self, ffi};
-use crate::config::{Config, Dht, DhtState};
+use crate::config::{Config, Dht, DhtState, Listen};
 use crate::error::{EngineError, ErrorKind};
+use crate::port;
 use crate::torrent::{
     AddTorrent, Added, FileEntry, FileIndex, FilePriority, Metainfo, MissingPieces, SelectedPieces, TorrentStatus,
     WrittenPieces,
@@ -37,7 +38,11 @@ impl Session {
         {
             return Err(EngineError::new(ErrorKind::InvalidInput, "dht_state needs at least one DHT bootstrap node"));
         }
-        let native = ffi::new_session(&bridge::settings(&config)).map_err(bridge::error)?;
+        let listen = match config.listen {
+            Listen::Addresses(addresses) => Listen::Addresses(addresses.into_iter().map(port::bindable).collect()),
+            interface => interface,
+        };
+        let native = ffi::new_session(&bridge::settings(&Config { listen, ..config })).map_err(bridge::error)?;
         Ok(Session { native })
     }
 

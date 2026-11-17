@@ -7,7 +7,11 @@ links = "torrent-rasterbar"
 
 [dependencies]
 cxx = "1"
+socket2 = "0.6"
 torrential-core = { path = "../core" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
 [build-dependencies]
 cmake = "0.1"
