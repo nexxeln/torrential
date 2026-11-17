@@ -129,12 +129,13 @@ fn audience(mode: Mode, env: &Env, stderr_is_terminal: bool) -> Option<Audience>
     }
 }
 
-/// Prints, after a command, that the engine added the login service and that an update is
-/// out, each once.
+/// Prints, after a command, that the engine it used does not run this torrential, that the
+/// engine added the login service, and that an update is out, each once.
 fn print_notices(mode: Mode, env: &Env) {
     let Some(audience) = audience(mode, env, std::io::stderr().is_terminal()) else { return };
     let Ok(paths) = Paths::from_process(env) else { return };
     let lines = [
+        client::connect::notice(audience),
         service::notice(&paths, audience),
         client::update::notice(&paths, env, audience, torrential_core::time::now()),
     ];

@@ -17,6 +17,8 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
     match command {
         DaemonCommand::Status => {
+            let service_binary = service::starts_another(env, &paths);
+            let this_version = env.version();
             let report = match connect::running(&paths, env)? {
                 Some(mut conn) => {
                     let jobs = conn.ask::<Vec<Job>>(&Request::Status { refs: Vec::new() });
@@ -24,10 +26,13 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     DaemonReport {
                         engine: "running",
                         pid: Some(conn.pid),
+                        notice: connect::mismatch(Some(&conn.engine_version), service_binary.as_deref(), &this_version),
                         version: Some(conn.engine_version.clone()),
                         address: Some(format!("http://127.0.0.1:{}", conn.http_port)),
                         log: paths.log().display().to_string(),
                         downloads,
+                        this_version,
+                        service_binary,
                     }
                 }
                 None => DaemonReport {
@@ -37,6 +42,9 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     address: None,
                     log: paths.log().display().to_string(),
                     downloads: None,
+                    notice: connect::mismatch(None, service_binary.as_deref(), &this_version),
+                    this_version,
+                    service_binary,
                 },
             };
             Ok(emit(mode, &daemon_status(&report), &Typed { kind: DocKind::Daemon, body: &report }))
@@ -119,6 +127,12 @@ pub struct DaemonReport {
     pub address: Option<String>,
     pub log: String,
     pub downloads: Option<usize>,
+    /// The version of this torrential, which the engine should run.
+    pub this_version: String,
+    /// The binary the login service starts, when it is not this torrential.
+    pub service_binary: Option<String>,
+    /// Why the engine may not run this torrential, and how to make it, in plain words.
+    pub notice: Option<String>,
 }
 
 pub fn daemon_status(report: &DaemonReport) -> Doc {
@@ -136,10 +150,14 @@ pub fn daemon_status(report: &DaemonReport) -> Doc {
     if let Some(address) = &report.address {
         fields.push(("address", Cell::new(address.clone())));
     }
+    if let Some(service) = &report.service_binary {
+        fields.push(("service", Cell::new(service.clone())));
+    }
     fields.push(("log", Cell::new(report.log.clone())));
+    let next = if report.service_binary.is_some() { "torrential engine install" } else { "torrential status" };
     Doc {
         body: Body::Fields { title: Vec::new(), fields },
-        summary: Vec::new(),
-        next: Some("torrential status".to_string()),
+        summary: report.notice.iter().cloned().collect(),
+        next: Some(next.to_string()),
     }
 }

@@ -20,6 +20,9 @@ next:      torrential status
   "address": "http://127.0.0.1:47919",
   "log": "/Users/ada/.local/state/torrential/engine.log",
   "downloads": 2,
+  "this_version": "0.1.0",
+  "service_binary": null,
+  "notice": null,
   "next": "torrential status"
 }
 engine: stopped
@@ -36,5 +39,33 @@ next:   torrential status
   "address": null,
   "log": "/Users/ada/.local/state/torrential/engine.log",
   "downloads": null,
+  "this_version": "0.1.0",
+  "service_binary": null,
+  "notice": null,
   "next": "torrential status"
+}
+engine:    running
+pid:       4242
+version:   0.0.9
+downloads: 2
+address:   http://127.0.0.1:47919
+service:   /opt/old/torrential
+log:       /Users/ada/.local/state/torrential/engine.log
+# the engine runs torrential 0.0.9 from /opt/old/torrential, which the login service starts, not this torrential 0.1.0; run torrential engine install to have it start this one
+next:      torrential engine install
+
+--- json
+{
+  "schema": 1,
+  "type": "daemon",
+  "engine": "running",
+  "pid": 4242,
+  "version": "0.0.9",
+  "address": "http://127.0.0.1:47919",
+  "log": "/Users/ada/.local/state/torrential/engine.log",
+  "downloads": 2,
+  "this_version": "0.1.0",
+  "service_binary": "/opt/old/torrential",
+  "notice": "the engine runs torrential 0.0.9 from /opt/old/torrential, which the login service starts, not this torrential 0.1.0; run torrential engine install to have it start this one",
+  "next": "torrential engine install"
 }
