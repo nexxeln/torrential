@@ -929,6 +929,36 @@ async fn a_download_here_that_holds_the_film_plays_before_any_search() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn while_the_torrent_interface_is_down_a_title_play_fails_at_once_unless_its_film_is_here() {
+    let (h, night) = night();
+    h.play_for(&night[3], &[0], Some("tt0063350")).await.unwrap();
+    h.until("the film is here", |jobs| jobs[0].status.name() == "done").await;
+    h.swarm.interface("wg0", false);
+    while h.running.ctx.owner.ask(|reply| Command::WaitingFor { reply }).await.unwrap().is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        h.play_title("tt0063350", None, None).await,
+        [
+            "resolved tt0063350 Night of the Living Dead",
+            "trying 1 of 1 night_of_the_living_dead",
+            "check file_list",
+            "check start",
+            "check first_bytes",
+            "playing tt0063350 a4a4a4 file 0 at null",
+        ]
+    );
+    assert_eq!(
+        h.play_title("tt0100258", None, None).await,
+        [
+            "resolved tt0100258 Night of the Living Dead",
+            "failed network_unavailable: torrential is waiting for wg0, the torrent_interface in config.yaml, to come up []",
+        ]
+    );
+    assert_eq!((h.search.searches(), h.status().await.len()), (0, 1), "no source was looked for or tried");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_title_whose_download_is_here_plays_while_the_catalog_search_is_unreachable() {
     let h = Harness::with_titles(Arc::new(catalog_port::Fake::without_search()));
     let film = torrent(0xa4, "night_of_the_living_dead", &[("night_of_the_living_dead.mp4", 700 * MIB)]);

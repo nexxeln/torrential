@@ -205,6 +205,7 @@ pub enum Command {
     Cache { metainfo: Metainfo },
     Cached { id: TorrentId, reply: Reply<Option<Arc<Metainfo>>> },
     Status { refs: Vec<String>, reply: Reply<Vec<Job>> },
+    WaitingFor { reply: Reply<Option<String>> },
     Pause { refs: Vec<String>, reply: Reply<Vec<Change>> },
     Resume { refs: Vec<String>, all: bool, reply: Reply<Vec<Change>> },
     Remove { refs: Vec<String>, delete: bool, reply: Reply<Vec<Change>> },
@@ -451,6 +452,9 @@ impl Owner {
             }
             Command::Status { refs, reply } => {
                 let _ = reply.send(self.resolve_jobs(&refs, "status").map(|ids| self.views(&ids)));
+            }
+            Command::WaitingFor { reply } => {
+                let _ = reply.send(Ok(self.waiting_for.clone()));
             }
             Command::Pause { refs, reply } => match self.resolve_jobs(&refs, "pause") {
                 Ok(ids) => {
