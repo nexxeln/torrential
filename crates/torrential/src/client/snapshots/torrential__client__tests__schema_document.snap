@@ -442,6 +442,33 @@ expression: "serde_json::to_string_pretty(&value).unwrap()"
       ]
     },
     {
+      "name": "connect",
+      "about": "Drive the engine on another machine, such as a server or a NAS, or this machine's again",
+      "arguments": [
+        {
+          "name": "ADDRESS",
+          "help": "The engine's address: the link torrential devices add shows there, a URL, a host:port, or a machine's name, such as its Tailscale name",
+          "required": false,
+          "repeatable": false
+        }
+      ],
+      "flags": [
+        {
+          "name": "--code",
+          "help": "The code torrential devices add shows on the engine's machine",
+          "takes_value": true,
+          "repeatable": false,
+          "value_name": "CODE"
+        },
+        {
+          "name": "--local",
+          "help": "Drive this machine's engine again",
+          "takes_value": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
       "name": "status",
       "about": "List downloads, or show one in detail",
       "arguments": [

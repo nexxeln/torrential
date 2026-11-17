@@ -3312,6 +3312,8 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rustix",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde-saphyr",
  "serde_json",

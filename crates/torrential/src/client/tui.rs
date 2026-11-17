@@ -11,6 +11,7 @@ use torrential_tui::{ColorMode, Edit, Exit};
 
 use super::connect::{self, Conn};
 use super::play::{self, Playing};
+use super::remote::{self, Remotes};
 use super::titles;
 use torrential_daemon::config::{self, Config};
 use torrential_daemon::disk::{Disk, RealDisk};
@@ -97,6 +98,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn play(&self, reference: &str) -> Result<String, Error> {
+        remote::local_only(&self.paths, super::PLAYS_HERE)?;
         let config = Config::load(&self.paths, &self.env)?;
         let mut conn = self.conn()?;
         let target = Target::Prefix(reference.to_string());
@@ -137,6 +139,9 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn free_space(&self) -> Option<u64> {
+        if Remotes::using(&self.paths).ok()?.is_some() {
+            return None;
+        }
         RealDisk.space(&self.downloads).ok().map(|space| space.free)
     }
 
@@ -149,6 +154,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn save_preferences(&self, edit: Edit) -> Result<Preferences, Error> {
+        remote::local_only(&self.paths, super::SETTINGS_HERE)?;
         let preferences = edit.apply(config::preferences(&self.paths)?);
         let writes = Writes::new(&self.env, "torrential setup".into());
         config::save_preferences(&self.paths, &preferences, &writes)?;
@@ -169,6 +175,8 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn open(&self, folder: &Path) -> Result<(), Error> {
+        let elsewhere = ("the download's folder is on the machine that runs the engine", "open it on that machine");
+        remote::local_only(&self.paths, elsewhere)?;
         torrential_daemon::player::open_url(&folder.display().to_string(), &self.env)
     }
 
@@ -187,6 +195,7 @@ impl torrential_tui::Backend for EngineBackend {
     }
 
     fn play_title(&self, video: &VideoRef, step: &mut dyn FnMut(AttemptEvent)) -> Result<(String, TitlePlayed), Error> {
+        remote::local_only(&self.paths, super::PLAYS_HERE)?;
         let config = Config::load(&self.paths, &self.env)?;
         let mut conn = self.conn()?;
         let request = TitleRequest { video: video.clone(), source: None };

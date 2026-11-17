@@ -47,3 +47,7 @@ A `# update:` line means a newer torrential is out. Tell the user once and offer
 `torrential play <title id, torrent id, or search words>` opens the user's player on the video while it downloads, and for a title ID first finds a torrent that starts, as `get` does. Run it only when the user asks to watch something. With `--json` it opens nothing and returns `streams[0].url`, a local URL any player can open while the download continues. A title it plays downloads into torrential's plays folder, which drops the plays watched longest ago once they pass 20 GiB. To keep a file, use `get`.
 
 `torrential tv` lists the TVs on the home network (any smart TV with DLNA). When the user asks to watch on the TV, run `torrential tv play <title id or torrent id>`, with `--tv <part of its name>` if more than one answers. It returns once the TV plays, and the cast goes on without you. `torrential tv pause`, `resume`, `seek 1:02:30`, `volume 20`, and `stop` work the remote.
+
+## Another machine's engine
+
+`torrential connect <address>` makes every command drive the engine on a server or NAS, after the user runs `torrential devices add` there and passes its code with `--code` or its link. Run it only when the user asks. Downloads then run and land on that machine, and `torrential engine status` shows its `address`. `play` and `setup` work only with this machine's engine, so use `torrential web` or `torrential tv play` instead. `torrential connect --local` switches back.

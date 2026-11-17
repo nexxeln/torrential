@@ -153,6 +153,12 @@ impl Paths {
         self.state.join("engine-token")
     }
 
+    /// The engines on other machines that `torrential connect` paired with, their device tokens,
+    /// and the one this torrential drives, which only this user can read.
+    pub fn remotes(&self) -> PathBuf {
+        self.state.join("remotes.json")
+    }
+
     /// Left by an engine that exits for the login service to start the next one.
     pub fn switching(&self) -> PathBuf {
         self.state.join("engine.switching")

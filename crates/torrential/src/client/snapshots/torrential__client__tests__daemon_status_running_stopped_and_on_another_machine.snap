@@ -38,3 +38,24 @@ next:   torrential status
   "downloads": null,
   "next": "torrential status"
 }
+engine:    running
+pid:       4242
+version:   0.1.0
+downloads: 2
+address:   http://nas.local:47919
+device:    3f9a0c2e
+# an engine on another machine; torrential connect --local drives this machine's
+next:      torrential status
+
+--- json
+{
+  "schema": 1,
+  "type": "daemon",
+  "engine": "running",
+  "pid": 4242,
+  "version": "0.1.0",
+  "address": "http://nas.local:47919",
+  "device": "3f9a0c2e",
+  "downloads": 2,
+  "next": "torrential status"
+}

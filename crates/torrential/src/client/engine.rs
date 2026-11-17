@@ -5,6 +5,7 @@ use torrential_core::Error;
 use torrential_core::Job;
 use torrential_core::protocol::Request;
 
+use super::remote::Remotes;
 use super::{connect, emit, launch};
 use crate::cli::DaemonCommand;
 use crate::output::theme::Token;
@@ -17,7 +18,13 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
     let paths = Paths::from_process(env)?;
     match command {
         DaemonCommand::Status => {
-            let report = match connect::running(&paths, env)? {
+            let chosen = Remotes::using(&paths)?;
+            let found = match &chosen {
+                Some(chosen) => Some(connect::remote(chosen, env)?),
+                None => connect::running(&paths, env)?,
+            };
+            let log = chosen.is_none().then(|| paths.log().display().to_string());
+            let report = match found {
                 Some(mut conn) => {
                     let jobs = conn.ask::<Vec<Job>>(&Request::Status { refs: Vec::new() });
                     let downloads = jobs.ok().map(|jobs| jobs.len());
@@ -25,8 +32,9 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                         engine: "running",
                         pid: Some(conn.pid),
                         version: Some(conn.engine_version.clone()),
-                        address: Some(format!("http://127.0.0.1:{}", conn.http_port)),
-                        log: paths.log().display().to_string(),
+                        address: Some(conn.engine.address().to_string()),
+                        device: chosen.map(|chosen| chosen.device),
+                        log,
                         downloads,
                     }
                 }
@@ -35,7 +43,8 @@ pub fn run(command: DaemonCommand, env: &Env, mode: Mode) -> Result<u8, Error> {
                     pid: None,
                     version: None,
                     address: None,
-                    log: paths.log().display().to_string(),
+                    device: None,
+                    log,
                     downloads: None,
                 },
             };
@@ -115,9 +124,14 @@ pub struct DaemonReport {
     pub engine: &'static str,
     pub pid: Option<u32>,
     pub version: Option<String>,
-    /// Where the engine serves the web app and this user's torrential.
+    /// Where the engine serves the web app and this torrential's requests.
     pub address: Option<String>,
-    pub log: String,
+    /// This machine's device ID on the engine on another machine that `torrential connect` chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The log of this machine's engine. An engine on another machine keeps its own there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
     pub downloads: Option<usize>,
 }
 
@@ -136,10 +150,13 @@ pub fn daemon_status(report: &DaemonReport) -> Doc {
     if let Some(address) = &report.address {
         fields.push(("address", Cell::new(address.clone())));
     }
-    fields.push(("log", Cell::new(report.log.clone())));
-    Doc {
-        body: Body::Fields { title: Vec::new(), fields },
-        summary: Vec::new(),
-        next: Some("torrential status".to_string()),
+    let mut summary = Vec::new();
+    if let Some(device) = &report.device {
+        fields.push(("device", Cell::new(device.clone())));
+        summary.push("an engine on another machine; torrential connect --local drives this machine's".to_string());
     }
+    if let Some(log) = &report.log {
+        fields.push(("log", Cell::new(log.clone())));
+    }
+    Doc { body: Body::Fields { title: Vec::new(), fields }, summary, next: Some("torrential status".to_string()) }
 }
