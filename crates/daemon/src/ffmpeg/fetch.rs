@@ -848,7 +848,7 @@ mod tests {
         assert_eq!((newer.found().readiness(), newer.refused()), (Readiness::Fetch, None));
 
         let bin = dir.path().join("bin");
-        let installed = Tools { ffmpeg: Some(bin.join("ffmpeg")), ffprobe: Some(bin.join("ffprobe")) };
+        let installed = Tools { ffmpeg: Some(programs(&bin).ffmpeg), ffprobe: Some(programs(&bin).ffprobe) };
         assert_eq!(ffmpeg(installed, &build).found(), Found::Installed(programs(&bin)));
     }
 
