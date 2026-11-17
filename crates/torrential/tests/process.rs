@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use torrential_core::protocol::{Request, WIRE_VERSION, encode_frame, read_frame};
+use torrential_core::protocol::{Request, WIRE_VERSION};
 use torrential_daemon::wire::{Access, Client};
 
 mod common;
@@ -849,85 +849,6 @@ fn a_command_that_finds_an_engine_it_cannot_reach_says_to_stop_it() {
         )
     );
     assert!(alive(pid), "the engine runs until the person stops it");
-}
-
-/// What torrential 0.5.2 asks a release's engine at 0.5's socket before it installs the release.
-/// It takes jobs or a `daemon_version` error as the answer to the status, then waits for a clean exit.
-// Remove in 0.7
-// It plays an engine from before 0.6, which listened on a Unix socket.
-#[cfg(unix)]
-#[test]
-fn an_engine_passes_the_trial_torrential_0_5_runs_before_it_installs_a_release() {
-    use std::io::Write;
-    use std::process::Stdio;
-    let home = Home::new();
-    let mut engine = home
-        .process(&["daemon", "run", "--http-port", "0"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let socket = home.path("th/run/engine.sock");
-    let mut found = None;
-    eventually("the engine listens at 0.5's socket", Duration::from_secs(20), || {
-        found = std::os::unix::net::UnixStream::connect(&socket).ok();
-        found.is_some()
-    });
-    let mut stream = found.unwrap();
-    let mut ask = |json: &str| {
-        stream.write_all(&[&(json.len() as u32).to_be_bytes()[..], json.as_bytes()].concat()).unwrap();
-        read_frame::<Value>(&mut stream)
-    };
-
-    let hello = ask(r#"{"op":"hello","client_version":"0.5.2","wire":10}"#).unwrap();
-    let status = ask(r#"{"op":"status","refs":[]}"#).unwrap();
-    let _ = ask(r#"{"op":"shutdown","asked":true}"#);
-
-    let message =
-        format!("the engine runs the newer torrential {}, so restart this torrential", env!("CARGO_PKG_VERSION"));
-    let refusal = json!({"type": "error", "error": {"code": "daemon_version", "message": message}});
-    assert_eq!([hello, status], [Some(refusal.clone()), Some(refusal)]);
-    let mut exited = None;
-    eventually("the engine stops", Duration::from_secs(20), || {
-        exited = engine.try_wait().unwrap();
-        exited.is_some()
-    });
-    assert!(exited.unwrap().success(), "{:?}", exited);
-    assert!(!socket.exists(), "the engine removed 0.5's socket");
-}
-
-/// A torrential 0.5 engine still runs after `torrential update` installs this release, and answers
-/// only at 0.5's socket. It stops when a newer client asks it to make way.
-// Remove in 0.7
-// It plays an engine from before 0.6, which listened on a Unix socket.
-#[cfg(unix)]
-#[test]
-fn a_command_asks_an_engine_from_torrential_0_5_to_make_way_and_starts_its_own() {
-    use std::io::Write;
-    let home = Home::new();
-    std::fs::create_dir_all(home.path("th/run")).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(home.path("th/run/engine.sock")).unwrap();
-    let mut old = std::process::Command::new("sleep").arg("60").spawn().unwrap();
-    let stand_in = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let hello: Value = read_frame(&mut stream).unwrap().unwrap();
-        let reply = json!({"type": "hello", "engine_version": "0.5.2", "wire": 10, "pid": old.id(), "http_port": 0});
-        stream.write_all(&encode_frame(&reply).unwrap()).unwrap();
-        let stop: Value = read_frame(&mut stream).unwrap().unwrap();
-        old.kill().unwrap();
-        old.wait().unwrap();
-        stream.write_all(&encode_frame(&json!({"type": "ok"})).unwrap()).unwrap();
-        [hello, stop]
-    });
-
-    let run = home.run(&["status"]);
-
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(stand_in.is_finished(), "the command never asked the 0.5 engine to make way");
-    let [hello, stop] = stand_in.join().unwrap();
-    assert_eq!(hello, json!({"op": "hello", "client_version": env!("CARGO_PKG_VERSION"), "wire": 10}));
-    assert_eq!(stop, json!({"op": "shutdown", "asked": false}));
-    assert_eq!(home.engine().map(|(_, version)| version).as_deref(), Some(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
