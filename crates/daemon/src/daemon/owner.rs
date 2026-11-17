@@ -288,6 +288,9 @@ pub struct Owner {
     /// The disk, and which folders on it answer now. The owner looks in a folder only through it.
     reach: Reach,
     parked: Vec<Parked>,
+    /// Downloads whose file list came while their folder did not answer. The engine downloads
+    /// none of their files until the folder answers and they are admitted.
+    unadmitted: BTreeSet<TorrentId>,
     updates: broadcast::Sender<Update>,
     config: OwnerConfig,
     resume_saved_at: Instant,
@@ -345,6 +348,7 @@ impl Owner {
             parse,
             reach: Reach::new(disk, vec![config.plays.root.clone()]),
             parked: Vec::new(),
+            unadmitted: BTreeSet::new(),
             updates,
             config,
             resume_saved_at: Instant::now(),
@@ -554,6 +558,11 @@ impl Owner {
             }
         }
         if answered {
+            for id in std::mem::take(&mut self.unadmitted) {
+                if self.jobs.contains_key(&id) {
+                    self.admit(id);
+                }
+            }
             self.put_back_all();
             self.schedule();
         }
@@ -1519,7 +1528,18 @@ impl Owner {
         let job = self.jobs.get_mut(&id).expect("caller checked");
         job.record.name = Some(metainfo.name.clone());
         job.record.info_hash = metainfo.info_hash;
-        job.metainfo = Some(metainfo.clone());
+        job.metainfo = Some(metainfo);
+        self.admit(id);
+        let info = self.job_files(id).expect("metadata just stored");
+        self.reply_metadata_waiters(id, Ok(info));
+    }
+
+    /// Checks a download whose file list arrived against its folder, its size cap and the other
+    /// downloads, then gives the engine its files or stops it with why. One whose folder does not
+    /// answer waits in `unadmitted`, with no file selected, until it does.
+    fn admit(&mut self, id: TorrentId) {
+        let job = &self.jobs[&id];
+        let metainfo = job.metainfo.clone().expect("admitted once its file list is here");
         let (dir, cap, selection) = (job.record.dir.clone(), job.record.cap, job.record.selection.clone());
         let admitted = self.plan(&metainfo, &selection, &dir).and_then(|plan| {
             admission::check_size(plan.selected_size, cap, Some(id))?;
@@ -1535,14 +1555,12 @@ impl Owner {
                     self.engine.send(id, move |e| e.select(id, &plan.wanted));
                 }
                 self.publish(id);
-                let info = self.job_files(id).expect("metadata just stored");
-                self.reply_metadata_waiters(id, Ok(info));
             }
-            Err(error) => {
-                let info = self.job_files(id).expect("metadata just stored");
-                self.reply_metadata_waiters(id, Ok(info));
-                self.fail(id, error);
+            Err(_) if !self.reach.reached(&dir) => {
+                self.unadmitted.insert(id);
+                self.publish(id);
             }
+            Err(error) => self.fail(id, error),
         }
     }
 
