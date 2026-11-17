@@ -1,7 +1,7 @@
 //! `torrential pull`: copies a finished download's files from the engine on another machine to
 //! this one through the engine's file route, and goes on from where a cut transfer stopped.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -128,7 +128,8 @@ fn progress(mode: Mode, total: u64) -> ProgressBar {
 
 /// Copies the `size` bytes of the file at `route` to `path` through `path.part`, going on from
 /// what an earlier pull left there, and returns how much that was. A file already at `path` at
-/// its full size stays as it is.
+/// its full size stays as it is. A pull holds `path.part` locked until it is renamed, and another
+/// pull of the same file meanwhile is refused.
 fn copy(remote: &Remote, route: &str, size: u64, path: &Path, bar: &ProgressBar) -> Result<u64, Error> {
     let failed = |e: std::io::Error, what: &Path| {
         Error::new(ErrorCode::StorageError, format!("cannot write {}: {e}", what.display()))
@@ -153,6 +154,17 @@ fn copy(remote: &Remote, route: &str, size: u64, path: &Path, bar: &ProgressBar)
     }
     let mut out =
         OpenOptions::new().create(true).write(true).truncate(false).open(&part).map_err(|e| failed(e, &part))?;
+    match out.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(Error::new(
+                ErrorCode::PathConflict,
+                format!("another torrential pull is copying {} now", path.display()),
+            )
+            .with_hint("wait for that pull to finish"));
+        }
+        Err(TryLockError::Error(e)) => return Err(failed(e, &part)),
+    }
     let length = |out: &File| out.metadata().map(|meta| meta.len()).map_err(|e| failed(e, &part));
     let resumed_at = length(&out)?.min(size);
     bar.inc(resumed_at);
@@ -179,7 +191,8 @@ fn copy(remote: &Remote, route: &str, size: u64, path: &Path, bar: &ProgressBar)
             Err(error) => return Err(error),
         }
     }
-    drop(out);
+    // Renamed while still locked, so a pull that opens `path.part` just before never finds it
+    // whole and unlocked.
     std::fs::rename(&part, path).map_err(|e| failed(e, path))?;
     Ok(resumed_at)
 }
@@ -359,6 +372,33 @@ mod tests {
         assert_eq!(served.join().unwrap(), [None, Some("1200000-".to_string())]);
         assert_eq!((resumed_at, std::fs::read(&path).unwrap() == bytes), (0, true));
         assert!(!partial(&path).exists());
+    }
+
+    #[test]
+    fn a_second_pull_of_a_file_another_pull_is_copying_is_refused_and_leaves_its_part_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Sintel.mkv");
+        let bytes = film();
+        let (address, served) = engine(bytes.clone(), None);
+        let remote = Remote { address, token: "ab".repeat(32), device: "3f9a0c2e".into() };
+        let mut first = OpenOptions::new().create(true).write(true).truncate(false).open(partial(&path)).unwrap();
+        first.try_lock().unwrap();
+        first.write_all(&bytes[..700_000]).unwrap();
+
+        let second = copy(&remote, "/9b52/0/Sintel.mkv", bytes.len() as u64, &path, &ProgressBar::hidden());
+
+        let refused = second.unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message),
+            (ErrorCode::PathConflict, format!("another torrential pull is copying {} now", path.display()))
+        );
+        drop(first);
+        assert!(std::fs::read(partial(&path)).unwrap() == bytes[..700_000], "the first pull's bytes stay as they were");
+        assert!(!path.exists());
+        let resumed_at =
+            copy(&remote, "/9b52/0/Sintel.mkv", bytes.len() as u64, &path, &ProgressBar::hidden()).unwrap();
+        assert_eq!(served.join().unwrap(), [Some("700000-".to_string())]);
+        assert_eq!((resumed_at, std::fs::read(&path).unwrap() == bytes), (700_000, true));
     }
 
     #[test]
