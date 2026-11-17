@@ -605,24 +605,30 @@ async fn a_folder_that_stops_answering_holds_up_only_what_needs_it() {
     answers_at_once().await;
 }
 
-/// A file list that comes while its download's folder does not answer stops the download, which
-/// says why.
+/// A file list that comes while its download's folder does not answer waits with nothing
+/// selected, and the download goes on by itself once the folder answers.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_file_list_that_comes_while_the_folder_does_not_answer_stops_the_download() {
+async fn a_file_list_that_comes_while_the_folder_does_not_answer_downloads_once_it_does() {
     let gate = Gate::holding(|event| matches!(event, EngineEvent::Metadata { .. }));
     let outside = Outside { gate: Some(gate.clone()), ..Outside::default() };
     let h = Harness::with_outside(fake::Search::new(vec![]), outside);
     let film = torrent(33, "film", &[("film.mkv", GIB)]);
     h.swarm.publish(film.clone());
+    h.swarm.set_rate(GIB);
     gate.close();
     h.get(magnet(&film), &[]).await.unwrap();
     gate.until_held(1).await;
-    let _stalled = h.disk.stall(h.downloads(), h.dir.path().join("stall"));
+    let stalled = h.disk.stall(h.downloads(), h.dir.path().join("stall"));
     gate.open();
-    let jobs = h.until("it stops", |jobs| jobs[0].status.name() == "error").await;
-    let JobStatus::Error { error } = &jobs[0].status else { unreachable!() };
-    assert_eq!(error.message, format!("torrential is waiting for access to {}", h.downloads().display()));
+    let jobs = h.until("its file list is here", |jobs| jobs[0].name.is_some()).await;
+    assert_eq!(
+        (jobs[0].status.name(), jobs[0].progress.verified),
+        ("metadata", 0),
+        "nothing downloads into a folder that does not answer"
+    );
+    drop(stalled);
+    h.until("it downloads once the folder answers", |jobs| jobs[0].status.name() == "done").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
