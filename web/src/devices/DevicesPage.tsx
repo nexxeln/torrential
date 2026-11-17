@@ -50,6 +50,11 @@ function Offer({ offer, now }: { offer: PairingOffer; now: number }) {
             If the TV cannot open that address, use <span className="text-soft">{offer.lan_address}</span>.
           </p>
         )}
+        {offer.tailnet_address && offer.tailnet_address !== offer.address && (
+          <p className="text-pencil">
+            Away from home, a device on your tailnet opens <span className="text-soft">{offer.tailnet_address}</span>.
+          </p>
+        )}
         <p className="text-pencil tabular-nums">The code works for {remaining(offer.expires_at - now)} more and lets one device in.</p>
       </div>
     </section>

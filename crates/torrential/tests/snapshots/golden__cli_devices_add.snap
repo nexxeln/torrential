@@ -13,6 +13,7 @@ expression: value
       "url": "[redacted]",
       "address": "[redacted]",
       "lan_address": "[redacted]",
+      "tailnet_address": "[redacted]",
       "expires_at": "[redacted]"
     },
     "unreachable": null,

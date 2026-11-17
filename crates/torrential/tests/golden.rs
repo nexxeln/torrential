@@ -44,6 +44,7 @@ const VOLATILE: &[&str] = &[
     "qr",
     "saved_at",
     "started_at",
+    "tailnet_address",
     "took_ms",
     "updated_at",
     "uptime",
