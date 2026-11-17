@@ -35,7 +35,7 @@ impl WebSeeds {
         web_seeds: &[String],
     ) -> Option<impl Future<Output = Result<Vec<String>, Error>> + Send + 'static + use<>> {
         let inner = self.0.clone();
-        if let Some(item) = self.0.sources.iter().find_map(|s| s.archive_item(name, web_seeds)) {
+        if let Some(item) = self.0.registry().enabled.iter().find_map(|s| s.archive_item(name, web_seeds)) {
             let lookup = match self.0.asked_servers(&item) {
                 Some(asked) => asked.boxed(),
                 None => async move { item.mirrors(&inner.http).await }.boxed(),

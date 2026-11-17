@@ -200,6 +200,7 @@ torrential_core::words! {
         Error = "error",
         Files = "files",
         Get = "get",
+        Indexers = "indexers",
         Play = "play",
         Progress = "progress",
         Pull = "pull",

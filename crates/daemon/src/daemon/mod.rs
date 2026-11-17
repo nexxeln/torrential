@@ -10,6 +10,7 @@ pub(crate) mod engine_port;
 pub mod fake;
 pub mod files;
 pub(crate) mod http;
+pub(crate) mod indexers;
 pub(crate) mod libtorrent;
 pub(crate) mod magnet;
 pub(crate) mod media;
@@ -82,6 +83,8 @@ pub struct Ports {
     pub catalog: Arc<dyn titles::catalog_port::CatalogPort>,
     /// Where searches for TVs go.
     pub tvs: cast::Find,
+    /// config.yaml's indexers, which the engine checks and changes.
+    pub indexers: indexers::Indexers,
 }
 
 impl Ports {
@@ -111,6 +114,7 @@ impl Ports {
             };
             Arc::new(titles::catalog_port::Live::new(&config)?)
         };
+        let indexers = indexers::Indexers::new(paths.clone(), env.clone())?;
         let tvs = match test.map(|test| test.ssdp()).transpose()?.flatten() {
             Some(address) => cast::Find::At(address),
             None => cast::Find::Multicast,
@@ -134,6 +138,7 @@ impl Ports {
                 subtitles,
                 catalog,
                 tvs,
+                indexers,
             });
         }
         let network = match test.map(|test| test.loopback_peers()).transpose()?.flatten() {
@@ -162,6 +167,7 @@ impl Ports {
             subtitles,
             catalog,
             tvs,
+            indexers,
         })
     }
 }
@@ -256,6 +262,7 @@ pub fn start(
         news: switch::Board::default(),
         devices,
         casts: cast::Casts::new(ctx.clone(), ports.tvs),
+        indexers: ports.indexers,
     });
     let http = runtime.spawn(http::accept(ctx.clone(), players, reach));
     Ok(Running { ctx, owner: task, engine: thread, http })

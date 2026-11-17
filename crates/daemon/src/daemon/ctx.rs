@@ -52,4 +52,6 @@ pub struct Ctx {
     pub devices: Arc<super::devices::Devices>,
     /// The TVs on the home network, and the casts playing on them.
     pub casts: super::cast::Casts,
+    /// The Torznab indexers in config.yaml.
+    pub indexers: super::indexers::Indexers,
 }

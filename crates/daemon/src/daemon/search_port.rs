@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use torrential_core::{Error, HexPrefix, Profile, Release, ReleaseId, SearchQuery, SearchResult};
-use torrential_search::Search;
 pub use torrential_search::{Progress, SavedLink};
+use torrential_search::{Search, SearchConfig};
 
 use super::BoxFuture;
 
@@ -21,6 +21,10 @@ pub trait SearchPort: Send + Sync {
     fn torrent_url(&self, release: &Release) -> Result<Option<String>, Error>;
     fn saved_link(&self, id: &ReleaseId) -> Option<SavedLink>;
     fn restore(&self, saved: Vec<(Release, Option<SavedLink>)>);
+    /// Searches the indexers `config` names from now on. A made-up search has none to change.
+    fn reconfigure(&self, _config: &SearchConfig) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl SearchPort for Search {
@@ -56,5 +60,9 @@ impl SearchPort for Search {
 
     fn restore(&self, saved: Vec<(Release, Option<SavedLink>)>) {
         self.cache().restore(saved);
+    }
+
+    fn reconfigure(&self, config: &SearchConfig) -> Result<(), Error> {
+        Search::reconfigure(self, config)
     }
 }

@@ -70,6 +70,14 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<DevicesCommand>,
     },
+    /// List, add, or remove the Torznab indexers the engine searches, such as Jackett's or Prowlarr's
+    #[command(
+        after_help = "Examples:\n  torrential indexers\n  torrential indexers add http://127.0.0.1:9696 --key <prowlarr api key>\n  torrential indexers add http://127.0.0.1:9117 --key <jackett api key>\n  torrential indexers add http://127.0.0.1:3333/torznab --name bitmagnet\n  torrential indexers remove thepiratebay --json"
+    )]
+    Indexers {
+        #[command(subcommand)]
+        command: Option<IndexersCommand>,
+    },
     /// List the TVs on the home network, play on one, and control what plays
     #[command(
         after_help = "Examples:\n  torrential tv\n  torrential tv play tt0063350\n  torrential tv play tt0903747 s03e05 --tv bedroom\n  torrential tv play 6bc1af --json\n  torrential tv pause\n  torrential tv seek 1:02:30"
@@ -385,6 +393,30 @@ pub enum DevicesCommand {
         /// A device ID from torrential devices
         #[arg(value_name = "ID")]
         id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IndexersCommand {
+    /// List the indexers, whether each answers now, and their categories, the default
+    List,
+    /// Check a Torznab feed, or Prowlarr's or Jackett's own address, and add each indexer it has
+    Add {
+        /// A Torznab feed URL, or the address of Prowlarr or Jackett
+        #[arg(value_name = "URL")]
+        url: String,
+        /// The name to search it by with --source, for one feed
+        #[arg(long)]
+        name: Option<String>,
+        /// The API key, from the settings page of Jackett or Prowlarr
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
+    },
+    /// Stop searching an indexer, and take it out of config.yaml
+    Remove {
+        /// A name from torrential indexers
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 }
 

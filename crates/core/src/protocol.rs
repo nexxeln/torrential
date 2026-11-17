@@ -18,6 +18,7 @@ use crate::device::DeviceList;
 use crate::error::Tried;
 use crate::error::{Error, ErrorCode};
 use crate::id::ReleaseId;
+use crate::indexer::{ApiKey, IndexerList};
 use crate::job::{Job, Selection, TorrentFile};
 use crate::release::{Release, SearchQuery, SearchResult};
 use crate::target::Target;
@@ -31,7 +32,7 @@ pub const WRITES_STOP_WITHIN: Duration = Duration::from_secs(10);
 pub const STEP_WITHIN: Duration = Duration::from_secs(240);
 const REPLY_WITHIN: Duration = Duration::from_secs(30);
 
-pub const WIRE_VERSION: u32 = 11;
+pub const WIRE_VERSION: u32 = 12;
 /// Version of every JSON document printed with `--json`.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -140,12 +141,27 @@ pub enum Request {
         release: Option<ReleaseId>,
         socket: PathBuf,
     },
+    /// The Torznab indexers in config.yaml, each asked now whether it answers.
+    Indexers,
+    /// Asks `url` whether it answers as a Torznab indexer, then writes it to config.yaml, where
+    /// the engine searches it from now on. A Prowlarr or Jackett server's own address adds each
+    /// indexer it has. An entry already there with the same URL takes the new key.
+    AddIndexer {
+        url: String,
+        name: Option<String>,
+        key: Option<ApiKey>,
+    },
+    /// Takes an indexer out of config.yaml.
+    RemoveIndexer {
+        name: String,
+    },
 }
 
 impl Request {
     /// Why a paired device may not send this request, or `None` when it may. A device reaches the
     /// engine from another machine, so it may not stop the engine, list, add or remove devices, or
-    /// name a path on the engine's machine: a folder, a `.torrent` file, or a player's socket.
+    /// name a path on the engine's machine: a folder, a `.torrent` file, or a player's socket. It
+    /// may manage the indexers, since the server's engine is the one that searches them.
     pub fn refused_to_device(&self) -> Option<Error> {
         let local = |message: &str, hint: &str| Some(Error::new(ErrorCode::LocalOnly, message).with_hint(hint));
         let torrent_file = |target: &Target| match target {
@@ -171,7 +187,10 @@ impl Request {
             | Request::GetTitle(_)
             | Request::Tvs { .. }
             | Request::CastControl { .. }
-            | Request::Home => None,
+            | Request::Home
+            | Request::Indexers
+            | Request::AddIndexer { .. }
+            | Request::RemoveIndexer { .. } => None,
             Request::Files { target, .. } | Request::Cast(CastRequest { target, .. }) => torrent_file(target),
             Request::Get(GetRequest { target, dir, .. }) | Request::Play(PlayRequest { target, dir, .. }) => {
                 match dir {
@@ -206,6 +225,7 @@ impl Request {
             Request::Get(get) if get.dry_run => METADATA_WAIT + Duration::from_secs(15),
             Request::Pause { .. } | Request::Shutdown { .. } => 2 * WRITES_STOP_WITHIN,
             Request::PlayTitle(_) | Request::GetTitle(_) | Request::Cast(_) => STEP_WITHIN,
+            Request::AddIndexer { .. } => 2 * REPLY_WITHIN,
             _ => REPLY_WITHIN,
         }
     }
@@ -299,6 +319,10 @@ pub enum Response {
     },
     Home {
         home: Box<Home>,
+    },
+    Indexers {
+        #[serde(flatten)]
+        list: IndexerList,
     },
     Ok,
     Error {
@@ -423,6 +447,7 @@ replies! {
     TvList => Tvs { list },
     Box<Cast> => Cast { cast },
     Box<Home> => Home { home },
+    IndexerList => Indexers { list },
 }
 
 impl Reply for () {
@@ -699,6 +724,13 @@ mod tests {
             ("list devices", Request::Devices, devices),
             ("add a device", Request::AddDevice, devices),
             ("remove a device", Request::RemoveDevice { id: "3f9a0c2e".into() }, devices),
+            ("list indexers", Request::Indexers, None),
+            (
+                "add an indexer",
+                Request::AddIndexer { url: "http://127.0.0.1:9696".into(), name: None, key: crate::ApiKey::new("k3y") },
+                None,
+            ),
+            ("remove an indexer", Request::RemoveIndexer { name: "filelist".into() }, None),
             (
                 "follow a player",
                 Request::Follow { video: "tt0063350".parse().unwrap(), release: None, socket: "/tmp/mpv".into() },
@@ -765,6 +797,8 @@ mod tests {
         (10, &["follow"]),
         // Each request is a POST to the engine's HTTP port, which says the client's version.
         (11, &[]),
+        // Torznab indexers are added, listed and removed through the engine, which may be on a server.
+        (12, &["indexers", "add_indexer", "remove_indexer"]),
     ];
 
     #[test]

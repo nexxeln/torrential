@@ -297,6 +297,61 @@ expression: value
         ]
       },
       {
+        "name": "indexers",
+        "about": "List, add, or remove the Torznab indexers the engine searches, such as Jackett's or Prowlarr's",
+        "arguments": [],
+        "flags": [],
+        "subcommands": [
+          {
+            "name": "list",
+            "about": "List the indexers, whether each answers now, and their categories, the default",
+            "arguments": [],
+            "flags": []
+          },
+          {
+            "name": "add",
+            "about": "Check a Torznab feed, or Prowlarr's or Jackett's own address, and add each indexer it has",
+            "arguments": [
+              {
+                "name": "URL",
+                "help": "A Torznab feed URL, or the address of Prowlarr or Jackett",
+                "required": true,
+                "repeatable": false
+              }
+            ],
+            "flags": [
+              {
+                "name": "--name",
+                "help": "The name to search it by with --source, for one feed",
+                "takes_value": true,
+                "repeatable": false,
+                "value_name": "NAME"
+              },
+              {
+                "name": "--key",
+                "help": "The API key, from the settings page of Jackett or Prowlarr",
+                "takes_value": true,
+                "repeatable": false,
+                "value_name": "KEY"
+              }
+            ]
+          },
+          {
+            "name": "remove",
+            "about": "Stop searching an indexer, and take it out of config.yaml",
+            "arguments": [
+              {
+                "name": "NAME",
+                "help": "A name from torrential indexers",
+                "required": true,
+                "repeatable": false
+              }
+            ],
+            "flags": []
+          }
+        ]
+      },
+      {
         "name": "tv",
         "about": "List the TVs on the home network, play on one, and control what plays",
         "arguments": [],
