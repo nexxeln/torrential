@@ -49,6 +49,8 @@ struct SwarmState {
     streamed: BTreeSet<TorrentId>,
     /// The file ranges the engine was asked to fetch first, as (file, offset, length).
     wanted: BTreeMap<TorrentId, Vec<(u32, u64, u64)>>,
+    /// The network interface torrents are bound to, and whether it is up, until the engine says so.
+    interface: Option<(String, bool)>,
 }
 
 impl Swarm {
@@ -71,6 +73,12 @@ impl Swarm {
     #[cfg(test)]
     pub fn set_rate(&self, rate: u64) {
         self.0.lock().unwrap().rate = rate;
+    }
+
+    /// Takes the network interface torrents are bound to down, or brings it back.
+    #[cfg(test)]
+    pub fn interface(&self, name: &str, up: bool) {
+        self.0.lock().unwrap().interface = Some((name.to_string(), up));
     }
 
     #[cfg(test)]
@@ -362,6 +370,9 @@ impl engine_port::Engine for Engine {
             self.last_stats = Instant::now();
         }
         let swarm_rate = self.swarm.0.lock().unwrap().rate;
+        if let Some((name, up)) = self.swarm.0.lock().unwrap().interface.take() {
+            self.events.push_back(EngineEvent::Interface { name, up });
+        }
         for (id, t) in &mut self.torrents {
             let id = *id;
             if t.metainfo.is_none() {

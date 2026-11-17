@@ -101,7 +101,7 @@ impl Libtorrent {
         }
         .map_err(|e| Error::internal(format!("libtorrent did not start: {e}")))?;
         let now = Instant::now();
-        Ok(Self {
+        let mut engine = Self {
             session,
             bound: interface.map(|name| Bound { name, up: None }),
             reannounce: false,
@@ -113,7 +113,10 @@ impl Libtorrent {
             peers,
             stats_at: now,
             dht_saved_at: now,
-        })
+        };
+        // Said on the first poll, so a play asked for at once already knows the interface is down.
+        engine.watch_interface();
+        Ok(engine)
     }
 
     fn torrent(&mut self, id: TorrentId) -> Result<&mut Torrent, Error> {
