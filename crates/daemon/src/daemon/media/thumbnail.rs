@@ -58,7 +58,7 @@ pub async fn jpeg(ctx: &Ctx, id: TorrentId, index: u32, t: f64) -> Result<Arc<Ve
     command.args(ffmpeg::thumbnail(&file.path, t)).stdin(Stdio::null()).kill_on_drop(true);
     let output = tokio::time::timeout(DECODE_WITHIN, command.output()).await;
     let output = output.map_err(|_| none("ffmpeg took too long"))?;
-    let output = output.map_err(|e| Error::internal(format!("cannot run {}: {e}", program.display())))?;
+    let output = output.map_err(|e| crate::ffmpeg::cannot_run(&program, &e))?;
     // ffmpeg can draw a frame from damaged bytes and only complain. Such a picture is not kept.
     if !output.status.success() || output.stdout.is_empty() || !output.stderr.is_empty() {
         return Err(none("ffmpeg could not read a frame there"));

@@ -127,6 +127,10 @@ fn runs(command: &Command) -> Runs {
             "torrential engine stop stops the engine on this machine",
             "run it on that machine, or run torrential connect --local first",
         )),
+        Command::Server { .. } => Runs::LocalEngine((
+            "torrential server sets up the engine on this machine",
+            "run it on that machine, or run torrential connect --local first",
+        )),
     }
 }
 

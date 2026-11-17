@@ -129,7 +129,7 @@ pub async fn probe(ctx: &Ctx, id: TorrentId, index: u32) -> Result<Arc<Media>, E
         .kill_on_drop(true)
         .output()
         .await
-        .map_err(|e| Error::internal(format!("cannot run {}: {e}", ffprobe.display())))?;
+        .map_err(|e| crate::ffmpeg::cannot_run(&ffprobe, &e))?;
     if !output.status.success() {
         let complaint = crate::ffmpeg::complaint(&String::from_utf8_lossy(&output.stderr));
         return Err(Error::internal(format!("ffprobe cannot read {name}: {complaint}"))
