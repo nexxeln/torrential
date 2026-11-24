@@ -129,7 +129,7 @@ function ContinueCard({ item, onRemove }: { item: Continue; onRemove: () => void
         type="button"
         onClick={onRemove}
         aria-label={`Remove ${title.name} from Continue watching`}
-        className="absolute top-2 right-2 grid size-7 place-items-center rounded-full bg-black/60 text-white opacity-0 group-hover/item:opacity-100 hover:bg-black/80 focus-visible:opacity-100 tv:hidden"
+        className="absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white opacity-0 group-hover/item:opacity-100 hover:bg-black/80 focus-visible:opacity-100 tv:hidden"
       >
         <XMarkIcon aria-hidden="true" className="size-4" />
       </button>
