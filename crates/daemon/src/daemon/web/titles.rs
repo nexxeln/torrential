@@ -383,6 +383,17 @@ pub async fn library(ctx: &Ctx, request: Library) -> Result<Value, Error> {
     value(Shelved { saved: request.saved })
 }
 
+#[derive(Deserialize)]
+pub struct Dismiss {
+    title: TitleId,
+}
+
+/// `POST /api/continue/dismiss`: leaves a title out of Continue until it is watched again.
+pub async fn dismiss(ctx: &Ctx, request: Dismiss) -> Result<Value, Error> {
+    ctx.titles.shelf.dismiss(&request.title)?;
+    Ok(serde_json::json!({}))
+}
+
 /// `GET /api/home`: for each title watched lately, its video to go on with, and the saved titles.
 pub async fn home(ctx: &Ctx) -> Result<Value, Error> {
     super::value(titles::home(ctx).await?)

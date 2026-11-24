@@ -884,7 +884,7 @@ mod tests {
         let db = db::connect(&path).unwrap();
         let mut store = Store::open(&db).unwrap();
         let version: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         assert!(dir.path().join("state.v6.bak").is_file());
         let jobs = store.jobs().unwrap();
         assert_eq!(jobs[0].record, record(1));
