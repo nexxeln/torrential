@@ -101,7 +101,7 @@ function ContinueCard({ item }: { item: Continue }) {
   const left = started ? minutesLeft(item.resume_at!, item.duration!) : episode ? "Next episode" : "Not started";
   const what = episode ? `${episodeCode(episode)} · ${episodeName(episode)}` : title.year;
   return (
-    <li className="snap-start">
+    <li>
       <Link
         href={playPath(item.video)}
         aria-label={[title.name, what, left].filter(Boolean).join(", ")}
@@ -170,7 +170,7 @@ function Shelf() {
           </h2>
           <ul
             role="list"
-            className="-mx-4 grid snap-x snap-mandatory scroll-px-4 auto-cols-[78%] grid-flow-col gap-x-3 overflow-x-auto px-4 pb-2 sm:mx-0 sm:snap-none sm:auto-cols-auto sm:grid-flow-row sm:grid-cols-2 sm:gap-x-4 sm:gap-y-6 sm:overflow-visible sm:px-0 sm:pb-0 lg:grid-cols-3"
+            className="grid grid-cols-2 gap-x-4 gap-y-6 lg:grid-cols-3"
           >
             {unfinished.map((item) => (
               <ContinueCard key={item.video} item={item} />
