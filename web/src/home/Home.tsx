@@ -1,5 +1,6 @@
+import { XMarkIcon } from "@heroicons/react/16/solid";
 import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
-import { type ApiError, artUrl, type Continue, ENGINE_UNREACHABLE, type Home as HomeData, home } from "../api";
+import { type ApiError, artUrl, type Continue, ENGINE_UNREACHABLE, forgetWatched, type Home as HomeData, home } from "../api";
 import { count, minutesLeft, sentence } from "../lib/format";
 import { useJobs } from "../lib/jobs";
 import { useLatest } from "../lib/useLatest";
@@ -92,7 +93,7 @@ function Results({ query, state, onLeaveTop, grid }: { query: string; state: Tit
   );
 }
 
-function ContinueCard({ item }: { item: Continue }) {
+function ContinueCard({ item, onRemove }: { item: Continue; onRemove: () => void }) {
   const { title, episode } = item;
   const background = (
     <Picture src={artUrl(title.id, "background")} alt="" className="absolute inset-0 size-full object-cover" fallback={<Blank kind={title.kind} />} />
@@ -101,7 +102,7 @@ function ContinueCard({ item }: { item: Continue }) {
   const left = started ? minutesLeft(item.resume_at!, item.duration!) : episode ? "Next episode" : "Not started";
   const what = episode ? `${episodeCode(episode)} · ${episodeName(episode)}` : title.year;
   return (
-    <li className="snap-start">
+    <li className="group/item relative">
       <Link
         href={playPath(item.video)}
         aria-label={[title.name, what, left].filter(Boolean).join(", ")}
@@ -124,6 +125,14 @@ function ContinueCard({ item }: { item: Continue }) {
           </div>
         </div>
       </Link>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${title.name} from Continue watching`}
+        className="absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white opacity-0 group-hover/item:opacity-100 hover:bg-black/80 focus-visible:opacity-100 tv:hidden"
+      >
+        <XMarkIcon aria-hidden="true" className="size-4" />
+      </button>
     </li>
   );
 }
@@ -158,6 +167,13 @@ function Shelf() {
     );
   }
   const { continue: unfinished, saved } = state.home;
+  const remove = (item: Continue) => {
+    forgetWatched(item.video).then(() => {
+      const left = { ...state.home, continue: unfinished.filter((other) => other !== item) };
+      lastShelf = left;
+      setState({ kind: "ready", home: left });
+    });
+  };
   if (unfinished.length === 0 && saved.length === 0) {
     return <p className="max-w-[60ch] text-base text-pretty text-pencil sm:text-sm">Search for a film or a show to watch. It plays here while it downloads.</p>;
   }
@@ -170,10 +186,10 @@ function Shelf() {
           </h2>
           <ul
             role="list"
-            className="-mx-4 grid snap-x snap-mandatory scroll-px-4 auto-cols-[78%] grid-flow-col gap-x-3 overflow-x-auto px-4 pb-2 sm:mx-0 sm:snap-none sm:auto-cols-auto sm:grid-flow-row sm:grid-cols-2 sm:gap-x-4 sm:gap-y-6 sm:overflow-visible sm:px-0 sm:pb-0 lg:grid-cols-3"
+            className="grid grid-cols-2 gap-x-4 gap-y-6 lg:grid-cols-3"
           >
             {unfinished.map((item) => (
-              <ContinueCard key={item.video} item={item} />
+              <ContinueCard key={item.video} item={item} onRemove={() => remove(item)} />
             ))}
           </ul>
         </section>
