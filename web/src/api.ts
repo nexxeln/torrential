@@ -31,7 +31,6 @@
 //   POST /api/watched        Position                      Saved
 //   POST /api/watched/forget Forget                        {}
 //   POST /api/library        { title, saved }              { saved: boolean }
-//   POST /api/dismiss        { title }                     {}
 //   GET  /api/home                                         Home
 //
 // Phones and TVs. A browser on the home network that is not paired gets 401 from every route, and
@@ -488,11 +487,6 @@ export function forgetWatched(video: string): Promise<void> {
 
 export function setSaved(title: string, saved: boolean): Promise<boolean> {
   return post<{ saved: boolean }>("/api/library", { title, saved }).then((body) => body.saved);
-}
-
-/** Forgets where every film or episode of a title stopped, so it leaves Continue watching. */
-export function dismissContinue(title: string): Promise<void> {
-  return post<object>("/api/dismiss", { title }).then(() => {});
 }
 
 export function home(signal?: AbortSignal): Promise<Home> {

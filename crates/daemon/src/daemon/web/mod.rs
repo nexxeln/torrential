@@ -109,7 +109,6 @@ async fn respond(ctx: &Ctx, request: &Request, route: &str, asker: &Asker) -> Re
         (Method::Post, "watched") => titles::watched(ctx, body(request)?).await,
         (Method::Post, "watched/forget") => titles::forget(ctx, body(request)?).await,
         (Method::Post, "library") => titles::library(ctx, body(request)?).await,
-        (Method::Post, "dismiss") => titles::dismiss(ctx, body(request)?).await,
         (Method::Get, "home") => titles::home(ctx).await,
         (Method::Get, "version") => value(VersionReply { version: &ctx.version, notice: ctx.news.line() }),
         (Method::Get, "media") => {
