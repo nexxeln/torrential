@@ -178,16 +178,28 @@ impl Peer {
 
     /// Where `request` comes from. A reverse proxy on this machine, such as Caddy in front of the
     /// public address, connects over loopback, so a request that names the public address or
-    /// says whom it was forwarded for comes from the network, from that address.
+    /// says whom it was forwarded for comes from the network, from that address. So does one from
+    /// a proxy in `trusted_proxies`.
     fn of_request(self, request: &Request, addressing: &Addressing) -> Self {
-        let public = addressing.exposure.public_address.as_ref();
+        let exposure = &addressing.exposure;
+        let public = exposure.public_address.as_ref();
         let names_public = public.is_some_and(|public| request.from.host.as_deref() == Some(public.host.as_str()));
-        match self {
-            Self::Loopback if request.forwarded.is_some() || names_public => Self::Network {
-                local: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                remote: request.forwarded.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-            },
-            peer => peer,
+        let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let (local, remote) = match self {
+            Self::Loopback => (IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Self::Network { local, remote } => (local, remote),
+        };
+        if !exposure.trusts(remote) {
+            return self;
+        }
+        match request.forwarded.as_deref() {
+            // The last untrusted address, since a client can prepend any addresses it likes.
+            Some(chain) => {
+                let client = chain.iter().rev().find(|ip| !exposure.trusts(**ip)).or(chain.first());
+                Self::Network { local, remote: client.copied().unwrap_or(unspecified) }
+            }
+            None if self == Self::Loopback && names_public => Self::Network { local, remote: unspecified },
+            None => self,
         }
     }
 }
@@ -246,6 +258,7 @@ fn spawn(ctx: &Arc<Ctx>, strangers: &Arc<Strangers>, stream: TcpStream, remote: 
     let peer = Peer::of(local, remote);
     let stranger = match peer {
         Peer::Loopback => None,
+        Peer::Network { remote, .. } if ctx.devices.addressing().exposure.trusts(remote) => None,
         Peer::Network { remote, .. } => Some(strangers.admit(remote)),
     };
     let ctx = ctx.clone();
@@ -416,9 +429,8 @@ pub struct Request {
     bearer: Option<String>,
     /// The User-Agent, lowercased.
     pub agent: Option<String>,
-    /// The last address in `X-Forwarded-For`, which a reverse proxy adds: the one that connected
-    /// to it. Unspecified when the header holds no address.
-    forwarded: Option<IpAddr>,
+    /// Every address across all `X-Forwarded-For` lines, in order, unspecified for an entry that is no address.
+    forwarded: Option<Vec<IpAddr>>,
     keep_alive: bool,
     /// HTTP/1.1, which can take a chunked answer.
     chunks: bool,
@@ -919,9 +931,18 @@ fn head(parsed: &httparse::Request) -> Head {
         token.map(String::from)
     });
     let bearer = header("authorization").and_then(|value| Some(value.strip_prefix("bearer ")?.trim().to_string()));
-    let forwarded = header("x-forwarded-for").map(|list| {
-        let last = list.rsplit(',').next().unwrap_or_default().trim();
-        last.parse::<IpAddr>().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |ip| ip.to_canonical())
+    // Repeated header lines are one comma-separated list (RFC 9110 §5.3).
+    let forwarded_hdr: Vec<_> = parsed
+        .headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|h| String::from_utf8_lossy(h.value))
+        .collect();
+    let forwarded = (!forwarded_hdr.is_empty()).then(|| {
+        let ip = |entry: &str| {
+            entry.trim().parse::<IpAddr>().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |ip| ip.to_canonical())
+        };
+        forwarded_hdr.join(",").split(',').map(ip).collect()
     });
     let method = match parsed.method {
         Some("GET") => Method::Get,
@@ -1142,7 +1163,7 @@ mod tests {
         Addressing {
             local: local.map(String::from),
             tailnet: Some("studio-mac.tail1234.ts.net".into()),
-            exposure: Exposure { server, public_address },
+            exposure: Exposure { server, public_address, trusted_proxies: Vec::new() },
         }
     }
 
@@ -1285,11 +1306,54 @@ mod tests {
         assert_eq!(from("tv.example.com", None), network("0.0.0.0"));
         assert_eq!(from("127.0.0.1:47919", Some("unknown")), network("0.0.0.0"));
         assert_eq!(from("127.0.0.1:47919", None), Peer::Loopback, "the web app on this Mac");
+        assert_eq!(from("tv.example.com", Some("6.6.6.6, 127.0.0.1")), network("6.6.6.6"), "a second proxy here");
         let phone = Peer::Network { local: "192.168.1.23".parse().unwrap(), remote: "192.168.1.40".parse().unwrap() };
         assert_eq!(
             phone.of_request(&request("tv.example.com", Some("6.6.6.6")), &public),
             phone,
             "only a local proxy is believed"
+        );
+    }
+
+    #[test]
+    fn a_request_a_trusted_proxy_forwards_comes_from_its_client() {
+        let request = |forwarded: &[&str]| {
+            let mut head = "GET /api/jobs HTTP/1.1\r\nHost: tv.example.com\r\n".to_string();
+            for line in forwarded {
+                head.push_str(&format!("X-Forwarded-For: {line}\r\n"));
+            }
+            head.push_str("\r\n");
+            let mut headers = [httparse::EMPTY_HEADER; 16];
+            let mut parsed = httparse::Request::new(&mut headers);
+            parsed.parse(head.as_bytes()).unwrap();
+            match super::head(&parsed) {
+                Head::Request(request) => request,
+                Head::Refused(status) => panic!("{status}"),
+            }
+        };
+        let mut addressing = addressing(None, true, Some("https://tv.example.com"));
+        addressing.exposure.trusted_proxies =
+            ["172.17.0.0/16", "10.0.0.7/32"].map(|range| range.parse().unwrap()).to_vec();
+        let local: IpAddr = "172.17.0.2".parse().unwrap();
+        let at = |remote: &str| Peer::Network { local, remote: remote.parse().unwrap() };
+        let from = |remote: &str, forwarded: &[&str]| at(remote).of_request(&request(forwarded), &addressing);
+
+        assert_eq!(from("172.17.0.1", &["198.51.100.4"]), at("198.51.100.4"), "Caddy in another container");
+        assert_eq!(from("172.17.0.1", &["6.6.6.6, 198.51.100.4"]), at("198.51.100.4"), "a client cannot lie");
+        assert_eq!(from("172.17.0.1", &["198.51.100.4, 10.0.0.7"]), at("198.51.100.4"), "proxies in a row");
+        assert_eq!(from("172.17.0.1", &["10.0.0.7"]), at("10.0.0.7"), "only proxies");
+        assert_eq!(
+            from("172.17.0.1", &["6.6.6.6", "198.51.100.4"]),
+            at("198.51.100.4"),
+            "a proxy that adds a line of its own"
+        );
+        assert_eq!(from("172.17.0.1", &["unknown"]), at("0.0.0.0"));
+        assert_eq!(from("172.17.0.1", &[]), at("172.17.0.1"), "the proxy itself");
+        assert_eq!(from("192.168.1.40", &["198.51.100.4"]), at("192.168.1.40"), "an address not trusted");
+        assert_eq!(
+            Peer::Loopback.of_request(&request(&["127.0.0.1"]), &addressing),
+            Peer::Network { local: Ipv4Addr::LOCALHOST.into(), remote: Ipv4Addr::LOCALHOST.into() },
+            "never this Mac"
         );
     }
 

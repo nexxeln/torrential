@@ -275,7 +275,7 @@ async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name(
     let ip = lan();
     let h = Harness::with_outside(
         fake::Search::new(fake::isos()),
-        Outside { exposure: Exposure { server: true, public_address: None }, ..Outside::default() },
+        Outside { exposure: Exposure { server: true, ..Exposure::default() }, ..Outside::default() },
     );
     listening(&h, ip, true).await;
     let mut phone = Browser { host: "box.example.net:8080".into(), ..Browser::on(ip, &h) };
@@ -305,7 +305,7 @@ async fn a_server_listens_with_nothing_paired_and_lets_its_phone_in_by_any_name(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_pairs_through_a_proxy_at_the_public_address_with_a_secure_cookie_and_is_never_this_mac() {
     let public_address = PublicAddress::parse("https://tv.example.com");
-    let exposure = Exposure { server: false, public_address };
+    let exposure = Exposure { server: false, public_address, ..Exposure::default() };
     let h = Harness::with_outside(fake::Search::new(fake::isos()), Outside { exposure, ..Outside::default() });
     let port = h.running.ctx.http_port;
     let offer = devices(&h, Request::AddDevice).await.offer.unwrap();
