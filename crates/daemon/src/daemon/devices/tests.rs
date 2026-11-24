@@ -285,6 +285,7 @@ fn an_offer_leads_with_the_public_address_then_a_servers_tailnet_then_the_local_
             exposure: Exposure {
                 server,
                 public_address: public.map(|public| crate::config::PublicAddress::parse(public).unwrap()),
+                ..Exposure::default()
             },
         };
         let offer = state.offer(PORT).unwrap();

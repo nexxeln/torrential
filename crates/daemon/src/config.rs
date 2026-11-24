@@ -1,6 +1,8 @@
 use std::borrow::Cow;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use serde_saphyr::{Localizer, Location, SnippetMode, Spanned, UserMessageFormatter};
 use torrential_core::indexer::{ApiKey, KeyFrom};
@@ -42,6 +44,8 @@ pub struct Exposure {
     pub server: bool,
     /// `public_address`, which pairing links and QR codes use.
     pub public_address: Option<PublicAddress>,
+    /// `trusted_proxies`: addresses or CIDR ranges of reverse proxies whose `X-Forwarded-For` is trusted.
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 impl Exposure {
@@ -49,6 +53,12 @@ impl Exposure {
     /// cookie it gets must say `Secure`.
     pub fn secure(&self, host: Option<&str>) -> bool {
         self.public_address.as_ref().is_some_and(|public| public.https && host == Some(public.host.as_str()))
+    }
+
+    /// Whether a connection from `ip` is a trusted proxy or a loopback address.
+    pub fn trusts(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        ip.is_loopback() || self.trusted_proxies.iter().any(|range| range.contains(&ip))
     }
 }
 
@@ -120,6 +130,7 @@ struct File {
     server: Option<bool>,
     torrent_interface: Option<Spanned<String>>,
     public_address: Option<Spanned<String>>,
+    trusted_proxies: Vec<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -749,7 +760,21 @@ fn parse(text: &str, env: &Env) -> Result<Config, Problem> {
             })
         })
         .transpose()?;
-    let exposure = Exposure { server: file.server.unwrap_or_default(), public_address };
+    let trusted_proxies = file
+        .trusted_proxies
+        .into_iter()
+        .map(|Spanned { value, referenced, .. }| {
+            let text = value.trim();
+            let range = text.parse::<IpNet>().or_else(|_| text.parse::<IpAddr>().map(IpNet::from));
+            range.map_err(|_| {
+                let message = format!(
+                    "trusted_proxies entry {value:?} is not an IP address or a range such as 172.17.0.1 or 10.0.0.0/8"
+                );
+                (Some(referenced.line()), message)
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let exposure = Exposure { server: file.server.unwrap_or_default(), public_address, trusted_proxies };
     let torrent_interface =
         file.torrent_interface.map(|Spanned { value, referenced, .. }| torrent_interface(&value, referenced.line()));
     Ok(Config {
@@ -1237,6 +1262,38 @@ sources:
                     Some(1),
                     format!(
                         "public_address {bad:?} is not an address such as https://tv.example.com or http://box.tailnet.ts.net:47919"
+                    )
+                )),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_trusted_proxies_as_addresses_and_ranges() {
+        let read = |text: &str| parse(&format!("trusted_proxies: {text}\n"), &env()).map(|c| c.exposure);
+        let exposure = read("[172.17.0.1, 10.0.0.0/8, \"fd00::/8\"]").unwrap();
+        let trusts = |ip: &str| exposure.trusts(ip.parse().unwrap());
+        assert!(trusts("172.17.0.1"));
+        assert!(!trusts("172.17.0.2"));
+        assert!(trusts("10.200.3.4"));
+        assert!(trusts("::ffff:10.1.2.3"), "an IPv4 address mapped into IPv6");
+        assert!(trusts("fd12::5"));
+        assert!(!trusts("fe80::1"));
+        assert!(!trusts("192.168.1.40"));
+        assert!(trusts("127.0.0.1") && trusts("::1"), "loopback always");
+        assert!(Exposure::default().trusts("127.0.0.1".parse().unwrap()));
+        assert!(!Exposure::default().trusts("172.17.0.1".parse().unwrap()));
+        assert!(read("[0.0.0.0/0]").unwrap().trusts("203.0.113.9".parse().unwrap()));
+        assert!(read("[10.1.2.3/8]").unwrap().trusts("10.9.9.9".parse().unwrap()), "host bits ignored");
+        for bad in ["proxy.local", "10.0.0.0/33", "::/129", "10.0.0.0/", "10.0.0.0/+8", "10.0.0.0/8/8", "172.17.0.1:80"]
+        {
+            assert_eq!(
+                read(&format!("[\"{bad}\"]")),
+                Err((
+                    Some(1),
+                    format!(
+                        "trusted_proxies entry {bad:?} is not an IP address or a range such as 172.17.0.1 or 10.0.0.0/8"
                     )
                 )),
                 "{bad}"

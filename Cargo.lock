@@ -3304,6 +3304,7 @@ dependencies = [
  "globset",
  "httparse",
  "insta",
+ "ipnet",
  "libc",
  "lzma-rust2",
  "objc2",
