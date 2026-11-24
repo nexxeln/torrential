@@ -15,6 +15,7 @@ flate2 = "1"
 getrandom = "0.3"
 globset = "0.4"
 httparse = "1.10"
+ipnet = "2.12"
 libc = "0.2"
 lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "optimization"] }
 qrcodegen = "1.8"
