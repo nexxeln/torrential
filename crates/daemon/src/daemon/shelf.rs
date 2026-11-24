@@ -38,21 +38,20 @@ impl Shelf {
         let Watched { video, position, duration, release, at } = watched;
         let conn = self.conn();
         conn.execute("DELETE FROM dismissed WHERE title = ?1", [video.title.as_str()]).map_err(|e| self.fail(e))?;
-        conn
-            .execute(
-                "INSERT OR REPLACE INTO watched (video, title, position, duration, release, updated_at) \
+        conn.execute(
+            "INSERT OR REPLACE INTO watched (video, title, position, duration, release, updated_at) \
                  VALUES (?1, ?2, ?3, ?4, coalesce(?5, (SELECT release FROM watched WHERE video = ?1)), ?6)",
-                params![
-                    video.to_string(),
-                    video.title.as_str(),
-                    position,
-                    duration,
-                    release.as_ref().map(ReleaseId::to_ref),
-                    at
-                ],
-            )
-            .map(drop)
-            .map_err(|e| self.fail(e))
+            params![
+                video.to_string(),
+                video.title.as_str(),
+                position,
+                duration,
+                release.as_ref().map(ReleaseId::to_ref),
+                at
+            ],
+        )
+        .map(drop)
+        .map_err(|e| self.fail(e))
     }
 
     /// Forgets where `video` stopped, so it plays from the beginning and leaves the lists of
@@ -264,7 +263,10 @@ mod tests {
         assert_eq!(rows(shelf.recent(10).unwrap()), [("tt0063350".into(), 5.0, 20)]);
         assert_eq!(rows(shelf.watched(&"tt9999901".parse().unwrap()).unwrap()), [("tt9999901:1:1".into(), 60.0, 10)]);
         shelf.watch(&at("tt9999901:1:2", 30.0, None, 30)).unwrap();
-        assert_eq!(rows(shelf.recent(10).unwrap()), [("tt9999901:1:2".into(), 30.0, 30), ("tt0063350".into(), 5.0, 20)]);
+        assert_eq!(
+            rows(shelf.recent(10).unwrap()),
+            [("tt9999901:1:2".into(), 30.0, 30), ("tt0063350".into(), 5.0, 20)]
+        );
     }
 
     #[test]
