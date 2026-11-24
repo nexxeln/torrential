@@ -388,7 +388,8 @@ pub struct Dismiss {
     title: TitleId,
 }
 
-/// `POST /api/continue/dismiss`: leaves a title out of Continue until it is watched again.
+/// `POST /api/dismiss`: forgets where every film or episode of a title stopped, so it leaves
+/// Continue.
 pub async fn dismiss(ctx: &Ctx, request: Dismiss) -> Result<Value, Error> {
     ctx.titles.shelf.dismiss(&request.title)?;
     Ok(serde_json::json!({}))

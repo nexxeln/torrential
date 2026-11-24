@@ -113,7 +113,6 @@ CREATE TABLE deletions (
 ) STRICT;
 "#,
     "ALTER TABLE devices ADD COLUMN seen_from TEXT;",
-    "CREATE TABLE dismissed (title TEXT PRIMARY KEY) STRICT;",
 ];
 
 /// The engine's database file, checked and migrated to this version's schema. The store, the

@@ -32,26 +32,24 @@ impl Shelf {
     }
 
     /// Saves where a film or episode stopped. Saving the same video again replaces its row with
-    /// one after every other, and a save that names no release keeps the one saved before. The
-    /// title comes back to the recent list if it was dismissed.
+    /// one after every other, and a save that names no release keeps the one saved before.
     pub fn watch(&self, watched: &Watched) -> Result<(), Error> {
         let Watched { video, position, duration, release, at } = watched;
-        let conn = self.conn();
-        conn.execute("DELETE FROM dismissed WHERE title = ?1", [video.title.as_str()]).map_err(|e| self.fail(e))?;
-        conn.execute(
-            "INSERT OR REPLACE INTO watched (video, title, position, duration, release, updated_at) \
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO watched (video, title, position, duration, release, updated_at) \
                  VALUES (?1, ?2, ?3, ?4, coalesce(?5, (SELECT release FROM watched WHERE video = ?1)), ?6)",
-            params![
-                video.to_string(),
-                video.title.as_str(),
-                position,
-                duration,
-                release.as_ref().map(ReleaseId::to_ref),
-                at
-            ],
-        )
-        .map(drop)
-        .map_err(|e| self.fail(e))
+                params![
+                    video.to_string(),
+                    video.title.as_str(),
+                    position,
+                    duration,
+                    release.as_ref().map(ReleaseId::to_ref),
+                    at
+                ],
+            )
+            .map(drop)
+            .map_err(|e| self.fail(e))
     }
 
     /// Forgets where `video` stopped, so it plays from the beginning and leaves the lists of
@@ -63,10 +61,10 @@ impl Shelf {
             .map_err(|e| self.fail(e))
     }
 
-    /// Leaves `title` out of the recent list until one of its videos is watched again.
+    /// Forgets where every film or episode of `title` stopped, so it leaves Continue watching.
     pub fn dismiss(&self, title: &TitleId) -> Result<(), Error> {
         self.conn()
-            .execute("INSERT OR IGNORE INTO dismissed (title) VALUES (?1)", [title.as_str()])
+            .execute("DELETE FROM watched WHERE title = ?1", [title.as_str()])
             .map(drop)
             .map_err(|e| self.fail(e))
     }
@@ -78,11 +76,11 @@ impl Shelf {
         self.read(&sql, params![title.as_str()])
     }
 
-    /// The most recently watched film or episode of each title not dismissed, the most recent first.
+    /// The most recently watched film or episode of each title, the most recent first.
     pub fn recent(&self, most: usize) -> Result<Vec<Watched>, Error> {
         let sql = "SELECT video, position, duration, release, updated_at FROM (\
                    SELECT *, row_number() OVER (PARTITION BY title ORDER BY updated_at DESC, rowid DESC) AS n, \
-                   rowid AS r FROM watched WHERE title NOT IN (SELECT title FROM dismissed)) \
+                   rowid AS r FROM watched) \
                    WHERE n = 1 ORDER BY updated_at DESC, r DESC LIMIT ?1";
         self.read(sql, params![most as i64])
     }
@@ -254,19 +252,15 @@ mod tests {
     }
 
     #[test]
-    fn a_dismissed_title_leaves_the_recent_list_until_it_is_watched_again() {
+    fn a_dismissed_title_loses_every_position_and_leaves_the_recent_list() {
         let dir = tempfile::tempdir().unwrap();
         let shelf = shelf(&dir);
         shelf.watch(&at("tt9999901:1:1", 60.0, None, 10)).unwrap();
-        shelf.watch(&at("tt0063350", 5.0, None, 20)).unwrap();
+        shelf.watch(&at("tt9999901:1:2", 30.0, None, 20)).unwrap();
+        shelf.watch(&at("tt0063350", 5.0, None, 30)).unwrap();
         shelf.dismiss(&"tt9999901".parse().unwrap()).unwrap();
-        assert_eq!(rows(shelf.recent(10).unwrap()), [("tt0063350".into(), 5.0, 20)]);
-        assert_eq!(rows(shelf.watched(&"tt9999901".parse().unwrap()).unwrap()), [("tt9999901:1:1".into(), 60.0, 10)]);
-        shelf.watch(&at("tt9999901:1:2", 30.0, None, 30)).unwrap();
-        assert_eq!(
-            rows(shelf.recent(10).unwrap()),
-            [("tt9999901:1:2".into(), 30.0, 30), ("tt0063350".into(), 5.0, 20)]
-        );
+        assert_eq!(rows(shelf.watched(&"tt9999901".parse().unwrap()).unwrap()), []);
+        assert_eq!(rows(shelf.recent(10).unwrap()), [("tt0063350".into(), 5.0, 30)]);
     }
 
     #[test]
